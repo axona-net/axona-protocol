@@ -91,12 +91,18 @@ export class AxonPubSub {
    * @param {PostRef[]} [opts.references]  Reshare references (PR 2).
    * @returns {SignedPost}
    */
-  publish(topicName, content, { references = [] } = {}) {
-    const post = makePost({
+  async publish(topicName, content, { references = [], signer } = {}) {
+    // v1.0.0 — post.js is now async (Web Crypto).  publish() returns
+    // the SignedPost via a Promise.  Callers must await.
+    // The optional `signer` argument lets the application supply an
+    // Ed25519 signing function; without one, the post carries the
+    // legacy `stub:<publisher>` placeholder signature.
+    const post = await makePost({
       publisher: this.nodeId,
       topicName,
       content,
       references,
+      signer,
     });
     const json = JSON.stringify(post);
     this.axon.pubsubPublish(post.topic_id, json, {
@@ -118,8 +124,9 @@ export class AxonPubSub {
    *        once signature/hash/ownership checks pass.
    * @returns {{ topic_id: string, unsubscribe: () => void }}
    */
-  subscribe(publisher, topicName, callback) {
-    const topic_id = deriveTopicId(publisher, topicName);
+  async subscribe(publisher, topicName, callback) {
+    // v1.0.0 — async (post.js is now async).  Callers must await.
+    const topic_id = await deriveTopicId(publisher, topicName);
 
     let set = this._listeners.get(topic_id);
     if (!set) {
@@ -145,16 +152,18 @@ export class AxonPubSub {
 
   /** Internal: a delivery has arrived from the axon. Parse + verify
    *  + dispatch to local listeners. Failed verification = silent drop
-   *  per §3.5. */
-  _onDelivery(topicId, json) {
+   *  per §3.5.
+   *
+   *  v1.0.0 — async (Web Crypto verifies are async). */
+  async _onDelivery(topicId, json) {
     const set = this._listeners.get(topicId);
     if (!set || set.size === 0) return;
 
     let post;
     try { post = JSON.parse(json); }
     catch { return; }
-    if (!verifyPostHash(post))      return;
-    if (!verifyTopicOwnership(post)) return;
+    if (!(await verifyPostHash(post)))      return;
+    if (!(await verifyTopicOwnership(post))) return;
     if (post.topic_id !== topicId)   return;
 
     for (const cb of set) {
@@ -204,8 +213,8 @@ export class AxonPubSub {
     if (!post) return null;
     // Verify everything the protocol gave us before caching or
     // returning to the application. Failed verification = null.
-    if (!verifyPostHash(post))      return null;
-    if (!verifyTopicOwnership(post)) return null;
+    if (!(await verifyPostHash(post)))      return null;
+    if (!(await verifyTopicOwnership(post))) return null;
     if (post.topic_id !== topic_id || post.post_hash !== post_hash) return null;
 
     this._cachePost(post);
@@ -256,7 +265,7 @@ export class AxonPubSub {
    * @returns {Promise<Map<string, AggregateMetrics>>}
    */
   async metrics(topicName, postHashes, { timeoutMs = 500 } = {}) {
-    const topic_id = deriveTopicId(this.nodeId, topicName);
+    const topic_id = await deriveTopicId(this.nodeId, topicName);
     const responses = await this.axon.requestMetrics(
       topic_id,
       postHashes ?? null,

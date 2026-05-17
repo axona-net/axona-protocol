@@ -30,7 +30,24 @@ export {
   deriveTopicId,
   verifyPostHash,
   verifyTopicOwnership,
+  verifySignature,
 } from './pubsub/post.js';
+
+// ── Ed25519 helpers (Web Crypto wrapper) ─────────────────────────
+// Optional companion to post.js for runtimes that support Web Crypto
+// Ed25519 (Chrome 110+, Safari 17+, Firefox 130+, Node 20+).
+// Applications on older runtimes can substitute @noble/ed25519 with
+// the same shape — post.js's signer/verifier contracts are
+// implementation-agnostic.
+export {
+  generateKeyPair,
+  exportPublicKey,
+  importPublicKey,
+  sign,
+  verify,
+  makeSigner,
+  makeVerifier,
+} from './pubsub/ed25519.js';
 
 // ── Utilities ──────────────────────────────────────────────────────
 // The big ones the protocol uses directly are re-exported; the
