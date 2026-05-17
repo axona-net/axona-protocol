@@ -1,0 +1,41 @@
+{
+  "name": "@axona/protocol",
+  "version": "1.0.0-beta.0",
+  "description": "Pure-JS protocol kernel for the Axona peer-to-peer mesh. Contracts (DHT, Transport, BootstrapService), the per-node AxonaPeer implementation (NH-1 routing + axonal pub/sub), and supporting helpers. No simulator dependencies; runs in browsers and Node.",
+  "type": "module",
+  "main": "./src/index.js",
+  "exports": {
+    ".": "./src/index.js",
+    "./contracts": "./src/contracts/index.js",
+    "./contracts/*.js": "./src/contracts/*.js",
+    "./dht/*.js": "./src/dht/*.js",
+    "./pubsub/*.js": "./src/pubsub/*.js",
+    "./utils/*.js": "./src/utils/*.js"
+  },
+  "files": [
+    "src/",
+    "LICENSE",
+    "README.md"
+  ],
+  "scripts": {
+    "test": "node test/smoke.js"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/axona-net/axona-protocol.git"
+  },
+  "homepage": "https://axona.net",
+  "license": "MIT",
+  "keywords": [
+    "dht",
+    "p2p",
+    "pubsub",
+    "axona",
+    "webrtc",
+    "neuromorphic"
+  ],
+  "sideEffects": false
+}
