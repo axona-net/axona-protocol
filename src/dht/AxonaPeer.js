@@ -37,9 +37,12 @@
 //     Engine-cycle code continue to work)
 // =====================================================================
 
-import { DHT }      from '../contracts/DHT.js';
-import { Synapse }  from './Synapse.js';
-import { clz264 }   from '../utils/hexid.js';
+import { DHT }            from '../contracts/DHT.js';
+import { Synapse }        from './Synapse.js';
+import { Subscription }   from './Subscription.js';
+import { clz264, toHex, isHexId } from '../utils/hexid.js';
+import { deriveTopicId }  from '../pubsub/post.js';
+import { PublishError, SubscribeError, ErrorCodes } from '../errors.js';
 
 export class AxonaPeer extends DHT {
   /**
@@ -48,18 +51,30 @@ export class AxonaPeer extends DHT {
    *        The legacy multi-node engine (Phase 1: delegate target).
    * @param {import('./NeuronNode.js').NeuronNode} opts.node
    *        The NeuronNode this peer wraps.
+   * @param {object} [opts.axonManager]
+   *        Optional explicit AxonManager instance to use for the
+   *        unified pub()/sub() API.  When omitted, pub/sub fall back
+   *        to the engine's per-node AxonManager (engine.axonManagerFor
+   *        if present, else throws).
    */
-  constructor({ engine, node }) {
+  constructor({ engine, node, axonManager = null }) {
     super();
     if (!engine) throw new Error('AxonaPeer: engine is required');
     if (!node)   throw new Error('AxonaPeer: node is required');
     this._engine = engine;
     this._node   = node;
+    this._axonManager = axonManager;
     this._started = false;
     /** @type {Set<(event: object) => void>} */
     this._eventListeners = new Set();
     /** @type {(event: object) => void | null} */
     this._engineListenerUnsub = null;
+
+    // ─── Unified pub/sub state ────────────────────────────────────
+    /** @type {Map<string, Set<Subscription>>} topicId(hex) → handles */
+    this._subscriptions = new Map();
+    /** True once we've installed the AxonManager-side delivery hook. */
+    this._deliveryHookInstalled = false;
   }
 
   // ─── Lifecycle ─────────────────────────────────────────────────────
@@ -214,6 +229,220 @@ export class AxonaPeer extends DHT {
   async publish(topicName, payload) {
     const axon = this._engine.axonFor(this._node);
     return axon.publish(topicName, payload);
+  }
+
+  // ─── Unified pub/sub (v1.0 API) ────────────────────────────────────
+  //
+  // Replaces the legacy AxonManager.pubsubPublish(bigintTopicKey, json)
+  // and AxonManager.pubsubSubscribe(bigintTopicKey) entrypoints with a
+  // string-topic API:
+  //
+  //   const msgId = await peer.pub(topic, message);
+  //   const sub   = await peer.sub(topic, envelope => …, { since });
+  //   await sub.stop();
+  //
+  // topic is a string at the API boundary; we hash it via
+  // deriveTopicId(peer.nodeIdHex, topic) → 66-char hex topic ID, which
+  // is what flows through AxonManager.  Apps don't see the topic ID
+  // unless they introspect it on the subscription handle.
+  //
+  // The envelope shape (delivered to subscribers) is:
+  //   { msgId, ts, topic, message, publisher }
+  // A2 (#24) extends this with signature + signerPubkey once signing
+  // is wired through pub().
+
+  /**
+   * Publish a message on `topic`.  Resolves with the message ID once
+   * the publish has been handed to the K-closest replica set (today's
+   * AxonManager semantics).
+   *
+   * @param {string} topic   application-level topic name
+   * @param {*}      message JSON-serializable payload
+   * @returns {Promise<string>} msgId
+   */
+  async pub(topic, message) {
+    if (typeof topic !== 'string' || topic.length === 0) {
+      throw new PublishError(ErrorCodes.PUBLISH_INVALID_TOPIC,
+        `peer.pub: topic must be a non-empty string, got ${typeof topic}`,
+        { context: { topic } });
+    }
+    const am          = this._requireAxonManager('pub');
+    const publisherId = this._nodeIdHex();
+    const topicId     = await deriveTopicId(publisherId, topic);
+    const envelope    = { topic, message, publisher: publisherId };
+    let json;
+    try { json = JSON.stringify(envelope); }
+    catch (cause) {
+      throw new PublishError(ErrorCodes.PUBLISH_PAYLOAD_TOO_LARGE,
+        `peer.pub: payload not JSON-serializable (${cause.message})`,
+        { cause, context: { topic } });
+    }
+    const msgId = am.pubsubPublish(topicId, json, {
+      publisher: publisherId,
+    });
+    return msgId;
+  }
+
+  /**
+   * Subscribe to `topic`.  Handler is invoked with the full envelope
+   * `{ msgId, ts, topic, message, publisher }` for each delivery.
+   *
+   * @param {string}                       topic
+   * @param {(envelope: object) => void}   handler
+   * @param {object}                       [opts]
+   * @param {'all'|'latest'|number}        [opts.since]  replay control:
+   *   - omitted/undefined → live tail (future messages only)
+   *   - 'latest'          → most recent cached message + future
+   *   - 'all'             → everything in replay cache + future
+   *   - timestamp (number) → messages newer than the timestamp + future
+   * @returns {Promise<Subscription>}
+   */
+  async sub(topic, handler, opts = {}) {
+    if (typeof topic !== 'string' || topic.length === 0) {
+      throw new SubscribeError(ErrorCodes.SUBSCRIBE_INVALID_TOPIC,
+        `peer.sub: topic must be a non-empty string, got ${typeof topic}`,
+        { context: { topic } });
+    }
+    if (typeof handler !== 'function') {
+      throw new SubscribeError(ErrorCodes.SUBSCRIBE_HANDLER_MISSING,
+        'peer.sub: handler must be a function',
+        { context: { topic } });
+    }
+
+    const am          = this._requireAxonManager('sub');
+    const publisherId = this._nodeIdHex();
+    const topicId     = await deriveTopicId(publisherId, topic);
+
+    // Apply `since` mode by seeding AxonManager's per-topic lastSeenTs
+    // BEFORE the subscribe call.  AxonManager passes lastSeenTs in the
+    // subscribe envelope; the receiving axon's replay cache filters
+    // strictly above it.
+    this._applySince(am, topicId, opts.since);
+
+    // Register the handler and the dispatch hook before the network
+    // call so deliveries that arrive between submit and resolve are
+    // routed correctly.
+    const sub = new Subscription({
+      peer: this, topicId, topicName: topic, handler, opts,
+    });
+    if (!this._subscriptions.has(topicId)) this._subscriptions.set(topicId, new Set());
+    this._subscriptions.get(topicId).add(sub);
+    this._installDeliveryHook(am);
+
+    am.pubsubSubscribe(topicId);
+    return sub;
+  }
+
+  /** @internal — called by Subscription.stop() */
+  async _unsubscribeInternal(sub) {
+    const set = this._subscriptions.get(sub.topicId);
+    if (set) {
+      set.delete(sub);
+      if (set.size === 0) {
+        this._subscriptions.delete(sub.topicId);
+        try {
+          this._requireAxonManager('unsubscribe').pubsubUnsubscribe(sub.topicId);
+        } catch { /* unsubscribe is best-effort */ }
+      }
+    }
+  }
+
+  // ── AxonManager glue ────────────────────────────────────────────
+
+  _requireAxonManager(callerName) {
+    if (this._axonManager) return this._axonManager;
+    // Fallback: ask the engine for this node's AxonManager.  Different
+    // engine builds expose this differently; we probe in priority
+    // order and cache the result.
+    const engine = this._engine;
+    let am = null;
+    if (typeof engine?.axonManagerFor === 'function') {
+      am = engine.axonManagerFor(this._node);
+    } else if (engine?._axonManagers instanceof Map) {
+      am = engine._axonManagers.get(this._node.id);
+    }
+    if (!am) {
+      throw new PublishError(ErrorCodes.PUBLISH_INVALID_TOPIC,
+        `peer.${callerName}: no AxonManager available; ` +
+        'pass {axonManager} to the AxonaPeer constructor or wire engine.axonManagerFor()',
+      );
+    }
+    this._axonManager = am;
+    return am;
+  }
+
+  _installDeliveryHook(am) {
+    if (this._deliveryHookInstalled) return;
+    if (typeof am.onPubsubDelivery !== 'function') return;
+    am.onPubsubDelivery((topicId, json, publishId, publishTs) => {
+      this._dispatchDelivery(topicId, json, publishId, publishTs);
+    });
+    this._deliveryHookInstalled = true;
+  }
+
+  _dispatchDelivery(topicId, json, publishId, publishTs) {
+    const set = this._subscriptions.get(topicId);
+    if (!set || set.size === 0) return;
+    let envelope;
+    try {
+      const parsed = JSON.parse(json);
+      envelope = {
+        msgId:     publishId,
+        ts:        publishTs,
+        topic:     parsed.topic ?? null,
+        message:   parsed.message,
+        publisher: parsed.publisher ?? null,
+      };
+    } catch {
+      // Malformed payload: deliver raw json as the message.
+      envelope = {
+        msgId:     publishId,
+        ts:        publishTs,
+        topic:     null,
+        message:   json,
+        publisher: null,
+      };
+    }
+    for (const sub of set) sub._deliver(envelope);
+  }
+
+  _applySince(am, topicId, since) {
+    // The AxonManager tracks lastSeenTs per topic in _lastSeenTsByTopic.
+    // The subscribe call reads this and includes it in the outbound
+    // subscribe envelope; the axon's replay filter applies it strictly.
+    // We seed it here based on the `since` mode.
+    if (!am._lastSeenTsByTopic) return;     // unknown AxonManager build
+    if (since === undefined) {
+      // Live tail: only future messages.  Seed with a sentinel just
+      // below the current time so cached messages are filtered out.
+      am._lastSeenTsByTopic.set(topicId, Date.now());
+      return;
+    }
+    if (since === 'all') {
+      am._lastSeenTsByTopic.set(topicId, 0);
+      return;
+    }
+    if (since === 'latest') {
+      // Approximate: ask for the most recent ~1s of cache + future.
+      am._lastSeenTsByTopic.set(topicId, Date.now() - 1000);
+      return;
+    }
+    if (typeof since === 'number') {
+      am._lastSeenTsByTopic.set(topicId, since);
+      return;
+    }
+    throw new SubscribeError(ErrorCodes.SUBSCRIBE_INVALID_TOPIC,
+      `peer.sub: invalid since value: ${String(since)}`,
+      { context: { since } });
+  }
+
+  _nodeIdHex() {
+    const id = this._node.id;
+    if (typeof id === 'string' && isHexId(id)) return id;
+    if (typeof id === 'bigint') return toHex(id);
+    throw new PublishError(ErrorCodes.PUBLISH_INVALID_TOPIC,
+      `peer.pub: node.id must be 66-char hex or bigint, got ${typeof id}`,
+      { context: { id } });
   }
 
   // ─── Identity & observability ──────────────────────────────────────

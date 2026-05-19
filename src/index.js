@@ -81,10 +81,11 @@ export {
 } from './identity/index.js';
 
 // ── Per-node DHT implementation (NH-1) ──────────────────────────────
-export { AxonaPeer } from './dht/AxonaPeer.js';
+export { AxonaPeer }    from './dht/AxonaPeer.js';
 export { DHTNode, GEO_CELL_BITS } from './dht/DHTNode.js';
-export { NeuronNode } from './dht/NeuronNode.js';
-export { Synapse }    from './dht/Synapse.js';
+export { NeuronNode }   from './dht/NeuronNode.js';
+export { Synapse }      from './dht/Synapse.js';
+export { Subscription } from './dht/Subscription.js';
 
 // ── Pub/sub primitives ─────────────────────────────────────────────
 export { AxonManager } from './pubsub/AxonManager.js';
