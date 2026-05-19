@@ -43,6 +43,20 @@ export {
   InMemoryPersistence,
 } from './persistence/interface.js';
 
+// ── Identity ─────────────────────────────────────────────────────────
+// Ed25519 keypair + 264-bit nodeId + S2-prefix region anchor.
+// deriveIdentity({ lat, lng }) generates a fresh identity;
+// dumpIdentity/loadIdentity persist and restore. computeNodeId is
+// the public helper for verifying a claimed nodeId against the
+// stored pubkey + region.
+export {
+  deriveIdentity,
+  dumpIdentity,
+  loadIdentity,
+  computeNodeId,
+  computeNodeIdBigInt,
+} from './identity/index.js';
+
 // ── Per-node DHT implementation (NH-1) ──────────────────────────────
 export { AxonaPeer } from './dht/AxonaPeer.js';
 export { DHTNode, GEO_CELL_BITS } from './dht/DHTNode.js';
