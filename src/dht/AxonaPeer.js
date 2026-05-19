@@ -62,7 +62,7 @@ export class AxonaPeer extends DHT {
    *        signed publishes (the default).  Apps that only call
    *        `peer.pub(topic, message, { sign: false })` can omit it.
    */
-  constructor({ engine, node, axonManager = null, identity = null }) {
+  constructor({ engine, node, axonManager = null, identity = null, transport = null }) {
     super();
     if (!engine) throw new Error('AxonaPeer: engine is required');
     if (!node)   throw new Error('AxonaPeer: node is required');
@@ -70,6 +70,7 @@ export class AxonaPeer extends DHT {
     this._node   = node;
     this._axonManager = axonManager;
     this._identity = identity;
+    this._transport = transport;
     this._started = false;
     /** @type {Set<(event: object) => void>} */
     this._eventListeners = new Set();
@@ -81,6 +82,12 @@ export class AxonaPeer extends DHT {
     this._subscriptions = new Map();
     /** True once we've installed the AxonManager-side delivery hook. */
     this._deliveryHookInstalled = false;
+
+    // ─── Direct messaging state ───────────────────────────────────
+    /** Application handler set by peer.onMessage().  At most one. */
+    this._directMessageHandler = null;
+    /** True once we've installed the transport-side req/ntf handlers. */
+    this._directHandlersInstalled = false;
   }
 
   // ─── Lifecycle ─────────────────────────────────────────────────────
@@ -504,6 +511,112 @@ export class AxonaPeer extends DHT {
       reshares,
       relayCount: relayIds.size,
     };
+  }
+
+  // ─── Direct messaging (v1.0 API) ──────────────────────────────────
+  //
+  // Three primitives that ride directly on the underlying Transport
+  // contract without going through pub/sub:
+  //
+  //   await peer.send(targetId, message)    — RPC; awaits reply
+  //   peer.notify(targetId, message)        — fire-and-forget
+  //   peer.onMessage(handler)               — receive direct msgs
+  //
+  // `targetId` is the 66-char hex node ID of the peer. The peer must
+  // already be in the synaptome (transport.openConnection completed)
+  // — direct messaging assumes a working channel.  Routing to peers
+  // we haven't established a channel with is the responsibility of
+  // higher layers (e.g. AxonaPeer.lookup); that's not in scope here.
+  //
+  // Wire type used between peers is 'axona:direct' so it doesn't
+  // collide with the existing typed transport surfaces (lookup_step,
+  // reinforce, pubsub:*, etc.).
+
+  /**
+   * Send a direct message to `targetId` and await the remote handler's
+   * return value (RPC-style).
+   *
+   * @param {string} targetId 66-char hex node ID
+   * @param {*}      message  JSON-serializable
+   * @returns {Promise<*>}     remote handler's return value
+   */
+  async send(targetId, message) {
+    if (!isHexId(targetId)) {
+      throw new TypeError(`peer.send: targetId must be 66-char hex, got ${typeof targetId}`);
+    }
+    const t = this._requireTransport('send');
+    return t.send(targetId, 'axona:direct', { from: this._nodeIdHex(), message });
+  }
+
+  /**
+   * Fire-and-forget direct message.  Resolves once enqueued, NOT
+   * when delivered.
+   *
+   * @param {string} targetId
+   * @param {*}      message
+   * @returns {Promise<void>}
+   */
+  async notify(targetId, message) {
+    if (!isHexId(targetId)) {
+      throw new TypeError(`peer.notify: targetId must be 66-char hex, got ${typeof targetId}`);
+    }
+    const t = this._requireTransport('notify');
+    return t.notify(targetId, 'axona:direct', { from: this._nodeIdHex(), message });
+  }
+
+  /**
+   * Register a handler for inbound direct messages.  At most one
+   * handler — calling onMessage again replaces the previous handler.
+   *
+   * The handler signature is `(senderId, message) => reply | void`:
+   *   - For peer.send() callers: any value returned (or its promise)
+   *     becomes the resolution of the caller's send().
+   *   - For peer.notify() callers: the return value is discarded.
+   *
+   * @param {(senderId: string, message: any) => any} handler
+   */
+  onMessage(handler) {
+    if (typeof handler !== 'function') {
+      throw new TypeError('peer.onMessage: handler must be a function');
+    }
+    this._directMessageHandler = handler;
+    this._installDirectHandlers();
+  }
+
+  _installDirectHandlers() {
+    if (this._directHandlersInstalled) return;
+    const t = this._transport;
+    if (!t || typeof t.onRequest !== 'function') return;
+
+    t.onRequest('axona:direct', async (fromId, payload) => {
+      const h = this._directMessageHandler;
+      if (!h) return undefined;
+      // The wire fromId is the transport's notion (typically the hex
+      // nodeId once bindPeer has happened).  payload.from is the
+      // sender's self-reported hex id — we prefer the transport's
+      // since it's bound at handshake time.
+      const senderId = (typeof fromId === 'string' && isHexId(fromId))
+        ? fromId : (payload?.from ?? null);
+      return await h(senderId, payload?.message);
+    });
+    t.onNotification('axona:direct', (fromId, payload) => {
+      const h = this._directMessageHandler;
+      if (!h) return;
+      const senderId = (typeof fromId === 'string' && isHexId(fromId))
+        ? fromId : (payload?.from ?? null);
+      try { h(senderId, payload?.message); }
+      catch { /* notification handler errors swallow */ }
+    });
+    this._directHandlersInstalled = true;
+  }
+
+  _requireTransport(callerName) {
+    const t = this._transport ?? this._engine?.transport ?? null;
+    if (!t) {
+      throw new Error(`peer.${callerName}: no transport available; ` +
+        'pass {transport} to the AxonaPeer constructor');
+    }
+    return t;
   }
 
   // ── AxonManager glue ────────────────────────────────────────────
