@@ -42,6 +42,7 @@ import { Synapse }        from './Synapse.js';
 import { Subscription }   from './Subscription.js';
 import { clz264, toHex, isHexId } from '../utils/hexid.js';
 import { deriveTopicId }  from '../pubsub/post.js';
+import { buildEnvelope }  from '../pubsub/envelope.js';
 import { PublishError, SubscribeError, ErrorCodes } from '../errors.js';
 
 export class AxonaPeer extends DHT {
@@ -56,14 +57,19 @@ export class AxonaPeer extends DHT {
    *        unified pub()/sub() API.  When omitted, pub/sub fall back
    *        to the engine's per-node AxonManager (engine.axonManagerFor
    *        if present, else throws).
+   * @param {object} [opts.identity]
+   *        Identity envelope from `deriveIdentity()` — required for
+   *        signed publishes (the default).  Apps that only call
+   *        `peer.pub(topic, message, { sign: false })` can omit it.
    */
-  constructor({ engine, node, axonManager = null }) {
+  constructor({ engine, node, axonManager = null, identity = null }) {
     super();
     if (!engine) throw new Error('AxonaPeer: engine is required');
     if (!node)   throw new Error('AxonaPeer: node is required');
     this._engine = engine;
     this._node   = node;
     this._axonManager = axonManager;
+    this._identity = identity;
     this._started = false;
     /** @type {Set<(event: object) => void>} */
     this._eventListeners = new Set();
@@ -252,15 +258,20 @@ export class AxonaPeer extends DHT {
   // is wired through pub().
 
   /**
-   * Publish a message on `topic`.  Resolves with the message ID once
-   * the publish has been handed to the K-closest replica set (today's
-   * AxonManager semantics).
+   * Publish a message on `topic`.  Resolves with the content-derived
+   * msgId once the publish has been handed to the K-closest replica
+   * set (today's AxonManager semantics).
    *
-   * @param {string} topic   application-level topic name
-   * @param {*}      message JSON-serializable payload
-   * @returns {Promise<string>} msgId
+   * Signed by default with the peer's identity; opt-out via
+   * `{ sign: false }` for anonymous broadcast.
+   *
+   * @param {string}  topic     application-level topic name
+   * @param {*}       message   JSON-serializable payload
+   * @param {object}  [opts]
+   * @param {boolean} [opts.sign=true]
+   * @returns {Promise<string>} msgId — sha256 of the canonical envelope.
    */
-  async pub(topic, message) {
+  async pub(topic, message, { sign = true } = {}) {
     if (typeof topic !== 'string' || topic.length === 0) {
       throw new PublishError(ErrorCodes.PUBLISH_INVALID_TOPIC,
         `peer.pub: topic must be a non-empty string, got ${typeof topic}`,
@@ -269,18 +280,40 @@ export class AxonaPeer extends DHT {
     const am          = this._requireAxonManager('pub');
     const publisherId = this._nodeIdHex();
     const topicId     = await deriveTopicId(publisherId, topic);
-    const envelope    = { topic, message, publisher: publisherId };
+
+    if (sign && !this._identity) {
+      throw new PublishError(ErrorCodes.PUBLISH_SIGN_FAILED,
+        'peer.pub: identity required for signed publish; pass {identity} to AxonaPeer ' +
+        'or call peer.pub(topic, msg, { sign: false }) for anonymous publish',
+        { context: { topic } });
+    }
+
+    let envelope;
+    try {
+      envelope = await buildEnvelope({
+        topic, message,
+        identity: this._identity,
+        sign,
+      });
+    } catch (cause) {
+      throw new PublishError(ErrorCodes.PUBLISH_SIGN_FAILED,
+        `peer.pub: building envelope failed (${cause.message})`,
+        { cause, context: { topic, sign } });
+    }
+
     let json;
     try { json = JSON.stringify(envelope); }
     catch (cause) {
       throw new PublishError(ErrorCodes.PUBLISH_PAYLOAD_TOO_LARGE,
-        `peer.pub: payload not JSON-serializable (${cause.message})`,
+        `peer.pub: envelope not JSON-serializable (${cause.message})`,
         { cause, context: { topic } });
     }
-    const msgId = am.pubsubPublish(topicId, json, {
-      publisher: publisherId,
-    });
-    return msgId;
+
+    // AxonManager generates its own publishId for network routing/
+    // cache keying; we ignore that and surface the content-derived
+    // msgId.  The meta.publisher field is for metrics counters only.
+    am.pubsubPublish(topicId, json, { publisher: publisherId });
+    return envelope.msgId;
   }
 
   /**
@@ -385,22 +418,25 @@ export class AxonaPeer extends DHT {
     if (!set || set.size === 0) return;
     let envelope;
     try {
-      const parsed = JSON.parse(json);
-      envelope = {
-        msgId:     publishId,
-        ts:        publishTs,
-        topic:     parsed.topic ?? null,
-        message:   parsed.message,
-        publisher: parsed.publisher ?? null,
-      };
+      envelope = JSON.parse(json);
+      // Defence: enforce envelope shape so apps always see consistent
+      // fields even if a malformed peer sends garbage.
+      if (!envelope || typeof envelope !== 'object' ||
+          typeof envelope.msgId !== 'string' ||
+          typeof envelope.ts !== 'number' ||
+          typeof envelope.topic !== 'string' ||
+          !('message' in envelope)) {
+        throw new Error('malformed envelope');
+      }
     } catch {
-      // Malformed payload: deliver raw json as the message.
+      // Fall back to a synthetic envelope carrying the raw json as
+      // message and the AxonManager's publishId as msgId — at least
+      // the handler still fires with something it can inspect.
       envelope = {
-        msgId:     publishId,
-        ts:        publishTs,
-        topic:     null,
-        message:   json,
-        publisher: null,
+        msgId:    publishId,
+        ts:       publishTs,
+        topic:    null,
+        message:  json,
       };
     }
     for (const sub of set) sub._deliver(envelope);

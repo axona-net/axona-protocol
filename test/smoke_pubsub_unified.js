@@ -76,10 +76,12 @@ function makePeer({ withAxonManager = true } = {}) {
 async function testPubBasics() {
   console.log('\n── peer.pub() basics ──');
   const { peer, am } = makePeer();
-  const msgId = await peer.pub('cats', { meow: 1 });
+  // Anonymous publish keeps this smoke test independent of identity
+  // wiring (the signed-publish flow is exercised by smoke_envelope.js).
+  const msgId = await peer.pub('cats', { meow: 1 }, { sign: false });
 
   check('pub resolves with msgId string',
-    typeof msgId === 'string' && msgId.length > 0);
+    typeof msgId === 'string' && msgId.length === 64);
   check('AxonManager.pubsubPublish called once',
     am.published.length === 1);
   check('topicId is 66-char hex',
@@ -89,11 +91,11 @@ async function testPubBasics() {
   check('topicId = deriveTopicId(nodeId, topic)',
     am.published[0].topicId === expectedTopicId);
 
-  // Envelope is JSON-serialized: { topic, message, publisher }
+  // Envelope is JSON-serialized: { msgId, ts, topic, message }
   const env = JSON.parse(am.published[0].json);
+  check('json envelope has msgId',     env.msgId === msgId);
   check('json envelope has topic',     env.topic === 'cats');
   check('json envelope has message',   env.message.meow === 1);
-  check('json envelope has publisher', env.publisher === NODE_ID);
   check('meta carries publisher',      am.published[0].meta.publisher === NODE_ID);
 }
 
@@ -115,17 +117,22 @@ async function testPubValidation() {
   err = null;
   const cyclic = {};
   cyclic.self = cyclic;
-  try { await peer.pub('cats', cyclic); }
+  try { await peer.pub('cats', cyclic, { sign: false }); }
   catch (e) { err = e; }
+  // Cyclic payloads explode inside canonical() during envelope build
+  // (msgId hashing).  The pub() entry point catches that as
+  // PUBLISH_SIGN_FAILED — sign-or-not, the envelope step always runs.
   check('un-stringifiable payload → PublishError',
-    err instanceof PublishError && err.code === ErrorCodes.PUBLISH_PAYLOAD_TOO_LARGE);
+    err instanceof PublishError &&
+    (err.code === ErrorCodes.PUBLISH_PAYLOAD_TOO_LARGE ||
+     err.code === ErrorCodes.PUBLISH_SIGN_FAILED));
 }
 
 async function testPubNoManager() {
   console.log('\n── peer.pub() without AxonManager ──');
   const { peer } = makePeer({ withAxonManager: false });
   let err = null;
-  try { await peer.pub('cats', null); }
+  try { await peer.pub('cats', null, { sign: false }); }
   catch (e) { err = e; }
   check('no AxonManager → PublishError', err instanceof PublishError);
 }
@@ -142,19 +149,24 @@ async function testSubReceives() {
   check('AxonManager.pubsubSubscribe called',
     am.subscribed.length === 1 && am.subscribed[0] === sub.topicId);
 
-  // Trigger a delivery.
-  const BOB = 'bb' + 'b2'.repeat(32);   // 66-char hex
-  const payload = JSON.stringify({
-    topic: 'cats', message: { hi: 1 }, publisher: BOB,
-  });
-  am.triggerDelivery(sub.topicId, payload, 'msg-7', 1234567);
+  // Synthesize a JSON envelope (matches what peer.pub would emit).
+  // Use sign:false here so this smoke stays independent of identity
+  // wiring — the signed flow is exercised by smoke_envelope.js.
+  const env = {
+    msgId: '0'.repeat(64),
+    ts: 1234567,
+    topic: 'cats',
+    message: { hi: 1 },
+  };
+  am.triggerDelivery(sub.topicId, JSON.stringify(env), 'internal-7', 999);
 
   check('handler invoked once', received.length === 1);
-  check('envelope.msgId',       received[0].msgId === 'msg-7');
-  check('envelope.ts',          received[0].ts === 1234567);
+  check('envelope.msgId is content-derived, not publishId',
+    received[0].msgId === env.msgId);
+  check('envelope.ts (from envelope, not delivery ts)',
+    received[0].ts === 1234567);
   check('envelope.topic',       received[0].topic === 'cats');
   check('envelope.message',     received[0].message.hi === 1);
-  check('envelope.publisher',   received[0].publisher === BOB);
 }
 
 async function testMultipleSubsSameTopic() {
@@ -167,7 +179,9 @@ async function testMultipleSubsSameTopic() {
   check('AxonManager.pubsubSubscribe called twice',
     am.subscribed.length === 2);
 
-  const payload = JSON.stringify({ topic: 'cats', message: 'meow', publisher: NODE_ID });
+  const payload = JSON.stringify({
+    msgId: '1'.repeat(64), ts: 1, topic: 'cats', message: 'meow',
+  });
   am.triggerDelivery(subA.topicId, payload, 'm-1', 1);
 
   check('handler A received', a.length === 1);
@@ -187,7 +201,9 @@ async function testSubStopUnsubscribes() {
   check('subA.stopped', subA.stopped);
 
   // Stopped sub no longer receives.
-  const payload = JSON.stringify({ topic: 'cats', message: 'x', publisher: NODE_ID });
+  const payload = JSON.stringify({
+    msgId: '2'.repeat(64), ts: 2, topic: 'cats', message: 'x',
+  });
   am.triggerDelivery(subA.topicId, payload);
   check('subA handler no longer fires after stop', a.length === 0);
   check('subB handler still fires',                b.length === 1);
@@ -256,7 +272,7 @@ async function testEngineFallback() {
   };
   const peer = new AxonaPeer({ engine, node });
 
-  const msgId = await peer.pub('topic', { hi: 1 });
+  const msgId = await peer.pub('topic', { hi: 1 }, { sign: false });
   check('engine.axonManagerFor wired through',
     typeof msgId === 'string' && am.published.length === 1);
 }
@@ -271,7 +287,7 @@ async function testEngineFallbackMapShape() {
   };
   const peer = new AxonaPeer({ engine, node });
 
-  await peer.pub('topic', { hi: 1 });
+  await peer.pub('topic', { hi: 1 }, { sign: false });
   check('engine._axonManagers Map wired through',
     am.published.length === 1);
 }

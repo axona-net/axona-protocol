@@ -43,7 +43,7 @@
 
 /** Stable JSON encoding: object keys sorted at every level so two
  *  semantically-identical posts hash to the same value across runs. */
-function canonical(value) {
+export function canonical(value) {
   if (value === null || typeof value !== 'object') return JSON.stringify(value);
   if (Array.isArray(value)) {
     return '[' + value.map(canonical).join(',') + ']';
@@ -55,7 +55,7 @@ function canonical(value) {
 const _enc = new TextEncoder();
 
 /** sha256 → hex.  Web Crypto in both Node 19+ and modern browsers. */
-async function sha256Hex(input) {
+export async function sha256Hex(input) {
   const bytes  = (typeof input === 'string') ? _enc.encode(input) : input;
   const buf    = await crypto.subtle.digest('SHA-256', bytes);
   const arr    = new Uint8Array(buf);

@@ -96,7 +96,14 @@ export {
   verifyPostHash,
   verifyTopicOwnership,
   verifySignature,
+  canonical,
+  sha256Hex,
 } from './pubsub/post.js';
+export {
+  buildEnvelope,
+  verifyEnvelope,
+  computeMsgId,
+} from './pubsub/envelope.js';
 
 // ── Ed25519 helpers (Web Crypto wrapper) ─────────────────────────
 // Optional companion to post.js for runtimes that support Web Crypto
