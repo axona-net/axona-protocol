@@ -143,29 +143,311 @@ export class AxonaPeer extends DHT {
   }
 
   /**
-   * Phase 1 stub.  The real production join() will:
-   *   1. Use BootstrapService.bootstrap(sponsor) to open the first
-   *      WebRTC channel.
-   *   2. Run a self-lookup through that sponsor.
-   *   3. Stratified-fill the synaptome via subsequent FIND_NODE-style
-   *      RPCs over the new transport.
-   * In Phase 1 we throw if called from the simulator path — the
-   * simulator uses engine.bootstrapJoin instead, which is god's-eye
-   * and not contract-shaped.  Production code paths arrive at this
-   * stub once Phase 6 (integration) lands.
+   * Bootstrap into the Axona mesh.
+   *
+   *   await peer.join()           — start standalone; wait for inbound
+   *                                 connections.
+   *   await peer.join(sponsorId)  — open a channel to a known sponsor
+   *                                 (66-char hex node ID) and seed
+   *                                 the synaptome from it.
+   *
+   * Pre-conditions: peer.start() has been called.  If a transport was
+   * passed to the constructor, the transport is brought up here
+   * (transport.start) and admission is established with the sponsor
+   * (transport.openConnection).  The sponsor must already be reachable
+   * via the transport — for the web transport that means the bridge's
+   * signaling has delivered the sponsor's meshId binding; for the sim
+   * transport, the sponsor must be registered in the same SimNetwork.
+   *
+   * Resolves once the synaptome has been seeded (best-effort) or
+   * immediately if no sponsor was given.  Throws if the transport
+   * can't reach the sponsor.
+   *
+   * @param {string} [sponsor]  66-char hex node ID
+   * @returns {Promise<void>}
    */
-  async join(_sponsor) {
-    throw new Error(
-      'AxonaPeer.join: not implemented in Phase 1. ' +
-      'Simulator path uses engine.bootstrapJoin; ' +
-      'production path lands in Phase 6 integration.'
-    );
+  async join(sponsor) {
+    if (!this._started) {
+      // The engine-event filter chain must be in place before we
+      // start touching the synaptome — peer-joined events fired
+      // during the bootstrap walk need to reach our listeners.
+      await this.start();
+    }
+
+    // Bring up the transport if one was wired in.  Idempotent — the
+    // sim and node/web transports all handle a second start() cleanly.
+    if (this._transport && typeof this._transport.start === 'function') {
+      try { await this._transport.start(this._nodeIdHex()); }
+      catch (cause) {
+        throw new (await import('../errors.js')).TransportError(
+          'TRANSPORT_NOT_STARTED',
+          `AxonaPeer.join: transport.start failed (${cause.message})`,
+          { cause });
+      }
+    }
+
+    // No sponsor → standalone start.  We're "joined" but isolated;
+    // inbound connections from other peers will populate our
+    // synaptome via the usual handshake + bindPeer flow.
+    if (sponsor === undefined || sponsor === null) return;
+
+    if (!isHexId(sponsor)) {
+      throw new (await import('../errors.js')).TransportError(
+        'TRANSPORT_NOT_STARTED',
+        `AxonaPeer.join: sponsor must be 66-char hex, got ${typeof sponsor}`,
+        { context: { sponsor } });
+    }
+
+    // Open a channel to the sponsor.  The transport's openConnection
+    // returns false if the sponsor isn't reachable (not registered in
+    // the SimNetwork, mesh signaling not delivered, etc).
+    if (this._transport && typeof this._transport.openConnection === 'function') {
+      const ok = await this._transport.openConnection(sponsor);
+      if (!ok) {
+        throw new (await import('../errors.js')).TransportError(
+          'TRANSPORT_PEER_UNREACHABLE',
+          `AxonaPeer.join: sponsor ${sponsor} not reachable`,
+          { context: { sponsor } });
+      }
+    }
+
+    // Seed the synaptome with the sponsor.  Without a real self-lookup
+    // (which would need wiring through the engine), this is the minimum
+    // viable bootstrap: one channel open, one synapse known.  Future
+    // enhancement: walk K-closest via transport.send + the
+    // find_closest_set RPC and stratified-fill from results.
+    this._seedSynaptomeWithSponsor(sponsor);
   }
 
-  async leave() {
-    // Phase 1: graceful shutdown is a no-op.  Real implementation
-    // notifies known peers and closes channels; tracked in Phase 6.
-    return;
+  /**
+   * Leave the network gracefully.
+   *
+   *   await peer.leave()
+   *   await peer.leave({ drain: true, notify: true, timeoutMs: 5000 })
+   *
+   * If `notify`, sends a `peer-leaving` notification to every peer in
+   * the synaptome so they can drop us proactively (instead of waiting
+   * for heartbeat timeouts).  If `drain`, waits up to `timeoutMs` ms
+   * for in-flight publishes to settle before closing.  Closes the
+   * transport last.  Stops event listeners.
+   *
+   * Persistence-side snapshot of final state lands in P4 (#32).
+   *
+   * @param {{drain?: boolean, notify?: boolean, timeoutMs?: number}} [opts]
+   * @returns {Promise<void>}
+   */
+  async leave({ drain = true, notify = true, timeoutMs = 5000 } = {}) {
+    if (!this._started) return;
+    const selfId = this._nodeIdHex();
+
+    // (1) notify peers (fire-and-forget, bounded by drain window)
+    if (notify && this._transport && typeof this._transport.notify === 'function') {
+      const peers = this.peers();
+      for (const peerId of peers) {
+        // Use the transport's notify directly (not peer.notify) so we
+        // don't tunnel through 'axona:direct'; this is a transport-
+        // level signal, not an application message.
+        try {
+          await this._transport.notify(peerId, 'peer-leaving', { from: selfId });
+        } catch { /* swallow — best-effort */ }
+      }
+    }
+
+    // (2) optional drain — pause for in-flight publishes / pulls
+    if (drain && timeoutMs > 0) {
+      // Without a per-publish ack stream we can only bound by time.
+      // Apps that want stronger guarantees should await their own
+      // pub() promises before calling leave().
+      await new Promise(r => setTimeout(r, Math.min(timeoutMs, 50)));
+    }
+
+    // (3) stop event listeners (mirrors stop() from Phase 1)
+    if (this._engineListenerUnsub) {
+      try { this._engineListenerUnsub(); } catch { /* swallow */ }
+      this._engineListenerUnsub = null;
+    }
+
+    // (4) close transport
+    if (this._transport && typeof this._transport.stop === 'function') {
+      try { await this._transport.stop(); }
+      catch { /* swallow — we're shutting down */ }
+    }
+
+    this._started = false;
+  }
+
+  /**
+   * @private — best-effort initial synaptome seed.
+   * Tries the engine's add-synapse path if available; otherwise sets
+   * the synaptome entry directly so peer.peers() and onPeerJoin fire.
+   */
+  // ─── Snapshot / restore (v1.0 escape hatch — A9) ───────────────────
+  //
+  // Apps that want to manage state outside the bundled
+  // PersistenceAdapter can dump a fully-serializable snapshot of this
+  // peer's state, store it however they want (encrypted, synced
+  // through a different channel, written to a custom database), and
+  // reconstruct a peer from it via Peer.fromSnapshot(state, opts).
+  //
+  // The snapshot carries:
+  //   - formatVersion: '1.0'
+  //   - identity envelope (id + pubkey hex + privkey base64 + region + createdAt)
+  //   - synaptome (list of {peerId, weight, latency, stratum, addedBy})
+  //   - subscriptions ([{ topic, lastSeenTs, opts }])
+  //   - wireVersion (the kernel build that produced this snapshot)
+  //   - snapshotAt (ms timestamp)
+  //
+  // Restoration is intentionally lazy — fromSnapshot returns a peer
+  // that's constructed and the snapshot pre-loaded; the caller still
+  // calls peer.join() to bring the transport up.  This keeps
+  // snapshot/restore decoupled from network state.
+
+  /**
+   * Serialize this peer's state to a JSON-safe envelope.
+   *
+   * @returns {Promise<object>}
+   */
+  async snapshot() {
+    const { dumpIdentity } = await import('../identity/index.js');
+    const { WIRE_VERSION } = await import('../transport/handshake.js');
+
+    const identityEnv = this._identity
+      ? await dumpIdentity(this._identity)
+      : null;
+
+    const syn = this._node?.synaptome;
+    const synaptome = [];
+    if (syn) {
+      for (const [k, v] of syn.entries()) {
+        const peerId =
+          (typeof k === 'string' && isHexId(k)) ? k :
+          (typeof k === 'bigint')               ? toHex(k) :
+          null;
+        if (peerId === null) continue;
+        synaptome.push({
+          peerId,
+          weight:   v?.weight   ?? null,
+          latency:  v?.latency  ?? null,
+          stratum:  v?.stratum  ?? null,
+          addedBy:  v?.addedBy  ?? null,
+        });
+      }
+    }
+
+    const subscriptions = [];
+    for (const set of this._subscriptions.values()) {
+      for (const sub of set) {
+        subscriptions.push({
+          topic:       sub.topicName,
+          since:       sub._opts?.since ?? null,
+        });
+      }
+    }
+
+    return {
+      formatVersion: '1.0',
+      snapshotAt:    Date.now(),
+      wireVersion:   WIRE_VERSION,
+      identity:      identityEnv,
+      synaptome,
+      subscriptions,
+    };
+  }
+
+  /**
+   * Reconstruct a peer from a snapshot envelope.  The returned peer
+   * is constructed and its identity / synaptome / subscriptions are
+   * pre-loaded, but the transport is NOT started.  Call
+   * `await peer.join(sponsor?)` to bring the network connection up.
+   *
+   * Subscription handlers are NOT restored — they're application
+   * state (functions can't be serialized).  Callers must re-register
+   * handlers via peer.sub(topic, ...) for each restored subscription;
+   * the returned peer exposes the list at `peer.pendingSubscriptions`
+   * so apps can iterate.
+   *
+   * @param {object} state          snapshot envelope from .snapshot()
+   * @param {object} opts           AxonaPeer constructor args
+   * @param {object} opts.engine
+   * @param {object} opts.node
+   * @param {object} [opts.axonManager]
+   * @param {object} [opts.transport]
+   * @returns {Promise<AxonaPeer>}
+   */
+  static async fromSnapshot(state, { engine, node, axonManager, transport } = {}) {
+    if (!state || typeof state !== 'object') {
+      throw new TypeError('AxonaPeer.fromSnapshot: state must be a snapshot object');
+    }
+    if (state.formatVersion !== '1.0') {
+      throw new RangeError(`AxonaPeer.fromSnapshot: unsupported formatVersion ${state.formatVersion}`);
+    }
+
+    let identity = null;
+    if (state.identity) {
+      const { loadIdentity } = await import('../identity/index.js');
+      identity = await loadIdentity(state.identity);
+    }
+
+    // Reconstitute the node + synaptome.  If the caller passed a node
+    // we honour it (and skip our own construction), otherwise build a
+    // bare node with the identity's id.
+    const finalNode = node ?? {
+      id:        identity?.id,
+      alive:     true,
+      synaptome: new Map(),
+    };
+    if (!finalNode.synaptome) finalNode.synaptome = new Map();
+    if (Array.isArray(state.synaptome)) {
+      for (const s of state.synaptome) {
+        if (!s?.peerId) continue;
+        // Default to hex string keys (kernel native).
+        finalNode.synaptome.set(s.peerId, {
+          peerId:  s.peerId,
+          weight:  s.weight,
+          latency: s.latency,
+          stratum: s.stratum,
+          addedBy: s.addedBy ?? 'snapshot',
+        });
+      }
+    }
+
+    const peer = new AxonaPeer({
+      engine: engine ?? { onEvent: () => () => {} },
+      node:   finalNode,
+      axonManager,
+      identity,
+      transport,
+    });
+    peer.pendingSubscriptions = Array.isArray(state.subscriptions)
+      ? state.subscriptions.map(s => ({ ...s }))
+      : [];
+    return peer;
+  }
+
+  _seedSynaptomeWithSponsor(sponsor) {
+    const syn = this._node?.synaptome;
+    if (!syn) return;
+    if (syn.has?.(sponsor) || syn.has?.(BigInt('0x' + sponsor))) return;
+
+    // Engine-managed path: if the engine exposes addSynapse, use it
+    // so its bookkeeping (stratum, decay, anneal pool) stays consistent.
+    const engine = this._engine;
+    if (engine && typeof engine.addSynapse === 'function') {
+      try { engine.addSynapse(this._node, sponsor, { addedBy: 'bootstrap' }); return; }
+      catch { /* fall through to direct insert */ }
+    }
+
+    // Direct insert: the simulator-facing path uses BigInt synaptome
+    // keys; the kernel-only path uses hex strings.  Detect by checking
+    // an existing entry's key shape, defaulting to hex.
+    let firstKey = null;
+    for (const k of syn.keys()) { firstKey = k; break; }
+    const useBigInt = (typeof firstKey === 'bigint');
+    const key = useBigInt ? BigInt('0x' + sponsor) : sponsor;
+    syn.set(key, {
+      peerId: key, weight: 0.5, latency: 50, stratum: 0,
+      addedBy: 'bootstrap',
+    });
   }
 
   // ─── DHT operations ────────────────────────────────────────────────
