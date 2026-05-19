@@ -49,6 +49,14 @@ export {
   performServerHandshake,
 } from './transport/handshake.js';
 
+// ── Sim transport (in-process; tests + dht-sim) ──────────────────────
+// Always-environment-neutral; safe to ship in the main barrel.
+export {
+  SimNetwork,
+  SimTransport,
+  simTransport,
+} from './transport/sim/index.js';
+
 // ── Persistence ───────────────────────────────────────────────────────
 // PersistenceAdapter is the abstract contract; InMemoryPersistence is
 // the reference implementation used by `persist: false` and by tests.
