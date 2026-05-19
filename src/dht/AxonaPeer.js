@@ -610,6 +610,162 @@ export class AxonaPeer extends DHT {
     this._directHandlersInstalled = true;
   }
 
+  // ─── Diagnostics + log/error/upgrade event surfaces (A6) ──────────
+  //
+  // Apps consume these for observability:
+  //
+  //   peer.health()         → snapshot of synaptome / axon / connections
+  //                            / replay-cache / wireVersion / uptime
+  //   peer.onLog(level, h)  → 'debug' | 'info' | 'warn' | 'error'
+  //   peer.onError(h)       → fires on background AxonaError emissions
+  //   peer.onUpgradeRequired(h) → fires on version-handshake mismatch
+  //
+  // The underlying log/error/upgrade events come from the transport
+  // layer (today via the `log` callback we passed to the factory).
+  // The peer offers a typed event surface on top so apps don't need
+  // to wire transport-specific callbacks themselves.
+
+  /**
+   * Synchronous diagnostic snapshot.  Stable shape:
+   *
+   *   {
+   *     nodeId:           '<hex>',
+   *     synaptomeSize:    number,
+   *     peers:            string[],
+   *     subscriptions:    number,
+   *     axonRoles:        Array<{topic, isRoot, children, cacheSize}>,
+   *     wireVersion:      string | null,
+   *     started:          boolean,
+   *   }
+   *
+   * Heavy implementations (per-replay-cache byte sizes, traffic
+   * counters) can be added later.  This is intentionally cheap so
+   * apps can poll it on a UI tick.
+   *
+   * @returns {object}
+   */
+  health() {
+    const am = this._axonManager
+            ?? (this._engine?.axonManagerFor?.(this._node))
+            ?? this._engine?._axonManagers?.get?.(this._node.id)
+            ?? null;
+    const axonRoles = [];
+    if (am && typeof am.inspectRoles === 'function') {
+      try {
+        for (const r of am.inspectRoles()) {
+          axonRoles.push({
+            topic:      r.topicId,
+            isRoot:     !!r.isRoot,
+            children:   Array.isArray(r.children) ? r.children.length : 0,
+            cacheSize:  r.replayCacheSize ?? r.cacheSize ?? 0,
+          });
+        }
+      } catch { /* best-effort */ }
+    }
+    return {
+      nodeId:        this._nodeIdHex(),
+      synaptomeSize: this._node?.synaptome?.size ?? 0,
+      peers:         this.peers(),
+      subscriptions: this._subscriptions.size,
+      axonRoles,
+      wireVersion:   this._transport?.wireVersion ?? null,
+      started:       this._started === true,
+    };
+  }
+
+  /**
+   * Subscribe to log-level events.
+   * @param {'debug'|'info'|'warn'|'error'} level
+   * @param {(msg: string, context?: object) => void} handler
+   * @returns {() => void} unsubscribe
+   */
+  onLog(level, handler) {
+    if (!['debug', 'info', 'warn', 'error'].includes(level)) {
+      throw new TypeError(`peer.onLog: level must be one of debug|info|warn|error, got ${String(level)}`);
+    }
+    if (typeof handler !== 'function') {
+      throw new TypeError('peer.onLog: handler must be a function');
+    }
+    if (!this._logHandlers) this._logHandlers = new Map();
+    if (!this._logHandlers.has(level)) this._logHandlers.set(level, new Set());
+    const set = this._logHandlers.get(level);
+    set.add(handler);
+    this._installTransportLogHook();
+    return () => set.delete(handler);
+  }
+
+  /**
+   * Subscribe to background AxonaError emissions (things the kernel
+   * surfaces asynchronously rather than throwing — e.g. transport
+   * failures during heartbeat, persistence-layer warnings).
+   *
+   * @param {(err: AxonaError) => void} handler
+   * @returns {() => void} unsubscribe
+   */
+  onError(handler) {
+    if (typeof handler !== 'function') {
+      throw new TypeError('peer.onError: handler must be a function');
+    }
+    if (!this._errorHandlers) this._errorHandlers = new Set();
+    this._errorHandlers.add(handler);
+    return () => this._errorHandlers.delete(handler);
+  }
+
+  /**
+   * Subscribe to wire-version handshake mismatches.  Handler receives
+   * the UpgradeRequiredError with full context (reason, server
+   * version, client version, downloadUrl).
+   *
+   * @param {(err: AxonaError) => void} handler
+   * @returns {() => void} unsubscribe
+   */
+  onUpgradeRequired(handler) {
+    if (typeof handler !== 'function') {
+      throw new TypeError('peer.onUpgradeRequired: handler must be a function');
+    }
+    if (!this._upgradeHandlers) this._upgradeHandlers = new Set();
+    this._upgradeHandlers.add(handler);
+    return () => this._upgradeHandlers.delete(handler);
+  }
+
+  // ── internal: emit helpers + transport log hook ────────────────────
+
+  /** @internal — kernel/transport modules call this. */
+  _emitLog(level, msg, context) {
+    const set = this._logHandlers?.get(level);
+    if (!set || set.size === 0) return;
+    for (const h of set) { try { h(msg, context); } catch { /* swallow */ } }
+  }
+
+  /** @internal — kernel modules call this on background errors. */
+  _emitError(err) {
+    if (!this._errorHandlers || this._errorHandlers.size === 0) return;
+    for (const h of this._errorHandlers) { try { h(err); } catch { /* swallow */ } }
+    // UpgradeRequired errors fan to their own channel too.
+    if (err?.code === 'UPGRADE_REQUIRED' && this._upgradeHandlers) {
+      for (const h of this._upgradeHandlers) { try { h(err); } catch { /* swallow */ } }
+    }
+  }
+
+  _installTransportLogHook() {
+    if (this._transportLogHooked) return;
+    const t = this._transport;
+    if (!t) return;
+    // Transports accept a log(event, data) callback at construction.
+    // For the kernel-side event surface we wrap any pre-existing log
+    // hook (preserved via t._log if present) so both consumers still
+    // get fed.  Falls back gracefully on transports without _log.
+    const orig = (typeof t._log === 'function') ? t._log : (() => {});
+    t._log = (event, data) => {
+      try { orig(event, data); } catch { /* keep going */ }
+      // Heuristic: events containing 'failed' or 'error' route to warn.
+      const level = (event.includes('failed') || event.includes('error'))
+        ? 'warn' : 'debug';
+      this._emitLog(level, event, data);
+    };
+    this._transportLogHooked = true;
+  }
+
   _requireTransport(callerName) {
     const t = this._transport ?? this._engine?.transport ?? null;
     if (!t) {
@@ -912,6 +1068,71 @@ export class AxonaPeer extends DHT {
     }
     this._eventListeners.add(handler);
     return () => this._eventListeners.delete(handler);
+  }
+
+  // ─── Mesh introspection (v1.0 API) ─────────────────────────────────
+  //
+  // Three primitives apps use to track who's in their synaptome:
+  //
+  //   peer.peers()        → string[] of 66-char hex nodeIds
+  //   peer.onPeerJoin(cb) → fires (peerId, ctx) on synapse admission
+  //   peer.onPeerLeave(cb)→ fires (peerId, ctx) on synapse eviction
+  //
+  // Both event helpers return an unsubscribe function.  `ctx` is the
+  // underlying event object so callers can inspect the addedBy /
+  // reason without going to the lower-level onEvent stream.
+
+  /**
+   * Current synaptome membership as hex node IDs.
+   * @returns {string[]}
+   */
+  peers() {
+    const syn = this._node?.synaptome;
+    if (!syn || typeof syn.keys !== 'function') return [];
+    const out = [];
+    for (const id of syn.keys()) {
+      if (typeof id === 'string' && isHexId(id))      out.push(id);
+      else if (typeof id === 'bigint')                out.push(toHex(id));
+    }
+    return out;
+  }
+
+  /**
+   * @param {(peerId: string, event?: object) => void} handler
+   * @returns {() => void} unsubscribe
+   */
+  onPeerJoin(handler) {
+    if (typeof handler !== 'function') {
+      throw new TypeError('peer.onPeerJoin: handler must be a function');
+    }
+    return this._onPeerLifecycleEvent('peer-joined', handler);
+  }
+
+  /**
+   * @param {(peerId: string, event?: object) => void} handler
+   * @returns {() => void} unsubscribe
+   */
+  onPeerLeave(handler) {
+    if (typeof handler !== 'function') {
+      throw new TypeError('peer.onPeerLeave: handler must be a function');
+    }
+    return this._onPeerLifecycleEvent('peer-left', handler);
+  }
+
+  _onPeerLifecycleEvent(eventType, handler) {
+    const filter = (ev) => {
+      if (!ev || ev.type !== eventType) return;
+      const peerId = ev.peerId;
+      const hex =
+        (typeof peerId === 'string' && isHexId(peerId)) ? peerId :
+        (typeof peerId === 'bigint')                    ? toHex(peerId) :
+        null;
+      if (hex === null) return;
+      try { handler(hex, ev); }
+      catch { /* listener errors are app-level; swallow */ }
+    };
+    this._eventListeners.add(filter);
+    return () => this._eventListeners.delete(filter);
   }
 
   // ─── Internal: event filtering ────────────────────────────────────
