@@ -16,6 +16,21 @@ export { Transport }        from './contracts/Transport.js';
 export { DHT }              from './contracts/DHT.js';
 export { BootstrapService } from './contracts/BootstrapService.js';
 
+// ── Errors ────────────────────────────────────────────────────────────
+export {
+  AxonaError,
+  IdentityError,
+  TransportError,
+  PublishError,
+  SubscribeError,
+  PullError,
+  MetricsError,
+  UpgradeRequiredError,
+  ErrorCodes,
+  isWireError,
+  fromWire,
+} from './errors.js';
+
 // ── Per-node DHT implementation (NH-1) ──────────────────────────────
 export { AxonaPeer } from './dht/AxonaPeer.js';
 export { DHTNode, GEO_CELL_BITS } from './dht/DHTNode.js';
