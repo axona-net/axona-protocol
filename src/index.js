@@ -31,6 +31,24 @@ export {
   fromWire,
 } from './errors.js';
 
+// ── Version handshake ─────────────────────────────────────────────────
+// Wire frames + compatibility checks used by the web and node
+// transports on each fresh signaling channel.  Most apps don't touch
+// these directly — they're plumbed into the transport factories.
+export {
+  WIRE_VERSION,
+  KERNEL_VERSION,
+  UPGRADE_CLOSE_CODE,
+  buildClientHello,
+  buildServerHello,
+  parseHello,
+  parseVersion,
+  compareVersions,
+  wireCompatible,
+  performClientHandshake,
+  performServerHandshake,
+} from './transport/handshake.js';
+
 // ── Persistence ───────────────────────────────────────────────────────
 // PersistenceAdapter is the abstract contract; InMemoryPersistence is
 // the reference implementation used by `persist: false` and by tests.
