@@ -34,10 +34,15 @@ export {
 // ── Persistence ───────────────────────────────────────────────────────
 // PersistenceAdapter is the abstract contract; InMemoryPersistence is
 // the reference implementation used by `persist: false` and by tests.
-// Concrete IndexedDB and File adapters live in sub-path imports
-// (`@axona/protocol/persistence/indexeddb.js` and
-// `@axona/protocol/persistence/file.js`) so they can be tree-shaken
-// out of bundles that don't need them.
+// Both are environment-neutral (no node:fs, no browser globals) so
+// they ship in the main barrel.
+//
+// Platform-specific impls are sub-path imports only — including them
+// here would pull node:fs into browser bundles or globalThis.indexedDB
+// into Node module load:
+//
+//   import { FilePersistence }      from '@axona/protocol/persistence/file.js';
+//   import { IndexedDBPersistence } from '@axona/protocol/persistence/indexeddb.js';
 export {
   PersistenceAdapter,
   InMemoryPersistence,
