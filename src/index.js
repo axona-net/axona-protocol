@@ -31,6 +31,18 @@ export {
   fromWire,
 } from './errors.js';
 
+// ── Persistence ───────────────────────────────────────────────────────
+// PersistenceAdapter is the abstract contract; InMemoryPersistence is
+// the reference implementation used by `persist: false` and by tests.
+// Concrete IndexedDB and File adapters live in sub-path imports
+// (`@axona/protocol/persistence/indexeddb.js` and
+// `@axona/protocol/persistence/file.js`) so they can be tree-shaken
+// out of bundles that don't need them.
+export {
+  PersistenceAdapter,
+  InMemoryPersistence,
+} from './persistence/interface.js';
+
 // ── Per-node DHT implementation (NH-1) ──────────────────────────────
 export { AxonaPeer } from './dht/AxonaPeer.js';
 export { DHTNode, GEO_CELL_BITS } from './dht/DHTNode.js';
