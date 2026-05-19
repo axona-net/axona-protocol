@@ -62,7 +62,7 @@ export class AxonaPeer extends DHT {
    *        signed publishes (the default).  Apps that only call
    *        `peer.pub(topic, message, { sign: false })` can omit it.
    */
-  constructor({ engine, node, axonManager = null, identity = null, transport = null }) {
+  constructor({ engine, node, axonManager = null, identity = null, transport = null, persist = null }) {
     super();
     if (!engine) throw new Error('AxonaPeer: engine is required');
     if (!node)   throw new Error('AxonaPeer: node is required');
@@ -71,7 +71,13 @@ export class AxonaPeer extends DHT {
     this._axonManager = axonManager;
     this._identity = identity;
     this._transport = transport;
+    this._persist  = persist;
     this._started = false;
+
+    // ─── Persistence state ────────────────────────────────────────
+    this._persistDirty   = new Set();  // namespaces with pending writes
+    this._persistTimer   = null;
+    this._persistFlushMs = 5000;
     /** @type {Set<(event: object) => void>} */
     this._eventListeners = new Set();
     /** @type {(event: object) => void | null} */
@@ -105,6 +111,15 @@ export class AxonaPeer extends DHT {
 
   async start() {
     if (this._started) return;
+
+    // ─── Persistence load (P4) ──────────────────────────────────────
+    // If a PersistenceAdapter was provided AND we don't already have
+    // an identity, try to load one.  Same for the synaptome seed and
+    // the subscriptions list (which becomes pendingSubscriptions for
+    // the app to re-register handlers).
+    if (this._persist) {
+      await this._loadFromPersist();
+    }
 
     // Engine emits events to a single global listener set today
     // (engine._eventListeners).  We subscribe and filter to events
@@ -261,13 +276,16 @@ export class AxonaPeer extends DHT {
       await new Promise(r => setTimeout(r, Math.min(timeoutMs, 50)));
     }
 
-    // (3) stop event listeners (mirrors stop() from Phase 1)
+    // (3) force-flush persistence (P4)
+    try { await this._flushAllToPersist(); } catch { /* swallow */ }
+
+    // (4) stop event listeners (mirrors stop() from Phase 1)
     if (this._engineListenerUnsub) {
       try { this._engineListenerUnsub(); } catch { /* swallow */ }
       this._engineListenerUnsub = null;
     }
 
-    // (4) close transport
+    // (5) close transport
     if (this._transport && typeof this._transport.stop === 'function') {
       try { await this._transport.stop(); }
       catch { /* swallow — we're shutting down */ }
@@ -281,6 +299,140 @@ export class AxonaPeer extends DHT {
    * Tries the engine's add-synapse path if available; otherwise sets
    * the synaptome entry directly so peer.peers() and onPeerJoin fire.
    */
+  // ─── Persistence wiring (P4) ──────────────────────────────────────
+  //
+  // Four namespaces, one PersistenceAdapter key each:
+  //   'identity'       — IdentityEnvelope from dumpIdentity()
+  //   'synaptome'      — [{peerId, weight, latency, stratum, addedBy}]
+  //   'subscriptions'  — [{topic, since}]
+  //   'wireVersion'    — string (the kernel build that wrote this)
+  //
+  // On start(): all four loaded if persist is wired and the
+  // constructor didn't already supply identity / synaptome.
+  // On sub() / sub.stop() / synapse-add: namespace marked dirty,
+  // debounced flush scheduled (~5s).  On leave(): force flush.
+  //
+  // Axon-role state is owned by AxonManager and persisted at that
+  // layer (deferred to AxonManager P4-followup).
+
+  async _loadFromPersist() {
+    const p = this._persist;
+    if (!p) return;
+
+    // Identity — only if constructor didn't supply one.
+    if (!this._identity) {
+      try {
+        const env = await p.load('identity');
+        if (env && typeof env === 'object') {
+          const { loadIdentity } = await import('../identity/index.js');
+          this._identity = await loadIdentity(env);
+        }
+      } catch (err) {
+        this._emitLog?.('warn', 'persist-identity-load-failed', { err: err.message });
+      }
+    }
+
+    // Synaptome — only if it's currently empty.
+    if (this._node?.synaptome && this._node.synaptome.size === 0) {
+      try {
+        const entries = await p.load('synaptome');
+        if (Array.isArray(entries)) {
+          for (const s of entries) {
+            if (!s?.peerId) continue;
+            this._node.synaptome.set(s.peerId, {
+              peerId:  s.peerId,
+              weight:  s.weight,
+              latency: s.latency,
+              stratum: s.stratum,
+              addedBy: s.addedBy ?? 'persist',
+            });
+          }
+        }
+      } catch (err) {
+        this._emitLog?.('warn', 'persist-synaptome-load-failed', { err: err.message });
+      }
+    }
+
+    // Subscriptions — expose as pendingSubscriptions for apps to
+    // re-register handlers (functions don't serialize).
+    try {
+      const subs = await p.load('subscriptions');
+      if (Array.isArray(subs)) {
+        this.pendingSubscriptions = subs.map(s => ({ ...s }));
+      }
+    } catch (err) {
+      this._emitLog?.('warn', 'persist-subscriptions-load-failed', { err: err.message });
+    }
+  }
+
+  /** Mark a namespace dirty and schedule a debounced flush. */
+  _markPersistDirty(namespace) {
+    if (!this._persist) return;
+    this._persistDirty.add(namespace);
+    if (this._persistTimer) return;
+    this._persistTimer = setTimeout(() => {
+      this._persistTimer = null;
+      this._flushDirtyToPersist().catch(err => {
+        this._emitLog?.('warn', 'persist-flush-failed', { err: err.message });
+      });
+    }, this._persistFlushMs);
+    if (typeof this._persistTimer.unref === 'function') this._persistTimer.unref();
+  }
+
+  async _flushDirtyToPersist() {
+    if (!this._persist || this._persistDirty.size === 0) return;
+    const namespaces = [...this._persistDirty];
+    this._persistDirty.clear();
+    for (const ns of namespaces) {
+      try { await this._writeNamespace(ns); }
+      catch (err) {
+        this._emitLog?.('warn', `persist-write-${ns}-failed`, { err: err.message });
+        // Re-queue on failure so the next debounce retries.
+        this._persistDirty.add(ns);
+      }
+    }
+  }
+
+  async _writeNamespace(ns) {
+    const p = this._persist;
+    if (!p) return;
+    if (ns === 'identity') {
+      if (!this._identity) return;
+      const { dumpIdentity } = await import('../identity/index.js');
+      await p.save('identity', await dumpIdentity(this._identity));
+      return;
+    }
+    if (ns === 'synaptome') {
+      const snap = await this.snapshot();
+      await p.save('synaptome', snap.synaptome);
+      return;
+    }
+    if (ns === 'subscriptions') {
+      const snap = await this.snapshot();
+      await p.save('subscriptions', snap.subscriptions);
+      return;
+    }
+    if (ns === 'wireVersion') {
+      const { WIRE_VERSION } = await import('../transport/handshake.js');
+      await p.save('wireVersion', WIRE_VERSION);
+      return;
+    }
+  }
+
+  /** Force-flush every dirty namespace immediately. Called on leave. */
+  async _flushAllToPersist() {
+    if (!this._persist) return;
+    if (this._persistTimer) {
+      clearTimeout(this._persistTimer);
+      this._persistTimer = null;
+    }
+    // Make sure identity gets written at least once even if it wasn't
+    // explicitly marked dirty (first-run case).
+    if (this._identity) this._persistDirty.add('identity');
+    this._persistDirty.add('wireVersion');
+    await this._flushDirtyToPersist();
+  }
+
   // ─── Snapshot / restore (v1.0 escape hatch — A9) ───────────────────
   //
   // Apps that want to manage state outside the bundled
@@ -656,6 +808,7 @@ export class AxonaPeer extends DHT {
     this._installDeliveryHook(am);
 
     am.pubsubSubscribe(topicId);
+    this._markPersistDirty('subscriptions');
     return sub;
   }
 
@@ -670,6 +823,7 @@ export class AxonaPeer extends DHT {
           this._requireAxonManager('unsubscribe').pubsubUnsubscribe(sub.topicId);
         } catch { /* unsubscribe is best-effort */ }
       }
+      this._markPersistDirty('subscriptions');
     }
   }
 
