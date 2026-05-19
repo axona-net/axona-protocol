@@ -28,37 +28,45 @@ function check(label, condition) {
   else           { console.log(`  ✗ ${label}`); failed++; }
 }
 
+// 264-bit hex nodeIds for test publishers (66 chars: [8-bit S2 prefix] || [256-bit hash]).
+const ALICE = 'aa' + 'a1'.repeat(32);   // S2 prefix 0xaa
+const BOB   = 'bb' + 'b2'.repeat(32);   // S2 prefix 0xbb
+
 async function testDeriveTopicId() {
   console.log('\n── deriveTopicId (async) ──');
-  const id = await deriveTopicId('alice', 'cat-pics');
-  check('returns 64-char hex',
-    typeof id === 'string' && id.length === 64 && /^[0-9a-f]+$/.test(id));
-  const id2 = await deriveTopicId('alice', 'cat-pics');
+  const id = await deriveTopicId(ALICE, 'cat-pics');
+  check('returns 66-char hex',
+    typeof id === 'string' && id.length === 66 && /^[0-9a-f]+$/.test(id));
+  check("topic_id top 8 bits = publisher's S2 prefix",
+    id.slice(0, 2) === ALICE.slice(0, 2));
+  const id2 = await deriveTopicId(ALICE, 'cat-pics');
   check('deterministic (same input → same id)', id === id2);
-  const id3 = await deriveTopicId('alice', 'dog-pics');
+  const id3 = await deriveTopicId(ALICE, 'dog-pics');
   check('different topic → different id',          id !== id3);
-  const id4 = await deriveTopicId('bob', 'cat-pics');
+  const id4 = await deriveTopicId(BOB, 'cat-pics');
   check('different publisher → different id',       id !== id4);
+  check("BOB's topic carries BOB's S2 prefix",
+    id4.slice(0, 2) === BOB.slice(0, 2));
 }
 
 async function testMakePostUnsigned() {
   console.log('\n── makePost (unsigned, stub: signature) ──');
   const post = await makePost({
-    publisher: 'alice',
+    publisher: ALICE,
     topicName: 'hello',
     content:   { msg: 'hi mesh' },
   });
   check('returns a post object',           post && typeof post === 'object');
   check('has post_hash 64-char hex',       /^[0-9a-f]{64}$/.test(post.post_hash));
-  check('has stub signature',              post.signature === 'stub:alice');
+  check('has stub signature',              post.signature === 'stub:' + ALICE);
   check('topic_id matches deriveTopicId',
-    post.topic_id === await deriveTopicId('alice', 'hello'));
+    post.topic_id === await deriveTopicId(ALICE, 'hello'));
 }
 
 async function testVerifyPostHash() {
   console.log('\n── verifyPostHash ──');
   const post = await makePost({
-    publisher: 'alice',
+    publisher: ALICE,
     topicName: 'hello',
     content:   { msg: 'hi mesh' },
   });
@@ -71,12 +79,12 @@ async function testVerifyPostHash() {
 async function testVerifyTopicOwnership() {
   console.log('\n── verifyTopicOwnership ──');
   const post = await makePost({
-    publisher: 'alice',
+    publisher: ALICE,
     topicName: 'hello',
     content:   {},
   });
   check('intact topic_id → true', await verifyTopicOwnership(post));
-  const spoofed = { ...post, topic_id: '0'.repeat(64) };
+  const spoofed = { ...post, topic_id: '0'.repeat(66) };
   check('forged topic_id → false', !(await verifyTopicOwnership(spoofed)));
 }
 
@@ -105,7 +113,7 @@ async function testMakePostSigned() {
   catch { console.log('  ⚠ Ed25519 not supported; skipping signed-post tests.'); return; }
 
   const post = await makePost({
-    publisher: 'alice',
+    publisher: ALICE,
     topicName: 'signed-topic',
     content:   { msg: 'authenticated' },
     signer:    makeSigner(pair.privateKey),
@@ -128,7 +136,7 @@ async function testMakePostSigned() {
 async function testStubSignatureCompat() {
   console.log('\n── Backward-compat: stub: signatures pass verifySignature ──');
   const post = await makePost({
-    publisher: 'alice',
+    publisher: ALICE,
     topicName: 'test',
     content:   {},
   });

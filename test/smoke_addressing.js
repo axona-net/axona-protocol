@@ -1,0 +1,192 @@
+// =====================================================================
+// smoke_addressing.js — verify 264-bit ID math: hex roundtrip, S2-prefix
+//                       composition, XOR distance, clz, deriveTopicId.
+// Run: node test/smoke_addressing.js
+// =====================================================================
+
+import {
+  ID_BITS,
+  HASH_BITS,
+  S2_BITS,
+  HEX_CHARS,
+  MAX_ID,
+  MAX_HASH,
+  MAX_S2,
+  toHex,
+  fromHex,
+  isHexId,
+  randomU256,
+  assembleId,
+  extractS2Prefix,
+  extractHash,
+  s2PrefixOfHex,
+  xorDistance,
+  stratumOf,
+  clz264,
+} from '../src/utils/hexid.js';
+
+import { deriveTopicId } from '../src/pubsub/post.js';
+
+let passed = 0, failed = 0;
+function check(label, condition) {
+  if (condition) { console.log(`  ✓ ${label}`); passed++; }
+  else           { console.log(`  ✗ ${label}`); failed++; }
+}
+
+function testConstants() {
+  console.log('\n── constants ──');
+  check('ID_BITS = 264',   ID_BITS === 264);
+  check('HASH_BITS = 256', HASH_BITS === 256);
+  check('S2_BITS = 8',     S2_BITS === 8);
+  check('HEX_CHARS = 66',  HEX_CHARS === 66);
+  check('MAX_ID = 2^264 - 1',     MAX_ID === (1n << 264n) - 1n);
+  check('MAX_HASH = 2^256 - 1',   MAX_HASH === (1n << 256n) - 1n);
+  check('MAX_S2 = 255',           MAX_S2 === 255);
+}
+
+function testHexRoundtrip() {
+  console.log('\n── toHex / fromHex roundtrip ──');
+  check('toHex(0n) is 66 zero chars', toHex(0n) === '0'.repeat(66));
+  check('toHex(1n) is 65 zeros + 1', toHex(1n) === '0'.repeat(65) + '1');
+  check('toHex(MAX_ID) is 66 f chars', toHex(MAX_ID) === 'f'.repeat(66));
+  check('fromHex(toHex(x)) === x for random sample',
+    [0n, 1n, 0xdeadbeefn, MAX_ID, (1n << 263n)].every(x => fromHex(toHex(x)) === x));
+  check('fromHex accepts uppercase',
+    fromHex('A'.repeat(66)) === BigInt('0x' + 'a'.repeat(66)));
+  let threw = false;
+  try { toHex(MAX_ID + 1n); } catch { threw = true; }
+  check('toHex rejects out-of-range', threw);
+  threw = false;
+  try { fromHex('abc'); } catch { threw = true; }
+  check('fromHex rejects wrong length', threw);
+  threw = false;
+  try { fromHex('z'.repeat(66)); } catch { threw = true; }
+  check('fromHex rejects non-hex chars', threw);
+}
+
+function testIsHexId() {
+  console.log('\n── isHexId ──');
+  check('valid 66-char hex',         isHexId('0'.repeat(66)));
+  check('valid mixed-case 66-char',  isHexId('AbCdEf' + '0'.repeat(60)));
+  check('wrong length rejected',     !isHexId('abc'));
+  check('non-string rejected',       !isHexId(123n));
+  check('non-hex chars rejected',    !isHexId('z'.repeat(66)));
+}
+
+function testRandom() {
+  console.log('\n── randomU256 ──');
+  const a = randomU256();
+  const b = randomU256();
+  check('returns bigint',           typeof a === 'bigint');
+  check('within 256-bit range',     a >= 0n && a <= MAX_HASH);
+  check('two draws differ',         a !== b);
+}
+
+function testAssembleExtract() {
+  console.log('\n── assemble / extract ──');
+  const id = assembleId(42, 0xdeadbeefcafebaben);
+  check('extractS2Prefix(assembled) === 42', extractS2Prefix(id) === 42);
+  check('extractHash(assembled) === hash',   extractHash(id) === 0xdeadbeefcafebaben);
+  check('round-trip via hex',
+    extractS2Prefix(fromHex(toHex(id))) === 42 &&
+    extractHash(fromHex(toHex(id))) === 0xdeadbeefcafebaben);
+
+  // Boundary: prefix = 255, max hash
+  const boundary = assembleId(255, MAX_HASH);
+  check('boundary id = MAX_ID', boundary === MAX_ID);
+  check('boundary prefix = 255', extractS2Prefix(boundary) === 255);
+
+  // s2PrefixOfHex shortcut
+  check('s2PrefixOfHex shortcut matches',
+    s2PrefixOfHex(toHex(id)) === 42);
+
+  // Reject bad inputs
+  let threw = false;
+  try { assembleId(256, 0n); } catch { threw = true; }
+  check('assembleId rejects s2Prefix > 255', threw);
+  threw = false;
+  try { assembleId(0, MAX_HASH + 1n); } catch { threw = true; }
+  check('assembleId rejects hash > 2^256-1', threw);
+}
+
+function testXorDistance() {
+  console.log('\n── xorDistance ──');
+  check('xorDistance(a, a) === 0n',
+    xorDistance(123n, 123n) === 0n);
+  check('xorDistance(a, b) === xorDistance(b, a)',
+    xorDistance(0xabcdn, 0x1234n) === xorDistance(0x1234n, 0xabcdn));
+  check('xorDistance(0, x) === x',
+    xorDistance(0n, 0xdeadbeefn) === 0xdeadbeefn);
+}
+
+function testClz264() {
+  console.log('\n── clz264 ──');
+  check('clz264(0n) === 264', clz264(0n) === 264);
+  check('clz264(1n) === 263', clz264(1n) === 263);
+  check('clz264(MAX_ID) === 0', clz264(MAX_ID) === 0);
+  check('clz264(1n << 263n) === 0', clz264(1n << 263n) === 0);
+  check('clz264(1n << 100n) === 163', clz264(1n << 100n) === (264 - 1 - 100));
+  check('clz264(0xffn) === 256', clz264(0xffn) === 256);
+  check('clz264(0xff << 256) hits top 8-bit slot', clz264(0xffn << 256n) === 0);
+  check('clz264(0x80n << 256n) === 0', clz264(0x80n << 256n) === 0);
+  check('clz264(0x01n << 256n) === 7', clz264(0x01n << 256n) === 7);
+
+  // Stratum helper
+  const a = (1n << 263n) | 0xdeadn;
+  const b = (1n << 263n) | 0xbeefn;
+  // a and b agree on the MSB, differ in low bits; stratum should be > 0
+  check('stratumOf identical → 263', stratumOf(a, a) === 263);
+  check('stratumOf differing low bits is high (≥248)',
+    stratumOf(a, b) >= 248);
+}
+
+async function testDeriveTopicId() {
+  console.log('\n── deriveTopicId ──');
+  const alice = '2a' + '0'.repeat(64);   // 66-char hex with S2 prefix = 0x2a
+  const bob   = 'ff' + '1'.repeat(64);   // 66-char hex with S2 prefix = 0xff
+
+  const tid1 = await deriveTopicId(alice, 'cats');
+  check('returns 66-char hex',
+    typeof tid1 === 'string' && tid1.length === 66 && /^[0-9a-f]+$/.test(tid1));
+  check('top 2 hex chars = publisher S2 prefix',
+    tid1.slice(0, 2) === '2a');
+
+  const tid2 = await deriveTopicId(alice, 'cats');
+  check('deterministic (same input → same id)', tid1 === tid2);
+
+  const tid3 = await deriveTopicId(alice, 'dogs');
+  check('different topic → different id', tid1 !== tid3);
+
+  const tid4 = await deriveTopicId(bob, 'cats');
+  check('different publisher → different id', tid1 !== tid4);
+  check("bob's topic carries bob's S2 prefix",
+    tid4.slice(0, 2) === 'ff');
+
+  // Reject bad inputs
+  let threw = false;
+  try { await deriveTopicId('alice', 'cats'); } catch { threw = true; }
+  check('rejects short publisher string', threw);
+
+  threw = false;
+  try { await deriveTopicId('z'.repeat(66), 'cats'); } catch { threw = true; }
+  check('rejects non-hex publisher', threw);
+}
+
+async function main() {
+  console.log('Axona 264-bit addressing smoke');
+  testConstants();
+  testHexRoundtrip();
+  testIsHexId();
+  testRandom();
+  testAssembleExtract();
+  testXorDistance();
+  testClz264();
+  await testDeriveTopicId();
+  console.log(`\nResult: ${passed} passed, ${failed} failed`);
+  process.exit(failed === 0 ? 0 : 1);
+}
+
+main().catch(err => {
+  console.error('smoke threw:', err);
+  process.exit(2);
+});

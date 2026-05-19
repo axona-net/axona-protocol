@@ -39,7 +39,7 @@
 
 import { DHT }      from '../contracts/DHT.js';
 import { Synapse }  from './Synapse.js';
-import { clz64 }    from '../utils/geo.js';
+import { clz264 }   from '../utils/hexid.js';
 
 export class AxonaPeer extends DHT {
   /**
@@ -543,7 +543,7 @@ export class AxonaPeer extends DHT {
 
     const measuredLat = node.transport.getLatency(candidate.id);
     const latMs   = (measuredLat >= 0) ? measuredLat : 200;
-    const stratum = clz64(node.id ^ candidate.id);
+    const stratum = clz264(node.id ^ candidate.id);
     const syn     = new Synapse({ peerId: candidate.id, latencyMs: latMs, stratum });
     syn.weight    = 0.1;
     syn._addedBy  = 'anneal';
@@ -580,7 +580,7 @@ export class AxonaPeer extends DHT {
 
     const measuredLat = node.transport.getLatency(candidate.id);
     const latMs   = (measuredLat >= 0) ? measuredLat : 200;
-    const stratum = clz64(node.id ^ candidate.id);
+    const stratum = clz264(node.id ^ candidate.id);
     const syn     = new Synapse({ peerId: candidate.id, latencyMs: latMs, stratum });
     syn.weight    = medW;
     syn._addedBy  = 'evictReplace';
@@ -611,7 +611,7 @@ export class AxonaPeer extends DHT {
       for (const id of r.value) {
         if (id === node.id) continue;
         if (node.synaptome.has(id)) continue;
-        const stratum = clz64(node.id ^ id);
+        const stratum = clz264(node.id ^ id);
         if (stratum < lo || stratum > hi) continue;
         candidates.push(id);
         if (candidates.length >= engine.ANNEAL_LOCAL_SAMPLE) break outer;
@@ -1002,7 +1002,7 @@ export class AxonaPeer extends DHT {
     ctx.hops += 1;
 
     if (node.id !== targetKey && !node.synaptome.has(targetKey)) {
-      const stratum = clz64(node.id ^ targetKey);
+      const stratum = clz264(node.id ^ targetKey);
       const syn = new Synapse({
         peerId: targetKey, latencyMs: 0, stratum,
       });

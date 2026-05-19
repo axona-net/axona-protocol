@@ -55,10 +55,32 @@ export {
 // detection, XOR routing-table builders, etc.) are reachable via
 // the `@axona/protocol/utils/geo.js` sub-path import for consumers
 // that need them.
+
+// 264-bit identifier math — node ID and topic ID share the same
+// keyspace: [8-bit S2 prefix] || [256-bit hash].
 export {
-  clz64,
+  ID_BITS,
+  HASH_BITS,
+  S2_BITS,
+  HEX_CHARS,
+  MAX_ID,
+  MAX_HASH,
+  MAX_S2,
+  toHex,
+  fromHex,
+  isHexId,
+  assembleId,
+  extractS2Prefix,
+  extractHash,
+  s2PrefixOfHex,
+  xorDistance,
+  stratumOf,
+  clz264,
+  randomU256,
+} from './utils/hexid.js';
+
+export {
   randomU32,
-  randomU64,
   roundTripLatency,
   haversine,
 } from './utils/geo.js';
