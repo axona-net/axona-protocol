@@ -43,7 +43,7 @@ import { Subscription }   from './Subscription.js';
 import { clz264, toHex, isHexId } from '../utils/hexid.js';
 import { deriveTopicId }  from '../pubsub/post.js';
 import { buildEnvelope }  from '../pubsub/envelope.js';
-import { PublishError, SubscribeError, ErrorCodes } from '../errors.js';
+import { PublishError, SubscribeError, PullError, MetricsError, ErrorCodes } from '../errors.js';
 
 export class AxonaPeer extends DHT {
   /**
@@ -310,9 +310,13 @@ export class AxonaPeer extends DHT {
     }
 
     // AxonManager generates its own publishId for network routing/
-    // cache keying; we ignore that and surface the content-derived
-    // msgId.  The meta.publisher field is for metrics counters only.
-    am.pubsubPublish(topicId, json, { publisher: publisherId });
+    // cache keying.  We pass postHash = envelope.msgId so the relay's
+    // replay cache becomes searchable by content-hash for peer.pull()
+    // (A3).  publisher is recorded for the metrics counters.
+    am.pubsubPublish(topicId, json, {
+      publisher: publisherId,
+      postHash:  envelope.msgId,
+    });
     return envelope.msgId;
   }
 
@@ -378,6 +382,128 @@ export class AxonaPeer extends DHT {
         } catch { /* unsubscribe is best-effort */ }
       }
     }
+  }
+
+  /**
+   * Pull a specific message by content hash.  The msgId is what
+   * peer.pub() returned to the publisher and what subscribers receive
+   * as `envelope.msgId`.
+   *
+   * Bounded by the K-closest set's replay cache window (~100 messages
+   * per topic, ~60s grace).  Older messages return null and that's
+   * expected — pull is for "did I miss this one?" not durable storage.
+   *
+   * Because msgId is content-derived and the topic is publisher-
+   * scoped, the caller passes `{ topic, publisher }` so we can route
+   * the request to the right K-closest set.
+   *
+   * @param {string} msgId
+   * @param {object} opts
+   * @param {string} opts.topic       application topic name
+   * @param {string} opts.publisher   66-char hex node ID of the topic owner
+   * @param {number} [opts.timeoutMs=1000]
+   * @returns {Promise<object | null>} envelope or null
+   */
+  async pull(msgId, { topic, publisher, timeoutMs = 1000 } = {}) {
+    if (typeof msgId !== 'string' || msgId.length !== 64) {
+      throw new PullError(ErrorCodes.PULL_INVALID_MSGID,
+        `peer.pull: msgId must be 64-char hex, got length ${msgId?.length}`,
+        { context: { msgId } });
+    }
+    if (typeof topic !== 'string' || topic.length === 0) {
+      throw new PullError(ErrorCodes.PULL_INVALID_MSGID,
+        'peer.pull: { topic } is required',
+        { context: { msgId } });
+    }
+    if (!isHexId(publisher)) {
+      throw new PullError(ErrorCodes.PULL_INVALID_MSGID,
+        'peer.pull: { publisher } must be a 66-char hex node ID',
+        { context: { msgId, publisher } });
+    }
+    const am = this._requireAxonManager('pull');
+    if (typeof am.requestPull !== 'function') {
+      throw new PullError(ErrorCodes.PULL_AXONS_UNREACHABLE,
+        'peer.pull: AxonManager does not support requestPull',
+        { context: {} });
+    }
+    const topicId = await deriveTopicId(publisher, topic);
+    const result = await am.requestPull(topicId, msgId, { timeoutMs });
+    if (!result) return null;
+
+    // requestPull returns the parsed payload — which is the JSON we
+    // wrote in pub(): the envelope itself.  Some legacy AxonManagers
+    // return a SignedPost shape; we surface either, leaving
+    // verification to the caller via verifyEnvelope().
+    if (result && typeof result === 'object' &&
+        typeof result.msgId === 'string' &&
+        typeof result.ts === 'number') {
+      return result;
+    }
+    // Legacy / unknown shape — return as-is so caller can inspect.
+    return result;
+  }
+
+  /**
+   * Aggregate counters for a topic across the K-closest relay tree.
+   *
+   * Returns an object `{ publishes, subscribers, deliveries, pulls,
+   * reshares, relayCount }`.  Sums per-post counters across all relays
+   * that respond; `relayCount` is the number of distinct responding
+   * relays so callers can sanity-check coverage.
+   *
+   * Note: today's AxonManager enforces a publisher-only ownership
+   * check on metrics requests — only the topic's publisher gets a
+   * non-empty result.  Removing that check (so any peer can audit)
+   * is queued as a kernel-side cleanup.
+   *
+   * @param {string} topic
+   * @param {object} opts
+   * @param {string} opts.publisher  66-char hex node ID of the topic owner
+   * @param {number} [opts.timeoutMs=500]
+   * @returns {Promise<{ publishes: number, subscribers: number, deliveries: number, pulls: number, reshares: number, relayCount: number }>}
+   */
+  async metrics(topic, { publisher, timeoutMs = 500 } = {}) {
+    if (typeof topic !== 'string' || topic.length === 0) {
+      throw new MetricsError(ErrorCodes.METRICS_AXONS_UNREACHABLE,
+        'peer.metrics: topic must be a non-empty string',
+        { context: { topic } });
+    }
+    if (!isHexId(publisher)) {
+      throw new MetricsError(ErrorCodes.METRICS_AXONS_UNREACHABLE,
+        'peer.metrics: { publisher } must be a 66-char hex node ID',
+        { context: { topic, publisher } });
+    }
+    const am = this._requireAxonManager('metrics');
+    if (typeof am.requestMetrics !== 'function') {
+      return { publishes: 0, subscribers: 0, deliveries: 0, pulls: 0, reshares: 0, relayCount: 0 };
+    }
+    const topicId = await deriveTopicId(publisher, topic);
+    const responses = await am.requestMetrics(topicId, null, { timeoutMs });
+
+    let deliveries = 0, pulls = 0, reshares = 0, publishes = 0;
+    let subscribers = 0;
+    const relayIds = new Set();
+    for (const resp of (responses ?? [])) {
+      if (resp?.responderId) relayIds.add(resp.responderId);
+      const entries = resp?.entries ?? [];
+      publishes = Math.max(publishes, entries.length);    // distinct post hashes seen
+      for (const c of entries) {
+        deliveries += c.delivery_count ?? 0;
+        pulls      += c.pull_count     ?? 0;
+        reshares   += c.reshare_count  ?? 0;
+      }
+      if (typeof resp?.subscribers === 'number') {
+        subscribers = Math.max(subscribers, resp.subscribers);
+      }
+    }
+    return {
+      publishes,
+      subscribers,
+      deliveries,
+      pulls,
+      reshares,
+      relayCount: relayIds.size,
+    };
   }
 
   // ── AxonManager glue ────────────────────────────────────────────
