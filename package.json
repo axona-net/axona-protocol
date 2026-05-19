@@ -18,7 +18,7 @@
     "README.md"
   ],
   "scripts": {
-    "test": "node test/smoke_addressing.js && node test/smoke_errors.js && node test/smoke_persistence_inmemory.js && node test/smoke_persistence_file.js && node test/smoke_persistence_indexeddb.js && node test/smoke_identity.js && node test/smoke_post_ed25519.js"
+    "test": "node test/smoke_addressing.js && node test/smoke_errors.js && node test/smoke_persistence_inmemory.js && node test/smoke_persistence_file.js && node test/smoke_persistence_indexeddb.js && node test/smoke_identity.js && node test/smoke_transport_sim.js && node test/smoke_post_ed25519.js"
   },
   "engines": {
     "node": ">=20"
