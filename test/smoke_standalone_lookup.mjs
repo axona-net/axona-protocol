@@ -75,16 +75,9 @@ async function buildMesh(N, domain) {
   return { network, peers };
 }
 
-/** Wire each peer to handle inbound 'lookup_step' messages.  In the
- *  simulator this is set up by AxonaEngine._registerNH1Handlers;
- *  here we do it explicitly because we're outside the simulator. */
-function wireLookupStep(peers) {
-  for (const { transport, peer } of peers) {
-    transport.onRequest('lookup_step', async (_fromId, payload) => {
-      return await peer._lookupStep(payload);
-    });
-  }
-}
+// Note: each peer's `start()` now wires the receiver-side
+// 'lookup_step' handler automatically as long as a transport is
+// attached to `node.transport`.  No manual wiring needed here.
 
 /** Manually populate each peer's synaptome with synapses to all
  *  other peers.  Skips bootstrap entirely — every peer is one hop
@@ -155,7 +148,7 @@ async function testFullMeshLookup() {
 
   await openMesh(peers);
   fullMeshSynaptomes(peers);
-  wireLookupStep(peers);
+  // (lookup_step handler is auto-installed by peer.start())
 
   const source = peers[0];
   const target = peers[N - 1];
@@ -219,7 +212,7 @@ async function testTwoHopLookup() {
   await peers[2].transport.openConnection(peers[1].id);
   await peers[1].transport.openConnection(peers[0].id);
 
-  wireLookupStep(peers);
+  // (lookup_step handler is auto-installed by peer.start())
 
   const result = await peers[0].peer.lookup(peers[2].id);
   check('two-hop lookup found',                  result?.found === true);
