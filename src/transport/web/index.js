@@ -260,9 +260,10 @@ export function webTransport({
   if (!autoHandshake) {
     bridgeReadyResolve(null);
   } else {
-    // Register hello / hello-ack handlers BEFORE the socket opens so
-    // we don't miss the bridge's first hello (which arrives on the
-    // same tick as version-gate / welcome).
+    // ── Bridge hello / hello-ack ─────────────────────────────────
+    // Register BEFORE the socket opens so we don't miss the bridge's
+    // first hello (which arrives on the same tick as version-gate /
+    // welcome).
     bridge.onNotification('hello', (fromConnId, body) => {
       if (typeof fromConnId !== 'string') return;     // already bound
       if (!body || !isHexId(body.nodeId)) return;
@@ -283,8 +284,6 @@ export function webTransport({
       log('auto-handshake-complete', { bridgeNodeId: nodeIdHex });
       bridgeReadyResolve(nodeIdHex);
     });
-    // Also handle the case where the bridge replies to OUR hello with
-    // hello-ack (rare in current bridges, but defensive).
     bridge.onNotification('hello-ack', (fromConnId, body) => {
       if (typeof fromConnId !== 'string') return;
       if (!body || !isHexId(body.nodeId)) return;
@@ -301,14 +300,83 @@ export function webTransport({
       log('auto-handshake-complete', { bridgeNodeId: nodeIdHex });
       bridgeReadyResolve(nodeIdHex);
     });
-    // If the socket closes before the handshake completes, the bridge
-    // rejected us (typically version-gate via close code 4426).
     socketEvents.close.add(() => {
       if (!bridgeNodeId) {
         bridgeReadyReject(new UpgradeRequiredError(
           'bridge closed socket before handshake completed',
           { context: { reason: 'socket_closed_pre_handshake', bridgeUrl } }));
       }
+    });
+
+    // ── Mesh hello / hello-ack ────────────────────────────────────
+    // When a WebRTC DataChannel reaches 'open' state, send hello to
+    // the remote.  When their hello (or hello-ack) arrives, bindPeer
+    // in WebRTCTransport so subsequent transport.send / notify by
+    // nodeId routes via the mesh.  AxonaPeer's onPeerBound subscriber
+    // then admits the new peer into the synaptome — the kernel now
+    // handles the full multi-peer mesh admission automatically.
+    const helloSentToMeshId = new Set();
+    if (typeof mesh.onChange === 'function') {
+      mesh.onChange((peers) => {
+        const list = Array.isArray(peers) ? peers : [];
+        for (const p of list) {
+          if (!p || p.state !== 'open') continue;
+          const meshId = p.peerId ?? p.id;
+          if (typeof meshId !== 'string') continue;
+          if (helloSentToMeshId.has(meshId)) continue;
+          helloSentToMeshId.add(meshId);
+          try {
+            mesh.send(meshId, {
+              k: 'ntf', type: 'hello',
+              body: { proto: 'axona/3', nodeId: localNodeId },
+            });
+            log('mesh-hello-sent', { meshId });
+          } catch (err) {
+            log('mesh-hello-send-failed', { meshId, err: err.message });
+          }
+        }
+      });
+    }
+    if (typeof mesh.onPeerLost === 'function') {
+      mesh.onPeerLost((meshId) => helloSentToMeshId.delete(meshId));
+    }
+    webrtc.onNotification('hello', (fromConnId, body) => {
+      if (typeof fromConnId !== 'string') return;     // already bound
+      if (!body || !isHexId(body.nodeId)) return;
+      const meshId  = fromConnId;
+      const peerHex = body.nodeId;
+      try {
+        webrtc.bindPeer(peerHex, meshId);
+      } catch (err) {
+        log('mesh-bind-failed', { meshId, err: err.message });
+        return;
+      }
+      // Reply with hello-ack on the SAME data channel (mesh.send,
+      // not webrtc.notify — the latter requires bindPeer to have run
+      // on the SENDING side too, which is the case here, but mesh.send
+      // is the direct path that mirrors what axona-peer uses).
+      try {
+        mesh.send(meshId, {
+          k: 'ntf', type: 'hello-ack',
+          body: { proto: 'axona/3', nodeId: localNodeId },
+        });
+      } catch (err) {
+        log('mesh-hello-ack-failed', { meshId, err: err.message });
+      }
+      log('mesh-handshake-complete', { meshId, peer: peerHex });
+    });
+    webrtc.onNotification('hello-ack', (fromConnId, body) => {
+      if (typeof fromConnId !== 'string') return;
+      if (!body || !isHexId(body.nodeId)) return;
+      const meshId  = fromConnId;
+      const peerHex = body.nodeId;
+      try {
+        webrtc.bindPeer(peerHex, meshId);
+      } catch (err) {
+        log('mesh-bind-failed', { meshId, err: err.message });
+        return;
+      }
+      log('mesh-handshake-complete', { meshId, peer: peerHex });
     });
   }
 

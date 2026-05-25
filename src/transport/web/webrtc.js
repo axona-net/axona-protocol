@@ -186,15 +186,53 @@ export class WebRTCTransport extends Transport {
     if (typeof meshId !== 'string') {
       throw new TypeError(`bindPeer: meshId must be string, got ${typeof meshId}`);
     }
+    const isNew = !this._meshIdByNodeId.has(nodeId);
     this._meshIdByNodeId.set(nodeId, meshId);
     this._nodeIdByMeshId.set(meshId, nodeId);
     this._log('bindPeer', { nodeId, meshId });
+    if (isNew && this._peerBoundHandlers) {
+      for (const h of this._peerBoundHandlers) {
+        try { h(nodeId); }
+        catch (err) { this._log('peer-bound-handler-threw', { err: err.message }); }
+      }
+    }
   }
 
   unbindPeer(meshId) {
     const nodeId = this._nodeIdByMeshId.get(meshId);
     if (nodeId !== undefined) this._meshIdByNodeId.delete(nodeId);
     this._nodeIdByMeshId.delete(meshId);
+  }
+
+  /**
+   * Currently-bound mesh peer node IDs (66-char hex).  Consumed by
+   * AxonaPeer.start() so peers admitted via the mesh handshake are
+   * auto-admitted to the synaptome.
+   *
+   * @returns {string[]}
+   */
+  boundPeers() {
+    return [...this._meshIdByNodeId.keys()];
+  }
+
+  /**
+   * Register a callback that fires when a new peer is bound via
+   * `bindPeer(nodeId, meshId)`.  Fires immediately for any peer
+   * already bound at subscribe time.
+   *
+   * @param {(nodeIdHex: string) => void} handler
+   * @returns {() => void} unsubscribe
+   */
+  onPeerBound(handler) {
+    if (typeof handler !== 'function') {
+      throw new TypeError('onPeerBound: handler must be a function');
+    }
+    if (!this._peerBoundHandlers) this._peerBoundHandlers = new Set();
+    this._peerBoundHandlers.add(handler);
+    for (const nodeId of this._meshIdByNodeId.keys()) {
+      try { handler(nodeId); } catch { /* swallow */ }
+    }
+    return () => { this._peerBoundHandlers?.delete(handler); };
   }
 
   /** @param {string} nodeId @returns {string|null} */

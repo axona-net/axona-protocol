@@ -99,7 +99,14 @@ export class BridgeTransport extends Transport {
     if (connId !== BRIDGE_CONN_ID) {
       throw new Error(`BridgeTransport bind expects connId='${BRIDGE_CONN_ID}', got ${connId}`);
     }
+    const isNew = (this._bridgeNodeId !== nodeId);
     this._bridgeNodeId = nodeId;
+    if (isNew && this._peerBoundHandlers) {
+      for (const h of this._peerBoundHandlers) {
+        try { h(nodeId); }
+        catch (err) { this._log?.('peer-bound-handler-threw', { err: err.message }); }
+      }
+    }
   }
 
   unbindPeer(_connId) {
@@ -129,6 +136,28 @@ export class BridgeTransport extends Transport {
    */
   boundPeers() {
     return this._bridgeNodeId !== null ? [this._bridgeNodeId] : [];
+  }
+
+  /**
+   * Register a callback that fires when a new peer is bound via
+   * `bindPeer(nodeId, connId)`.  Used by AxonaPeer.start() to admit
+   * synapses dynamically as the bridge handshake / mesh handshake
+   * complete.
+   *
+   * @param {(nodeIdHex: string) => void} handler
+   * @returns {() => void} unsubscribe
+   */
+  onPeerBound(handler) {
+    if (typeof handler !== 'function') {
+      throw new TypeError('onPeerBound: handler must be a function');
+    }
+    if (!this._peerBoundHandlers) this._peerBoundHandlers = new Set();
+    this._peerBoundHandlers.add(handler);
+    // Fire immediately for any peer already bound at subscribe time.
+    if (this._bridgeNodeId) {
+      try { handler(this._bridgeNodeId); } catch { /* swallow */ }
+    }
+    return () => { this._peerBoundHandlers?.delete(handler); };
   }
 
   // ── Channel pool ──────────────────────────────────────────────────

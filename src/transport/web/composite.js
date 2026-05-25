@@ -104,8 +104,8 @@ export class CompositeTransport extends Transport {
 
   /**
    * Aggregate boundPeers() across sub-transports.  Each sub may
-   * implement `boundPeers()` (BridgeTransport, future WebRTCTransport)
-   * to report the 66-char hex nodeIds it has admitted via its own
+   * implement `boundPeers()` (BridgeTransport, WebRTCTransport) to
+   * report the 66-char hex nodeIds it has admitted via its own
    * handshake.  AxonaPeer.start() consumes this to auto-admit peers
    * into the synaptome, so consumers don't have to wire the synapse
    * by hand after a webTransport handshake.
@@ -125,6 +125,35 @@ export class CompositeTransport extends Transport {
       }
     }
     return [...seen];
+  }
+
+  /**
+   * Subscribe to bind events across all sub-transports that emit them.
+   * The composite's handler fires for every new peer bound on any sub,
+   * deduplicated across sub-transports (a peer that gets bound on both
+   * the bridge and the mesh fires once).
+   *
+   * @param {(nodeIdHex: string) => void} handler
+   * @returns {() => void} unsubscribe
+   */
+  onPeerBound(handler) {
+    if (typeof handler !== 'function') {
+      throw new TypeError('onPeerBound: handler must be a function');
+    }
+    const seen = new Set();
+    const wrapped = (nodeIdHex) => {
+      if (seen.has(nodeIdHex)) return;
+      seen.add(nodeIdHex);
+      try { handler(nodeIdHex); }
+      catch (err) { this._log?.('peer-bound-fanout-threw', { err: err.message }); }
+    };
+    const unsubs = [];
+    for (const t of this._subs) {
+      if (typeof t.onPeerBound === 'function') {
+        unsubs.push(t.onPeerBound(wrapped));
+      }
+    }
+    return () => { for (const u of unsubs) try { u(); } catch { /* swallow */ } };
   }
 
   // ── Channel pool ────────────────────────────────────────────────────

@@ -236,11 +236,23 @@ export class AxonaPeer extends DHT {
           this._seedSynaptomeWithSponsor(hexId);
         }
       } catch (err) {
-        // Don't fail start() if a single admission throws — log and continue.
         if (typeof console !== 'undefined') {
           console.warn('AxonaPeer.start: auto-admit failed', err);
         }
       }
+    }
+    // Subscribe to ongoing bind events so peers admitted to the
+    // transport AFTER start() — typically other browser peers that
+    // join the mesh — are also auto-admitted to the synaptome.
+    if (transport && typeof transport.onPeerBound === 'function') {
+      this._onPeerBoundUnsub = transport.onPeerBound((hexId) => {
+        try { this._seedSynaptomeWithSponsor(hexId); }
+        catch (err) {
+          if (typeof console !== 'undefined') {
+            console.warn('AxonaPeer.onPeerBound: admission failed', err);
+          }
+        }
+      });
     }
 
     this._started = true;
@@ -494,6 +506,10 @@ export class AxonaPeer extends DHT {
     if (this._engineListenerUnsub) {
       this._engineListenerUnsub();
       this._engineListenerUnsub = null;
+    }
+    if (this._onPeerBoundUnsub) {
+      this._onPeerBoundUnsub();
+      this._onPeerBoundUnsub = null;
     }
     this._started = false;
   }
