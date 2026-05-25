@@ -333,6 +333,17 @@ export class AxonManager {
     const publisher  = meta?.publisher  || null;
     const references = meta?.references || null;
 
+    // Mark this publishId as seen on our own side BEFORE any direct
+    // delivery happens.  In K-closest mode the publish-k tree fans
+    // out to roots, each of which forwards pubsub:deliver back to the
+    // subscriber set — including the publisher itself when the
+    // publisher is a child of one of its own K-closest peers.  Without
+    // marking seen here, _onDeliver fires _deliveryCallback a second
+    // time on that bounce-back and the publisher sees its own message
+    // twice.  This mark is per-publishId LRU; an honest republish from
+    // another peer with a fresh publishId is unaffected.
+    this._alreadySeenPublish(publishId);
+
     // For every PostRef in this publish, route a one-shot notification
     // toward the referenced topic so that topic's root learns about
     // the reshare and bumps reshare_count. Fire-and-forget; the count
