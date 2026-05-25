@@ -187,25 +187,66 @@ export function webTransport({
 
   // ── 2. MeshManager (handles WebRTC + signaling) ──────────────────
 
+  // MeshManager calls sendSignal(toPeerId, payload) with two args when
+  // it has SDP offers, answers, or ICE candidates for a remote peer.
+  // Wrap them in the bridge's `signal` envelope so the bridge can
+  // route the payload to the destination peer.  Pattern matches
+  // axona-peer/src/client.js's MeshManager setup verbatim.
   const mesh = new MeshManager({
-    sendSignal: (msg) => sendToBridge(msg),
+    sendSignal: (toPeerId, payload) => {
+      if (!socketOpen) {
+        log('signal-drop-no-bridge', { to: toPeerId });
+        return;
+      }
+      try {
+        sendToBridge({ type: 'signal', to: toPeerId, payload });
+      } catch (err) {
+        log('signal-send-failed', { to: toPeerId, err: err.message });
+      }
+    },
     log,
   });
 
-  // Minimal signaling-frame dispatcher.  MeshManager's existing API
-  // exposes the handlers it expects to be called when these frames
-  // arrive (handleWelcome, handlePeerList, handlePeerJoined, etc).
-  // Different builds of MeshManager have slightly different surface
-  // names; we keep the dispatch defensive.
+  // Signaling-frame dispatcher.  Bridge frames carry payloads addressed
+  // to the local node's MeshManager so it can drive the WebRTC layer
+  // (peer discovery + SDP/ICE relay).  The mapping from bridge frame
+  // type → MeshManager method mirrors axona-peer/src/client.js's
+  // onBridgeMessage switch — keep these in sync or peers will never
+  // negotiate a data channel.
   const signaling = {
     dispatch(frame) {
       if (!frame || typeof frame !== 'object') return;
       const t = frame.type;
-      if (t === 'welcome'     && typeof mesh.handleWelcome     === 'function') return mesh.handleWelcome(frame);
-      if (t === 'peer-list'   && typeof mesh.handlePeerList    === 'function') return mesh.handlePeerList(frame);
-      if (t === 'peer-joined' && typeof mesh.handlePeerJoined  === 'function') return mesh.handlePeerJoined(frame);
-      if (t === 'peer-left'   && typeof mesh.handlePeerLeft    === 'function') return mesh.handlePeerLeft(frame);
-      if (t === 'signal'      && typeof mesh.handleSignal      === 'function') return mesh.handleSignal(frame);
+      switch (t) {
+        case 'welcome':
+          // Bridge greeting (myConnId, server version).  No mesh hook —
+          // composite.start has already called mesh.setMyId(localNodeId).
+          return;
+        case 'peer-list':
+          if (typeof mesh.onPeerList === 'function') {
+            return mesh.onPeerList(Array.isArray(frame.peers) ? frame.peers : []);
+          }
+          break;
+        case 'peer-joined':
+          if (typeof mesh.onPeerJoined === 'function' && typeof frame.peerId === 'string') {
+            return mesh.onPeerJoined(frame.peerId);
+          }
+          break;
+        case 'peer-left':
+          if (typeof mesh.onPeerLeft === 'function' && typeof frame.peerId === 'string') {
+            return mesh.onPeerLeft(frame.peerId);
+          }
+          break;
+        case 'signal':
+          if (typeof mesh.onSignal === 'function' && typeof frame.from === 'string') {
+            return mesh.onSignal(frame.from, frame.payload);
+          }
+          break;
+        case 'pong':
+        case 'version-gate':
+          // Heartbeat reply / version-gate announcement — no action needed.
+          return;
+      }
       log('bridge-frame-unhandled', { type: t });
     },
   };
