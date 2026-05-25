@@ -205,12 +205,40 @@
     log('peer ready · bridge:', transport.bridgeNodeId.slice(0, 16) + '…');
     setStatus('connected', `connected · bridge ${transport.bridgeNodeId.slice(0, 8)}…`);
 
-    // ── 3. Subscribe + publish ──────────────────────────────────────
+    // ── 3. Subscribe (deferred until mesh stabilises) ───────────────
+    //
+    // Match axona-peer's pattern (client.js, PERSIST_PUBSUB_STATE
+    // = false): the user-facing demo subscribes only AFTER the
+    // synaptome has filled out via the bridge's peer-list + mesh
+    // handshakes.  Subscribing immediately after peer.start() —
+    // when the synaptome only contains the bridge — sends
+    // pubsub:subscribe-k to a stale K-closest set, and as more
+    // peers join the publisher's K-closest drifts away from the
+    // subscriber's stale targets and cross-peer delivery silently
+    // drops.
+    //
+    // Gate: wait for synaptome.size to reach READY_SYNAPSE_COUNT
+    // (or READY_TIMEOUT_MS, whichever comes first), then subscribe.
     const TOPIC     = 'us-east/hello-world';
     const publisher = regionSynthPublisher(US_EAST);
+    const READY_SYNAPSE_COUNT = 4;   // bridge + ~3 mesh peers
+    const READY_TIMEOUT_MS    = 8000;
 
     const receivedEl = document.getElementById('receivedLog');
     let receivedCount = 0;
+
+    async function waitForMeshReady() {
+      const t0 = Date.now();
+      while (Date.now() - t0 < READY_TIMEOUT_MS) {
+        if (node.synaptome.size >= READY_SYNAPSE_COUNT) return node.synaptome.size;
+        await new Promise(r => setTimeout(r, 200));
+      }
+      return node.synaptome.size;
+    }
+
+    setStatus('connecting', 'waiting for mesh to stabilise…');
+    const synSize = await waitForMeshReady();
+    log('mesh ready', { synaptomeSize: synSize });
 
     const sub = await peer.sub(TOPIC, (envelope) => {
       if (receivedCount === 0) receivedEl.textContent = '';
@@ -223,10 +251,8 @@
         '  signer: ' + (envelope.signerPubkey || '') + '\n\n';
       receivedEl.scrollTop = receivedEl.scrollHeight;
     }, { publisher, since: 'all' });
-    log('subscribed', { topicId: sub.topicId.slice(0, 16) + '…' });
-
-    await new Promise(r => setTimeout(r, 200));
-    log('ready');
+    log('subscribed', { topicId: sub.topicId, synaptomeSize: node.synaptome.size });
+    setStatus('connected', `subscribed · synaptome=${node.synaptome.size} · bridge ${transport.bridgeNodeId.slice(0, 8)}…`);
 
     // ── 7. Publish button ───────────────────────────────────────────
     const pubBtn    = document.getElementById('pubBtn');

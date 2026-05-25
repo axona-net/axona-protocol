@@ -244,42 +244,21 @@ export class AxonaPeer extends DHT {
     }
     // Subscribe to ongoing bind events so peers admitted to the
     // transport AFTER start() — typically other browser peers that
-    // join the mesh — are also auto-admitted to the synaptome.  Each
-    // new admission also invalidates the AxonManager's K-closest
-    // cache: without this, the K-closest computed when only the
-    // bridge was bound stays cached forever, subscribe-k only lands
-    // at the bridge, and as the synaptome grows the publisher's
-    // publish-k targets a fresh top-K that doesn't include the
-    // bridge — so subscribers go cold.  axona-net's denser meshes
-    // mask the problem; the demo's small mesh exposes it.
+    // join the mesh — are also auto-admitted to the synaptome.
+    // This mirrors axona-peer/src/axona_node.js's _completeHandshake:
+    // admit-to-synaptome only.  Pub/sub state (K-closest cache,
+    // subscription targets) is left alone — applications subscribe
+    // after the mesh has stabilised, so the K-closest computed at
+    // sub time is already wide.  Subscribing before mesh
+    // stabilisation is an application-level mistake (the demo waits
+    // for synaptome convergence via a "ready" gate before calling
+    // peer.sub), not a kernel bug to paper over here.
     if (transport && typeof transport.onPeerBound === 'function') {
       this._onPeerBoundUnsub = transport.onPeerBound((hexId) => {
         try { this._seedSynaptomeWithSponsor(hexId); }
         catch (err) {
           if (typeof console !== 'undefined') {
             console.warn('AxonaPeer.onPeerBound: admission failed', err);
-          }
-        }
-        // Bust the cached K-closest so the next sub/pub sees the
-        // wider synaptome, then eagerly re-issue subscribe-k for
-        // every active subscription so the new K-closest peers
-        // immediately know we're a subscriber.  Without this, a
-        // subscription created when only the bridge was bound stays
-        // pinned to the bridge — the 10s refreshTick eventually
-        // re-targets, but cross-peer publishes during the first
-        // ~10s drop on the floor.
-        const am = this._axonManager;
-        if (!am) return;
-        try { am.invalidateKClosestCache?.(); } catch {}
-        if (am.mySubscriptions && typeof am._asyncSubscribe === 'function') {
-          for (const [topicId] of am.mySubscriptions) {
-            const lastSeenTs = am._lastSeenTsByTopic?.get?.(topicId) ?? 0;
-            am._asyncSubscribe(topicId, lastSeenTs)
-              .catch(e => {
-                if (typeof console !== 'undefined') {
-                  console.warn('AxonaPeer.onPeerBound: re-subscribe failed', e);
-                }
-              });
           }
         }
       });
@@ -1809,24 +1788,13 @@ export class AxonaPeer extends DHT {
       return 'consumed';
     });
 
-    const am = new AxonManager({ dht });
-    // Start the periodic refreshTick.  Default 10s.  Without this,
-    // subscriptions never refresh, so once subscribe-k lands at the
-    // K-closest peers from boot-time membership, it never moves —
-    // even as new peers join the mesh and the K-closest set shifts
-    // away from the original holders.  The engine-driven path
-    // (dht-sim, axona-peer's engine-managed AxonManager) calls
-    // refreshTick on a different schedule, so this is only wired
-    // for the standalone path the default builder is used from.
-    if (typeof am.start === 'function') {
-      try { am.start(); }
-      catch (err) {
-        if (typeof console !== 'undefined') {
-          console.warn('AxonaPeer default AxonManager.start() threw:', err);
-        }
-      }
-    }
-    return am;
+    // Match axona-peer's wiring: do NOT call am.start() here.
+    // axona-peer constructs AxonManager via engine.axonFor(node)
+    // and never arms the 10s refreshTick interval.  Applications
+    // call peer.sub after the mesh has stabilised, so the
+    // initial K-closest is already wide and refresh isn't needed
+    // to recover from a stale boot-time target set.
+    return new AxonManager({ dht });
   }
 
   _installDeliveryHook(am) {
