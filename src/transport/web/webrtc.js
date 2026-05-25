@@ -38,7 +38,18 @@
 // =====================================================================
 
 import { Transport }    from '../../contracts/Transport.js';
-import { isHexId }      from '../../utils/hexid.js';
+import { isHexId, toHex } from '../../utils/hexid.js';
+
+// nodeId at the Transport surface can arrive as 66-char hex (the
+// wire-canonical form, what bindPeer admits and the internal
+// _meshIdByNodeId Map keys on) OR as the BigInt the AxonaPeer routing
+// layer uses (peer.sendDirect / peer.routeMessage pass BigInt through).
+// Normalise to hex at every surface point so the Map lookups land.
+function _normPeerId(peerId) {
+  if (typeof peerId === 'bigint') return toHex(peerId);
+  if (typeof peerId === 'string') return peerId.replace(/^0x/, '').toLowerCase();
+  return peerId;
+}
 import {
   TransportError,
   ErrorCodes,
@@ -235,9 +246,9 @@ export class WebRTCTransport extends Transport {
     return () => { this._peerBoundHandlers?.delete(handler); };
   }
 
-  /** @param {string} nodeId @returns {string|null} */
+  /** @param {string|bigint} nodeId @returns {string|null} */
   meshIdFor(nodeId) {
-    return this._meshIdByNodeId.get(nodeId) ?? null;
+    return this._meshIdByNodeId.get(_normPeerId(nodeId)) ?? null;
   }
 
   /** @param {string} meshId @returns {string|null} */
@@ -245,10 +256,15 @@ export class WebRTCTransport extends Transport {
     return this._nodeIdByMeshId.get(meshId) ?? null;
   }
 
+  /** True if this transport owns a binding for `nodeId`. */
+  ownsPeer(nodeId) {
+    return this._meshIdByNodeId.has(_normPeerId(nodeId));
+  }
+
   // ─── Channel pool ────────────────────────────────────────────────────
 
   async openConnection(nodeId) {
-    const meshId = this._meshIdByNodeId.get(nodeId);
+    const meshId = this._meshIdByNodeId.get(_normPeerId(nodeId));
     if (!meshId) return false;   // not yet handshaken
     if (this._mesh.isConnected(meshId)) return true;
 
@@ -270,12 +286,12 @@ export class WebRTCTransport extends Transport {
   }
 
   async closeConnection(nodeId) {
-    const meshId = this._meshIdByNodeId.get(nodeId);
+    const meshId = this._meshIdByNodeId.get(_normPeerId(nodeId));
     if (meshId) this.unbindPeer(meshId);
   }
 
   isConnected(nodeId) {
-    const meshId = this._meshIdByNodeId.get(nodeId);
+    const meshId = this._meshIdByNodeId.get(_normPeerId(nodeId));
     return meshId != null && this._mesh.isConnected(meshId);
   }
 
@@ -286,6 +302,7 @@ export class WebRTCTransport extends Transport {
       throw new TransportError(ErrorCodes.TRANSPORT_NOT_STARTED,
         'Transport.send: not started');
     }
+    nodeId = _normPeerId(nodeId);
     const meshId = this._meshIdByNodeId.get(nodeId);
     if (!meshId || !this._mesh.isConnected(meshId)) {
       throw new TransportError(ErrorCodes.TRANSPORT_CHANNEL_CLOSED,
@@ -323,6 +340,7 @@ export class WebRTCTransport extends Transport {
       throw new TransportError(ErrorCodes.TRANSPORT_NOT_STARTED,
         'Transport.notify: not started');
     }
+    nodeId = _normPeerId(nodeId);
     const meshId = this._meshIdByNodeId.get(nodeId);
     if (!meshId) {
       this._log('notify-no-binding', { nodeId, type });
@@ -367,7 +385,7 @@ export class WebRTCTransport extends Transport {
   }
 
   getLatency(nodeId) {
-    const meshId = this._meshIdByNodeId.get(nodeId);
+    const meshId = this._meshIdByNodeId.get(_normPeerId(nodeId));
     return meshId ? this._mesh.getLatency(meshId) : -1;
   }
 

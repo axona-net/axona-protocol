@@ -214,11 +214,9 @@
       if (receivedCount === 0) receivedEl.textContent = '';
       receivedCount++;
       const ts = new Date().toLocaleTimeString();
-      const fromMe = envelope.signerPubkey === identity.pubkeyHex;
       receivedEl.innerHTML +=
         '<span class="arrived">[' + ts + ']</span> ' +
-        escapeHtml(envelope.message) +
-        (fromMe ? '<span class="self">(you)</span>' : '') + '\n' +
+        escapeHtml(envelope.message) + '\n' +
         '  msgId:  ' + envelope.msgId.slice(0, 16) + '…\n' +
         '  signer: ' + (envelope.signerPubkey || '').slice(0, 16) + '…\n\n';
       receivedEl.scrollTop = receivedEl.scrollHeight;

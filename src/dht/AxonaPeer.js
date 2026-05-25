@@ -1818,6 +1818,15 @@ export class AxonaPeer extends DHT {
         message:  json,
       };
     }
+    // Pub/sub semantics: a publisher never sees its own publish through
+    // its own subscription callback.  Without this filter the K-closest
+    // tree (or our own role-children fan-out) bounces the message back
+    // to the publisher's _onDeliver and fires the handler — misleading
+    // because it looks like a remote delivery.  Signed envelopes carry
+    // signerPubkey; we compare against our own identity's pubkey when
+    // available.
+    const ourPubkey = this._identity?.pubkeyHex;
+    if (ourPubkey && envelope.signerPubkey === ourPubkey) return;
     for (const sub of set) sub._deliver(envelope);
   }
 

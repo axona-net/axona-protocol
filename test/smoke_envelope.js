@@ -184,30 +184,50 @@ async function testPeerSignedRoundTrip() {
     node, axonManager: am, identity: id,
   });
 
+  // The pub/sub contract: a publisher does NOT see its own publish
+  // through its subscription handler.  To exercise the e2e envelope
+  // pipeline (publish → JSON → handler) we need a remote-shaped
+  // envelope, so we build it via a second peer with a different
+  // identity and feed THAT JSON into the local AxonManager's
+  // triggerDelivery — same code path as a real network delivery.
+  const otherId = await deriveIdentity({ lat: 35.6762, lng: 139.6503 });  // Tokyo
+  const remotePeer = new AxonaPeer({
+    engine: { onEvent: () => () => {} },
+    node: { id: otherId.id, alive: true },
+    axonManager: new MockAxonManager(otherId.id),
+    identity: otherId,
+  });
+
   const received = [];
   const sub = await peer.sub('cats', e => received.push(e));
 
-  const msgId = await peer.pub('cats', { meow: 1 });
+  const msgId = await remotePeer.pub('cats', { meow: 1 });
   check('pub returns content-derived msgId (64-char hex)',
     typeof msgId === 'string' && msgId.length === 64 && /^[0-9a-f]+$/.test(msgId));
-  check('AxonManager.pubsubPublish called',
-    am.published.length === 1);
-
-  // Trigger delivery with the same JSON the publisher wrote.
-  am.triggerDelivery(sub.topicId, am.published[0].json, 'internal-1', 1700000000000);
+  const remoteJson = remotePeer._axonManager.published[0].json;
+  am.triggerDelivery(sub.topicId, remoteJson, 'internal-1', 1700000000000);
 
   check('handler received envelope', received.length === 1);
   check('envelope.msgId matches pub return value',
     received[0].msgId === msgId);
   check('envelope.signature present (signed by default)',
     received[0].signature?.startsWith('ed25519:'));
-  check('envelope.signerPubkey matches identity',
-    received[0].signerPubkey === id.pubkeyHex);
+  check('envelope.signerPubkey matches remote identity',
+    received[0].signerPubkey === otherId.pubkeyHex);
 
   // Verify the delivered envelope.
   const r = await verifyEnvelope(received[0]);
   check('delivered envelope verifies signed',
     r.ok === true && r.signed === true);
+
+  // Now verify the publisher-self filter: when peer publishes its own
+  // message and the AxonManager bounces it back via triggerDelivery,
+  // the handler does NOT fire.
+  await peer.pub('cats', { meow: 'mine' });
+  const selfJson = am.published[0].json;
+  am.triggerDelivery(sub.topicId, selfJson, 'internal-2', 1700000000001);
+  check('publisher does not receive its own publish via handler',
+    received.length === 1);
 
   await sub.stop();
 }

@@ -30,13 +30,25 @@
 // =====================================================================
 
 import { Transport }            from '../../contracts/Transport.js';
-import { isHexId }              from '../../utils/hexid.js';
+import { isHexId, toHex }       from '../../utils/hexid.js';
 import { TransportError, ErrorCodes } from '../../errors.js';
 
 const REQUEST_TIMEOUT_MS = 5000;
 const MAX_REQ_ID = 0x7fffffff;
 
 const BRIDGE_CONN_ID = 'bridge';  // stable mesh-side id for the bridge
+
+// nodeId at the Transport surface can arrive as 66-char hex (the
+// kernel-canonical wire form, what bindPeer admits) OR as the BigInt
+// the AxonaPeer routing layer uses (peer.sendDirect / peer.routeMessage
+// pass BigInt through to transport.notify / transport.send).  Internal
+// state — this._bridgeNodeId etc. — uses hex, so we normalise inputs
+// at every public surface point.  Sim transport has the same helper.
+function _normPeerId(peerId) {
+  if (typeof peerId === 'bigint') return toHex(peerId);
+  if (typeof peerId === 'string') return peerId.replace(/^0x/, '').toLowerCase();
+  return peerId;
+}
 
 export class BridgeTransport extends Transport {
   /**
@@ -114,7 +126,8 @@ export class BridgeTransport extends Transport {
   }
 
   connIdFor(nodeId) {
-    return (this._bridgeNodeId !== null && this._bridgeNodeId === nodeId) ? BRIDGE_CONN_ID : null;
+    const hex = _normPeerId(nodeId);
+    return (this._bridgeNodeId !== null && this._bridgeNodeId === hex) ? BRIDGE_CONN_ID : null;
   }
 
   nodeIdFor(connId) {
@@ -123,7 +136,8 @@ export class BridgeTransport extends Transport {
 
   /** True if this transport knows about this peer (i.e., it's the bridge). */
   ownsPeer(nodeId) {
-    return this._bridgeNodeId !== null && this._bridgeNodeId === nodeId;
+    if (this._bridgeNodeId === null) return false;
+    return this._bridgeNodeId === _normPeerId(nodeId);
   }
 
   /**
