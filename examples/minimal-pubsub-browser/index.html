@@ -172,7 +172,11 @@
     document.getElementById('myId').textContent = identity.id;
     log('identity derived', { id: identity.id.slice(0, 16) + '…' });
 
-    // ── 2. Build peer + transport ───────────────────────────────────
+    // ── 2. Transport + peer ─────────────────────────────────────────
+    // With autoHandshake (default), webTransport drives the bridge's
+    // WebSocket version gate AND the application-level hello / hello-ack
+    // admission as part of start().  After this completes, the bridge
+    // is bound in the BridgeTransport and routable as a peer.
     const transport = webTransport({
       bridgeUrl: BRIDGE_URL,
       identity,
@@ -187,92 +191,22 @@
     const domain = new AxonaDomain({ k: 20 });
     const peer = new AxonaPeer({ domain, node, identity, transport });
 
-    // ── 3. Bridge hello / hello-ack admission ───────────────────────
-    // The kernel's webTransport doesn't drive the application-level
-    // handshake — the orchestrator does.  Pattern mirrors axona-peer's
-    // axona_node.js: register handlers BEFORE the socket opens, then
-    // either reply to the bridge's hello with hello-ack, or send our
-    // own hello and admit on hello-ack receipt.
-    const BRIDGE_CONN_ID = 'bridge';
-    let bridgeAdmitted = false;
+    await transport.start(identity.id);   // includes auto-handshake
+    log('bridge admitted', { nodeId: transport.bridgeNodeId.slice(0, 16) + '…' });
+    setStatus('connected', `connected · bridge ${transport.bridgeNodeId.slice(0, 8)}…`);
 
-    function admitBridge(bridgeNodeIdHex) {
-      if (bridgeAdmitted) return;
-      bridgeAdmitted = true;
-      transport.bridge.bindPeer(bridgeNodeIdHex, BRIDGE_CONN_ID);
-      const remoteBigInt = BigInt('0x' + bridgeNodeIdHex);
-      if (!node.synaptome.has(remoteBigInt)) {
-        const stratum = clz264(node.id ^ remoteBigInt);
-        const syn = new Synapse({ peerId: remoteBigInt, latencyMs: 50, stratum });
-        syn.weight   = 0.5;
-        syn.inertia  = 0;
-        syn._addedBy = 'bridge-handshake';
-        node.synaptome.set(remoteBigInt, syn);
-      }
-      log('bridge admitted', { nodeId: bridgeNodeIdHex.slice(0, 16) + '…' });
-      setStatus('connected', `connected · bridge ${bridgeNodeIdHex.slice(0, 8)}…`);
-    }
-
-    // The bridge greets us with `hello` on socket open.  We reply with
-    // our own hello-ack carrying our nodeId.
-    transport.bridge.onNotification('hello', (fromConnId, body) => {
-      if (typeof fromConnId !== 'string') return;   // already bound
-      if (!body || !body.nodeId) return;
-      admitBridge(body.nodeId);
-      // Reply with hello-ack.
-      transport.bridge.notify(BRIDGE_CONN_ID, 'hello-ack', {
-        proto: 'axona/3',
-        nodeId: identity.id,
-      }).catch(err => log('hello-ack send-failed', err.message));
-    });
-    // If we send hello first (defensive — race with the bridge), the
-    // bridge replies with hello-ack.
-    transport.bridge.onNotification('hello-ack', (fromConnId, body) => {
-      if (typeof fromConnId !== 'string') return;
-      if (!body || !body.nodeId) return;
-      admitBridge(body.nodeId);
-    });
-
-    await transport.start(identity.id);
-    log('transport started');
     await peer.start();
     log('peer started');
 
-    // The bridge's WebSocket-level version gate requires a raw
-    // `client-hello` frame as the FIRST message — sent directly on
-    // the socket, BEFORE any axona payloads.  Without it the bridge
-    // drops everything and never sends us its `hello`.  Pattern
-    // matches axona-peer/src/client.js line 533.
-    const PEER_VERSION = '1.1.3';
-    try {
-      transport.socket.send(JSON.stringify({
-        type: 'client-hello',
-        version: PEER_VERSION,
-      }));
-      log('client-hello sent', { version: PEER_VERSION });
-    } catch (err) {
-      log('client-hello-send-failed', err.message);
-    }
-
-    // Defensive: also send our own application-level hello in case
-    // the bridge expects the client to initiate that side too.
-    // Harmless if the bridge already sent theirs (we'll just exchange
-    // two helloes).
-    transport.bridge.notify(BRIDGE_CONN_ID, 'hello', {
-      proto: 'axona/3',
-      nodeId: identity.id,
-    }).catch(err => log('hello send-failed', err.message));
-
-    // Wait briefly for the bridge admission to complete.
-    for (let i = 0; i < 30; i++) {
-      if (bridgeAdmitted) break;
-      await new Promise(r => setTimeout(r, 100));
-    }
-    if (!bridgeAdmitted) {
-      setStatus('failed', 'bridge handshake timeout');
-      log('bridge handshake timed out');
-      throw new Error('bridge handshake timeout');
-    }
+    // Admit the bridge into our synaptome so AxonManager can route
+    // through it for pub/sub fan-out.
+    const bridgeBig = BigInt('0x' + transport.bridgeNodeId);
+    const stratum   = clz264(node.id ^ bridgeBig);
+    const syn = new Synapse({ peerId: bridgeBig, latencyMs: 50, stratum });
+    syn.weight   = 0.5;
+    syn.inertia  = 0;
+    syn._addedBy = 'bridge-handshake';
+    node.synaptome.set(bridgeBig, syn);
 
     // ── 4. AxonManager + dht adapter ────────────────────────────────
     const dht = {

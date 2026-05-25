@@ -37,10 +37,11 @@
 
 import { MeshManager }       from './mesh.js';
 import { WebRTCTransport }   from './webrtc.js';
-import { BridgeTransport }   from './bridge.js';
+import { BridgeTransport, BRIDGE_CONN_ID_EXPORT as BRIDGE_CONN_ID } from './bridge.js';
 import { CompositeTransport } from './composite.js';
 import { isHexId }            from '../../utils/hexid.js';
-import { TransportError, ErrorCodes } from '../../errors.js';
+import { TransportError, ErrorCodes, UpgradeRequiredError } from '../../errors.js';
+import { KERNEL_VERSION }    from '../handshake.js';
 
 export { MeshManager, WebRTCTransport, BridgeTransport, CompositeTransport };
 
@@ -53,6 +54,25 @@ export { MeshManager, WebRTCTransport, BridgeTransport, CompositeTransport };
  * @property {WebSocket}           [WebSocketImpl]
  *           Constructor for the WebSocket class.  Defaults to
  *           globalThis.WebSocket (browser).  Tests inject a fake.
+ * @property {boolean}             [autoHandshake=true]
+ *           When true (default), the transport drives the full bridge
+ *           admission sequence as part of `start()`:
+ *             (a) sends `{type:'client-hello', version}` as the first
+ *                 raw frame on the socket (satisfies the bridge's
+ *                 WebSocket-level version gate);
+ *             (b) registers a notification handler for the bridge's
+ *                 `hello`, calls `bridge.bindPeer(bridgeNodeId, 'bridge')`
+ *                 on receipt, replies with our own `hello-ack`;
+ *             (c) `transport.start()` resolves only after the bridge
+ *                 has been bound, OR rejects on timeout / WS close.
+ *           Set to `false` for advanced consumers (axona-peer,
+ *           dht-sim, smoke tests) that drive the handshake themselves.
+ * @property {string}              [peerVersion]
+ *           Semver string sent in `client-hello`.  Defaults to the
+ *           kernel's KERNEL_VERSION.
+ * @property {number}              [handshakeTimeoutMs=15000]
+ *           How long to wait for the bridge's `hello` before rejecting
+ *           start().  Ignored when autoHandshake is false.
  */
 
 /**
@@ -62,13 +82,24 @@ export { MeshManager, WebRTCTransport, BridgeTransport, CompositeTransport };
  *   - a BridgeTransport that talks Axona wire frames directly to the
  *     bridge over the same WebSocket
  *
- * Returns the CompositeTransport (which implements the full Transport
- * contract).  Call `await transport.start()` before use.
+ * With `autoHandshake: true` (default), `await transport.start()`
+ * also completes the bridge's WebSocket-level version gate AND the
+ * application-level hello / hello-ack admission.  After start, the
+ * bridge is bound in `transport.bridge` and reachable as a peer.
+ * Read `transport.bridgeNodeId` for the bound bridge's 66-char hex id.
  *
  * @param {WebTransportConfig} config
- * @returns {CompositeTransport & { mesh: MeshManager, webrtc: WebRTCTransport, bridge: BridgeTransport, socket: WebSocket | null }}
+ * @returns {CompositeTransport & { mesh: MeshManager, webrtc: WebRTCTransport, bridge: BridgeTransport, socket: WebSocket | null, bridgeReady: Promise<string|null>, bridgeNodeId: string | null }}
  */
-export function webTransport({ bridgeUrl, identity, log = () => {}, WebSocketImpl } = {}) {
+export function webTransport({
+  bridgeUrl,
+  identity,
+  log = () => {},
+  WebSocketImpl,
+  autoHandshake = true,
+  peerVersion,
+  handshakeTimeoutMs = 15000,
+} = {}) {
   if (typeof bridgeUrl !== 'string' || !/^wss?:\/\//.test(bridgeUrl)) {
     throw new TransportError(ErrorCodes.TRANSPORT_NOT_STARTED,
       'webTransport: bridgeUrl must be a ws:// or wss:// URL',
@@ -198,6 +229,89 @@ export function webTransport({ bridgeUrl, identity, log = () => {}, WebSocketImp
   composite.addSubtransport(bridge);   // bridge is the single-peer fast-path
   composite.addSubtransport(webrtc);   // WebRTC for everyone else
 
+  // ── Bridge handshake state (auto-handshake path) ─────────────────
+  //
+  // The kernel's webTransport optionally drives the full bridge
+  // admission sequence so consumers don't have to re-discover it.
+  // Two layers:
+  //
+  //   (a) WebSocket-level version gate.  The bridge requires
+  //       `{type:'client-hello', version}` as the FIRST raw frame on
+  //       the socket — before any axona payloads.  Send it once on
+  //       open.
+  //
+  //   (b) Application-level hello / hello-ack.  After admission the
+  //       bridge sends an `axona`-framed `hello` carrying its own
+  //       nodeId.  On receipt: bridge.bindPeer(nodeId, 'bridge') +
+  //       reply with hello-ack carrying our nodeId.
+  //
+  // composite.start() awaits both layers when autoHandshake is true.
+  let bridgeNodeId = null;
+  let bridgeReadyResolve = null;
+  let bridgeReadyReject  = null;
+  const bridgeReady = new Promise((resolve, reject) => {
+    bridgeReadyResolve = resolve;
+    bridgeReadyReject  = reject;
+  });
+  // Suppress unhandled-rejection warnings for the no-op case
+  // (autoHandshake === false → we resolve immediately below).
+  bridgeReady.catch(() => {});
+
+  if (!autoHandshake) {
+    bridgeReadyResolve(null);
+  } else {
+    // Register hello / hello-ack handlers BEFORE the socket opens so
+    // we don't miss the bridge's first hello (which arrives on the
+    // same tick as version-gate / welcome).
+    bridge.onNotification('hello', (fromConnId, body) => {
+      if (typeof fromConnId !== 'string') return;     // already bound
+      if (!body || !isHexId(body.nodeId)) return;
+      const nodeIdHex = body.nodeId;
+      try {
+        bridge.bindPeer(nodeIdHex, BRIDGE_CONN_ID);
+      } catch (err) {
+        log('auto-handshake-bind-failed', { err: err.message });
+        bridgeReadyReject(err);
+        return;
+      }
+      // Reply with hello-ack so the bridge knows our nodeId.
+      bridge.notify(BRIDGE_CONN_ID, 'hello-ack', {
+        proto:  'axona/3',
+        nodeId: localNodeId,
+      }).catch(err => log('auto-handshake-ack-failed', { err: err.message }));
+      bridgeNodeId = nodeIdHex;
+      log('auto-handshake-complete', { bridgeNodeId: nodeIdHex });
+      bridgeReadyResolve(nodeIdHex);
+    });
+    // Also handle the case where the bridge replies to OUR hello with
+    // hello-ack (rare in current bridges, but defensive).
+    bridge.onNotification('hello-ack', (fromConnId, body) => {
+      if (typeof fromConnId !== 'string') return;
+      if (!body || !isHexId(body.nodeId)) return;
+      if (bridgeNodeId) return;                       // already done
+      const nodeIdHex = body.nodeId;
+      try {
+        bridge.bindPeer(nodeIdHex, BRIDGE_CONN_ID);
+      } catch (err) {
+        log('auto-handshake-bind-failed', { err: err.message });
+        bridgeReadyReject(err);
+        return;
+      }
+      bridgeNodeId = nodeIdHex;
+      log('auto-handshake-complete', { bridgeNodeId: nodeIdHex });
+      bridgeReadyResolve(nodeIdHex);
+    });
+    // If the socket closes before the handshake completes, the bridge
+    // rejected us (typically version-gate via close code 4426).
+    socketEvents.close.add(() => {
+      if (!bridgeNodeId) {
+        bridgeReadyReject(new UpgradeRequiredError(
+          'bridge closed socket before handshake completed',
+          { context: { reason: 'socket_closed_pre_handshake', bridgeUrl } }));
+      }
+    });
+  }
+
   // Wire start() so calling composite.start() opens the socket and
   // starts the sub-transports in order.  Stop reverses the chain.
   const origStart = composite.start.bind(composite);
@@ -215,6 +329,32 @@ export function webTransport({ bridgeUrl, identity, log = () => {}, WebSocketImp
     }
     if (typeof mesh.setMyId === 'function') mesh.setMyId(localNodeId);
     await origStart(localNodeId);
+
+    if (autoHandshake) {
+      // (a) WebSocket-level version gate: send the raw client-hello
+      // frame the bridge waits for.  Must precede any axona payloads.
+      try {
+        sendToBridge({
+          type:    'client-hello',
+          version: peerVersion || KERNEL_VERSION,
+        });
+      } catch (err) {
+        log('auto-handshake-client-hello-failed', { err: err.message });
+      }
+      // (b) Wait for the application-level hello / hello-ack to land.
+      const timer = setTimeout(() => {
+        if (!bridgeNodeId) {
+          bridgeReadyReject(new UpgradeRequiredError(
+            `bridge handshake timed out after ${handshakeTimeoutMs}ms`,
+            { context: { reason: 'handshake_timeout', bridgeUrl } }));
+        }
+      }, handshakeTimeoutMs);
+      try {
+        await bridgeReady;
+      } finally {
+        clearTimeout(timer);
+      }
+    }
   };
   const origStop = composite.stop.bind(composite);
   composite.stop = async () => {
@@ -233,7 +373,9 @@ export function webTransport({ bridgeUrl, identity, log = () => {}, WebSocketImp
   composite.mesh    = mesh;
   composite.webrtc  = webrtc;
   composite.bridge  = bridge;
-  Object.defineProperty(composite, 'socket', { get() { return socket; } });
+  Object.defineProperty(composite, 'socket',       { get() { return socket; } });
+  Object.defineProperty(composite, 'bridgeReady',  { get() { return bridgeReady; } });
+  Object.defineProperty(composite, 'bridgeNodeId', { get() { return bridgeNodeId; } });
 
   return composite;
 }

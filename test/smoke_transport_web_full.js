@@ -316,14 +316,21 @@ async function testWebTransportFactory() {
   catch { threw = true; }
   check('rejects non-hex identity.id', threw);
 
-  // Build with a fake WebSocket impl.
+  // Build with a fake WebSocket impl.  autoHandshake:false preserves
+  // the pre-v1.2 behaviour — start() returns as soon as the socket
+  // opens, without waiting for a bridge hello (which the fake socket
+  // never sends).
   const t = webTransport({
     bridgeUrl: 'wss://test.example',
     identity:  { id: ALICE },
     WebSocketImpl: FakeWebSocket,
+    autoHandshake: false,
   });
   check('factory returns object with mesh/webrtc/bridge sub-refs',
     !!(t.mesh && t.webrtc && t.bridge));
+  check('factory exposes bridgeReady promise', t.bridgeReady instanceof Promise);
+  check('factory exposes bridgeNodeId getter (initially null)',
+    t.bridgeNodeId === null);
 
   await t.start();
   check('after start: socket is open',
@@ -343,6 +350,92 @@ async function testWebTransportFactory() {
   check('after stop: socket closed', t.socket === null);
 }
 
+// ── autoHandshake path ────────────────────────────────────────────
+//
+// Verify that start() with autoHandshake:true (the default):
+//   - sends a raw {type:'client-hello', version} frame on socket open
+//   - awaits the bridge's `hello` notification
+//   - calls bridge.bindPeer + sends hello-ack
+//   - resolves with the bridge's nodeId on bridgeReady
+//
+// The FakeWebSocket replays whatever we feed it through _deliver,
+// so we can simulate the bridge's responses inline.
+
+async function testWebTransportAutoHandshake() {
+  console.log('\n── webTransport factory: autoHandshake (default) ──');
+
+  const t = webTransport({
+    bridgeUrl: 'wss://test.example',
+    identity:  { id: ALICE },
+    WebSocketImpl: FakeWebSocket,
+    // autoHandshake defaults to true
+    handshakeTimeoutMs: 1000,
+  });
+
+  // Kick start, then simulate the bridge's hello before the timeout.
+  const startPromise = t.start();
+
+  // Wait one microtask so the FakeWebSocket opens + client-hello sends.
+  await new Promise(r => queueMicrotask(r));
+  // Also drain the next microtask for sub-transport start order.
+  await new Promise(r => setTimeout(r, 0));
+
+  // (a) Confirm the client-hello went out as the first send.
+  const firstFrame = t.socket.sent[0] ? JSON.parse(t.socket.sent[0]) : null;
+  check('autoHandshake sends client-hello as first frame',
+    firstFrame && firstFrame.type === 'client-hello' && typeof firstFrame.version === 'string');
+
+  // (b) Simulate the bridge replying with `axona`-framed hello.
+  t.socket._deliver(JSON.stringify({
+    type: 'axona',
+    payload: { k: 'ntf', type: 'hello', body: {
+      proto: 'axona/3', nodeId: BRIDGE,
+    }},
+  }));
+
+  // start() should now resolve.
+  await startPromise;
+  check('autoHandshake: start() resolves after bridge hello arrives', true);
+  check('autoHandshake: bridgeNodeId is set', t.bridgeNodeId === BRIDGE);
+  check('autoHandshake: bridge is bound', t.bridge.ownsPeer(BRIDGE) === true);
+  check('autoHandshake: bridgeReady resolves with the bridge nodeId',
+    (await t.bridgeReady) === BRIDGE);
+
+  // (c) Confirm we sent a hello-ack back to the bridge.
+  const helloAckFrame = t.socket.sent.map(s => JSON.parse(s))
+    .find(f => f.type === 'axona' && f.payload?.type === 'hello-ack');
+  check('autoHandshake: hello-ack was sent in reply',
+    helloAckFrame && helloAckFrame.payload.body.nodeId === ALICE);
+
+  await t.stop();
+}
+
+async function testWebTransportAutoHandshakeTimeout() {
+  console.log('\n── webTransport factory: autoHandshake timeout ──');
+
+  const t = webTransport({
+    bridgeUrl: 'wss://test.example',
+    identity:  { id: ALICE },
+    WebSocketImpl: FakeWebSocket,
+    handshakeTimeoutMs: 50,   // tight timeout so we fail fast
+  });
+
+  let rejected = false;
+  let errCode = null;
+  try {
+    await t.start();
+  } catch (err) {
+    rejected = true;
+    errCode = err.code;
+  }
+  check('autoHandshake timeout: start() rejects when bridge hello never arrives',
+    rejected);
+  check('autoHandshake timeout: UpgradeRequiredError with handshake_timeout context',
+    errCode === 'UPGRADE_REQUIRED');
+
+  await t.stop();
+}
+
 // ── main ─────────────────────────────────────────────────────────────
 
 async function main() {
@@ -357,6 +450,8 @@ async function main() {
   await testCompositeLateAdd();
   await testCompositeLocalIdValidation();
   await testWebTransportFactory();
+  await testWebTransportAutoHandshake();
+  await testWebTransportAutoHandshakeTimeout();
   console.log(`\nResult: ${passed} passed, ${failed} failed`);
   process.exit(failed === 0 ? 0 : 1);
 }
