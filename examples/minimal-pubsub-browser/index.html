@@ -198,6 +198,8 @@
                                           // with the reachable-only K-closest
                                           // + tunneled-direct sendDirect that
                                           // production axona.net peers use.
+    // DIAG: expose live handles for in-page inspection.
+    window.__axona = { peer, transport, identity, node };
     log('peer ready · bridge:', transport.bridgeNodeId.slice(0, 16) + '…');
     setStatus('connected', `connected · bridge ${transport.bridgeNodeId.slice(0, 8)}…`);
 

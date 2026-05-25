@@ -937,28 +937,49 @@ export class AxonaPeer extends DHT {
   _seedSynaptomeWithSponsor(sponsor) {
     const syn = this._node?.synaptome;
     if (!syn) return;
-    if (syn.has?.(sponsor) || syn.has?.(BigInt('0x' + sponsor))) return;
+
+    // Canonicalise the sponsor to the full 264-bit BigInt nodeId so
+    // synaptome keys are always one type.  Hex strings (66-char,
+    // produced by transport.boundPeers() and hello-ack admission) get
+    // promoted to BigInt; existing BigInt callers are passed through.
+    // This matches axona-peer's _completeHandshake → hexToId → new
+    // Synapse({peerId: bigint, ...}) production path; the older
+    // hex-string-keyed kernel branch is deprecated.
+    const sponsorBig = (typeof sponsor === 'bigint')
+      ? sponsor
+      : BigInt('0x' + String(sponsor).replace(/^0x/, ''));
+    if (syn.has?.(sponsorBig)) return;
+    // Belt-and-braces: dedupe against any pre-existing hex-string key
+    // from an older session before we standardise on BigInt.
+    const sponsorHex = sponsorBig.toString(16).padStart(66, '0');
+    if (syn.has?.(sponsorHex)) return;
 
     // Engine-managed path: if the engine exposes addSynapse, use it
     // so its bookkeeping (stratum, decay, anneal pool) stays consistent.
     const engine = this._engine;
-    const domain = this._domain;
     if (engine && typeof engine.addSynapse === 'function') {
-      try { engine.addSynapse(this._node, sponsor, { addedBy: 'bootstrap' }); return; }
+      try { engine.addSynapse(this._node, sponsorBig, { addedBy: 'bootstrap' }); return; }
       catch { /* fall through to direct insert */ }
     }
 
-    // Direct insert: the simulator-facing path uses BigInt synaptome
-    // keys; the kernel-only path uses hex strings.  Detect by checking
-    // an existing entry's key shape, defaulting to hex.
-    let firstKey = null;
-    for (const k of syn.keys()) { firstKey = k; break; }
-    const useBigInt = (typeof firstKey === 'bigint');
-    const key = useBigInt ? BigInt('0x' + sponsor) : sponsor;
-    syn.set(key, {
-      peerId: key, weight: 0.5, latency: 50, stratum: 0,
-      addedBy: 'bootstrap',
-    });
+    // Direct insert: real Synapse instance with the BigInt peerId.
+    // Stratum = number of leading zero bits in (self ^ peer), matching
+    // axona-peer/src/axona_node.js's _completeHandshake.
+    const selfId = this._node.id;
+    const stratum = (typeof selfId === 'bigint')
+      ? this._clz(selfId ^ sponsorBig)
+      : 0;
+    syn.set(sponsorBig, new Synapse({
+      peerId:    sponsorBig,
+      latencyMs: 50,
+      stratum,
+    }));
+    const inserted = syn.get(sponsorBig);
+    if (inserted) {
+      inserted.weight   = 0.5;
+      inserted.inertia  = 0;
+      inserted._addedBy = 'bootstrap';
+    }
   }
 
   // ─── DHT operations ────────────────────────────────────────────────
@@ -1667,9 +1688,14 @@ export class AxonaPeer extends DHT {
     const dht = {
       getSelfId:    () => peer.getNodeId(),
       findKClosest: async (targetId, K = 5) => {
-        const targetBig = typeof targetId === 'bigint'
+        // 264-bit BigInt throughout — matches axona-peer's
+        // _completeHandshake → hexToId path.  Hex strings only appear at
+        // wire boundaries (transport.boundPeers() returns hex);
+        // _seedSynaptomeWithSponsor promotes them to BigInt at admission,
+        // so by the time we read from node.synaptome, peerIds are BigInt.
+        const targetBig = (typeof targetId === 'bigint')
           ? targetId
-          : BigInt('0x' + String(targetId));
+          : BigInt('0x' + String(targetId).replace(/^0x/, ''));
         const dist = new Map();
         if (typeof selfId === 'bigint') {
           dist.set(selfId, selfId ^ targetBig);
