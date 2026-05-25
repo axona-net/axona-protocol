@@ -260,9 +260,28 @@ export class AxonaPeer extends DHT {
             console.warn('AxonaPeer.onPeerBound: admission failed', err);
           }
         }
-        // Bust the cached K-closest so the next sub/pub/refresh sees
-        // the wider synaptome.  Safe no-op if no AxonManager yet.
-        try { this._axonManager?.invalidateKClosestCache?.(); } catch {}
+        // Bust the cached K-closest so the next sub/pub sees the
+        // wider synaptome, then eagerly re-issue subscribe-k for
+        // every active subscription so the new K-closest peers
+        // immediately know we're a subscriber.  Without this, a
+        // subscription created when only the bridge was bound stays
+        // pinned to the bridge — the 10s refreshTick eventually
+        // re-targets, but cross-peer publishes during the first
+        // ~10s drop on the floor.
+        const am = this._axonManager;
+        if (!am) return;
+        try { am.invalidateKClosestCache?.(); } catch {}
+        if (am.mySubscriptions && typeof am._asyncSubscribe === 'function') {
+          for (const [topicId] of am.mySubscriptions) {
+            const lastSeenTs = am._lastSeenTsByTopic?.get?.(topicId) ?? 0;
+            am._asyncSubscribe(topicId, lastSeenTs)
+              .catch(e => {
+                if (typeof console !== 'undefined') {
+                  console.warn('AxonaPeer.onPeerBound: re-subscribe failed', e);
+                }
+              });
+          }
+        }
       });
     }
 

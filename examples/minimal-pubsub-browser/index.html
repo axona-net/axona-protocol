@@ -219,8 +219,8 @@
       receivedEl.innerHTML +=
         '<span class="arrived">[' + ts + ']</span> ' +
         escapeHtml(envelope.message) + '\n' +
-        '  msgId:  ' + envelope.msgId.slice(0, 16) + '…\n' +
-        '  signer: ' + (envelope.signerPubkey || '').slice(0, 16) + '…\n\n';
+        '  msgId:  ' + envelope.msgId + '\n' +
+        '  signer: ' + (envelope.signerPubkey || '') + '\n\n';
       receivedEl.scrollTop = receivedEl.scrollHeight;
     }, { publisher, since: 'all' });
     log('subscribed', { topicId: sub.topicId.slice(0, 16) + '…' });
@@ -244,7 +244,7 @@
       try {
         const msgId = await peer.pub(TOPIC, wireMsg, { publisher });
         lastMsgIdEl.textContent = msgId;
-        log('published', { wireMsg, msgId: msgId.slice(0, 16) + '…' });
+        log('published', { wireMsg, msgId });
       } catch (err) {
         lastMsgIdEl.textContent = '(error: ' + err.message + ')';
         log('publish error', err.message);
