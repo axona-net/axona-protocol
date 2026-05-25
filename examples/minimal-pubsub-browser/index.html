@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>@axona/protocol — single-peer pub/sub demo</title>
+  <title>@axona/protocol — webTransport pub/sub demo</title>
   <style>
     :root {
       --rust: #2d7373;
@@ -14,6 +14,9 @@
       --card-bg: #fbfbf6;
       --border: #d8d4ca;
       --code-bg: #f0ecdf;
+      --green: #2d7373;
+      --red: #c0392b;
+      --amber: #b07d3a;
     }
     * { box-sizing: border-box; }
     body {
@@ -25,142 +28,63 @@
       color: var(--ink);
       line-height: 1.5;
     }
-    h1 {
-      font-weight: 500;
-      letter-spacing: -0.015em;
-      margin-bottom: 0.3em;
-    }
-    .lede {
-      color: var(--muted);
-      margin-top: 0;
-    }
-    code {
-      font-family: 'Inconsolata', ui-monospace, Menlo, monospace;
-      background: var(--code-bg);
-      padding: 1px 4px;
-      border-radius: 2px;
-      font-size: 0.92em;
-    }
-    .panes {
-      display: grid;
-      grid-template-columns: 1fr 1fr;
-      gap: 1.2rem;
-      margin-top: 1.2rem;
-    }
-    .pane {
-      background: var(--card-bg);
-      border: 1px solid var(--border);
-      border-radius: 8px;
-      padding: 1rem 1.2rem;
-    }
-    .pane h2 {
-      font-size: 18px;
-      margin: 0 0 0.5rem 0;
-      color: var(--rust);
-      font-weight: 600;
-    }
-    .label {
-      color: var(--muted);
-      font-size: 13px;
-      margin: 0.7rem 0 0.3rem 0;
-    }
-    .nodeId {
-      font-family: 'Inconsolata', ui-monospace, monospace;
-      font-size: 11px;
-      color: var(--muted);
-      word-break: break-all;
-      padding: 0.3rem 0.5rem;
-      background: var(--code-bg);
-      border-radius: 3px;
-    }
-    .row {
-      display: flex;
-      gap: 0.5rem;
-      margin-bottom: 0.5rem;
-    }
-    input[type=text] {
-      padding: 0.5rem 0.7rem;
-      border: 1px solid var(--border);
-      border-radius: 4px;
-      font-family: inherit;
-      font-size: 15px;
-      background: white;
-      width: 100%;
-    }
-    .row input[type=text] { flex: 1; }
-    button {
-      background: var(--rust);
-      color: white;
-      border: none;
-      padding: 0.5rem 1rem;
-      border-radius: 4px;
-      cursor: pointer;
-      font-family: inherit;
-      font-size: 15px;
-      font-weight: 500;
-      white-space: nowrap;
-    }
-    button:disabled {
-      background: #aaa;
-      cursor: not-allowed;
-    }
-    .received {
-      background: white;
-      border: 1px solid var(--border);
-      border-radius: 4px;
-      padding: 0.6rem 0.9rem;
-      font-family: 'Inconsolata', ui-monospace, monospace;
-      font-size: 12.5px;
-      min-height: 260px;
-      max-height: 420px;
-      overflow-y: auto;
-      white-space: pre-wrap;
-      color: #333;
-    }
-    .received .empty { color: var(--muted); font-style: italic; }
-    .arrived { color: var(--rust); font-weight: 600; }
-    .self    { color: var(--rust-soft); font-style: italic; margin-left: 0.5em; }
-    .bootlog {
+    h1 { font-weight: 500; letter-spacing: -0.015em; margin-bottom: 0.3em; }
+    .lede { color: var(--muted); margin-top: 0; }
+    code { font-family: 'Inconsolata', ui-monospace, Menlo, monospace; background: var(--code-bg); padding: 1px 4px; border-radius: 2px; font-size: 0.92em; }
+
+    .status {
       background: var(--card-bg);
       border: 1px solid var(--border);
       border-radius: 6px;
       padding: 0.6rem 0.9rem;
-      font-family: 'Inconsolata', ui-monospace, Menlo, monospace;
-      font-size: 12px;
-      color: var(--muted);
-      margin-top: 1.5rem;
-      min-height: 1.5rem;
-      max-height: 220px;
-      overflow-y: auto;
-      white-space: pre-wrap;
+      margin-top: 1rem;
+      font-size: 14px;
+      display: flex;
+      align-items: center;
+      gap: 0.7rem;
     }
-    .bootlog .heading {
-      color: var(--rust);
-      font-weight: 600;
-      letter-spacing: 0.05em;
-      text-transform: uppercase;
-      font-size: 11px;
-      margin-bottom: 0.4em;
-    }
-    footer {
-      margin-top: 1.5rem;
-      font-size: 13px;
-      color: var(--muted);
-      text-align: center;
-    }
+    .dot { width: 10px; height: 10px; border-radius: 50%; background: var(--muted); }
+    .dot.connecting { background: var(--amber); }
+    .dot.connected  { background: var(--green); }
+    .dot.failed     { background: var(--red); }
+    .status-text { flex: 1; }
+    .status-text code { font-size: 12px; }
+
+    .panes { display: grid; grid-template-columns: 1fr 1fr; gap: 1.2rem; margin-top: 1.2rem; }
+    .pane { background: var(--card-bg); border: 1px solid var(--border); border-radius: 8px; padding: 1rem 1.2rem; }
+    .pane h2 { font-size: 18px; margin: 0 0 0.5rem 0; color: var(--rust); font-weight: 600; }
+    .label { color: var(--muted); font-size: 13px; margin: 0.7rem 0 0.3rem 0; }
+    .nodeId { font-family: 'Inconsolata', ui-monospace, monospace; font-size: 11px; color: var(--muted); word-break: break-all; padding: 0.3rem 0.5rem; background: var(--code-bg); border-radius: 3px; }
+    .row { display: flex; gap: 0.5rem; margin-bottom: 0.5rem; }
+    input[type=text] { padding: 0.5rem 0.7rem; border: 1px solid var(--border); border-radius: 4px; font-family: inherit; font-size: 15px; background: white; width: 100%; }
+    .row input[type=text] { flex: 1; }
+    button { background: var(--rust); color: white; border: none; padding: 0.5rem 1rem; border-radius: 4px; cursor: pointer; font-family: inherit; font-size: 15px; font-weight: 500; white-space: nowrap; }
+    button:disabled { background: #aaa; cursor: not-allowed; }
+    .received { background: white; border: 1px solid var(--border); border-radius: 4px; padding: 0.6rem 0.9rem; font-family: 'Inconsolata', ui-monospace, monospace; font-size: 12.5px; min-height: 260px; max-height: 420px; overflow-y: auto; white-space: pre-wrap; color: #333; }
+    .received .empty { color: var(--muted); font-style: italic; }
+    .arrived { color: var(--rust); font-weight: 600; }
+    .self    { color: var(--rust-soft); font-style: italic; margin-left: 0.5em; }
+
+    .bootlog { background: var(--card-bg); border: 1px solid var(--border); border-radius: 6px; padding: 0.6rem 0.9rem; font-family: 'Inconsolata', ui-monospace, Menlo, monospace; font-size: 12px; color: var(--muted); margin-top: 1.5rem; min-height: 1.5rem; max-height: 260px; overflow-y: auto; white-space: pre-wrap; }
+    .bootlog .heading { color: var(--rust); font-weight: 600; letter-spacing: 0.05em; text-transform: uppercase; font-size: 11px; margin-bottom: 0.4em; }
+
+    footer { margin-top: 1.5rem; font-size: 13px; color: var(--muted); text-align: center; }
     footer a { color: var(--rust); }
   </style>
 </head>
 <body>
-  <h1>@axona/protocol — single-peer pub/sub demo</h1>
+  <h1>@axona/protocol — pub/sub demo on the live bridge</h1>
   <p class="lede">
-    One Axona peer in this browser tab — both publisher and subscriber on
-    <code>us-east/hello-world</code>. Pick a name, type a message, hit Publish.
-    The signed envelope routes through the axonal pub/sub tree (this peer is
-    the K-closest replica for the topic) and arrives back at your own subscriber.
-    Open more tabs once a real transport is wired in and they'll join the same
-    topic as additional peers.
+    This tab is an Axona peer connected to <code>wss://bridge.axona.net</code> via
+    <code>webTransport</code>. Open this page in multiple tabs (or share the URL
+    with a friend) and every connected peer publishing to
+    <code>us-east/hello-world</code> shows up in the received list.
   </p>
+
+  <div class="status">
+    <span class="dot" id="dot"></span>
+    <span class="status-text" id="statusText">connecting…</span>
+  </div>
 
   <div class="panes">
     <div class="pane">
@@ -174,6 +98,8 @@
       </div>
       <div class="label">Your nodeId</div>
       <div class="nodeId" id="myId">…</div>
+      <div class="label">Bridge</div>
+      <div class="nodeId" id="bridgeUrl">…</div>
     </div>
 
     <div class="pane">
@@ -183,39 +109,58 @@
   </div>
 
   <div class="bootlog">
-    <div class="heading">console</div><div id="bootlog">Booting…</div>
+    <div class="heading">console</div>
+    <div id="bootlog">Booting…</div>
   </div>
 
   <footer>
     Source: <code>axona-protocol/src/</code> served live · kernel
-    v<span id="kernelVer">…</span> · <code>peer.pub</code> + <code>peer.sub</code> on the same peer
+    v<span id="kernelVer">…</span> · <code>webTransport({ bridgeUrl })</code>
+    + <code>peer.pub</code>/<code>peer.sub</code>
   </footer>
 
   <script type="module">
     import {
-      AxonaPeer, AxonaDomain, NeuronNode,
-      AxonManager, simTransport, SimNetwork,
-      deriveIdentity, geoCellId,
+      AxonaPeer, AxonaDomain, NeuronNode, Synapse,
+      AxonManager,
+      deriveIdentity, geoCellId, clz264,
     } from '/src/index.js';
+    import { webTransport } from '/src/transport/web/index.js';
+
+    // ── Bridge URL: ?bridge= override, default to the live bridge ────
+    function getBridgeUrl() {
+      const fromQs = new URLSearchParams(location.search).get('bridge');
+      if (fromQs) return fromQs;
+      return 'wss://bridge.axona.net';
+    }
+    const BRIDGE_URL = getBridgeUrl();
+    document.getElementById('bridgeUrl').textContent = BRIDGE_URL;
 
     const bootlogEl = document.getElementById('bootlog');
-    const log = (msg) => {
-      bootlogEl.textContent += '\n' + msg;
+    const log = (msg, extra) => {
+      const line = extra != null ? `${msg}  ${typeof extra === 'object' ? JSON.stringify(extra) : extra}` : msg;
+      bootlogEl.textContent += '\n' + line;
       bootlogEl.scrollTop = bootlogEl.scrollHeight;
+      // Mirror to console for devtools debugging.
+      console.log('[demo]', msg, extra ?? '');
     };
-    const setLog = (msg) => { bootlogEl.textContent = msg; };
+    bootlogEl.textContent = 'Booting…';
 
-    // Pull the kernel version
+    const dotEl    = document.getElementById('dot');
+    const statusEl = document.getElementById('statusText');
+    function setStatus(state, text) {
+      dotEl.className = 'dot ' + state;
+      statusEl.textContent = text;
+    }
+    setStatus('connecting', `connecting to ${BRIDGE_URL}…`);
+
+    // Pull kernel version for footer
     try {
       const pkg = await fetch('/package.json').then(r => r.json());
       document.getElementById('kernelVer').textContent = pkg.version;
-    } catch {
-      document.getElementById('kernelVer').textContent = '?';
-    }
+    } catch { document.getElementById('kernelVer').textContent = '?'; }
 
-    setLog('Booting…');
-
-    // ── Region helpers ─────────────────────────────────────────────────
+    // ── 1. Identity (264-bit Ed25519, US-east region anchor) ────────
     const US_EAST = { lat: 38.0, lng: -77.0 };
 
     function regionSynthPublisher({ lat, lng }) {
@@ -223,58 +168,132 @@
       return s2.toString(16).padStart(2, '0') + '0'.repeat(64);
     }
 
-    // ── Build a peer ────────────────────────────────────────────────────
-    const network = new SimNetwork();
+    const identity = await deriveIdentity(US_EAST);
+    document.getElementById('myId').textContent = identity.id;
+    log('identity derived', { id: identity.id.slice(0, 16) + '…' });
 
-    async function makePeer({ region }) {
-      const identity = await deriveIdentity(region);
-      const transport = simTransport({ network, identity, heartbeatMs: 0 });
-      await transport.start(identity.id);
+    // ── 2. Build peer + transport ───────────────────────────────────
+    const transport = webTransport({
+      bridgeUrl: BRIDGE_URL,
+      identity,
+      log: (evt, extra) => log('wt:' + evt, extra),
+    });
 
-      const node = new NeuronNode({
-        id:  BigInt('0x' + identity.id),
-        lat: region.lat, lng: region.lng,
-      });
-      node.transport = transport;
-      const domain = new AxonaDomain({ k: 20 });
+    const node = new NeuronNode({
+      id:  BigInt('0x' + identity.id),
+      lat: US_EAST.lat, lng: US_EAST.lng,
+    });
+    node.transport = transport;
+    const domain = new AxonaDomain({ k: 20 });
+    const peer = new AxonaPeer({ domain, node, identity, transport });
 
-      const peer = new AxonaPeer({ domain, node, identity, transport });
-      await peer.start();
+    // ── 3. Bridge hello / hello-ack admission ───────────────────────
+    // The kernel's webTransport doesn't drive the application-level
+    // handshake — the orchestrator does.  Pattern mirrors axona-peer's
+    // axona_node.js: register handlers BEFORE the socket opens, then
+    // either reply to the bridge's hello with hello-ack, or send our
+    // own hello and admit on hello-ack receipt.
+    const BRIDGE_CONN_ID = 'bridge';
+    let bridgeAdmitted = false;
 
-      // The DHT adapter for AxonManager.  The `sendDirect` self-loopback
-      // is what makes a single-peer setup work: when the axonal tree
-      // fans out a publish and the subscriber happens to be the publisher
-      // itself, the message is dispatched locally without going to the
-      // network.
-      const dht = {
-        getSelfId:       () => peer.getNodeId(),
-        findKClosest:    (...args) => peer.findKClosest(...args),
-        routeMessage:    (...args) => peer.routeMessage(...args),
-        sendDirect:      async (peerId, type, payload) => {
-          if (peerId === peer.getNodeId()) {
-            const h = peer._directHandlers?.get(type);
-            if (!h) return false;
-            try { await h(payload, { fromId: peer.getNodeId(), type }); return true; }
-            catch (err) { console.error('self-sendDirect threw:', err); return false; }
-          }
-          return peer.sendDirect(peerId, type, payload);
-        },
-        onRoutedMessage: (type, h) => peer.onRoutedMessage(type, h),
-        onDirectMessage: (type, h) => peer.onDirectMessage(type, h),
-      };
-      const axonManager = new AxonManager({ dht });
-      peer._axonManager = axonManager;
-      return { peer, identity };
+    function admitBridge(bridgeNodeIdHex) {
+      if (bridgeAdmitted) return;
+      bridgeAdmitted = true;
+      transport.bridge.bindPeer(bridgeNodeIdHex, BRIDGE_CONN_ID);
+      const remoteBigInt = BigInt('0x' + bridgeNodeIdHex);
+      if (!node.synaptome.has(remoteBigInt)) {
+        const stratum = clz264(node.id ^ remoteBigInt);
+        const syn = new Synapse({ peerId: remoteBigInt, latencyMs: 50, stratum });
+        syn.weight   = 0.5;
+        syn.inertia  = 0;
+        syn._addedBy = 'bridge-handshake';
+        node.synaptome.set(remoteBigInt, syn);
+      }
+      log('bridge admitted', { nodeId: bridgeNodeIdHex.slice(0, 16) + '…' });
+      setStatus('connected', `connected · bridge ${bridgeNodeIdHex.slice(0, 8)}…`);
     }
 
-    log('SimNetwork created.');
-    const { peer, identity } = await makePeer({ region: US_EAST });
-    log('Peer started.');
+    // The bridge greets us with `hello` on socket open.  We reply with
+    // our own hello-ack carrying our nodeId.
+    transport.bridge.onNotification('hello', (fromConnId, body) => {
+      if (typeof fromConnId !== 'string') return;   // already bound
+      if (!body || !body.nodeId) return;
+      admitBridge(body.nodeId);
+      // Reply with hello-ack.
+      transport.bridge.notify(BRIDGE_CONN_ID, 'hello-ack', {
+        proto: 'axona/3',
+        nodeId: identity.id,
+      }).catch(err => log('hello-ack send-failed', err.message));
+    });
+    // If we send hello first (defensive — race with the bridge), the
+    // bridge replies with hello-ack.
+    transport.bridge.onNotification('hello-ack', (fromConnId, body) => {
+      if (typeof fromConnId !== 'string') return;
+      if (!body || !body.nodeId) return;
+      admitBridge(body.nodeId);
+    });
 
-    document.getElementById('myId').textContent = identity.id;
-    log('nodeId: ' + identity.id);
+    await transport.start(identity.id);
+    log('transport started');
+    await peer.start();
+    log('peer started');
 
-    // ── Subscribe + publish on the same topic ──────────────────────────
+    // The bridge's WebSocket-level version gate requires a raw
+    // `client-hello` frame as the FIRST message — sent directly on
+    // the socket, BEFORE any axona payloads.  Without it the bridge
+    // drops everything and never sends us its `hello`.  Pattern
+    // matches axona-peer/src/client.js line 533.
+    const PEER_VERSION = '1.1.3';
+    try {
+      transport.socket.send(JSON.stringify({
+        type: 'client-hello',
+        version: PEER_VERSION,
+      }));
+      log('client-hello sent', { version: PEER_VERSION });
+    } catch (err) {
+      log('client-hello-send-failed', err.message);
+    }
+
+    // Defensive: also send our own application-level hello in case
+    // the bridge expects the client to initiate that side too.
+    // Harmless if the bridge already sent theirs (we'll just exchange
+    // two helloes).
+    transport.bridge.notify(BRIDGE_CONN_ID, 'hello', {
+      proto: 'axona/3',
+      nodeId: identity.id,
+    }).catch(err => log('hello send-failed', err.message));
+
+    // Wait briefly for the bridge admission to complete.
+    for (let i = 0; i < 30; i++) {
+      if (bridgeAdmitted) break;
+      await new Promise(r => setTimeout(r, 100));
+    }
+    if (!bridgeAdmitted) {
+      setStatus('failed', 'bridge handshake timeout');
+      log('bridge handshake timed out');
+      throw new Error('bridge handshake timeout');
+    }
+
+    // ── 4. AxonManager + dht adapter ────────────────────────────────
+    const dht = {
+      getSelfId:       () => peer.getNodeId(),
+      findKClosest:    (...args) => peer.findKClosest(...args),
+      routeMessage:    (...args) => peer.routeMessage(...args),
+      sendDirect:      async (peerId, type, payload) => {
+        if (peerId === peer.getNodeId()) {
+          const h = peer._directHandlers?.get(type);
+          if (!h) return false;
+          try { await h(payload, { fromId: peer.getNodeId(), type }); return true; }
+          catch (err) { console.error('self-sendDirect threw:', err); return false; }
+        }
+        return peer.sendDirect(peerId, type, payload);
+      },
+      onRoutedMessage: (type, h) => peer.onRoutedMessage(type, h),
+      onDirectMessage: (type, h) => peer.onDirectMessage(type, h),
+    };
+    peer._axonManager = new AxonManager({ dht });
+
+    // ── 6. Subscribe + publish ──────────────────────────────────────
     const TOPIC     = 'us-east/hello-world';
     const publisher = regionSynthPublisher(US_EAST);
 
@@ -294,12 +313,12 @@
         '  signer: ' + (envelope.signerPubkey || '').slice(0, 16) + '…\n\n';
       receivedEl.scrollTop = receivedEl.scrollHeight;
     }, { publisher, since: 'all' });
-    log('Subscribed to ' + TOPIC + ' (topicId ' + sub.topicId.slice(0, 16) + '…).');
+    log('subscribed', { topicId: sub.topicId.slice(0, 16) + '…' });
 
-    await new Promise(r => setTimeout(r, 100));
-    log('Ready. Type a message and click Publish.');
+    await new Promise(r => setTimeout(r, 200));
+    log('ready');
 
-    // ── Wire the Publish button ────────────────────────────────────────
+    // ── 7. Publish button ───────────────────────────────────────────
     const pubBtn    = document.getElementById('pubBtn');
     const msgInput  = document.getElementById('msgInput');
     const nameInput = document.getElementById('nameInput');
@@ -313,9 +332,9 @@
       pubBtn.disabled = true;
       try {
         const msgId = await peer.pub(TOPIC, wireMsg, { publisher });
-        log('Published: "' + wireMsg + '" (msgId ' + msgId.slice(0, 16) + '…)');
+        log('published', { wireMsg, msgId: msgId.slice(0, 16) + '…' });
       } catch (err) {
-        log('publish error: ' + err.message);
+        log('publish error', err.message);
       }
       pubBtn.disabled = false;
       msgInput.focus();
@@ -327,10 +346,7 @@
     });
 
     function escapeHtml(s) {
-      return String(s)
-        .replaceAll('&', '&amp;')
-        .replaceAll('<', '&lt;')
-        .replaceAll('>', '&gt;');
+      return String(s).replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;');
     }
   </script>
 </body>
