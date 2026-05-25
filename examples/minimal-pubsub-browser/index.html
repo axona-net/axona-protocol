@@ -1,0 +1,328 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>@axona/protocol — minimal pub/sub demo</title>
+  <style>
+    :root {
+      --rust: #2d7373;
+      --rust-soft: #d4a896;
+      --ink: #1a1a1a;
+      --muted: #666;
+      --bg: #fffff8;
+      --card-bg: #fbfbf6;
+      --border: #d8d4ca;
+      --code-bg: #f0ecdf;
+    }
+    * { box-sizing: border-box; }
+    body {
+      font-family: 'EB Garamond', Georgia, serif;
+      max-width: 1000px;
+      margin: 0 auto;
+      padding: 2rem 1.5rem;
+      background: var(--bg);
+      color: var(--ink);
+      line-height: 1.5;
+    }
+    h1 {
+      font-weight: 500;
+      letter-spacing: -0.015em;
+      margin-bottom: 0.3em;
+    }
+    .lede {
+      color: var(--muted);
+      margin-top: 0;
+    }
+    code {
+      font-family: 'Inconsolata', ui-monospace, Menlo, monospace;
+      background: var(--code-bg);
+      padding: 1px 4px;
+      border-radius: 2px;
+      font-size: 0.92em;
+    }
+    .bootlog {
+      background: var(--card-bg);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 0.6rem 0.9rem;
+      font-family: 'Inconsolata', ui-monospace, Menlo, monospace;
+      font-size: 12px;
+      color: var(--muted);
+      margin: 1rem 0;
+      min-height: 1.5rem;
+      white-space: pre-wrap;
+    }
+    .peers {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 1.2rem;
+      margin-top: 1rem;
+    }
+    .peer {
+      background: var(--card-bg);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 1rem 1.2rem;
+    }
+    .peer h2 {
+      font-size: 18px;
+      margin: 0 0 0.4rem 0;
+      color: var(--rust);
+      font-weight: 600;
+    }
+    .nodeId {
+      font-family: 'Inconsolata', ui-monospace, monospace;
+      font-size: 11px;
+      color: var(--muted);
+      word-break: break-all;
+      padding: 0.3rem 0.5rem;
+      background: var(--code-bg);
+      border-radius: 3px;
+      margin-bottom: 0.8rem;
+    }
+    .row {
+      display: flex;
+      gap: 0.5rem;
+      margin-bottom: 0.5rem;
+    }
+    input[type=text] {
+      flex: 1;
+      padding: 0.5rem 0.7rem;
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      font-family: inherit;
+      font-size: 15px;
+      background: white;
+    }
+    button {
+      background: var(--rust);
+      color: white;
+      border: none;
+      padding: 0.5rem 1rem;
+      border-radius: 4px;
+      cursor: pointer;
+      font-family: inherit;
+      font-size: 15px;
+      font-weight: 500;
+    }
+    button:disabled {
+      background: #aaa;
+      cursor: not-allowed;
+    }
+    .label {
+      color: var(--muted);
+      font-size: 13px;
+      margin: 0.7rem 0 0.3rem 0;
+    }
+    .received {
+      background: white;
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      padding: 0.6rem 0.9rem;
+      font-family: 'Inconsolata', ui-monospace, monospace;
+      font-size: 12px;
+      min-height: 200px;
+      max-height: 320px;
+      overflow-y: auto;
+      white-space: pre-wrap;
+      color: #333;
+    }
+    .received .empty { color: var(--muted); font-style: italic; }
+    .arrived { color: var(--rust); font-weight: 600; }
+    footer {
+      margin-top: 2rem;
+      font-size: 13px;
+      color: var(--muted);
+      text-align: center;
+    }
+    footer a { color: var(--rust); }
+  </style>
+</head>
+<body>
+  <h1>@axona/protocol — minimal pub/sub demo</h1>
+  <p class="lede">
+    Two Axona peers running in this browser tab, connected by an in-process
+    <code>SimNetwork</code>. Alice publishes; Bob subscribes; signed envelopes
+    arrive end-to-end. Same source as <code>examples/minimal-pubsub/index.js</code>,
+    just wired to the DOM instead of <code>console.log</code>.
+  </p>
+
+  <div id="bootlog" class="bootlog">Booting…</div>
+
+  <div class="peers">
+    <div class="peer">
+      <h2>Alice (publisher)</h2>
+      <div class="label">nodeId</div>
+      <div class="nodeId" id="aliceId">…</div>
+      <div class="label">Publish to <code>us-east/hello-world</code></div>
+      <div class="row">
+        <input type="text" id="msgInput" placeholder="message to publish" value="hello from alice" />
+        <button id="pubBtn" disabled>Publish</button>
+      </div>
+    </div>
+    <div class="peer">
+      <h2>Bob (subscriber)</h2>
+      <div class="label">nodeId</div>
+      <div class="nodeId" id="bobId">…</div>
+      <div class="label">Received messages</div>
+      <div class="received" id="receivedLog"><span class="empty">(waiting for messages…)</span></div>
+    </div>
+  </div>
+
+  <footer>
+    Source: <code>axona-protocol/src/</code> served live · kernel
+    v<span id="kernelVer">…</span> · same code path as the Node example
+  </footer>
+
+  <script type="module">
+    import {
+      AxonaPeer, AxonaDomain, NeuronNode,
+      AxonManager, simTransport, SimNetwork, Synapse,
+      deriveIdentity, geoCellId, clz264,
+    } from '/src/index.js';
+
+    const bootlogEl = document.getElementById('bootlog');
+    const log = (msg) => {
+      bootlogEl.textContent += '\n' + msg;
+      bootlogEl.scrollTop = bootlogEl.scrollHeight;
+    };
+    const setLog = (msg) => { bootlogEl.textContent = msg; };
+
+    // Pull the kernel version from the package.json (served alongside src/)
+    try {
+      const pkg = await fetch('/package.json').then(r => r.json());
+      document.getElementById('kernelVer').textContent = pkg.version;
+    } catch {
+      document.getElementById('kernelVer').textContent = '?';
+    }
+
+    setLog('Booting…');
+
+    // ── 1. Region helpers ──────────────────────────────────────────────
+    const US_EAST = { lat: 38.0, lng: -77.0 };
+
+    function regionSynthPublisher({ lat, lng }) {
+      const s2 = geoCellId(lat, lng, 8);
+      return s2.toString(16).padStart(2, '0') + '0'.repeat(64);
+    }
+
+    // ── 2. Build a peer ────────────────────────────────────────────────
+    async function makePeer({ network, region }) {
+      const identity = await deriveIdentity(region);
+      const transport = simTransport({ network, identity, heartbeatMs: 0 });
+      await transport.start(identity.id);
+      const node = new NeuronNode({
+        id:  BigInt('0x' + identity.id),
+        lat: region.lat, lng: region.lng,
+      });
+      node.transport = transport;
+      const domain = new AxonaDomain({ k: 20 });
+      const peer = new AxonaPeer({ domain, node, identity, transport });
+      await peer.start();
+
+      const dht = {
+        getSelfId:       () => peer.getNodeId(),
+        findKClosest:    (...args) => peer.findKClosest(...args),
+        routeMessage:    (...args) => peer.routeMessage(...args),
+        sendDirect:      async (peerId, type, payload) => {
+          if (peerId === peer.getNodeId()) {
+            const h = peer._directHandlers?.get(type);
+            if (!h) return false;
+            try { await h(payload, { fromId: peer.getNodeId(), type }); return true; }
+            catch (err) { console.error('self-sendDirect threw:', err); return false; }
+          }
+          return peer.sendDirect(peerId, type, payload);
+        },
+        onRoutedMessage: (type, h) => peer.onRoutedMessage(type, h),
+        onDirectMessage: (type, h) => peer.onDirectMessage(type, h),
+      };
+      const axonManager = new AxonManager({ dht });
+      peer._axonManager = axonManager;
+      return { peer, identity };
+    }
+
+    // ── 3. Wire two peers ──────────────────────────────────────────────
+    const network = new SimNetwork();
+    log('SimNetwork created.');
+
+    const { peer: alice, identity: aliceId } = await makePeer({ network, region: US_EAST });
+    log('Alice peer started.');
+    const { peer: bob, identity: bobId } = await makePeer({ network, region: US_EAST });
+    log('Bob peer started.');
+
+    await alice._transport.openConnection(bobId.id);
+
+    function admitSynapse(localPeer, remoteBigInt) {
+      const localId = localPeer._node.id;
+      const stratum = clz264(localId ^ remoteBigInt);
+      const syn = new Synapse({ peerId: remoteBigInt, latencyMs: 1, stratum });
+      syn.weight   = 0.5;
+      syn.inertia  = 0;
+      syn._addedBy = 'demo';
+      localPeer._node.synaptome.set(remoteBigInt, syn);
+    }
+    admitSynapse(alice, BigInt('0x' + bobId.id));
+    admitSynapse(bob,   BigInt('0x' + aliceId.id));
+    log('Alice ↔ Bob synapses admitted.');
+
+    document.getElementById('aliceId').textContent = aliceId.id;
+    document.getElementById('bobId').textContent   = bobId.id;
+
+    await new Promise(r => setTimeout(r, 50));
+
+    // ── 4. Subscribe ──────────────────────────────────────────────────
+    const TOPIC     = 'us-east/hello-world';
+    const publisher = regionSynthPublisher(US_EAST);
+
+    const receivedEl = document.getElementById('receivedLog');
+    let receivedCount = 0;
+
+    const sub = await bob.sub(TOPIC, (envelope) => {
+      if (receivedCount === 0) receivedEl.textContent = '';
+      receivedCount++;
+      const ts = new Date().toLocaleTimeString();
+      receivedEl.innerHTML +=
+        '<span class="arrived">[' + ts + ']</span> ' +
+        escapeHtml(envelope.message) + '\n' +
+        '  msgId: ' + envelope.msgId.slice(0, 16) + '…\n' +
+        '  from:  ' + (envelope.signerPubkey || '').slice(0, 16) + '…\n\n';
+      receivedEl.scrollTop = receivedEl.scrollHeight;
+    }, { publisher, since: 'all' });
+    log('Bob subscribed to ' + TOPIC + ' (topicId: ' + sub.topicId.slice(0, 16) + '…).');
+
+    await new Promise(r => setTimeout(r, 100));
+    log('Ready. Click Publish.');
+
+    // ── 5. Wire the Publish button ────────────────────────────────────
+    const pubBtn   = document.getElementById('pubBtn');
+    const msgInput = document.getElementById('msgInput');
+    pubBtn.disabled = false;
+
+    async function publishOnce() {
+      const msg = msgInput.value || 'hello from alice';
+      pubBtn.disabled = true;
+      try {
+        const msgId = await alice.pub(TOPIC, msg, { publisher });
+        log('Alice published: "' + msg + '" (msgId ' + msgId.slice(0, 16) + '…)');
+      } catch (err) {
+        log('publish error: ' + err.message);
+      }
+      pubBtn.disabled = false;
+      msgInput.focus();
+      msgInput.select();
+    }
+    pubBtn.addEventListener('click', publishOnce);
+    msgInput.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' && !pubBtn.disabled) publishOnce();
+    });
+
+    function escapeHtml(s) {
+      return String(s)
+        .replaceAll('&', '&amp;')
+        .replaceAll('<', '&lt;')
+        .replaceAll('>', '&gt;');
+    }
+  </script>
+</body>
+</html>
