@@ -350,6 +350,30 @@ export class AxonManager {
       }
     }
 
+    // ── Direct fan-out to our own role's children ──────────────────────
+    // If a peer subscribed via us (sent us subscribe-k because we were
+    // in their K-closest), they live in OUR axonRole.children for this
+    // topic.  In a small mesh where two peers' synaptomes don't fully
+    // converge, the publisher's K-closest fan-out below may miss the
+    // peers that subscribed via the publisher directly.  Sending
+    // pubsub:deliver to our children here closes that gap: subscribers
+    // who landed on us as their axon are always served by our publishes,
+    // independent of K-set agreement.  Per-hop _alreadySeenPublish
+    // dedupe keeps this safe when a child also gets the message via the
+    // K-closest tree.
+    const role = this.axonRoles.get(topicId);
+    if (role && role.children?.size > 0) {
+      for (const [childId] of role.children) {
+        if (childId === this.nodeId) {
+          if (this._deliveryCallback) this._deliveryCallback(topicId, json, publishId, publishTs);
+          continue;
+        }
+        this.dht.sendDirect(childId, 'pubsub:deliver', {
+          topicId, json, publishId, publishTs, postHash, publisher,
+        });
+      }
+    }
+
     if (this._useKClosestMode()) {
       const roots = await this._findKClosest(topicId, this.rootSetSize);
       if (roots.length > 0) {
@@ -1249,13 +1273,25 @@ export class AxonManager {
     this._addToReplayCache(role, { json, publishId, publishTs, postHash, publisher });
     this._recordReceived(topicId, publishId, publishTs);
 
+    // Deliver locally if we hold a subscription for this topic, OR if
+    // we appear as a child of our own role (legacy self-subscriber
+    // path).  We may be one of the publisher's K-closest (publish-k
+    // landed here as the first hop) AND a local subscriber whose own
+    // subscribe-k went to a different K-set — without this branch,
+    // _onDeliver — which always fires _deliveryCallback — never runs
+    // here because no peer is forwarding pubsub:deliver to us (we ARE
+    // the root).  The _alreadySeenPublish guard at the top of this
+    // method prevents double-firing if the same publishId also
+    // arrives via _onDeliver from another K-closest peer.
+    const selfInChildren = role.children.has(this.nodeId);
+    if ((this.mySubscriptions.has(topicId) || selfInChildren) && this._deliveryCallback) {
+      this._deliveryCallback(topicId, json, publishId, publishTs);
+      if (selfInChildren && postHash) this._bumpDelivery(topicId, postHash);
+    }
+
     const deadChildren = [];
     for (const [childId] of role.children) {
-      if (childId === this.nodeId) {
-        if (this._deliveryCallback) this._deliveryCallback(topicId, json, publishId, publishTs);
-        if (postHash) this._bumpDelivery(topicId, postHash);
-        continue;
-      }
+      if (childId === this.nodeId) continue;  // already handled above
       const ok = await this.dht.sendDirect(childId, 'pubsub:deliver',
         { topicId, json, publishId, publishTs, postHash, publisher });
       if (!ok) {
