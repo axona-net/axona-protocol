@@ -56,8 +56,8 @@ await alice.pub('hello-world', 'hi from alice');
 ```
 
 For a runnable version with synaptome admission and the full
-SimNetwork wiring, see
-[`axona-docs/programmer-guide/examples/minimal-pubsub/`](https://github.com/axona-net/axona-docs/tree/main/programmer-guide/examples/minimal-pubsub).
+SimNetwork wiring, see [`examples/minimal-pubsub/`](examples/minimal-pubsub/).
+`npm install && node index.js` — full pub/sub roundtrip in ~150 lines.
 
 ## The AxonaPeer surface
 
@@ -214,12 +214,16 @@ Full list: `AxonaError`, `IdentityError`, `TransportError`, `PublishError`,
 
 ## Examples
 
-Runnable example in [`axona-docs/programmer-guide/examples/minimal-pubsub/`](https://github.com/axona-net/axona-docs/tree/main/programmer-guide/examples/minimal-pubsub):
-two peers, one Node process, pub/sub roundtrip in ~150 lines.
+- [`examples/minimal-pubsub/`](examples/minimal-pubsub/) — two peers in
+  one Node process, pub/sub roundtrip in ~150 lines. Pinned to the
+  local kernel source via `file:../..`, so `npm install && node index.js`
+  picks up whatever's in `src/`. The right starting point for new
+  developers.
 
 For real-world wiring (WebRTC + bridge fallback, identity persistence,
 region pickers), the canonical example is
-[`axona-peer/src/client.js`](https://github.com/axona-net/axona-peer/blob/main/src/client.js).
+[`axona-peer/src/client.js`](https://github.com/axona-net/axona-peer/blob/main/src/client.js)
+— the reference browser peer at ~1500 lines.
 
 ## Programmer guide
 
