@@ -91,6 +91,9 @@ export { MeshManager, WebRTCTransport, BridgeTransport, CompositeTransport };
  * @param {WebTransportConfig} config
  * @returns {CompositeTransport & { mesh: MeshManager, webrtc: WebRTCTransport, bridge: BridgeTransport, socket: WebSocket | null, bridgeReady: Promise<string|null>, bridgeNodeId: string | null }}
  */
+/** Bridge ping cadence — matches axona-peer's BRIDGE_PING_INTERVAL_MS. */
+const BRIDGE_PING_INTERVAL_MS = 1000;
+
 export function webTransport({
   bridgeUrl,
   identity,
@@ -99,6 +102,7 @@ export function webTransport({
   autoHandshake = true,
   peerVersion,
   handshakeTimeoutMs = 15000,
+  pingIntervalMs = BRIDGE_PING_INTERVAL_MS,
 } = {}) {
   if (typeof bridgeUrl !== 'string' || !/^wss?:\/\//.test(bridgeUrl)) {
     throw new TransportError(ErrorCodes.TRANSPORT_NOT_STARTED,
@@ -422,10 +426,16 @@ export function webTransport({
       } finally {
         clearTimeout(timer);
       }
+
+      // (c) Start the bridge ping/pong heartbeat.  The live bridge
+      // closes idle sockets after ~15s without a ping; axona-peer
+      // sends one every 1s.  We do the same so apps stay connected.
+      startBridgePingLoop();
     }
   };
   const origStop = composite.stop.bind(composite);
   composite.stop = async () => {
+    stopBridgePingLoop();
     await origStop();
     if (socket) {
       try { socket.close(); } catch { /* ignore */ }
@@ -434,6 +444,33 @@ export function webTransport({
     }
     if (typeof mesh.dispose === 'function') mesh.dispose();
   };
+
+  // ── Bridge ping/pong heartbeat ──────────────────────────────────
+  // The live bridge drops idle clients after a short timeout.  Send a
+  // raw `{type:'ping', t}` over the WebSocket every pingIntervalMs;
+  // the bridge replies with `{type:'pong', t}` which the signaling
+  // dispatcher logs as bridge-frame-unhandled (harmless).  Future
+  // enhancement: surface RTT to consumers via transport.getLatency.
+  let pingTimer = null;
+  function startBridgePingLoop() {
+    if (pingTimer != null) return;
+    pingTimer = setInterval(() => {
+      if (!socket || !socketOpen) return;
+      try {
+        socket.send(JSON.stringify({ type: 'ping', t: Date.now() }));
+      } catch (err) {
+        log('bridge-ping-send-failed', { err: err.message });
+      }
+    }, pingIntervalMs);
+  }
+  function stopBridgePingLoop() {
+    if (pingTimer != null) {
+      clearInterval(pingTimer);
+      pingTimer = null;
+    }
+  }
+  // Also stop the ping loop if the socket dies for any reason.
+  socketEvents.close.add(() => stopBridgePingLoop());
 
   // Expose the sub-transports + raw mesh for orchestrators that need
   // direct access (hello/hello-ack wiring before W1 lands, smoke
