@@ -121,9 +121,8 @@
 
   <script type="module">
     import {
-      AxonaPeer, AxonaDomain, NeuronNode, Synapse,
-      AxonManager,
-      deriveIdentity, geoCellId, clz264,
+      AxonaPeer, AxonaDomain, NeuronNode,
+      deriveIdentity, geoCellId,
     } from '/src/index.js';
     import { webTransport } from '/src/transport/web/index.js';
 
@@ -195,29 +194,14 @@
 
     await transport.start(identity.id);   // does the bridge handshake
     await peer.start();                   // auto-admits transport.boundPeers()
+                                          // and builds a default AxonManager
+                                          // with the reachable-only K-closest
+                                          // + tunneled-direct sendDirect that
+                                          // production axona.net peers use.
     log('peer ready · bridge:', transport.bridgeNodeId.slice(0, 16) + '…');
     setStatus('connected', `connected · bridge ${transport.bridgeNodeId.slice(0, 8)}…`);
 
-    // ── 4. AxonManager + dht adapter ────────────────────────────────
-    const dht = {
-      getSelfId:       () => peer.getNodeId(),
-      findKClosest:    (...args) => peer.findKClosest(...args),
-      routeMessage:    (...args) => peer.routeMessage(...args),
-      sendDirect:      async (peerId, type, payload) => {
-        if (peerId === peer.getNodeId()) {
-          const h = peer._directHandlers?.get(type);
-          if (!h) return false;
-          try { await h(payload, { fromId: peer.getNodeId(), type }); return true; }
-          catch (err) { console.error('self-sendDirect threw:', err); return false; }
-        }
-        return peer.sendDirect(peerId, type, payload);
-      },
-      onRoutedMessage: (type, h) => peer.onRoutedMessage(type, h),
-      onDirectMessage: (type, h) => peer.onDirectMessage(type, h),
-    };
-    peer._axonManager = new AxonManager({ dht });
-
-    // ── 6. Subscribe + publish ──────────────────────────────────────
+    // ── 3. Subscribe + publish ──────────────────────────────────────
     const TOPIC     = 'us-east/hello-world';
     const publisher = regionSynthPublisher(US_EAST);
 

@@ -219,8 +219,21 @@ export function webTransport({
       const t = frame.type;
       switch (t) {
         case 'welcome':
-          // Bridge greeting (myConnId, server version).  No mesh hook —
-          // composite.start has already called mesh.setMyId(localNodeId).
+          // Bridge greeting (myConnId, server version, optional TURN
+          // credentials).  composite.start has already called
+          // mesh.setMyId(localNodeId); here we just thread the TURN
+          // config through to the mesh BEFORE peer-list arrives so the
+          // RTCPeerConnections built by _initiateTo can relay through
+          // it.  Mirrors axona-peer/src/client.js's `case 'welcome'`.
+          if (typeof mesh.setTurnConfig === 'function') {
+            try { mesh.setTurnConfig(frame.turn ?? null); }
+            catch (err) { log('turn-config-failed', { err: err.message }); }
+          }
+          log('bridge-welcome', {
+            connId:  frame.connId,
+            version: frame.version,
+            turn:    !!frame.turn,
+          });
           return;
         case 'peer-list':
           if (typeof mesh.onPeerList === 'function') {
