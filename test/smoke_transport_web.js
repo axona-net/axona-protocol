@@ -9,6 +9,7 @@
 
 import { WebRTCTransport } from '../src/transport/web/index.js';
 import { TransportError, ErrorCodes } from '../src/errors.js';
+import { fromHex } from '../src/utils/hexid.js';
 
 let passed = 0, failed = 0;
 function check(label, condition) {
@@ -16,9 +17,11 @@ function check(label, condition) {
   else           { console.log(`  ✗ ${label}`); failed++; }
 }
 
-// 66-char hex nodeIds for testing (8-bit S2 prefix + 256-bit hash).
-const ALICE = 'aa' + 'a1'.repeat(32);
-const BOB   = 'bb' + 'b2'.repeat(32);
+// Kernel-canonical form: 264-bit BigInt.  Wire/display form is hex.
+const ALICE_HEX = 'aa' + 'a1'.repeat(32);
+const BOB_HEX   = 'bb' + 'b2'.repeat(32);
+const ALICE = fromHex(ALICE_HEX);
+const BOB   = fromHex(BOB_HEX);
 const ALICE_MESH = 'mesh-alice';
 const BOB_MESH   = 'mesh-bob';
 
@@ -104,7 +107,7 @@ async function testLifecycle() {
   const { alice } = makePair();
   await alice.start();
   check('start() sets _started',         alice._started === true);
-  check('getLocalNodeId returns hex id', alice.getLocalNodeId() === ALICE);
+  check('getLocalNodeId returns BigInt id', alice.getLocalNodeId() === ALICE);
 
   await alice.start();
   check('repeat start is idempotent',    alice._started === true);
@@ -119,11 +122,11 @@ async function testLifecycle() {
 async function testStartValidation() {
   console.log('\n── start validation ──');
   const mesh = new FakeMesh(ALICE_MESH);
-  const t = new WebRTCTransport({ mesh, localNodeId: 'not-a-hex-id' });
+  const t = new WebRTCTransport({ mesh, localNodeId: 'not-a-bigint-id' });
   let err = null;
   try { await t.start(); }
   catch (e) { err = e; }
-  check('rejects non-hex localNodeId',
+  check('rejects non-bigint localNodeId',
     err instanceof TransportError && err.code === ErrorCodes.TRANSPORT_NOT_STARTED);
 
   const t2 = new WebRTCTransport({ /* no mesh */ });
@@ -154,8 +157,8 @@ async function testBindUnbind() {
   check('meshIdFor after unbind = null',    alice.meshIdFor(BOB) === null);
 
   let threw = false;
-  try { alice.bindPeer('not-hex', BOB_MESH); } catch { threw = true; }
-  check('bindPeer rejects non-hex nodeId', threw);
+  try { alice.bindPeer('not-a-bigint', BOB_MESH); } catch { threw = true; }
+  check('bindPeer rejects non-bigint nodeId', threw);
 }
 
 async function testSendRequest() {
@@ -267,7 +270,7 @@ async function testNotify() {
   check('notify with no handler is silent', true);
 
   // Unbound peer → silent drop.
-  await alice.notify('cc' + '0'.repeat(64), 'tick', null);
+  await alice.notify(fromHex('cc' + '0'.repeat(64)), 'tick', null);
   check('notify to unbound peer is silent', true);
 }
 

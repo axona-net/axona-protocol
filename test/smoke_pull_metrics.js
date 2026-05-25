@@ -9,7 +9,8 @@
 import { AxonaPeer }       from '../src/dht/AxonaPeer.js';
 import { deriveIdentity }  from '../src/identity/index.js';
 import { buildEnvelope }   from '../src/pubsub/envelope.js';
-import { deriveTopicId }   from '../src/pubsub/post.js';
+import { deriveTopicId, deriveTopicIdBig } from '../src/pubsub/post.js';
+import { fromHex }         from '../src/utils/hexid.js';
 import { PullError, MetricsError, ErrorCodes } from '../src/errors.js';
 
 let passed = 0, failed = 0;
@@ -108,8 +109,9 @@ async function testPullHappy() {
 
   const msgId = await peer.pub('cats', { meow: 1 });
   check('pub succeeded', typeof msgId === 'string');
+  // Kernel passes BigInt topicId to AxonManager now.
   check('replay cache populated with postHash',
-    am._replay.get(await deriveTopicId(identity.id, 'cats'))?.[0]?.postHash === msgId);
+    am._replay.get(await deriveTopicIdBig(fromHex(identity.id), 'cats'))?.[0]?.postHash === msgId);
 
   const pulled = await peer.pull(msgId, { topic: 'cats', publisher: identity.id });
   check('pull returned envelope',
@@ -159,8 +161,9 @@ async function testPullBumpsCounter() {
   const msgId = await peer.pub('cats', 'hi');
   await peer.pull(msgId, { topic: 'cats', publisher: identity.id });
 
-  const topicId = await deriveTopicId(identity.id, 'cats');
-  const ctr = am._counters.get(topicId).get(msgId);
+  // BigInt topicId is the kernel-internal key.
+  const topicIdBig = await deriveTopicIdBig(fromHex(identity.id), 'cats');
+  const ctr = am._counters.get(topicIdBig).get(msgId);
   check('pull_count incremented', ctr.pull_count === 1);
 
   // Pull again.
@@ -178,7 +181,7 @@ async function testMetricsAggregation() {
   const m3 = await peer.pub('cats', 3);
 
   // Simulate deliveries (each post delivered to 5 subscribers).
-  const topicId = await deriveTopicId(identity.id, 'cats');
+  const topicId = await deriveTopicIdBig(fromHex(identity.id), 'cats');
   am._bumpDelivery(topicId, m1, 5);
   am._bumpDelivery(topicId, m2, 5);
   am._bumpDelivery(topicId, m3, 5);

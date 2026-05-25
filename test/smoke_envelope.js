@@ -194,7 +194,7 @@ async function testPeerSignedRoundTrip() {
     am.published.length === 1);
 
   // Trigger delivery with the same JSON the publisher wrote.
-  am.triggerDelivery(sub.topicId, am.published[0].json, 'internal-1', 1700000000000);
+  am.triggerDelivery(sub._topicId, am.published[0].json, 'internal-1', 1700000000000);
 
   check('handler received envelope', received.length === 1);
   check('envelope.msgId matches pub return value',
@@ -226,7 +226,7 @@ async function testPeerUnsignedRoundTrip() {
   const sub = await peer.sub('announce', e => received.push(e));
 
   const msgId = await peer.pub('announce', 'public broadcast', { sign: false });
-  am.triggerDelivery(sub.topicId, am.published[0].json, 'internal-1', 1700000000000);
+  am.triggerDelivery(sub._topicId, am.published[0].json, 'internal-1', 1700000000000);
 
   check('unsigned envelope delivered',
     received.length === 1 && received[0].msgId === msgId);

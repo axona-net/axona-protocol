@@ -20,7 +20,7 @@
 import { AxonaPeer }       from '../src/dht/AxonaPeer.js';
 import { Subscription }    from '../src/dht/Subscription.js';
 import { deriveTopicId }   from '../src/pubsub/post.js';
-import { isHexId }         from '../src/utils/hexid.js';
+import { isHexId, fromHex, toHex } from '../src/utils/hexid.js';
 import { PublishError, SubscribeError, ErrorCodes } from '../src/errors.js';
 
 let passed = 0, failed = 0;
@@ -84,12 +84,13 @@ async function testPubBasics() {
     typeof msgId === 'string' && msgId.length === 64);
   check('AxonManager.pubsubPublish called once',
     am.published.length === 1);
-  check('topicId is 66-char hex',
-    isHexId(am.published[0].topicId));
+  // Kernel passes BigInt topicId to AxonManager (post-v1.5 refactor).
+  check('topicId is bigint',
+    typeof am.published[0].topicId === 'bigint');
 
-  const expectedTopicId = await deriveTopicId(NODE_ID, 'cats');
+  const expectedTopicIdHex = await deriveTopicId(NODE_ID, 'cats');
   check('topicId = deriveTopicId(nodeId, topic)',
-    am.published[0].topicId === expectedTopicId);
+    toHex(am.published[0].topicId) === expectedTopicIdHex);
 
   // Envelope is JSON-serialized: { msgId, ts, topic, message }
   const env = JSON.parse(am.published[0].json);
@@ -145,20 +146,21 @@ async function testSubReceives() {
 
   check('sub returns Subscription', sub instanceof Subscription);
   check('sub.topicName preserved',  sub.topicName === 'cats');
+  // Public sub.topicId is hex (display form); kernel uses BigInt internally.
   check('sub.topicId is hex',       isHexId(sub.topicId));
+  // AxonManager.pubsubSubscribe is called with BigInt topicId.
   check('AxonManager.pubsubSubscribe called',
-    am.subscribed.length === 1 && am.subscribed[0] === sub.topicId);
+    am.subscribed.length === 1 && am.subscribed[0] === sub._topicId);
 
-  // Synthesize a JSON envelope (matches what peer.pub would emit).
-  // Use sign:false here so this smoke stays independent of identity
-  // wiring — the signed flow is exercised by smoke_envelope.js.
+  // Synthesize a JSON envelope.  triggerDelivery must use the BigInt
+  // topicId (kernel-internal key); sub._topicId exposes it.
   const env = {
     msgId: '0'.repeat(64),
     ts: 1234567,
     topic: 'cats',
     message: { hi: 1 },
   };
-  am.triggerDelivery(sub.topicId, JSON.stringify(env), 'internal-7', 999);
+  am.triggerDelivery(sub._topicId, JSON.stringify(env), 'internal-7', 999);
 
   check('handler invoked once', received.length === 1);
   check('envelope.msgId is content-derived, not publishId',
@@ -182,7 +184,7 @@ async function testMultipleSubsSameTopic() {
   const payload = JSON.stringify({
     msgId: '1'.repeat(64), ts: 1, topic: 'cats', message: 'meow',
   });
-  am.triggerDelivery(subA.topicId, payload, 'm-1', 1);
+  am.triggerDelivery(subA._topicId, payload, 'm-1', 1);
 
   check('handler A received', a.length === 1);
   check('handler B received', b.length === 1);
@@ -204,7 +206,7 @@ async function testSubStopUnsubscribes() {
   const payload = JSON.stringify({
     msgId: '2'.repeat(64), ts: 2, topic: 'cats', message: 'x',
   });
-  am.triggerDelivery(subA.topicId, payload);
+  am.triggerDelivery(subA._topicId, payload);
   check('subA handler no longer fires after stop', a.length === 0);
   check('subB handler still fires',                b.length === 1);
 
@@ -214,7 +216,7 @@ async function testSubStopUnsubscribes() {
 
   await subB.stop();
   check('after last handler stops: unsubscribe called',
-    am.unsubscribed.length === 1 && am.unsubscribed[0] === subB.topicId);
+    am.unsubscribed.length === 1 && am.unsubscribed[0] === subB._topicId);
 }
 
 async function testSubValidation() {
@@ -238,23 +240,24 @@ async function testSinceModes() {
   console.log('\n── peer.sub({since}) modes ──');
   const { peer, am } = makePeer();
 
+  // _lastSeenTsByTopic is keyed by BigInt topicId (kernel-internal form).
   const sub1 = await peer.sub('a', () => {});
-  const ts1 = am._lastSeenTsByTopic.get(sub1.topicId);
+  const ts1 = am._lastSeenTsByTopic.get(sub1._topicId);
   check('default since: lastSeenTs ≈ now (live tail)',
     typeof ts1 === 'number' && ts1 > 0 && ts1 <= Date.now());
 
   const sub2 = await peer.sub('b', () => {}, { since: 'all' });
   check("since:'all' → lastSeenTs = 0",
-    am._lastSeenTsByTopic.get(sub2.topicId) === 0);
+    am._lastSeenTsByTopic.get(sub2._topicId) === 0);
 
   const sub3 = await peer.sub('c', () => {}, { since: 'latest' });
-  const ts3 = am._lastSeenTsByTopic.get(sub3.topicId);
+  const ts3 = am._lastSeenTsByTopic.get(sub3._topicId);
   check("since:'latest' → lastSeenTs ≈ now-1s",
     typeof ts3 === 'number' && Math.abs(ts3 - (Date.now() - 1000)) < 100);
 
   const sub4 = await peer.sub('d', () => {}, { since: 42 });
   check('since:<number> → lastSeenTs set exactly',
-    am._lastSeenTsByTopic.get(sub4.topicId) === 42);
+    am._lastSeenTsByTopic.get(sub4._topicId) === 42);
 
   let err = null;
   try { await peer.sub('e', () => {}, { since: 'invalid' }); }

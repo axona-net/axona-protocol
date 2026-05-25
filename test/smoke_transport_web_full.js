@@ -20,6 +20,7 @@ import {
   webTransport,
 } from '../src/transport/web/index.js';
 import { TransportError, ErrorCodes } from '../src/errors.js';
+import { fromHex } from '../src/utils/hexid.js';
 
 let passed = 0, failed = 0;
 function check(label, condition) {
@@ -27,8 +28,11 @@ function check(label, condition) {
   else           { console.log(`  ✗ ${label}`); failed++; }
 }
 
-const ALICE  = 'aa' + 'a1'.repeat(32);
-const BRIDGE = 'cc' + 'fe'.repeat(32);
+// Wire/display form is hex; kernel-internal canonical form is BigInt.
+const ALICE_HEX  = 'aa' + 'a1'.repeat(32);
+const BRIDGE_HEX = 'cc' + 'fe'.repeat(32);
+const ALICE  = fromHex(ALICE_HEX);
+const BRIDGE = fromHex(BRIDGE_HEX);
 
 // ── BridgeTransport tests ────────────────────────────────────────────
 
@@ -48,8 +52,8 @@ async function testBridgeBindAndSend() {
   check('ownsPeer = true', bt.ownsPeer(BRIDGE));
 
   let threw = false;
-  try { bt.bindPeer('not-hex', 'bridge'); } catch { threw = true; }
-  check('bindPeer rejects non-hex nodeId', threw);
+  try { bt.bindPeer('not-a-bigint', 'bridge'); } catch { threw = true; }
+  check('bindPeer rejects non-bigint nodeId', threw);
 
   threw = false;
   try { bt.bindPeer(BRIDGE, 'not-bridge-connId'); } catch { threw = true; }
@@ -185,8 +189,8 @@ class FakeSubTransport {
 
 async function testCompositeRouting() {
   console.log('\n── CompositeTransport: routes to owning sub-transport ──');
-  const BOB   = 'bb' + 'b2'.repeat(32);
-  const CAROL = 'cc' + 'c3'.repeat(32);
+  const BOB   = fromHex('bb' + 'b2'.repeat(32));
+  const CAROL = fromHex('cc' + 'c3'.repeat(32));
 
   const subA = new FakeSubTransport('bridge', BRIDGE);
   const subB = new FakeSubTransport('webrtc', BOB);
@@ -222,7 +226,7 @@ async function testCompositeRouting() {
 
 async function testCompositeHandlerFanout() {
   console.log('\n── CompositeTransport: handlers fan out to every sub ──');
-  const BOB = 'bb' + 'b2'.repeat(32);
+  const BOB = fromHex('bb' + 'b2'.repeat(32));
   const subA = new FakeSubTransport('a', BRIDGE);
   const subB = new FakeSubTransport('b', BOB);
 
@@ -261,12 +265,18 @@ async function testCompositeLateAdd() {
 async function testCompositeLocalIdValidation() {
   console.log('\n── CompositeTransport: localNodeId validation ──');
   let threw = false;
-  try { new CompositeTransport({ localNodeId: 12345n }); } catch { threw = true; }
-  check('rejects BigInt localNodeId (must be hex string)', threw);
+  // Post-v1.5: localNodeId is BigInt-only.  Hex string is rejected.
+  try { new CompositeTransport({ localNodeId: 'aa' + 'a1'.repeat(32) }); } catch { threw = true; }
+  check('rejects hex-string localNodeId (must be BigInt)', threw);
 
   threw = false;
   try { new CompositeTransport({ localNodeId: 'short' }); } catch { threw = true; }
   check('rejects short string', threw);
+
+  // BigInt is accepted.
+  threw = false;
+  try { new CompositeTransport({ localNodeId: 12345n }); } catch { threw = true; }
+  check('accepts BigInt localNodeId', !threw);
 }
 
 // ── webTransport factory tests ───────────────────────────────────────
@@ -307,7 +317,8 @@ class FakeWebSocket {
 async function testWebTransportFactory() {
   console.log('\n── webTransport factory: construction + start ──');
   let threw = false;
-  try { webTransport({ bridgeUrl: 'not-a-url', identity: { id: ALICE } }); }
+  // identity.id is the user-facing hex form.
+  try { webTransport({ bridgeUrl: 'not-a-url', identity: { id: ALICE_HEX } }); }
   catch { threw = true; }
   check('rejects non-ws URL', threw);
 
@@ -322,7 +333,7 @@ async function testWebTransportFactory() {
   // never sends).
   const t = webTransport({
     bridgeUrl: 'wss://test.example',
-    identity:  { id: ALICE },
+    identity:  { id: ALICE_HEX },
     WebSocketImpl: FakeWebSocket,
     autoHandshake: false,
   });
@@ -338,9 +349,7 @@ async function testWebTransportFactory() {
   check('after start: composite is started', t._started === true);
 
   // Inbound axona-typed frame → routes to BridgeTransport.
-  // (We need to bind first so the bridge will accept the response,
-  // but for this smoke we just want to confirm the dispatch path
-  // doesn't throw.)
+  // bindPeer takes BigInt (kernel form).
   t.bridge.bindPeer(BRIDGE, 'bridge');
   t.socket._deliver(JSON.stringify({ type: 'axona', payload: { k: 'ntf', type: 'pong', body: { ok: true } } }));
   check('axona-typed frame dispatch reaches bridge transport without throwing',
@@ -366,7 +375,7 @@ async function testWebTransportAutoHandshake() {
 
   const t = webTransport({
     bridgeUrl: 'wss://test.example',
-    identity:  { id: ALICE },
+    identity:  { id: ALICE_HEX },
     WebSocketImpl: FakeWebSocket,
     // autoHandshake defaults to true
     handshakeTimeoutMs: 1000,
@@ -385,27 +394,32 @@ async function testWebTransportAutoHandshake() {
   check('autoHandshake sends client-hello as first frame',
     firstFrame && firstFrame.type === 'client-hello' && typeof firstFrame.version === 'string');
 
-  // (b) Simulate the bridge replying with `axona`-framed hello.
+  // (b) Simulate the bridge replying with `axona`-framed hello.  Wire
+  // payload nodeId is hex.
   t.socket._deliver(JSON.stringify({
     type: 'axona',
     payload: { k: 'ntf', type: 'hello', body: {
-      proto: 'axona/3', nodeId: BRIDGE,
+      proto: 'axona/3', nodeId: BRIDGE_HEX,
     }},
   }));
 
   // start() should now resolve.
   await startPromise;
   check('autoHandshake: start() resolves after bridge hello arrives', true);
-  check('autoHandshake: bridgeNodeId is set', t.bridgeNodeId === BRIDGE);
+  // bridgeNodeId is the display surface (hex).  bridgeNodeIdBig is the
+  // kernel form (BigInt).
+  check('autoHandshake: bridgeNodeId is set (hex display)', t.bridgeNodeId === BRIDGE_HEX);
+  check('autoHandshake: bridgeNodeIdBig is set (BigInt)', t.bridgeNodeIdBig === BRIDGE);
   check('autoHandshake: bridge is bound', t.bridge.ownsPeer(BRIDGE) === true);
-  check('autoHandshake: bridgeReady resolves with the bridge nodeId',
+  // bridgeReady resolves with BigInt (kernel form).
+  check('autoHandshake: bridgeReady resolves with the bridge BigInt nodeId',
     (await t.bridgeReady) === BRIDGE);
 
-  // (c) Confirm we sent a hello-ack back to the bridge.
+  // (c) Confirm we sent a hello-ack back to the bridge.  Wire payload hex.
   const helloAckFrame = t.socket.sent.map(s => JSON.parse(s))
     .find(f => f.type === 'axona' && f.payload?.type === 'hello-ack');
   check('autoHandshake: hello-ack was sent in reply',
-    helloAckFrame && helloAckFrame.payload.body.nodeId === ALICE);
+    helloAckFrame && helloAckFrame.payload.body.nodeId === ALICE_HEX);
 
   await t.stop();
 }
@@ -415,7 +429,7 @@ async function testWebTransportAutoHandshakeTimeout() {
 
   const t = webTransport({
     bridgeUrl: 'wss://test.example',
-    identity:  { id: ALICE },
+    identity:  { id: ALICE_HEX },
     WebSocketImpl: FakeWebSocket,
     handshakeTimeoutMs: 50,   // tight timeout so we fail fast
   });
