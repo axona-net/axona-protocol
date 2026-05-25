@@ -263,6 +263,13 @@
     log('mesh ready', { synaptomeSize: finalSynSize });
 
     const sub = await peer.sub(TOPIC, (envelope) => {
+      // Hide self-publishes from the receive log — the kernel loops
+      // them through K-closest back to us, but in the demo UI it's
+      // misleading to show our own publishes as if they were
+      // remote deliveries.  This is a UI choice, not a protocol
+      // change: any consumer that wants self-delivery sees it via
+      // the kernel's default loopback.
+      if (envelope.signerPubkey === identity.pubkeyHex) return;
       if (receivedCount === 0) receivedEl.textContent = '';
       receivedCount++;
       const ts = new Date().toLocaleTimeString();
