@@ -244,7 +244,14 @@ export class AxonaPeer extends DHT {
     }
     // Subscribe to ongoing bind events so peers admitted to the
     // transport AFTER start() — typically other browser peers that
-    // join the mesh — are also auto-admitted to the synaptome.
+    // join the mesh — are also auto-admitted to the synaptome.  Each
+    // new admission also invalidates the AxonManager's K-closest
+    // cache: without this, the K-closest computed when only the
+    // bridge was bound stays cached forever, subscribe-k only lands
+    // at the bridge, and as the synaptome grows the publisher's
+    // publish-k targets a fresh top-K that doesn't include the
+    // bridge — so subscribers go cold.  axona-net's denser meshes
+    // mask the problem; the demo's small mesh exposes it.
     if (transport && typeof transport.onPeerBound === 'function') {
       this._onPeerBoundUnsub = transport.onPeerBound((hexId) => {
         try { this._seedSynaptomeWithSponsor(hexId); }
@@ -253,6 +260,9 @@ export class AxonaPeer extends DHT {
             console.warn('AxonaPeer.onPeerBound: admission failed', err);
           }
         }
+        // Bust the cached K-closest so the next sub/pub/refresh sees
+        // the wider synaptome.  Safe no-op if no AxonManager yet.
+        try { this._axonManager?.invalidateKClosestCache?.(); } catch {}
       });
     }
 
@@ -1780,7 +1790,24 @@ export class AxonaPeer extends DHT {
       return 'consumed';
     });
 
-    return new AxonManager({ dht });
+    const am = new AxonManager({ dht });
+    // Start the periodic refreshTick.  Default 10s.  Without this,
+    // subscriptions never refresh, so once subscribe-k lands at the
+    // K-closest peers from boot-time membership, it never moves —
+    // even as new peers join the mesh and the K-closest set shifts
+    // away from the original holders.  The engine-driven path
+    // (dht-sim, axona-peer's engine-managed AxonManager) calls
+    // refreshTick on a different schedule, so this is only wired
+    // for the standalone path the default builder is used from.
+    if (typeof am.start === 'function') {
+      try { am.start(); }
+      catch (err) {
+        if (typeof console !== 'undefined') {
+          console.warn('AxonaPeer default AxonManager.start() threw:', err);
+        }
+      }
+    }
+    return am;
   }
 
   _installDeliveryHook(am) {

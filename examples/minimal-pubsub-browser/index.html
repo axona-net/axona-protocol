@@ -96,6 +96,8 @@
         <input type="text" id="msgInput" placeholder="message" value="hello from alice" />
         <button id="pubBtn" disabled>Publish</button>
       </div>
+      <div class="label">Last published msgId</div>
+      <div class="nodeId" id="lastMsgId">—</div>
       <div class="label">Your nodeId</div>
       <div class="nodeId" id="myId">…</div>
       <div class="label">Bridge</div>
@@ -232,6 +234,7 @@
     const nameInput = document.getElementById('nameInput');
     pubBtn.disabled = false;
 
+    const lastMsgIdEl = document.getElementById('lastMsgId');
     async function publishOnce() {
       const name = (nameInput.value || 'Alice').trim();
       const msg  = (msgInput.value  || '').trim();
@@ -240,8 +243,10 @@
       pubBtn.disabled = true;
       try {
         const msgId = await peer.pub(TOPIC, wireMsg, { publisher });
+        lastMsgIdEl.textContent = msgId;
         log('published', { wireMsg, msgId: msgId.slice(0, 16) + '…' });
       } catch (err) {
+        lastMsgIdEl.textContent = '(error: ' + err.message + ')';
         log('publish error', err.message);
       }
       pubBtn.disabled = false;
