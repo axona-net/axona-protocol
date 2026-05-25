@@ -102,6 +102,31 @@ export class CompositeTransport extends Transport {
     return null;
   }
 
+  /**
+   * Aggregate boundPeers() across sub-transports.  Each sub may
+   * implement `boundPeers()` (BridgeTransport, future WebRTCTransport)
+   * to report the 66-char hex nodeIds it has admitted via its own
+   * handshake.  AxonaPeer.start() consumes this to auto-admit peers
+   * into the synaptome, so consumers don't have to wire the synapse
+   * by hand after a webTransport handshake.
+   *
+   * Sub-transports without `boundPeers()` contribute nothing here;
+   * the SimNetwork-only path (dht-sim, tests) keeps its existing
+   * synaptome-seeding flow.
+   *
+   * @returns {string[]} deduplicated list of bound nodeIds
+   */
+  boundPeers() {
+    const seen = new Set();
+    for (const t of this._subs) {
+      if (typeof t.boundPeers !== 'function') continue;
+      for (const id of t.boundPeers()) {
+        if (typeof id === 'string') seen.add(id);
+      }
+    }
+    return [...seen];
+  }
+
   // ── Channel pool ────────────────────────────────────────────────────
 
   async openConnection(nodeId) {

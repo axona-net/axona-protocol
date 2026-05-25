@@ -119,6 +119,18 @@ export class BridgeTransport extends Transport {
     return this._bridgeNodeId !== null && this._bridgeNodeId === nodeId;
   }
 
+  /**
+   * Currently-bound peer node IDs (66-char hex).  At most one for a
+   * BridgeTransport: the bridge's own embedded peer.  Empty until the
+   * hello-ack admission completes.  Consumed by AxonaPeer.start() so
+   * peers known to the transport are auto-admitted to the synaptome.
+   *
+   * @returns {string[]}
+   */
+  boundPeers() {
+    return this._bridgeNodeId !== null ? [this._bridgeNodeId] : [];
+  }
+
   // ── Channel pool ──────────────────────────────────────────────────
 
   async openConnection(nodeId) {

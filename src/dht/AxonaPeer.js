@@ -224,6 +224,25 @@ export class AxonaPeer extends DHT {
       this._installRoutingHandlers();
     }
 
+    // Auto-admit any peers the transport has already bound for us
+    // (e.g., the bridge from webTransport's autoHandshake).  Sub-
+    // transports that don't expose boundPeers() (SimTransport,
+    // dht-sim's engine-driven path) contribute nothing here — the
+    // existing synaptome-seeding flow stays intact for them.
+    const transport = this._node?.transport;
+    if (transport && typeof transport.boundPeers === 'function') {
+      try {
+        for (const hexId of transport.boundPeers()) {
+          this._seedSynaptomeWithSponsor(hexId);
+        }
+      } catch (err) {
+        // Don't fail start() if a single admission throws — log and continue.
+        if (typeof console !== 'undefined') {
+          console.warn('AxonaPeer.start: auto-admit failed', err);
+        }
+      }
+    }
+
     this._started = true;
   }
 

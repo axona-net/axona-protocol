@@ -175,8 +175,10 @@
     // ── 2. Transport + peer ─────────────────────────────────────────
     // With autoHandshake (default), webTransport drives the bridge's
     // WebSocket version gate AND the application-level hello / hello-ack
-    // admission as part of start().  After this completes, the bridge
-    // is bound in the BridgeTransport and routable as a peer.
+    // admission as part of start().  AxonaPeer.start() then asks the
+    // transport for its boundPeers() and auto-admits them into the
+    // synaptome.  Net effect: three lines of setup, then peer.pub /
+    // peer.sub work.
     const transport = webTransport({
       bridgeUrl: BRIDGE_URL,
       identity,
@@ -191,22 +193,10 @@
     const domain = new AxonaDomain({ k: 20 });
     const peer = new AxonaPeer({ domain, node, identity, transport });
 
-    await transport.start(identity.id);   // includes auto-handshake
-    log('bridge admitted', { nodeId: transport.bridgeNodeId.slice(0, 16) + '…' });
+    await transport.start(identity.id);   // does the bridge handshake
+    await peer.start();                   // auto-admits transport.boundPeers()
+    log('peer ready · bridge:', transport.bridgeNodeId.slice(0, 16) + '…');
     setStatus('connected', `connected · bridge ${transport.bridgeNodeId.slice(0, 8)}…`);
-
-    await peer.start();
-    log('peer started');
-
-    // Admit the bridge into our synaptome so AxonManager can route
-    // through it for pub/sub fan-out.
-    const bridgeBig = BigInt('0x' + transport.bridgeNodeId);
-    const stratum   = clz264(node.id ^ bridgeBig);
-    const syn = new Synapse({ peerId: bridgeBig, latencyMs: 50, stratum });
-    syn.weight   = 0.5;
-    syn.inertia  = 0;
-    syn._addedBy = 'bridge-handshake';
-    node.synaptome.set(bridgeBig, syn);
 
     // ── 4. AxonManager + dht adapter ────────────────────────────────
     const dht = {
