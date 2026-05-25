@@ -96,16 +96,22 @@
         <input type="text" id="msgInput" placeholder="message" value="hello from alice" />
         <button id="pubBtn" disabled>Publish</button>
       </div>
-      <div class="label">Last published msgId</div>
+      <div class="label">Topic ID (publish location — deterministic from publisher + topic name; MUST match on every peer)</div>
+      <div class="nodeId" id="topicIdDisplay">…</div>
+      <div class="label">Last published msgId (per-message content hash — changes every publish)</div>
       <div class="nodeId" id="lastMsgId">—</div>
       <div class="label">Your nodeId</div>
       <div class="nodeId" id="myId">…</div>
+      <div class="label">Synaptome (peers known to your DHT)</div>
+      <div class="nodeId" id="synSize">…</div>
       <div class="label">Bridge</div>
       <div class="nodeId" id="bridgeUrl">…</div>
     </div>
 
     <div class="pane">
       <h2>Subscribe — <code>us-east/hello-world</code></h2>
+      <div class="label">Subscribed to topic ID (must match publisher's)</div>
+      <div class="nodeId" id="subTopicId">…</div>
       <div class="received" id="receivedLog"><span class="empty">(waiting for messages…)</span></div>
     </div>
   </div>
@@ -124,7 +130,7 @@
   <script type="module">
     import {
       AxonaPeer, AxonaDomain, NeuronNode,
-      deriveIdentity, geoCellId,
+      deriveIdentity, deriveTopicId, geoCellId,
     } from '/src/index.js';
     import { webTransport } from '/src/transport/web/index.js';
 
@@ -205,24 +211,40 @@
     log('peer ready · bridge:', transport.bridgeNodeId.slice(0, 16) + '…');
     setStatus('connected', `connected · bridge ${transport.bridgeNodeId.slice(0, 8)}…`);
 
-    // ── 3. Subscribe (deferred until mesh stabilises) ───────────────
+    // ── 3. Topic ID + live synaptome size ───────────────────────────
     //
-    // Match axona-peer's pattern (client.js, PERSIST_PUBSUB_STATE
-    // = false): the user-facing demo subscribes only AFTER the
-    // synaptome has filled out via the bridge's peer-list + mesh
-    // handshakes.  Subscribing immediately after peer.start() —
-    // when the synaptome only contains the bridge — sends
-    // pubsub:subscribe-k to a stale K-closest set, and as more
-    // peers join the publisher's K-closest drifts away from the
-    // subscriber's stale targets and cross-peer delivery silently
-    // drops.
-    //
-    // Gate: wait for synaptome.size to reach READY_SYNAPSE_COUNT
-    // (or READY_TIMEOUT_MS, whichever comes first), then subscribe.
+    // The topic ID is the DETERMINISTIC publish location in the DHT.
+    // Both peers using the same (publisher, topic-name) compute the
+    // same 264-bit hex topicId, which is what pubsub:publish-k and
+    // pubsub:subscribe-k address.  Both peers MUST see this same
+    // value; if not, they can't find each other.
     const TOPIC     = 'us-east/hello-world';
     const publisher = regionSynthPublisher(US_EAST);
+    const topicId   = await deriveTopicId(publisher, TOPIC);
+    document.getElementById('topicIdDisplay').textContent = topicId;
+    log('topicId derived', { topicId, publisher, topicName: TOPIC });
+
+    // Live synaptome-size display so the user can see the mesh
+    // building up.  Useful for confirming the ready-gate is
+    // firing on the same conditions both peers see.
+    const synSizeEl = document.getElementById('synSize');
+    function renderSyn() { synSizeEl.textContent = String(node.synaptome.size); }
+    renderSyn();
+    const synTimer = setInterval(renderSyn, 250);
+
+    // ── 4. Subscribe (deferred until mesh stabilises) ───────────────
+    //
+    // Match axona-peer's contract (client.js, PERSIST_PUBSUB_STATE
+    // = false): every fresh page load starts with NO active
+    // subscriptions.  axona-peer relies on the user clicking "Add
+    // subscription" some seconds after boot, by which time the
+    // synaptome has filled via the bridge's peer-list + mesh
+    // handshakes.  This demo automates the same wait so the
+    // ready-state matches axona-peer's manual flow.
+    //
+    // Gate: synaptome.size >= READY_SYNAPSE_COUNT (or timeout).
     const READY_SYNAPSE_COUNT = 4;   // bridge + ~3 mesh peers
-    const READY_TIMEOUT_MS    = 8000;
+    const READY_TIMEOUT_MS    = 10000;
 
     const receivedEl = document.getElementById('receivedLog');
     let receivedCount = 0;
@@ -237,8 +259,8 @@
     }
 
     setStatus('connecting', 'waiting for mesh to stabilise…');
-    const synSize = await waitForMeshReady();
-    log('mesh ready', { synaptomeSize: synSize });
+    const finalSynSize = await waitForMeshReady();
+    log('mesh ready', { synaptomeSize: finalSynSize });
 
     const sub = await peer.sub(TOPIC, (envelope) => {
       if (receivedCount === 0) receivedEl.textContent = '';
@@ -251,8 +273,9 @@
         '  signer: ' + (envelope.signerPubkey || '') + '\n\n';
       receivedEl.scrollTop = receivedEl.scrollHeight;
     }, { publisher, since: 'all' });
+    document.getElementById('subTopicId').textContent = sub.topicId;
     log('subscribed', { topicId: sub.topicId, synaptomeSize: node.synaptome.size });
-    setStatus('connected', `subscribed · synaptome=${node.synaptome.size} · bridge ${transport.bridgeNodeId.slice(0, 8)}…`);
+    setStatus('connected', `subscribed · topicId=${sub.topicId.slice(0, 8)}… · synaptome=${node.synaptome.size}`);
 
     // ── 7. Publish button ───────────────────────────────────────────
     const pubBtn    = document.getElementById('pubBtn');
@@ -270,7 +293,12 @@
       try {
         const msgId = await peer.pub(TOPIC, wireMsg, { publisher });
         lastMsgIdEl.textContent = msgId;
-        log('published', { wireMsg, msgId });
+        log('published', {
+          wireMsg,
+          topicId,       // publish location — same on every peer
+          msgId,         // per-message content hash — unique per publish
+          synaptomeSize: node.synaptome.size,
+        });
       } catch (err) {
         lastMsgIdEl.textContent = '(error: ' + err.message + ')';
         log('publish error', err.message);
