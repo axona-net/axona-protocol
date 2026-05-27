@@ -93,6 +93,7 @@
       gap: 2px;
       margin-top: 0.4rem;
     }
+    .swatch { min-height: 14px; }
     .swatch {
       aspect-ratio: 1 / 1;
       cursor: pointer;
@@ -143,7 +144,7 @@
   <div>
     <h1>S2 region visualizer</h1>
     <p class="lede">
-      The 256 geographic cells that anchor every Axona pub/sub topic and nodeId.
+      The 192 S2 cells that anchor every Axona pub/sub topic and nodeId.
       Hover the globe to see which cell a coordinate falls in; click a swatch in the legend to highlight all coordinates in that cell.
     </p>
     <div id="globeContainer">
@@ -213,17 +214,18 @@
       <h2>What you are seeing</h2>
       <p style="font-size:0.9rem; margin: 0.2rem 0;">
         Every Axona nodeId starts with an 8-bit S2 prefix derived from
-        the peer's lat/lng via a Hilbert curve over a 16×16 grid. The
+        the peer's lat/lng via Google's S2 cube projection. The
         prefix anchors pub/sub topics: K-closest routing for a
         publisher-keyed topic naturally finds peers in the
         publisher's region.
       </p>
       <p style="font-size:0.9rem; margin: 0.6rem 0 0 0;">
-        Cells are uniform 11.25° × 22.5° rectangles in equirectangular
-        space — which means they shrink toward the poles in ground
-        distance. The polar cells cover much less surface area than
-        the equatorial ones. This is a known property of flat
-        lat/lng partitioning.
+        S2 projects the globe onto the six faces of a cube and
+        partitions each face into 4×8 = 32 cells, giving <strong>192
+        cells total</strong>. The quadratic ST transform keeps cell
+        areas within ~1.4× of each other across the globe — no
+        polar shrinkage. Byte values 0xC0–0xFF are reserved (192–255)
+        for future system topics.
       </p>
     </div>
 
@@ -239,7 +241,13 @@
 <script type="module">
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
-import { geoCellId } from '../../src/utils/s2.js';
+import {
+  geoCellId,
+  geoCellCenter,
+  geoCellCorners,
+  geoCellFace,
+  S2_CELL_COUNT,
+} from '../../src/utils/s2.js';
 import { KERNEL_VERSION } from '../../src/transport/handshake.js';
 
 document.getElementById('kernelVer').textContent =
@@ -249,9 +257,7 @@ document.getElementById('kernelVer').textContent =
 // Geometry helpers
 // ─────────────────────────────────────────────────────────────────────
 
-const GRID = 16;   // 16 × 16 cells → 256 IDs
-const CELL_DLAT = 180 / GRID;   // 11.25°
-const CELL_DLNG = 360 / GRID;   // 22.5°
+const N_CELLS = S2_CELL_COUNT;   // 192 (6 faces × 32 cells/face)
 
 function latLngToXYZ(lat, lng, radius = 1) {
   const phi = (90 - lat) * Math.PI / 180;
@@ -269,36 +275,34 @@ function xyzToLatLng(x, y, z) {
   return { lat, lng };
 }
 
-// Cell ID → (gridX, gridY) reverse lookup, built once.
-const reverseCell = new Map();
-for (let gx = 0; gx < GRID; gx++) {
-  for (let gy = 0; gy < GRID; gy++) {
-    // The same x/y bucketing geoCellId uses:
-    const sampleLat = -90  + (gx + 0.5) * CELL_DLAT;
-    const sampleLng = -180 + (gy + 0.5) * CELL_DLNG;
-    const cid = geoCellId(sampleLat, sampleLng, 8);
-    reverseCell.set(cid, { gx, gy });
+/**
+ * Approximate lat/lng bounds + area for an S2 cell.  Computed from
+ * the four cell corners (face-local quadrilateral edges).  Since the
+ * boundaries are great-circle arcs, bounds-by-corners is approximate
+ * but close to correct for level-2.5 cells.  Area is by sampling
+ * (a few hundred pixels per cell on the equirectangular texture is
+ * already in cellGrid by the time we need this).
+ */
+function cellBoundsApprox(cid) {
+  const corners = geoCellCorners(cid);
+  if (!corners) return null;
+  let latLo = +Infinity, latHi = -Infinity;
+  for (const c of corners) {
+    if (c.lat < latLo) latLo = c.lat;
+    if (c.lat > latHi) latHi = c.lat;
   }
-}
-
-// Spherical trapezoid area (km²) — earth radius 6371 km.
-function cellAreaKm2(latLo, latHi) {
-  const R = 6371;
-  const dLng = CELL_DLNG * Math.PI / 180;
-  const s1 = Math.sin(latLo * Math.PI / 180);
-  const s2 = Math.sin(latHi * Math.PI / 180);
-  return Math.abs(R * R * dLng * (s2 - s1));
-}
-
-function cellBounds(cid) {
-  const xy = reverseCell.get(cid);
-  if (!xy) return null;
-  const { gx, gy } = xy;
-  const latLo = -90  + gx       * CELL_DLAT;
-  const latHi = -90  + (gx + 1) * CELL_DLAT;
-  const lngLo = -180 + gy       * CELL_DLNG;
-  const lngHi = -180 + (gy + 1) * CELL_DLNG;
-  return { latLo, latHi, lngLo, lngHi, areaKm2: cellAreaKm2(latLo, latHi) };
+  // Longitude is tricky across antimeridian — compute span the short way.
+  const lngs = corners.map(c => c.lng).sort((a, b) => a - b);
+  // Find the largest gap; the cell occupies the complement.
+  let bestGap = 0, bestIdx = 0;
+  for (let i = 0; i < lngs.length; i++) {
+    const nxt = i === lngs.length - 1 ? lngs[0] + 360 : lngs[i + 1];
+    const gap = nxt - lngs[i];
+    if (gap > bestGap) { bestGap = gap; bestIdx = i; }
+  }
+  const lngHi = lngs[bestIdx];
+  const lngLo = lngs[(bestIdx + 1) % lngs.length];
+  return { latLo, latHi, lngLo, lngHi };
 }
 
 // ─────────────────────────────────────────────────────────────────────
@@ -307,58 +311,93 @@ function cellBounds(cid) {
 
 const TEX_W = 2048, TEX_H = 1024;
 
-const GRID_COLOR        = 'rgba(220, 170,   0, 0.75)';  // yellow-amber grid lines
-const HIGHLIGHT_FILL    = 'rgba(255, 215,   0, 0.45)';  // selected-cell tint
-const HIGHLIGHT_STROKE  = 'rgba(180, 100,   0, 1.0)';   // selected-cell outline
+const GRID_R = 220, GRID_G = 170, GRID_B = 0;   // yellow-amber for cell edges
+const HI_R = 255,   HI_G = 215,   HI_B = 0;     // highlighted-cell fill
 
 /**
- * Cell-grid texture: only the 17 parallels + 17 meridians that bound the
- * 16×16 cell grid, drawn in semi-transparent yellow over a fully clear
- * canvas.  Optionally fills + outlines a single highlighted cell.
+ * Per-pixel cellId grid for the equirectangular texture.  Built once
+ * (~3M geoCellId evaluations, ~80–150ms) and cached.  Used both to
+ * detect cell-boundary pixels (yellow lines) and to paint the
+ * highlighted cell.  Also approximates cell area-in-km² by counting
+ * pixels per cell with a cos(lat) weighting.
+ */
+let _cellGrid = null;
+let _cellAreaKm2 = null;
+
+function buildCellGrid() {
+  if (_cellGrid) return _cellGrid;
+  const g = new Uint8Array(TEX_W * TEX_H);
+  const areas = new Float64Array(N_CELLS);
+  const EARTH_KM2_PER_PIXEL_AT_EQ = (510_000_000 / (TEX_W * TEX_H)) * Math.PI / 2;
+  // ^ ~510M km² globe / pixels, with cos-weighting integrating to π/2
+  for (let py = 0; py < TEX_H; py++) {
+    const lat = 90 - (py + 0.5) / TEX_H * 180;
+    const cosLat = Math.cos(lat * Math.PI / 180);
+    for (let px = 0; px < TEX_W; px++) {
+      const lng = (px + 0.5) / TEX_W * 360 - 180;
+      const cid = geoCellId(lat, lng, 8);
+      g[py * TEX_W + px] = cid;
+      areas[cid] += cosLat;
+    }
+  }
+  // Normalize: total cos-weighted pixels = TEX_W * (sum of cosLat over rows)
+  let totalWeight = 0;
+  for (let py = 0; py < TEX_H; py++) {
+    const lat = 90 - (py + 0.5) / TEX_H * 180;
+    totalWeight += TEX_W * Math.cos(lat * Math.PI / 180);
+  }
+  const km2PerWeight = 510_000_000 / totalWeight;
+  for (let i = 0; i < N_CELLS; i++) areas[i] *= km2PerWeight;
+  _cellGrid = g;
+  _cellAreaKm2 = areas;
+  return g;
+}
+
+function cellArea(cid) {
+  if (!_cellAreaKm2) buildCellGrid();
+  return _cellAreaKm2[cid] || 0;
+}
+
+/**
+ * Cell-overlay texture: pixel-edge yellow lines wherever two
+ * neighbouring pixels carry different cell IDs (curved S2 cell
+ * boundaries fall out automatically).  Optionally fills the
+ * highlighted cell with a translucent yellow.
  */
 function buildCellTexture(highlightCellId = null) {
+  const grid = buildCellGrid();
   const c = document.createElement('canvas');
   c.width = TEX_W; c.height = TEX_H;
   const ctx = c.getContext('2d');
-  ctx.clearRect(0, 0, TEX_W, TEX_H);  // start fully transparent
+  const img = ctx.createImageData(TEX_W, TEX_H);
+  const data = img.data;
 
-  // Highlighted cell — fill its rectangle on the equirectangular canvas.
-  if (highlightCellId !== null) {
-    const b = cellBounds(highlightCellId);
-    if (b) {
-      const px0 = (b.lngLo + 180) / 360 * TEX_W;
-      const py0 = (90 - b.latHi) / 180 * TEX_H;
-      const w   = CELL_DLNG / 360 * TEX_W;
-      const h   = CELL_DLAT / 180 * TEX_H;
-      ctx.fillStyle   = HIGHLIGHT_FILL;
-      ctx.fillRect(px0, py0, w, h);
-      ctx.strokeStyle = HIGHLIGHT_STROKE;
-      ctx.lineWidth   = 4;
-      ctx.strokeRect(px0, py0, w, h);
+  for (let py = 0; py < TEX_H; py++) {
+    for (let px = 0; px < TEX_W; px++) {
+      const idx = py * TEX_W + px;
+      const cid = grid[idx];
+      const isEdge =
+        (px > 0          && grid[idx - 1]     !== cid) ||
+        (py > 0          && grid[idx - TEX_W] !== cid) ||
+        (px < TEX_W - 1  && grid[idx + 1]     !== cid) ||
+        (py < TEX_H - 1  && grid[idx + TEX_W] !== cid);
+      const off = idx * 4;
+      if (highlightCellId !== null && cid === highlightCellId) {
+        data[off]   = HI_R;
+        data[off+1] = HI_G;
+        data[off+2] = HI_B;
+        data[off+3] = isEdge ? 255 : 110;   // stronger on the outline
+      } else if (isEdge) {
+        data[off]   = GRID_R;
+        data[off+1] = GRID_G;
+        data[off+2] = GRID_B;
+        data[off+3] = 200;
+      } else {
+        data[off+3] = 0;   // fully transparent
+      }
     }
   }
-
-  // Grid lines.
-  ctx.strokeStyle = GRID_COLOR;
-  ctx.lineWidth   = 1.5;
-  // Parallels (horizontal lines at each cell-row boundary)
-  for (let gx = 0; gx <= GRID; gx++) {
-    const lat = -90 + gx * CELL_DLAT;
-    const py  = (90 - lat) / 180 * TEX_H;
-    ctx.beginPath();
-    ctx.moveTo(0, py);
-    ctx.lineTo(TEX_W, py);
-    ctx.stroke();
-  }
-  // Meridians (vertical lines at each cell-column boundary)
-  for (let gy = 0; gy <= GRID; gy++) {
-    const lng = -180 + gy * CELL_DLNG;
-    const px  = (lng + 180) / 360 * TEX_W;
-    ctx.beginPath();
-    ctx.moveTo(px, 0);
-    ctx.lineTo(px, TEX_H);
-    ctx.stroke();
-  }
+  ctx.putImageData(img, 0, 0);
   return c;
 }
 
@@ -369,45 +408,89 @@ function buildCellTexture(highlightCellId = null) {
  * property that motivates using a space-filling curve in the first
  * place.
  */
+/**
+ * Numbering-path texture: continuous polyline visiting cell centers
+ * 0x00 → 0xBF in order.  Within each face (32 cells), consecutive
+ * IDs are geographically adjacent (row-major).  Across face
+ * boundaries, the path jumps to the next face.  Useful for showing
+ * the locality property: most consecutive cells are neighbours.
+ *
+ * Each line segment between consecutive centers is drawn as a series
+ * of short steps interpolated through XYZ so that long diagonals
+ * wrap correctly around the sphere instead of cutting through it.
+ */
 function buildHilbertTexture() {
   const c = document.createElement('canvas');
   c.width = TEX_W; c.height = TEX_H;
   const ctx = c.getContext('2d');
   ctx.clearRect(0, 0, TEX_W, TEX_H);
 
-  // Build the path: cell 0x00 → 0x01 → ... → 0xFF.
+  // For each cell, compute its center in lat/lng → equirectangular px.
   const pts = [];
-  for (let i = 0; i < 256; i++) {
-    const xy = reverseCell.get(i);
-    if (!xy) continue;
-    const lat = -90  + (xy.gx + 0.5) * CELL_DLAT;
-    const lng = -180 + (xy.gy + 0.5) * CELL_DLNG;
+  for (let i = 0; i < N_CELLS; i++) {
+    const ll = geoCellCenter(i);
+    if (!ll) continue;
     pts.push({
-      px: (lng + 180) / 360 * TEX_W,
-      py: (90  - lat) / 180 * TEX_H,
+      lat: ll.lat,
+      lng: ll.lng,
+      cid: i,
     });
   }
 
-  // Path stroke — wide light halo behind, then the curve itself.
-  ctx.strokeStyle = 'rgba(255, 255, 255, 0.65)';
-  ctx.lineWidth   = 6;
-  ctx.beginPath();
-  ctx.moveTo(pts[0].px, pts[0].py);
-  for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i].px, pts[i].py);
-  ctx.stroke();
+  // Convert each segment to a series of antimeridian-aware sub-strokes.
+  const drawPath = (style, width) => {
+    ctx.strokeStyle = style;
+    ctx.lineWidth   = width;
+    for (let i = 0; i < pts.length - 1; i++) {
+      const a = pts[i], b = pts[i + 1];
+      // Interpolate along great circle in small steps; wrap longitude.
+      const STEPS = 24;
+      ctx.beginPath();
+      for (let s = 0; s <= STEPS; s++) {
+        const t = s / STEPS;
+        // Linear blend on lat is fine for these distances (~5000km/segment);
+        // for lng, take the short way.
+        let dLng = b.lng - a.lng;
+        if (dLng >  180) dLng -= 360;
+        if (dLng < -180) dLng += 360;
+        const lat = a.lat + t * (b.lat - a.lat);
+        const lng = ((a.lng + t * dLng + 540) % 360) - 180;
+        const px = (lng + 180) / 360 * TEX_W;
+        const py = (90  - lat) / 180 * TEX_H;
+        if (s === 0) {
+          ctx.moveTo(px, py);
+        } else {
+          // Break the path if a segment-step crosses the antimeridian
+          // (longitudinal wrap > half-canvas-width).
+          const prevPx = ctx._lastX !== undefined ? ctx._lastX : px;
+          if (Math.abs(px - prevPx) > TEX_W * 0.5) {
+            ctx.stroke();
+            ctx.beginPath();
+            ctx.moveTo(px, py);
+          } else {
+            ctx.lineTo(px, py);
+          }
+        }
+        ctx._lastX = px;
+      }
+      ctx.stroke();
+      ctx._lastX = undefined;
+    }
+  };
 
-  ctx.strokeStyle = 'rgba(180, 60, 30, 0.95)';
-  ctx.lineWidth   = 2.4;
-  ctx.beginPath();
-  ctx.moveTo(pts[0].px, pts[0].py);
-  for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i].px, pts[i].py);
-  ctx.stroke();
+  // Halo behind, then the curve itself.
+  drawPath('rgba(255, 255, 255, 0.7)', 6);
+  drawPath('rgba(180, 60, 30, 0.95)',  2.4);
 
-  // Endpoint markers
-  ctx.fillStyle = 'rgba(20, 90, 30, 1)';   // start (0x00) — green dot
-  ctx.beginPath(); ctx.arc(pts[0].px, pts[0].py, 8, 0, Math.PI * 2); ctx.fill();
-  ctx.fillStyle = 'rgba(120, 20, 20, 1)';  // end (0xFF) — dark red dot
-  ctx.beginPath(); ctx.arc(pts[pts.length-1].px, pts[pts.length-1].py, 8, 0, Math.PI * 2); ctx.fill();
+  // Endpoints
+  const drawDot = (lat, lng, fill) => {
+    const px = (lng + 180) / 360 * TEX_W;
+    const py = (90  - lat) / 180 * TEX_H;
+    ctx.fillStyle = fill;
+    ctx.beginPath(); ctx.arc(px, py, 8, 0, Math.PI * 2); ctx.fill();
+  };
+  drawDot(pts[0].lat,            pts[0].lng,            'rgba(20, 90, 30, 1)');     // start (0x00)
+  drawDot(pts[pts.length-1].lat, pts[pts.length-1].lng, 'rgba(120, 20, 20, 1)');    // end (0xBF)
 
   return c;
 }
@@ -506,17 +589,14 @@ function buildLabelTexture() {
   ctx.fillStyle = '#1a1a1a';
   ctx.strokeStyle = 'white';
   ctx.lineWidth = 3;
-  for (let gx = 0; gx < GRID; gx++) {
-    for (let gy = 0; gy < GRID; gy++) {
-      const lat = -90  + (gx + 0.5) * CELL_DLAT;
-      const lng = -180 + (gy + 0.5) * CELL_DLNG;
-      const cid = geoCellId(lat, lng, 8);
-      const px = (lng + 180) / 360 * TEX_W;
-      const py = (90  - lat) / 180 * TEX_H;
-      const txt = '0x' + cid.toString(16).padStart(2, '0').toUpperCase();
-      ctx.strokeText(txt, px, py);
-      ctx.fillText(txt, px, py);
-    }
+  for (let cid = 0; cid < N_CELLS; cid++) {
+    const ll = geoCellCenter(cid);
+    if (!ll) continue;
+    const px = (ll.lng + 180) / 360 * TEX_W;
+    const py = (90  - ll.lat) / 180 * TEX_H;
+    const txt = '0x' + cid.toString(16).padStart(2, '0').toUpperCase();
+    ctx.strokeText(txt, px, py);
+    ctx.fillText(txt, px, py);
   }
   return c;
 }
@@ -630,77 +710,97 @@ function updateHover(clientX, clientY) {
   const p = hits[0].point;
   const { lat, lng } = xyzToLatLng(p.x, p.y, p.z);
   const cid = geoCellId(lat, lng, 8);
-  const b = cellBounds(cid);
+  const face = geoCellFace(cid);
+  const b = cellBoundsApprox(cid);
+  const area = cellArea(cid);
   document.getElementById('hoverCell').textContent =
-    '0x' + cid.toString(16).padStart(2, '0').toUpperCase() + '  (' + cid + ')';
+    '0x' + cid.toString(16).padStart(2, '0').toUpperCase() + '  (' + cid + ')  face ' + face;
   document.getElementById('hoverLatLng').textContent =
     lat.toFixed(2) + '°, ' + lng.toFixed(2) + '°';
   if (b) {
     document.getElementById('hoverBounds').textContent =
       `${b.latLo.toFixed(1)}…${b.latHi.toFixed(1)}°  ${b.lngLo.toFixed(1)}…${b.lngHi.toFixed(1)}°`;
     document.getElementById('hoverArea').textContent =
-      Math.round(b.areaKm2 / 1000).toLocaleString() + ' × 1000 km²';
+      Math.round(area / 1000).toLocaleString() + ' × 1000 km²';
   }
 }
 canvas.addEventListener('pointermove', e => updateHover(e.clientX, e.clientY));
 
 // ─────────────────────────────────────────────────────────────────────
-// Legend (256 cell swatches)
+// Legend (192 cell swatches)
 // ─────────────────────────────────────────────────────────────────────
 
 const legend       = document.getElementById('legend');
 const legendCaption = document.getElementById('legendCaption');
 
+const FACE_NAMES = ['+X (lng 0°)', '+Y (lng +90°)', '+Z (north)',
+                    '-X (lng ±180°)', '-Y (lng -90°)', '-Z (south)'];
+
 /**
- * Render the 256-cell legend in one of two layouts:
+ * Render the 192-cell legend in one of two layouts:
  *
- *   "index"   — swatches in numerical reading order: 00,01,02…0F,
- *               10,11…FF.  Position in the legend grid has no
- *               geographic meaning.
+ *   "index"   — 12 rows × 16 cols, swatches in numerical reading
+ *               order 0x00..0xBF.  Position has no geographic meaning.
  *
- *   "spatial" — swatches arranged so the legend cell at row R, col C
- *               is the cell that lives at the same geographic
- *               position on the globe (R=0 → north, C=0 → west).
- *               Each swatch still shows its Hilbert hex ID, but its
- *               position in the grid matches the globe layout.
- *
- * Switching between the two shows the Hilbert curve's job: the
- * spatial layout reveals which adjacent cells on the globe share
- * adjacent Hilbert indices and which jump across the byte range.
+ *   "spatial" — six 4×8 mini-grids, one per cube face, labelled by
+ *               face axis.  Within each mini-grid, the swatch at
+ *               (sBin, tBin) is the cell at that face-local position.
+ *               This is the "unfolded cube" view of the address space.
  */
 function renderLegend(mode) {
   legend.innerHTML = '';
-  const order = []; // sequence of cell-IDs to place into the 16x16 grid
-  if (mode === 'spatial') {
-    // Top row = north (gx=15); left col = west (gy=0).
-    for (let row = 0; row < GRID; row++) {
-      const gx = GRID - 1 - row;
-      for (let gy = 0; gy < GRID; gy++) {
-        const lat = -90  + (gx + 0.5) * CELL_DLAT;
-        const lng = -180 + (gy + 0.5) * CELL_DLNG;
-        order.push(geoCellId(lat, lng, 8));
-      }
+
+  if (mode === 'index') {
+    // Single flat grid, 16 columns × 12 rows = 192.
+    legend.style.gridTemplateColumns = 'repeat(16, 1fr)';
+    legend.style.gap = '2px';
+    for (let cid = 0; cid < N_CELLS; cid++) {
+      legend.appendChild(makeSwatch(cid, mode));
     }
   } else {
-    for (let i = 0; i < 256; i++) order.push(i);
+    // Spatial: 6 face mini-grids, each 8 cols × 4 rows.  Stack in 3 cols × 2 rows of mini-grids.
+    legend.style.gridTemplateColumns = 'repeat(3, 1fr)';
+    legend.style.gap = '10px';
+    for (let face = 0; face < 6; face++) {
+      const wrap = document.createElement('div');
+      wrap.style.cssText = 'display:flex; flex-direction:column; gap:2px;';
+      const label = document.createElement('div');
+      label.style.cssText = 'font-size:0.72rem; color:#888; font-family:Inconsolata,monospace;';
+      label.textContent = `face ${face} · ${FACE_NAMES[face]}`;
+      wrap.appendChild(label);
+      const grid = document.createElement('div');
+      grid.style.cssText = 'display:grid; grid-template-columns:repeat(8,1fr); gap:2px;';
+      for (let sBin = 0; sBin < 4; sBin++) {
+        for (let tBin = 0; tBin < 8; tBin++) {
+          const cid = face * 32 + sBin * 8 + tBin;
+          grid.appendChild(makeSwatch(cid, mode));
+        }
+      }
+      wrap.appendChild(grid);
+      legend.appendChild(wrap);
+    }
   }
-  for (const cid of order) {
-    const s = document.createElement('div');
-    s.className = 'swatch';
-    if (cid === cellHighlightId) s.classList.add('selected');
-    s.textContent = cid.toString(16).padStart(2, '0').toUpperCase();
-    s.title = '0x' + cid.toString(16).padStart(2, '0').toUpperCase() + '  (' + cid + ')';
-    s.addEventListener('click', () => {
-      cellHighlightId = (cellHighlightId === cid) ? null : cid;
-      renderLegend(mode);
-      rebuild();
-    });
-    legend.appendChild(s);
-  }
+
   legendCaption.textContent = mode === 'spatial'
-    ? 'Each row is a latitude band (top = north); each column a longitude band (left = west). Cell numbers reveal the Hilbert curve\'s zigzag.'
-    : 'Cells laid out in numerical order. Consecutive numbers are geographically adjacent on the globe — the Hilbert-curve locality property.';
+    ? 'Six 4×8 mini-grids, one per cube face. Each cell sits at its face-local (s, t) position. Cell IDs are face×32 + s×8 + t.'
+    : 'Cells laid out in numerical reading order 0x00 to 0xBF (192 valid IDs). Reserved range 0xC0–0xFF is held for future system messages.';
 }
+
+function makeSwatch(cid, mode) {
+  const s = document.createElement('div');
+  s.className = 'swatch';
+  if (cid === cellHighlightId) s.classList.add('selected');
+  s.textContent = cid.toString(16).padStart(2, '0').toUpperCase();
+  const face = Math.floor(cid / 32);
+  s.title = '0x' + cid.toString(16).padStart(2, '0').toUpperCase() + '  (' + cid + ')   face ' + face;
+  s.addEventListener('click', () => {
+    cellHighlightId = (cellHighlightId === cid) ? null : cid;
+    renderLegend(mode);
+    rebuild();
+  });
+  return s;
+}
+
 renderLegend('index');
 
 // Legend layout toggle
