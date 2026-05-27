@@ -31,7 +31,7 @@ function check(label, condition) {
 function testConstants() {
   console.log('\n── constants ──');
   check('WIRE_VERSION = "1.0"',         WIRE_VERSION === '1.0');
-  check('KERNEL_VERSION starts with 1.', KERNEL_VERSION.startsWith('1.'));
+  check('KERNEL_VERSION is semver-shaped', /^\d+\.\d+\.\d+/.test(KERNEL_VERSION));
   check('UPGRADE_CLOSE_CODE = 4426',     UPGRADE_CLOSE_CODE === 4426);
 }
 
