@@ -311,8 +311,8 @@ function cellBoundsApprox(cid) {
 
 const TEX_W = 2048, TEX_H = 1024;
 
-const GRID_R = 220, GRID_G = 170, GRID_B = 0;   // yellow-amber for cell edges
-const HI_R = 255,   HI_G = 215,   HI_B = 0;     // highlighted-cell fill
+const GRID_R = 30,  GRID_G = 130, GRID_B = 60;  // deep green for cell edges
+const HI_R = 255,   HI_G = 215,   HI_B = 0;     // highlighted-cell fill (yellow)
 
 /**
  * Per-pixel cellId grid for the equirectangular texture.  Built once
@@ -372,15 +372,23 @@ function buildCellTexture(highlightCellId = null) {
   const img = ctx.createImageData(TEX_W, TEX_H);
   const data = img.data;
 
+  // Detect cell boundaries by per-pixel cellId comparison against the
+  // 4 cardinal neighbours.  Antimeridian wrap: left of px=0 is the
+  // pixel at px=TEX_W-1 and vice versa, so cell boundaries running
+  // along ±180° lng are still detected.  Poles: no wrap needed.
+  const wrap = (px) => (px < 0) ? px + TEX_W : (px >= TEX_W) ? px - TEX_W : px;
+
   for (let py = 0; py < TEX_H; py++) {
     for (let px = 0; px < TEX_W; px++) {
       const idx = py * TEX_W + px;
       const cid = grid[idx];
+      const cidL = grid[py * TEX_W + wrap(px - 1)];
+      const cidR = grid[py * TEX_W + wrap(px + 1)];
+      const cidU = (py > 0)         ? grid[idx - TEX_W] : cid;
+      const cidD = (py < TEX_H - 1) ? grid[idx + TEX_W] : cid;
       const isEdge =
-        (px > 0          && grid[idx - 1]     !== cid) ||
-        (py > 0          && grid[idx - TEX_W] !== cid) ||
-        (px < TEX_W - 1  && grid[idx + 1]     !== cid) ||
-        (py < TEX_H - 1  && grid[idx + TEX_W] !== cid);
+        (cidL !== cid) || (cidR !== cid) ||
+        (cidU !== cid) || (cidD !== cid);
       const off = idx * 4;
       if (highlightCellId !== null && cid === highlightCellId) {
         data[off]   = HI_R;
