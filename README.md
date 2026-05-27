@@ -25,7 +25,7 @@ A pub/sub roundtrip in one process using the in-memory `SimNetwork`:
 ```js
 import {
   AxonaPeer, AxonaDomain, NeuronNode,
-  AxonManager, simTransport, SimNetwork,
+  AxonaManager, simTransport, SimNetwork,
   deriveIdentity,
 } from '@axona/protocol';
 
@@ -172,7 +172,7 @@ Full list: `AxonaError`, `IdentityError`, `TransportError`, `PublishError`,
 │   └── Subscription.js # handle returned by peer.sub() — .unsubscribe(), .topicId
 │
 ├── pubsub/
-│   ├── AxonManager.js  # axonal-tree pub/sub membership protocol
+│   ├── AxonaManager.js  # axonal-tree pub/sub membership protocol
 │   ├── AxonPubSub.js   # feed-style application API (pub/sub/pull/metrics)
 │   ├── envelope.js     # buildEnvelope / verifyEnvelope / computeMsgId
 │   ├── post.js         # makePost + topic-id derivation + verification
