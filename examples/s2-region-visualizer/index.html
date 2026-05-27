@@ -1,0 +1,654 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>@axona/protocol — S2 region visualizer</title>
+
+  <script type="importmap">
+  {
+    "imports": {
+      "three":         "https://cdn.jsdelivr.net/npm/three@0.162.0/build/three.module.js",
+      "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.162.0/examples/jsm/"
+    }
+  }
+  </script>
+  <script src="https://cdn.jsdelivr.net/npm/topojson-client@3.1.0/dist/topojson-client.min.js"></script>
+
+  <style>
+    :root {
+      --rust: #2d7373;
+      --ink: #1a1a1a;
+      --muted: #666;
+      --bg: #fffff8;
+      --card-bg: #fbfbf6;
+      --border: #d8d4ca;
+      --code-bg: #f0ecdf;
+    }
+    * { box-sizing: border-box; }
+    html, body { margin: 0; padding: 0; background: var(--bg); color: var(--ink); }
+    body {
+      font-family: 'EB Garamond', Georgia, serif;
+      line-height: 1.5;
+      min-height: 100vh;
+    }
+    code, .mono { font-family: 'Inconsolata', ui-monospace, Menlo, monospace; background: var(--code-bg); padding: 1px 4px; border-radius: 2px; font-size: 0.92em; }
+
+    #layout {
+      display: grid;
+      grid-template-columns: 1fr 360px;
+      gap: 1.2rem;
+      padding: 1.2rem 1.5rem;
+      max-width: 1400px;
+      margin: 0 auto;
+    }
+    @media (max-width: 900px) {
+      #layout { grid-template-columns: 1fr; }
+    }
+
+    h1 { font-weight: 500; letter-spacing: -0.015em; margin: 0 0 0.2em 0; font-size: 1.6rem; }
+    .lede { color: var(--muted); margin: 0 0 1rem 0; font-size: 0.95rem; }
+
+    #globeContainer {
+      background: #f5efe0;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      overflow: hidden;
+      position: relative;
+      aspect-ratio: 1 / 1;
+      min-height: 480px;
+    }
+    #globeCanvas { display: block; width: 100%; height: 100%; cursor: grab; }
+    #globeCanvas:active { cursor: grabbing; }
+
+    .sidepanel { display: flex; flex-direction: column; gap: 1rem; }
+    .card {
+      background: var(--card-bg);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 0.8rem 1rem;
+    }
+    .card h2 { font-size: 1rem; font-weight: 600; margin: 0 0 0.5em 0; }
+    .row { display: flex; justify-content: space-between; align-items: baseline; padding: 0.2rem 0; font-size: 0.92rem; }
+    .row .label { color: var(--muted); }
+    .row .value { font-family: 'Inconsolata', ui-monospace, monospace; }
+
+    button {
+      font-family: 'EB Garamond', serif;
+      font-size: 0.95rem;
+      padding: 0.4rem 0.8rem;
+      background: var(--rust);
+      color: white;
+      border: none;
+      border-radius: 4px;
+      cursor: pointer;
+    }
+    button:hover { background: #1d5959; }
+    button[disabled] { background: #999; cursor: not-allowed; }
+    label.toggle { display: flex; align-items: center; gap: 0.4rem; font-size: 0.92rem; cursor: pointer; }
+
+    #legend {
+      display: grid;
+      grid-template-columns: repeat(16, 1fr);
+      gap: 1px;
+      margin-top: 0.4rem;
+    }
+    .swatch {
+      aspect-ratio: 1 / 1;
+      cursor: pointer;
+      border: 1px solid rgba(0,0,0,0.05);
+      position: relative;
+      transition: transform 0.08s;
+    }
+    .swatch:hover { transform: scale(1.4); z-index: 2; border-color: black; }
+    .swatch.selected { outline: 2px solid var(--ink); outline-offset: -1px; }
+
+    .pin {
+      position: absolute;
+      width: 14px; height: 14px;
+      border-radius: 50%;
+      background: #c0392b;
+      border: 2px solid white;
+      box-shadow: 0 1px 3px rgba(0,0,0,0.4);
+      transform: translate(-50%, -50%);
+      pointer-events: none;
+    }
+
+    footer {
+      text-align: center;
+      padding: 0.8rem;
+      font-size: 0.82rem;
+      color: var(--muted);
+      border-top: 1px solid var(--border);
+      margin-top: 1rem;
+    }
+    footer a { color: var(--rust); text-decoration: none; }
+    footer a:hover { text-decoration: underline; }
+  </style>
+</head>
+<body>
+
+<div id="layout">
+  <div>
+    <h1>S2 region visualizer</h1>
+    <p class="lede">
+      The 256 geographic cells that anchor every Axona pub/sub topic and nodeId.
+      Hover the globe to see which cell a coordinate falls in; click a swatch in the legend to highlight all coordinates in that cell.
+    </p>
+    <div id="globeContainer">
+      <canvas id="globeCanvas"></canvas>
+      <div id="pin" class="pin" style="display:none"></div>
+    </div>
+  </div>
+
+  <div class="sidepanel">
+
+    <div class="card">
+      <h2>Under cursor</h2>
+      <div class="row"><span class="label">Cell ID</span><span class="value" id="hoverCell">—</span></div>
+      <div class="row"><span class="label">Lat / Lng</span><span class="value" id="hoverLatLng">—</span></div>
+      <div class="row"><span class="label">Cell bounds</span><span class="value" id="hoverBounds">—</span></div>
+      <div class="row"><span class="label">Approx area</span><span class="value" id="hoverArea">—</span></div>
+    </div>
+
+    <div class="card">
+      <h2>Your location</h2>
+      <div class="row"><span class="label">Lat / Lng</span><span class="value" id="myLatLng">—</span></div>
+      <div class="row"><span class="label">Your cell</span><span class="value" id="myCell">—</span></div>
+      <div style="margin-top:0.5rem;">
+        <button id="locateBtn">Detect my location</button>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>Display</h2>
+      <label class="toggle">
+        <input type="checkbox" id="toggleCells" checked> Show S2 cell tints
+      </label>
+      <label class="toggle">
+        <input type="checkbox" id="toggleBorders" checked> Show country borders
+      </label>
+      <label class="toggle">
+        <input type="checkbox" id="toggleLabels"> Show cell ID labels
+      </label>
+      <label class="toggle">
+        <input type="checkbox" id="toggleAutorotate" checked> Auto-rotate
+      </label>
+    </div>
+
+    <div class="card">
+      <h2>Cell legend (0x00 – 0xFF)</h2>
+      <div style="font-size:0.85rem; color: var(--muted); margin-bottom: 0.3rem;">
+        Click a swatch to highlight that cell on the globe.
+      </div>
+      <div id="legend"></div>
+      <div style="font-size:0.85rem; color: var(--muted); margin-top: 0.4rem;">
+        Colors are spaced by golden-angle hue rotation so neighbours are visually distinct.
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>What you are seeing</h2>
+      <p style="font-size:0.9rem; margin: 0.2rem 0;">
+        Every Axona nodeId starts with an 8-bit S2 prefix derived from
+        the peer's lat/lng via a Hilbert curve over a 16×16 grid. The
+        prefix anchors pub/sub topics: K-closest routing for a
+        publisher-keyed topic naturally finds peers in the
+        publisher's region.
+      </p>
+      <p style="font-size:0.9rem; margin: 0.6rem 0 0 0;">
+        Cells are uniform 11.25° × 22.5° rectangles in equirectangular
+        space — which means they shrink toward the poles in ground
+        distance. The polar cells cover much less surface area than
+        the equatorial ones. This is a known property of flat
+        lat/lng partitioning.
+      </p>
+    </div>
+
+  </div>
+</div>
+
+<footer>
+  <code class="mono" id="kernelVer">@axona/protocol</code> ·
+  <a href="https://github.com/axona-net/axona-protocol">source</a> ·
+  <a href="https://github.com/axona-net/axona-docs/blob/main/architecture/">architecture note</a>
+</footer>
+
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { geoCellId } from '../../src/utils/s2.js';
+import { KERNEL_VERSION } from '../../src/transport/handshake.js';
+
+document.getElementById('kernelVer').textContent =
+  `@axona/protocol kernel v${KERNEL_VERSION}`;
+
+// ─────────────────────────────────────────────────────────────────────
+// Geometry helpers
+// ─────────────────────────────────────────────────────────────────────
+
+const GRID = 16;   // 16 × 16 cells → 256 IDs
+const CELL_DLAT = 180 / GRID;   // 11.25°
+const CELL_DLNG = 360 / GRID;   // 22.5°
+
+function latLngToXYZ(lat, lng, radius = 1) {
+  const phi = (90 - lat) * Math.PI / 180;
+  const theta = (lng + 180) * Math.PI / 180;
+  return {
+    x: -radius * Math.sin(phi) * Math.cos(theta),
+    y:  radius * Math.cos(phi),
+    z:  radius * Math.sin(phi) * Math.sin(theta),
+  };
+}
+function xyzToLatLng(x, y, z) {
+  const lat = 90 - Math.acos(Math.max(-1, Math.min(1, y))) * 180 / Math.PI;
+  let lng = Math.atan2(z, -x) * 180 / Math.PI - 180;
+  lng = ((lng + 540) % 360) - 180;
+  return { lat, lng };
+}
+
+// Cell ID → (gridX, gridY) reverse lookup, built once.
+const reverseCell = new Map();
+for (let gx = 0; gx < GRID; gx++) {
+  for (let gy = 0; gy < GRID; gy++) {
+    // The same x/y bucketing geoCellId uses:
+    const sampleLat = -90  + (gx + 0.5) * CELL_DLAT;
+    const sampleLng = -180 + (gy + 0.5) * CELL_DLNG;
+    const cid = geoCellId(sampleLat, sampleLng, 8);
+    reverseCell.set(cid, { gx, gy });
+  }
+}
+
+// Spherical trapezoid area (km²) — earth radius 6371 km.
+function cellAreaKm2(latLo, latHi) {
+  const R = 6371;
+  const dLng = CELL_DLNG * Math.PI / 180;
+  const s1 = Math.sin(latLo * Math.PI / 180);
+  const s2 = Math.sin(latHi * Math.PI / 180);
+  return Math.abs(R * R * dLng * (s2 - s1));
+}
+
+function cellBounds(cid) {
+  const xy = reverseCell.get(cid);
+  if (!xy) return null;
+  const { gx, gy } = xy;
+  const latLo = -90  + gx       * CELL_DLAT;
+  const latHi = -90  + (gx + 1) * CELL_DLAT;
+  const lngLo = -180 + gy       * CELL_DLNG;
+  const lngHi = -180 + (gy + 1) * CELL_DLNG;
+  return { latLo, latHi, lngLo, lngHi, areaKm2: cellAreaKm2(latLo, latHi) };
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Color palette — 256 distinct hues via golden angle.
+// ─────────────────────────────────────────────────────────────────────
+
+const PALETTE = new Array(256);
+for (let i = 0; i < 256; i++) {
+  const hue = (i * 137.508) % 360;
+  PALETTE[i] = `hsl(${hue.toFixed(1)}, 65%, 58%)`;
+}
+function hslToCss(i) { return PALETTE[i]; }
+
+// ─────────────────────────────────────────────────────────────────────
+// Build textures
+// ─────────────────────────────────────────────────────────────────────
+
+const TEX_W = 2048, TEX_H = 1024;
+
+function buildCellTexture(highlightCellId = null) {
+  const c = document.createElement('canvas');
+  c.width = TEX_W; c.height = TEX_H;
+  const ctx = c.getContext('2d');
+  const img = ctx.createImageData(TEX_W, TEX_H);
+  const data = img.data;
+
+  // Pre-parse palette to RGB once
+  const palRGB = PALETTE.map(s => {
+    const m = s.match(/hsl\(([\d.]+),\s*([\d.]+)%,\s*([\d.]+)%\)/);
+    return hslToRgb(parseFloat(m[1])/360, parseFloat(m[2])/100, parseFloat(m[3])/100);
+  });
+
+  for (let py = 0; py < TEX_H; py++) {
+    const lat = 90 - (py / TEX_H) * 180;
+    for (let px = 0; px < TEX_W; px++) {
+      const lng = (px / TEX_W) * 360 - 180;
+      const cid = geoCellId(lat, lng, 8);
+      const [r, g, b] = palRGB[cid];
+      const off = (py * TEX_W + px) * 4;
+      if (highlightCellId !== null) {
+        if (cid === highlightCellId) {
+          data[off]   = 255;
+          data[off+1] = 255;
+          data[off+2] = 0;
+          data[off+3] = 255;
+        } else {
+          // Dim non-highlighted cells
+          data[off]   = Math.floor(r * 0.55);
+          data[off+1] = Math.floor(g * 0.55);
+          data[off+2] = Math.floor(b * 0.55);
+          data[off+3] = 220;
+        }
+      } else {
+        data[off]   = r;
+        data[off+1] = g;
+        data[off+2] = b;
+        data[off+3] = 200;   // semi-transparent
+      }
+    }
+  }
+  ctx.putImageData(img, 0, 0);
+  return c;
+}
+
+function hslToRgb(h, s, l) {
+  let r, g, b;
+  if (s === 0) { r = g = b = l; }
+  else {
+    const hue2rgb = (p, q, t) => {
+      if (t < 0) t += 1;
+      if (t > 1) t -= 1;
+      if (t < 1/6) return p + (q - p) * 6 * t;
+      if (t < 1/2) return q;
+      if (t < 2/3) return p + (q - p) * (2/3 - t) * 6;
+      return p;
+    };
+    const q = l < 0.5 ? l * (1 + s) : l + s - l * s;
+    const p = 2 * l - q;
+    r = hue2rgb(p, q, h + 1/3);
+    g = hue2rgb(p, q, h);
+    b = hue2rgb(p, q, h - 1/3);
+  }
+  return [Math.round(r * 255), Math.round(g * 255), Math.round(b * 255)];
+}
+
+function buildLandTexture(geoJSON, withBorders) {
+  const c = document.createElement('canvas');
+  c.width = TEX_W; c.height = TEX_H;
+  const ctx = c.getContext('2d');
+  ctx.fillStyle = '#a8c4d8';   // ocean
+  ctx.fillRect(0, 0, TEX_W, TEX_H);
+  ctx.fillStyle = '#c8b794';   // land — sand to keep cell tints legible
+  for (const f of geoJSON.features) {
+    const g = f.geometry; if (!g) continue;
+    const polys = g.type === 'Polygon' ? [g.coordinates]
+      : g.type === 'MultiPolygon' ? g.coordinates : [];
+    for (const poly of polys) for (const ring of poly) fillRing(ctx, ring);
+  }
+  if (withBorders) {
+    ctx.strokeStyle = '#665540';
+    ctx.lineWidth = 0.7;
+    for (const f of geoJSON.features) {
+      const g = f.geometry; if (!g) continue;
+      const polys = g.type === 'Polygon' ? [g.coordinates]
+        : g.type === 'MultiPolygon' ? g.coordinates : [];
+      for (const poly of polys) for (const ring of poly) strokeRing(ctx, ring);
+    }
+  }
+  return c;
+}
+function fillRing(ctx, ring) {
+  if (ring.length < 3) return;
+  ctx.beginPath();
+  for (let i = 0; i < ring.length; i++) {
+    const lng = ring[i][0], lat = ring[i][1];
+    const px = (lng + 180) / 360 * TEX_W;
+    const py = (90  - lat) / 180 * TEX_H;
+    if (i === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
+  }
+  ctx.closePath();
+  ctx.fill();
+}
+function strokeRing(ctx, ring) {
+  if (ring.length < 3) return;
+  ctx.beginPath();
+  for (let i = 0; i < ring.length; i++) {
+    const lng = ring[i][0], lat = ring[i][1];
+    const px = (lng + 180) / 360 * TEX_W;
+    const py = (90  - lat) / 180 * TEX_H;
+    if (i === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
+  }
+  ctx.closePath();
+  ctx.stroke();
+}
+
+function buildLabelTexture() {
+  const c = document.createElement('canvas');
+  c.width = TEX_W; c.height = TEX_H;
+  const ctx = c.getContext('2d');
+  ctx.font = 'bold 18px Inconsolata, monospace';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillStyle = '#1a1a1a';
+  ctx.strokeStyle = 'white';
+  ctx.lineWidth = 3;
+  for (let gx = 0; gx < GRID; gx++) {
+    for (let gy = 0; gy < GRID; gy++) {
+      const lat = -90  + (gx + 0.5) * CELL_DLAT;
+      const lng = -180 + (gy + 0.5) * CELL_DLNG;
+      const cid = geoCellId(lat, lng, 8);
+      const px = (lng + 180) / 360 * TEX_W;
+      const py = (90  - lat) / 180 * TEX_H;
+      const txt = '0x' + cid.toString(16).padStart(2, '0').toUpperCase();
+      ctx.strokeText(txt, px, py);
+      ctx.fillText(txt, px, py);
+    }
+  }
+  return c;
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Three.js scene
+// ─────────────────────────────────────────────────────────────────────
+
+const container = document.getElementById('globeContainer');
+const canvas    = document.getElementById('globeCanvas');
+
+const scene  = new THREE.Scene();
+scene.background = new THREE.Color(0xf5efe0);
+const camera = new THREE.PerspectiveCamera(40, 1, 0.1, 100);
+camera.position.set(0, 0, 3.4);
+
+const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+function resize() {
+  const w = container.clientWidth, h = container.clientHeight;
+  renderer.setSize(w, h, false);
+  camera.aspect = w / h;
+  camera.updateProjectionMatrix();
+}
+window.addEventListener('resize', resize);
+resize();
+
+const controls = new OrbitControls(camera, canvas);
+controls.enablePan = false;
+controls.minDistance = 1.4;
+controls.maxDistance = 6;
+controls.enableDamping = true;
+controls.dampingFactor = 0.08;
+controls.autoRotate = true;
+controls.autoRotateSpeed = 0.4;
+
+scene.add(new THREE.AmbientLight(0xffffff, 1.0));
+
+const geom = new THREE.SphereGeometry(1, 96, 96);
+
+// Three layers, slightly offset radially so they composite properly:
+//   base land  (radius 1.000)
+//   cell tints (radius 1.002, transparent)
+//   borders    (radius 1.004, transparent)  — built into land tex for now
+//   labels     (radius 1.006, transparent)
+
+let landMesh, cellMesh, labelMesh;
+let cellHighlightId = null;
+let geoJSON = null;
+
+function makeMesh(texCanvas, radius, transparent) {
+  const tex = new THREE.CanvasTexture(texCanvas);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  tex.anisotropy = 4;
+  const g = new THREE.SphereGeometry(radius, 96, 96);
+  const m = new THREE.MeshBasicMaterial({
+    map: tex,
+    transparent,
+    depthWrite: !transparent,
+  });
+  return new THREE.Mesh(g, m);
+}
+
+function rebuild() {
+  // Remove existing
+  for (const m of [landMesh, cellMesh, labelMesh]) {
+    if (m) { scene.remove(m); m.geometry.dispose(); m.material.map.dispose(); m.material.dispose(); }
+  }
+  landMesh = cellMesh = labelMesh = null;
+
+  if (geoJSON) {
+    const showBorders = document.getElementById('toggleBorders').checked;
+    landMesh = makeMesh(buildLandTexture(geoJSON, showBorders), 1.000, false);
+    scene.add(landMesh);
+  }
+  if (document.getElementById('toggleCells').checked) {
+    cellMesh = makeMesh(buildCellTexture(cellHighlightId), 1.002, true);
+    scene.add(cellMesh);
+  }
+  if (document.getElementById('toggleLabels').checked) {
+    labelMesh = makeMesh(buildLabelTexture(), 1.006, true);
+    scene.add(labelMesh);
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Raycast → hover info
+// ─────────────────────────────────────────────────────────────────────
+
+const raycaster = new THREE.Raycaster();
+const ndc = new THREE.Vector2();
+
+function updateHover(clientX, clientY) {
+  const rect = canvas.getBoundingClientRect();
+  ndc.x = ((clientX - rect.left) / rect.width)  *  2 - 1;
+  ndc.y = ((clientY - rect.top)  / rect.height) * -2 + 1;
+  raycaster.setFromCamera(ndc, camera);
+  const targets = [landMesh, cellMesh].filter(Boolean);
+  const hits = raycaster.intersectObjects(targets, false);
+  if (hits.length === 0) {
+    document.getElementById('hoverCell').textContent = '—';
+    document.getElementById('hoverLatLng').textContent = '—';
+    document.getElementById('hoverBounds').textContent = '—';
+    document.getElementById('hoverArea').textContent = '—';
+    return;
+  }
+  const p = hits[0].point;
+  const { lat, lng } = xyzToLatLng(p.x, p.y, p.z);
+  const cid = geoCellId(lat, lng, 8);
+  const b = cellBounds(cid);
+  document.getElementById('hoverCell').textContent =
+    '0x' + cid.toString(16).padStart(2, '0').toUpperCase() + '  (' + cid + ')';
+  document.getElementById('hoverLatLng').textContent =
+    lat.toFixed(2) + '°, ' + lng.toFixed(2) + '°';
+  if (b) {
+    document.getElementById('hoverBounds').textContent =
+      `${b.latLo.toFixed(1)}…${b.latHi.toFixed(1)}°  ${b.lngLo.toFixed(1)}…${b.lngHi.toFixed(1)}°`;
+    document.getElementById('hoverArea').textContent =
+      Math.round(b.areaKm2 / 1000).toLocaleString() + ' × 1000 km²';
+  }
+}
+canvas.addEventListener('pointermove', e => updateHover(e.clientX, e.clientY));
+
+// ─────────────────────────────────────────────────────────────────────
+// Legend (256 cell swatches)
+// ─────────────────────────────────────────────────────────────────────
+
+const legend = document.getElementById('legend');
+for (let i = 0; i < 256; i++) {
+  const s = document.createElement('div');
+  s.className = 'swatch';
+  s.style.background = PALETTE[i];
+  s.title = '0x' + i.toString(16).padStart(2, '0').toUpperCase() + '  (' + i + ')';
+  s.addEventListener('click', () => {
+    cellHighlightId = (cellHighlightId === i) ? null : i;
+    for (const sw of legend.children) sw.classList.remove('selected');
+    if (cellHighlightId !== null) s.classList.add('selected');
+    rebuild();
+  });
+  legend.appendChild(s);
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Geolocation pin
+// ─────────────────────────────────────────────────────────────────────
+
+let myPin = null;
+document.getElementById('locateBtn').addEventListener('click', () => {
+  if (!navigator.geolocation) {
+    alert('Geolocation not available.');
+    return;
+  }
+  navigator.geolocation.getCurrentPosition(
+    pos => {
+      const lat = pos.coords.latitude;
+      const lng = pos.coords.longitude;
+      const cid = geoCellId(lat, lng, 8);
+      document.getElementById('myLatLng').textContent =
+        lat.toFixed(3) + '°, ' + lng.toFixed(3) + '°';
+      document.getElementById('myCell').textContent =
+        '0x' + cid.toString(16).padStart(2, '0').toUpperCase() + '  (' + cid + ')';
+      addOrUpdatePin(lat, lng);
+    },
+    err => alert('Geolocation failed: ' + err.message),
+    { enableHighAccuracy: false, timeout: 8000, maximumAge: 600_000 },
+  );
+});
+
+function addOrUpdatePin(lat, lng) {
+  if (myPin) scene.remove(myPin);
+  const { x, y, z } = latLngToXYZ(lat, lng, 1.01);
+  const g = new THREE.SphereGeometry(0.015, 16, 16);
+  const m = new THREE.MeshBasicMaterial({ color: 0xc0392b });
+  myPin = new THREE.Mesh(g, m);
+  myPin.position.set(x, y, z);
+  scene.add(myPin);
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Toggles
+// ─────────────────────────────────────────────────────────────────────
+
+for (const id of ['toggleCells', 'toggleBorders', 'toggleLabels']) {
+  document.getElementById(id).addEventListener('change', rebuild);
+}
+document.getElementById('toggleAutorotate').addEventListener('change', e => {
+  controls.autoRotate = e.target.checked;
+});
+
+// ─────────────────────────────────────────────────────────────────────
+// Load world atlas, then build scene
+// ─────────────────────────────────────────────────────────────────────
+
+(async () => {
+  try {
+    const topoData = await fetch(
+      'https://cdn.jsdelivr.net/npm/world-atlas@2.0.2/countries-110m.json'
+    ).then(r => r.json());
+    geoJSON = topojson.feature(topoData, topoData.objects.countries);
+  } catch (err) {
+    console.warn('World atlas load failed:', err);
+  }
+  rebuild();
+})();
+
+// ─────────────────────────────────────────────────────────────────────
+// Render loop
+// ─────────────────────────────────────────────────────────────────────
+
+function animate() {
+  requestAnimationFrame(animate);
+  controls.update();
+  renderer.render(scene, camera);
+}
+animate();
+</script>
+
+</body>
+</html>
