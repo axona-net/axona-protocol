@@ -137,8 +137,14 @@
     import { webTransport } from '/src/transport/web/index.js';
 
     // ── Bridge URL: ?bridge= override, default to the live bridge ────
+    //
+    // Use window.location explicitly here — the later `const geo =
+    // await getLocation()` would otherwise put a local `location`
+    // binding into the temporal dead zone for the whole module, and
+    // this synchronous lookup at boot would throw `Cannot access
+    // 'location' before initialization`.
     function getBridgeUrl() {
-      const fromQs = new URLSearchParams(location.search).get('bridge');
+      const fromQs = new URLSearchParams(window.location.search).get('bridge');
       if (fromQs) return fromQs;
       return 'wss://bridge.axona.net';
     }
@@ -197,10 +203,10 @@
       });
     }
 
-    const location = await getLocation();
+    const geo = await getLocation();
     document.getElementById('myLocation').textContent =
-      `${location.lat.toFixed(4)}, ${location.lng.toFixed(4)} · ${location.source}`;
-    log('location resolved', location);
+      `${geo.lat.toFixed(4)}, ${geo.lng.toFixed(4)} · ${geo.source}`;
+    log("location resolved", geo);
 
     // The "regional synthetic publisher" is a nodeId-shaped hash whose
     // top 8 bits are the S2 cell of this lat/lng and whose bottom 256
@@ -213,7 +219,7 @@
     }
 
     // ── 2. Identity (264-bit Ed25519, anchored at the resolved location)
-    const identity = await deriveIdentity({ lat: location.lat, lng: location.lng });
+    const identity = await deriveIdentity({ lat: geo.lat, lng: geo.lng });
     document.getElementById('myId').textContent = identity.id;
     log('identity derived', { id: identity.id.slice(0, 16) + '…' });
 
@@ -232,8 +238,8 @@
 
     const node = new NeuronNode({
       id:  BigInt('0x' + identity.id),
-      lat: location.lat,
-      lng: location.lng,
+      lat: geo.lat,
+      lng: geo.lng,
     });
     node.transport = transport;
     const domain = new AxonaDomain({ k: 20 });
@@ -262,11 +268,11 @@
     // null → topicId = sha256(topicName), prefix '00'), so anyone
     // running the demo anywhere in the world lands at the same
     // topicId and can chat.  Regional topics are an option too —
-    // pass `publisher: regionSynthPublisher(location)` to confine
+    // pass `publisher: regionSynthPublisher(geo)` to confine
     // chat to your S2 region (~800 km radius).
     const TOPIC     = 'hello-world';
     const publisher = null;   // global public topic; swap for
-                              // regionSynthPublisher(location) to
+                              // regionSynthPublisher(geo) to
                               // make it regional.
     const topicId   = await deriveTopicId(publisher, TOPIC);
     document.getElementById('topicIdDisplay').textContent = topicId;
