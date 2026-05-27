@@ -40,7 +40,8 @@ const server = http.createServer(async (req, res) => {
     const url = new URL(req.url, 'http://localhost');
     let pathname = decodeURIComponent(url.pathname);
     // Root redirects to the browser demo.
-    if (pathname === '/') pathname = '/examples/minimal-pubsub-browser/index.html';
+    if (pathname === '/') pathname = '/index.html';
+    if (pathname.endsWith('/')) pathname += 'index.html';
     const filePath = normalize(join(ROOT, pathname));
     if (!filePath.startsWith(ROOT)) {                 // path-traversal guard
       res.writeHead(403); res.end('forbidden'); return;
