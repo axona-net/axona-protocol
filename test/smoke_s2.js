@@ -9,6 +9,9 @@
 // Run: node test/smoke_s2.js
 // =====================================================================
 
+// Import via the public BARREL (../src/index.js), not the deep s2 module.
+// This ensures the foundational S2 API stays first-class — if anyone
+// removes a re-export from index.js, this test fails immediately.
 import {
   geoCellId,
   geoCellCenter,
@@ -18,7 +21,7 @@ import {
   S2_FACES,
   S2_CELL_COUNT,
   S2_RESERVED_FROM,
-} from '../src/utils/s2.js';
+} from '../src/index.js';
 
 let passed = 0, failed = 0;
 function check(label, cond) {
