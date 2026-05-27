@@ -397,12 +397,36 @@ transport.onPeerDied?.(peerId => {
 });
 
 // ─── Connect ─────────────────────────────────────────────────────────
+//
+// Two-phase: transport+peer start first (handshake with the bridge),
+// then wait for the mesh to fill in before subscribing.  Subscribing
+// while synaptome.size === 1 (just the bridge) registers our
+// subscription at the bridge only.  When other peers come online and
+// other publishers route their `pubsub:publish-k` through a fuller
+// K-closest set, those publishes can miss us because our subscription
+// is anchored at the wrong axon.  Gating the subscribe behind a
+// stable synaptome matches axona-peer's manual "Add subscription"
+// pattern and what dht-sim does after warm-up.
+//
+// READY_SYNAPSE_COUNT = bridge + ~3 WebRTC peers; READY_TIMEOUT_MS
+// puts a ceiling on solo-tab runs (when there's no one else to find).
+const READY_SYNAPSE_COUNT = 4;
+const READY_TIMEOUT_MS    = 10_000;
+
+async function waitForMeshReady() {
+  const t0 = Date.now();
+  while (Date.now() - t0 < READY_TIMEOUT_MS) {
+    if (node.synaptome.size >= READY_SYNAPSE_COUNT) return node.synaptome.size;
+    await new Promise(r => setTimeout(r, 200));
+  }
+  return node.synaptome.size;
+}
+
 try {
   await transport.start(identity.id);
   await peer.start();
   bridgeUp = true;
-  $status.textContent = 'connected';
-  $pubBtn.disabled = false;
+  $status.textContent = 'stabilising mesh…';
 
   // Seed the dot strip from boundPeers() at startup — onPeerBound
   // only fires for new arrivals after our hook installed.
@@ -410,6 +434,10 @@ try {
     peerStates.set(asHex(peerId), 'open');
   }
   renderDots();
+
+  await waitForMeshReady();
+  // Subscription happens just below (top-level await) — gate the
+  // button on success after sub resolves.
 } catch (err) {
   $status.textContent = 'connection failed';
   console.error('[demo] connect failed', err);
@@ -450,6 +478,10 @@ const sub = await peer.sub(TOPIC, (envelope) => {
   const body = colonAt > 0 ? wire.slice(colonAt + 1).trim() : wire;
   appendMessage(name, body, new Date());
 }, { publisher, since: 'all' });
+
+// Subscription is registered — safe to publish now.
+$status.textContent = 'connected';
+$pubBtn.disabled    = false;
 
 // ─── Publish ─────────────────────────────────────────────────────────
 async function publish() {
