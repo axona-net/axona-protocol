@@ -2,389 +2,476 @@
 <html lang="en">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>@axona/protocol — webTransport pub/sub demo</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#2d7373">
+  <title>Axona Demo</title>
+
   <style>
     :root {
-      --rust: #2d7373;
-      --rust-soft: #d4a896;
-      --ink: #1a1a1a;
-      --muted: #666;
-      --bg: #fffff8;
-      --card-bg: #fbfbf6;
-      --border: #d8d4ca;
-      --code-bg: #f0ecdf;
-      --green: #2d7373;
-      --red: #c0392b;
-      --amber: #b07d3a;
+      --bg:          #fffff8;
+      --ink:         #1a1a1a;
+      --muted:       #6b6b6b;
+      --card:        #ffffff;
+      --border:      #e2dfd6;
+      --accent:      #2d7373;
+      --accent-soft: #d4e4e1;
+      --dot-bridge:  #2d7373;
+      --dot-open:    #22c55e;
+      --dot-pending: #f59e0b;
+      --dot-dead:    #cbcbc4;
+      --tile-bg:     #f4f1e8;
     }
     * { box-sizing: border-box; }
+    html, body { margin: 0; padding: 0; background: var(--bg); color: var(--ink); }
     body {
-      font-family: 'EB Garamond', Georgia, serif;
-      max-width: 1100px;
-      margin: 0 auto;
-      padding: 2rem 1.5rem;
-      background: var(--bg);
-      color: var(--ink);
+      font-family: system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
       line-height: 1.5;
+      min-height: 100vh;
+      padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);
     }
-    h1 { font-weight: 500; letter-spacing: -0.015em; margin-bottom: 0.3em; }
-    .lede { color: var(--muted); margin-top: 0; }
-    code { font-family: 'Inconsolata', ui-monospace, Menlo, monospace; background: var(--code-bg); padding: 1px 4px; border-radius: 2px; font-size: 0.92em; }
+    .wrap {
+      max-width: 880px;
+      margin: 0 auto;
+      padding: 1.4rem 1.1rem 3rem;
+    }
 
+    /* ── Header ──────────────────────────────────────────────────────── */
+    header {
+      display: flex;
+      align-items: baseline;
+      justify-content: space-between;
+      gap: 1rem;
+      margin-bottom: 0.6rem;
+    }
+    h1 {
+      font-size: 1.5rem;
+      font-weight: 600;
+      letter-spacing: -0.01em;
+      margin: 0;
+      color: var(--accent);
+    }
     .status {
-      background: var(--card-bg);
+      font-size: 0.8rem;
+      color: var(--muted);
+      font-variant-numeric: tabular-nums;
+    }
+
+    /* ── Dot strip (mesh) ────────────────────────────────────────────── */
+    .dots {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 4px;
+      padding: 0.5rem 0 1rem;
+      min-height: 18px;
+    }
+    .dot {
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      background: var(--dot-dead);
+      transition: background 0.15s;
+    }
+    .dot.bridge  { background: var(--dot-bridge); width: 9px; height: 9px; }
+    .dot.open    { background: var(--dot-open); }
+    .dot.pending { background: var(--dot-pending); }
+    .dot.dead    { background: var(--dot-dead); }
+
+    /* ── Topic info row ─────────────────────────────────────────────── */
+    .topic-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.5rem;
+      margin-bottom: 1.2rem;
+    }
+    .tile {
+      background: var(--tile-bg);
       border: 1px solid var(--border);
       border-radius: 6px;
-      padding: 0.6rem 0.9rem;
-      margin-top: 1rem;
-      font-size: 14px;
+      padding: 0.4rem 0.7rem;
+      font-size: 0.82rem;
+      color: var(--ink);
       display: flex;
-      align-items: center;
-      gap: 0.7rem;
+      flex-direction: column;
+      gap: 1px;
     }
-    .dot { width: 10px; height: 10px; border-radius: 50%; background: var(--muted); }
-    .dot.connecting { background: var(--amber); }
-    .dot.connected  { background: var(--green); }
-    .dot.failed     { background: var(--red); }
-    .status-text { flex: 1; }
-    .status-text code { font-size: 12px; }
+    .tile .k { color: var(--muted); font-size: 0.7rem; letter-spacing: 0.04em; text-transform: uppercase; }
+    .tile .v {
+      font-family: ui-monospace, 'SF Mono', Menlo, monospace;
+      font-size: 0.86rem;
+    }
+    .tile.topic   .v { color: var(--accent); font-weight: 600; }
+    .tile.prefix  .v { color: var(--accent); font-weight: 600; }
+    .tile.topicid .v { color: var(--muted); font-size: 0.74rem; word-break: break-all; }
 
-    .panes { display: grid; grid-template-columns: 1fr 1fr; gap: 1.2rem; margin-top: 1.2rem; }
-    .pane { background: var(--card-bg); border: 1px solid var(--border); border-radius: 8px; padding: 1rem 1.2rem; }
-    .pane h2 { font-size: 18px; margin: 0 0 0.5rem 0; color: var(--rust); font-weight: 600; }
-    .label { color: var(--muted); font-size: 13px; margin: 0.7rem 0 0.3rem 0; }
-    .nodeId { font-family: 'Inconsolata', ui-monospace, monospace; font-size: 11px; color: var(--muted); word-break: break-all; padding: 0.3rem 0.5rem; background: var(--code-bg); border-radius: 3px; }
-    .row { display: flex; gap: 0.5rem; margin-bottom: 0.5rem; }
-    input[type=text] { padding: 0.5rem 0.7rem; border: 1px solid var(--border); border-radius: 4px; font-family: inherit; font-size: 15px; background: white; width: 100%; }
-    .row input[type=text] { flex: 1; }
-    button { background: var(--rust); color: white; border: none; padding: 0.5rem 1rem; border-radius: 4px; cursor: pointer; font-family: inherit; font-size: 15px; font-weight: 500; white-space: nowrap; }
-    button:disabled { background: #aaa; cursor: not-allowed; }
-    .received { background: white; border: 1px solid var(--border); border-radius: 4px; padding: 0.6rem 0.9rem; font-family: 'Inconsolata', ui-monospace, monospace; font-size: 12.5px; min-height: 260px; max-height: 420px; overflow-y: auto; white-space: pre-wrap; color: #333; }
-    .received .empty { color: var(--muted); font-style: italic; }
-    .arrived { color: var(--rust); font-weight: 600; }
-    .self    { color: var(--rust-soft); font-style: italic; margin-left: 0.5em; }
+    /* ── Two-pane grid ──────────────────────────────────────────────── */
+    .panes {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 1rem;
+    }
+    @media (max-width: 700px) {
+      .panes { grid-template-columns: 1fr; }
+    }
+    .pane {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 1rem 1.1rem;
+    }
+    .pane h2 {
+      font-size: 0.78rem;
+      font-weight: 600;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      color: var(--muted);
+      margin: 0 0 0.7rem 0;
+    }
 
-    .bootlog { background: var(--card-bg); border: 1px solid var(--border); border-radius: 6px; padding: 0.6rem 0.9rem; font-family: 'Inconsolata', ui-monospace, Menlo, monospace; font-size: 12px; color: var(--muted); margin-top: 1.5rem; min-height: 1.5rem; max-height: 260px; overflow-y: auto; white-space: pre-wrap; }
-    .bootlog .heading { color: var(--rust); font-weight: 600; letter-spacing: 0.05em; text-transform: uppercase; font-size: 11px; margin-bottom: 0.4em; }
+    /* ── Publish form ───────────────────────────────────────────────── */
+    label.field {
+      display: block;
+      margin-bottom: 0.7rem;
+    }
+    label.field span {
+      display: block;
+      font-size: 0.74rem;
+      color: var(--muted);
+      margin-bottom: 0.2rem;
+    }
+    input[type="text"] {
+      width: 100%;
+      padding: 0.6rem 0.7rem;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      font-family: inherit;
+      font-size: 1rem;
+      color: var(--ink);
+      background: white;
+      transition: border-color 0.15s, box-shadow 0.15s;
+    }
+    input[type="text"]:focus {
+      outline: none;
+      border-color: var(--accent);
+      box-shadow: 0 0 0 3px var(--accent-soft);
+    }
+    button.publish {
+      width: 100%;
+      padding: 0.75rem 1rem;
+      border: none;
+      border-radius: 6px;
+      background: var(--accent);
+      color: white;
+      font-family: inherit;
+      font-size: 1rem;
+      font-weight: 600;
+      cursor: pointer;
+      transition: background 0.15s;
+      margin-top: 0.3rem;
+    }
+    button.publish:hover  { background: #1d5959; }
+    button.publish:active { background: #144545; }
+    button.publish:disabled { background: #9aafad; cursor: not-allowed; }
 
-    footer { margin-top: 1.5rem; font-size: 13px; color: var(--muted); text-align: center; }
-    footer a { color: var(--rust); }
+    /* ── Subscribe feed ─────────────────────────────────────────────── */
+    .feed {
+      min-height: 220px;
+      max-height: 420px;
+      overflow-y: auto;
+      display: flex;
+      flex-direction: column;
+      gap: 0.5rem;
+    }
+    .feed .empty {
+      color: var(--muted);
+      font-style: italic;
+      font-size: 0.92rem;
+      padding: 0.4rem 0;
+    }
+    .msg {
+      padding: 0.55rem 0.7rem;
+      background: var(--tile-bg);
+      border-radius: 6px;
+      font-size: 0.95rem;
+    }
+    .msg .meta {
+      font-size: 0.72rem;
+      color: var(--muted);
+      margin-bottom: 0.15rem;
+      display: flex;
+      gap: 0.6rem;
+      align-items: baseline;
+    }
+    .msg .name { font-weight: 600; color: var(--accent); }
+    .msg .time { font-variant-numeric: tabular-nums; }
+    .msg .body { color: var(--ink); white-space: pre-wrap; word-wrap: break-word; }
+
+    /* ── Footer ─────────────────────────────────────────────────────── */
+    footer {
+      margin-top: 1.6rem;
+      padding-top: 0.9rem;
+      border-top: 1px solid var(--border);
+      font-size: 0.74rem;
+      color: var(--muted);
+      display: flex;
+      justify-content: space-between;
+      gap: 1rem;
+      flex-wrap: wrap;
+      font-family: ui-monospace, 'SF Mono', Menlo, monospace;
+    }
+    footer a { color: var(--accent); text-decoration: none; }
+    footer a:hover { text-decoration: underline; }
   </style>
 </head>
 <body>
-  <h1>@axona/protocol — pub/sub demo on the live bridge</h1>
-  <p class="lede">
-    This tab is an Axona peer connected to <code>wss://bridge.axona.net</code> via
-    <code>webTransport</code>. Open this page in multiple tabs (or share the URL
-    with a friend) and every connected peer publishing to
-    <code>hello-world</code> shows up in the received list.
-  </p>
+<div class="wrap">
 
-  <div class="status">
-    <span class="dot" id="dot"></span>
-    <span class="status-text" id="statusText">connecting…</span>
+  <header>
+    <h1>Axona Demo</h1>
+    <div class="status" id="status">connecting…</div>
+  </header>
+
+  <div class="dots" id="dots" aria-label="connected peers"></div>
+
+  <div class="topic-row">
+    <div class="tile topic">
+      <span class="k">Topic</span>
+      <span class="v">hello-world</span>
+    </div>
+    <div class="tile prefix">
+      <span class="k">Anchor</span>
+      <span class="v" id="prefix">—</span>
+    </div>
+    <div class="tile topicid">
+      <span class="k">Topic ID</span>
+      <span class="v" id="topicId">—</span>
+    </div>
   </div>
 
   <div class="panes">
     <div class="pane">
       <h2>Publish</h2>
-      <div class="label">Your name</div>
-      <input type="text" id="nameInput" value="Alice" />
-      <div class="label">Message</div>
-      <div class="row">
-        <input type="text" id="msgInput" placeholder="message" value="hello from alice" />
-        <button id="pubBtn" disabled>Publish</button>
-      </div>
-      <div class="label">Topic ID (publish location — deterministic from publisher + topic name; MUST match on every peer)</div>
-      <div class="nodeId" id="topicIdDisplay">…</div>
-      <div class="label">Last published msgId (per-message content hash — changes every publish)</div>
-      <div class="nodeId" id="lastMsgId">—</div>
-      <div class="label">Your nodeId</div>
-      <div class="nodeId" id="myId">…</div>
-      <div class="label">Your location (top 8 bits of nodeId = S2 cell of this lat/lng)</div>
-      <div class="nodeId" id="myLocation">…</div>
-      <div class="label">Synaptome (peers known to your DHT)</div>
-      <div class="nodeId" id="synSize">…</div>
-      <div class="label">Bridge</div>
-      <div class="nodeId" id="bridgeUrl">…</div>
+      <label class="field">
+        <span>Name</span>
+        <input type="text" id="nameInput" value="Alice" autocomplete="off" autocapitalize="words">
+      </label>
+      <label class="field">
+        <span>Message</span>
+        <input type="text" id="msgInput" value="Hello, world." autocomplete="off">
+      </label>
+      <button class="publish" id="pubBtn" disabled>Publish</button>
     </div>
 
     <div class="pane">
-      <h2>Subscribe — <code>hello-world</code></h2>
-      <div class="label">Subscribed to topic ID (must match publisher's)</div>
-      <div class="nodeId" id="subTopicId">…</div>
-      <div class="received" id="receivedLog"><span class="empty">(waiting for messages…)</span></div>
+      <h2>Subscribe</h2>
+      <div class="feed" id="feed">
+        <span class="empty">Waiting for messages…</span>
+      </div>
     </div>
   </div>
 
-  <div class="bootlog">
-    <div class="heading">console</div>
-    <div id="bootlog">Booting…</div>
-  </div>
-
   <footer>
-    Source: <code>axona-protocol/src/</code> served live · kernel
-    v<span id="kernelVer">…</span> · <code>webTransport({ bridgeUrl })</code>
-    + <code>peer.pub</code>/<code>peer.sub</code>
+    <span>kernel v<span id="kernelVer">…</span></span>
+    <a href="https://github.com/axona-net/axona-protocol">source</a>
   </footer>
 
-  <script type="module">
-    import {
-      AxonaPeer, AxonaDomain, NeuronNode,
-      deriveIdentity, deriveTopicId, geoCellId,
-    } from '/src/index.js';
-    import { webTransport } from '/src/transport/web/index.js';
+</div>
 
-    // ── Bridge URL: ?bridge= override, default to the live bridge ────
-    //
-    // Use window.location explicitly here — the later `const geo =
-    // await getLocation()` would otherwise put a local `location`
-    // binding into the temporal dead zone for the whole module, and
-    // this synchronous lookup at boot would throw `Cannot access
-    // 'location' before initialization`.
-    function getBridgeUrl() {
-      const fromQs = new URLSearchParams(window.location.search).get('bridge');
-      if (fromQs) return fromQs;
-      return 'wss://bridge.axona.net';
-    }
-    const BRIDGE_URL = getBridgeUrl();
-    document.getElementById('bridgeUrl').textContent = BRIDGE_URL;
+<script type="module">
+import {
+  AxonaPeer, AxonaDomain, NeuronNode,
+  deriveIdentity, deriveTopicId, geoCellId,
+} from '/src/index.js';
+import { webTransport } from '/src/transport/web/index.js';
 
-    const bootlogEl = document.getElementById('bootlog');
-    const log = (msg, extra) => {
-      const line = extra != null ? `${msg}  ${typeof extra === 'object' ? JSON.stringify(extra) : extra}` : msg;
-      bootlogEl.textContent += '\n' + line;
-      bootlogEl.scrollTop = bootlogEl.scrollHeight;
-      // Mirror to console for devtools debugging.
-      console.log('[demo]', msg, extra ?? '');
-    };
-    bootlogEl.textContent = 'Booting…';
+// ─── Constants ────────────────────────────────────────────────────────
+const BRIDGE_URL = new URLSearchParams(window.location.search).get('bridge')
+                || 'wss://bridge.axona.net';
+const VIRGINIA   = { lat: 38.0, lng: -77.0 };
+const TOPIC      = 'hello-world';
+const MAX_DOTS   = 100;
 
-    const dotEl    = document.getElementById('dot');
-    const statusEl = document.getElementById('statusText');
-    function setStatus(state, text) {
-      dotEl.className = 'dot ' + state;
-      statusEl.textContent = text;
-    }
-    setStatus('connecting', `connecting to ${BRIDGE_URL}…`);
+// ─── DOM ─────────────────────────────────────────────────────────────
+const $dots    = document.getElementById('dots');
+const $status  = document.getElementById('status');
+const $prefix  = document.getElementById('prefix');
+const $topicId = document.getElementById('topicId');
+const $kernel  = document.getElementById('kernelVer');
+const $name    = document.getElementById('nameInput');
+const $msg     = document.getElementById('msgInput');
+const $pubBtn  = document.getElementById('pubBtn');
+const $feed    = document.getElementById('feed');
 
-    // Pull kernel version for footer
-    try {
-      const pkg = await fetch('/package.json').then(r => r.json());
-      document.getElementById('kernelVer').textContent = pkg.version;
-    } catch { document.getElementById('kernelVer').textContent = '?'; }
+// ─── Footer kernel version ───────────────────────────────────────────
+try {
+  const pkg = await fetch('/package.json').then(r => r.json());
+  $kernel.textContent = pkg.version;
+} catch { $kernel.textContent = '?'; }
 
-    // ── 1. Geolocation ──────────────────────────────────────────────
-    //
-    // The top 8 bits of every Axona nodeId are the S2 cell of the
-    // peer's lat/lng, so peers in the same region are naturally
-    // XOR-closest to topics anchored at that region.  We ask the
-    // browser for a real location; fall back to (0, 0) — a point in
-    // the Gulf of Guinea — if the user denies or the API is
-    // unavailable.  That gives every "no-permission" peer the same
-    // S2 prefix so they still form a coherent regional cluster.
-    function getLocation() {
-      const FALLBACK = { lat: 0, lng: 0, source: 'fallback (Gulf of Guinea)' };
-      if (!navigator.geolocation) return Promise.resolve(FALLBACK);
-      return new Promise(resolve => {
-        navigator.geolocation.getCurrentPosition(
-          pos => resolve({
-            lat: pos.coords.latitude,
-            lng: pos.coords.longitude,
-            source: 'browser geolocation',
-          }),
-          err => {
-            log('geolocation denied', { reason: err.message });
-            resolve(FALLBACK);
-          },
-          { enableHighAccuracy: false, timeout: 8000, maximumAge: 600_000 },
-        );
-      });
-    }
+// ─── Topic info (Virginia-anchored) ──────────────────────────────────
+const virginiaPrefix = geoCellId(VIRGINIA.lat, VIRGINIA.lng, 8);
+$prefix.textContent  = '0x' + virginiaPrefix.toString(16).padStart(2, '0').toUpperCase();
 
-    const geo = await getLocation();
-    document.getElementById('myLocation').textContent =
-      `${geo.lat.toFixed(4)}, ${geo.lng.toFixed(4)} · ${geo.source}`;
-    log("location resolved", geo);
+// Synthetic publisher: nodeId-shaped hex whose top 8 bits = Virginia
+// S2 cell.  Anchors the topic at Virginia regardless of where the
+// subscribing peer lives — every demo user worldwide computes the
+// same topicId.
+const publisher = virginiaPrefix.toString(16).padStart(2, '0') + '0'.repeat(64);
+const topicId   = await deriveTopicId(publisher, TOPIC);
+$topicId.textContent = topicId.slice(0, 12) + '…' + topicId.slice(-6);
 
-    // The "regional synthetic publisher" is a nodeId-shaped hash whose
-    // top 8 bits are the S2 cell of this lat/lng and whose bottom 256
-    // bits are zero.  Topic IDs derived from it inherit that S2
-    // prefix, so subscribers in the same region land XOR-close to
-    // those topics.
-    function regionSynthPublisher({ lat, lng }) {
-      const s2 = geoCellId(lat, lng, 8);
-      return s2.toString(16).padStart(2, '0') + '0'.repeat(64);
-    }
+// ─── Geolocation (for our own identity only) ─────────────────────────
+async function getLocation() {
+  // Even if denied, identity falls back to (0, 0) → cell 0x10 (Gulf
+  // of Guinea).  We never end up with a 0x00 identity prefix unless
+  // the user is at the South Pole.  The topic anchor above is
+  // independent of this — it always stays at Virginia (0x89).
+  const FALLBACK = { lat: 0, lng: 0 };
+  if (!navigator.geolocation) return FALLBACK;
+  return new Promise(resolve => {
+    navigator.geolocation.getCurrentPosition(
+      pos  => resolve({ lat: pos.coords.latitude, lng: pos.coords.longitude }),
+      ()   => resolve(FALLBACK),
+      { enableHighAccuracy: false, timeout: 6000, maximumAge: 600_000 },
+    );
+  });
+}
+const geo = await getLocation();
 
-    // ── 2. Identity (264-bit Ed25519, anchored at the resolved location)
-    const identity = await deriveIdentity({ lat: geo.lat, lng: geo.lng });
-    document.getElementById('myId').textContent = identity.id;
-    log('identity derived', { id: identity.id.slice(0, 16) + '…' });
+// ─── Identity + transport + peer ─────────────────────────────────────
+const identity = await deriveIdentity({ lat: geo.lat, lng: geo.lng });
+const transport = webTransport({ bridgeUrl: BRIDGE_URL, identity });
+const node     = new NeuronNode({ id: BigInt('0x' + identity.id), lat: geo.lat, lng: geo.lng });
+node.transport = transport;
+const domain   = new AxonaDomain({ k: 20 });
+const peer     = new AxonaPeer({ domain, node, identity, transport });
 
-    // ── 2. Transport + peer ─────────────────────────────────────────
-    // With autoHandshake (default), webTransport drives the bridge's
-    // WebSocket version gate AND the application-level hello / hello-ack
-    // admission as part of start().  AxonaPeer.start() then asks the
-    // transport for its boundPeers() and auto-admits them into the
-    // synaptome.  Net effect: three lines of setup, then peer.pub /
-    // peer.sub work.
-    const transport = webTransport({
-      bridgeUrl: BRIDGE_URL,
-      identity,
-      log: (evt, extra) => log('wt:' + evt, extra),
-    });
+// ─── Peer-state tracking for the dot strip ───────────────────────────
+//
+// We render one dot per known peer.  Bridge is always the first
+// (larger, accent-colored) dot, drawn whenever the bridge connection
+// is alive.  Each subsequent dot is a WebRTC peer.
+//
+//   open     — green   (bound peer, isConnected = true)
+//   pending  — amber   (in synaptome but not yet bound — fresh signal)
+//   dead     — grey    (was bound, transport reported death)
+//
+// Cap at MAX_DOTS; if more peers, we just truncate (rare in a single
+// browser tab — typically 5–20 connections).
+const peerStates = new Map();   // hex peerId → 'open'|'pending'|'dead'
+let   bridgeUp   = false;
 
-    const node = new NeuronNode({
-      id:  BigInt('0x' + identity.id),
-      lat: geo.lat,
-      lng: geo.lng,
-    });
-    node.transport = transport;
-    const domain = new AxonaDomain({ k: 20 });
-    const peer = new AxonaPeer({ domain, node, identity, transport });
+// Transport callbacks deliver peerIds as BigInts (kernel canonical
+// form).  Normalize to lowercase 66-char hex for use as a Map key
+// and for the dot's tooltip.
+function asHex(peerId) {
+  if (typeof peerId === 'bigint') return peerId.toString(16).padStart(66, '0');
+  if (typeof peerId === 'string') return peerId.toLowerCase();
+  return String(peerId);
+}
 
-    await transport.start(identity.id);   // does the bridge handshake
-    await peer.start();                   // auto-admits transport.boundPeers()
-                                          // and builds a default AxonaManager
-                                          // with the reachable-only K-closest
-                                          // + tunneled-direct sendDirect that
-                                          // production axona.net peers use.
-    // DIAG: expose live handles for in-page inspection.
-    window.__axona = { peer, transport, identity, node };
-    log('peer ready · bridge:', transport.bridgeNodeId.slice(0, 16) + '…');
-    setStatus('connected', `connected · bridge ${transport.bridgeNodeId.slice(0, 8)}…`);
+function renderDots() {
+  $dots.innerHTML = '';
+  // Bridge dot first
+  const b = document.createElement('div');
+  b.className = 'dot bridge' + (bridgeUp ? ' open' : ' pending');
+  b.title = 'bridge';
+  $dots.appendChild(b);
+  // Up to MAX_DOTS-1 peer dots
+  const peers = [...peerStates.entries()].slice(0, MAX_DOTS - 1);
+  for (const [hex, state] of peers) {
+    const d = document.createElement('div');
+    d.className = 'dot ' + state;
+    d.title = hex.slice(0, 12) + '…';
+    $dots.appendChild(d);
+  }
+}
+renderDots();
 
-    // ── 3. Topic ID + live synaptome size ───────────────────────────
-    //
-    // The topic ID is the DETERMINISTIC publish location in the DHT.
-    // Both peers using the same (publisher, topic-name) compute the
-    // same 264-bit hex topicId, which is what pubsub:publish-k and
-    // pubsub:subscribe-k address.  Both peers MUST see this same
-    // value; if not, they can't find each other.
-    //
-    // For this hello-world demo we pin the topic to a single global
-    // coordinate — Virginia (38° N, 77° W) — using a synthetic
-    // publisher whose top 8 bits = Virginia's S2 cell (0x89 under
-    // standard S2 level-3 truncated).  Every demo peer worldwide
-    // computes the SAME topicId starting with 0x89, so they all
-    // arrive at the same K-closest anchor set; the deployed bridge
-    // (nodeId 0x895bf03e58…) is naturally one of those anchors.
-    //
-    // We deliberately do NOT use publisher: null here.  Public-mode
-    // null produces a 0x00-prefixed topic, which would route every
-    // demo publish through whichever peers happen to have low-byte
-    // nodeIds — a hotspot at the southern-Atlantic edge of the
-    // address space.  Pinning to Virginia is both simple and
-    // illustrative of how an application chooses its own regional
-    // anchor for a globally-shared topic.
-    const VIRGINIA  = { lat: 38.0, lng: -77.0 };
-    const TOPIC     = 'hello-world';
-    const publisher = regionSynthPublisher(VIRGINIA);
-    const topicId   = await deriveTopicId(publisher, TOPIC);
-    document.getElementById('topicIdDisplay').textContent = topicId;
-    log('topicId derived', { topicId, publisher, topicName: TOPIC });
+transport.onPeerBound?.(peerId => {
+  peerStates.set(asHex(peerId), 'open');
+  renderDots();
+});
+transport.onPeerDied?.(peerId => {
+  peerStates.set(asHex(peerId), 'dead');
+  renderDots();
+});
 
-    // Live synaptome-size display so the user can see the mesh
-    // building up.  Useful for confirming the ready-gate is
-    // firing on the same conditions both peers see.
-    const synSizeEl = document.getElementById('synSize');
-    function renderSyn() { synSizeEl.textContent = String(node.synaptome.size); }
-    renderSyn();
-    const synTimer = setInterval(renderSyn, 250);
+// ─── Connect ─────────────────────────────────────────────────────────
+try {
+  await transport.start(identity.id);
+  await peer.start();
+  bridgeUp = true;
+  $status.textContent = 'connected';
+  $pubBtn.disabled = false;
 
-    // ── 4. Subscribe (deferred until mesh stabilises) ───────────────
-    //
-    // Match axona-peer's contract (client.js, PERSIST_PUBSUB_STATE
-    // = false): every fresh page load starts with NO active
-    // subscriptions.  axona-peer relies on the user clicking "Add
-    // subscription" some seconds after boot, by which time the
-    // synaptome has filled via the bridge's peer-list + mesh
-    // handshakes.  This demo automates the same wait so the
-    // ready-state matches axona-peer's manual flow.
-    //
-    // Gate: synaptome.size >= READY_SYNAPSE_COUNT (or timeout).
-    const READY_SYNAPSE_COUNT = 4;   // bridge + ~3 mesh peers
-    const READY_TIMEOUT_MS    = 10000;
+  // Seed the dot strip from boundPeers() at startup — onPeerBound
+  // only fires for new arrivals after our hook installed.
+  for (const peerId of transport.boundPeers?.() || []) {
+    peerStates.set(asHex(peerId), 'open');
+  }
+  renderDots();
+} catch (err) {
+  $status.textContent = 'connection failed';
+  console.error('[demo] connect failed', err);
+}
 
-    const receivedEl = document.getElementById('receivedLog');
-    let receivedCount = 0;
+// ─── Subscribe ───────────────────────────────────────────────────────
+let messageCount = 0;
+function appendMessage(name, body, when) {
+  if (messageCount === 0) $feed.innerHTML = '';
+  messageCount++;
+  const msg = document.createElement('div');
+  msg.className = 'msg';
+  const meta = document.createElement('div');
+  meta.className = 'meta';
+  const nameEl = document.createElement('span');
+  nameEl.className = 'name';
+  nameEl.textContent = name;
+  const timeEl = document.createElement('span');
+  timeEl.className = 'time';
+  timeEl.textContent = when.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  meta.appendChild(nameEl);
+  meta.appendChild(timeEl);
+  const bodyEl = document.createElement('div');
+  bodyEl.className = 'body';
+  bodyEl.textContent = body;
+  msg.appendChild(meta);
+  msg.appendChild(bodyEl);
+  $feed.appendChild(msg);
+  // Auto-scroll to the newest message
+  $feed.scrollTop = $feed.scrollHeight;
+}
 
-    async function waitForMeshReady() {
-      const t0 = Date.now();
-      while (Date.now() - t0 < READY_TIMEOUT_MS) {
-        if (node.synaptome.size >= READY_SYNAPSE_COUNT) return node.synaptome.size;
-        await new Promise(r => setTimeout(r, 200));
-      }
-      return node.synaptome.size;
-    }
+const sub = await peer.sub(TOPIC, (envelope) => {
+  // Envelopes from the wire are "Name: Body" strings.
+  const wire = envelope.message || '';
+  const colonAt = wire.indexOf(':');
+  const name = colonAt > 0 ? wire.slice(0, colonAt).trim() : '(unknown)';
+  const body = colonAt > 0 ? wire.slice(colonAt + 1).trim() : wire;
+  appendMessage(name, body, new Date());
+}, { publisher, since: 'all' });
 
-    setStatus('connecting', 'waiting for mesh to stabilise…');
-    const finalSynSize = await waitForMeshReady();
-    log('mesh ready', { synaptomeSize: finalSynSize });
+// ─── Publish ─────────────────────────────────────────────────────────
+async function publish() {
+  const name = ($name.value || 'Alice').trim();
+  const msg  = ($msg.value  || 'Hello, world.').trim();
+  if (!msg) return;
+  $pubBtn.disabled = true;
+  try {
+    await peer.pub(TOPIC, name + ': ' + msg, { publisher });
+  } catch (err) {
+    console.error('[demo] publish failed', err);
+  } finally {
+    $pubBtn.disabled = false;
+    $msg.focus();
+    $msg.select();
+  }
+}
+$pubBtn.addEventListener('click', publish);
+$msg.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter' && !$pubBtn.disabled) publish();
+});
+</script>
 
-    const sub = await peer.sub(TOPIC, (envelope) => {
-      // Show every message we subscribe to, including our own
-      // publishes — the kernel loops them back through K-closest, and
-      // a subscriber on a topic genuinely received the message
-      // regardless of who signed it.  Self-published envelopes are
-      // tagged "(you)" in the receive log so they're visually
-      // distinguishable but not hidden.
-      const fromMe = envelope.signerPubkey === identity.pubkeyHex;
-      if (receivedCount === 0) receivedEl.textContent = '';
-      receivedCount++;
-      const ts = new Date().toLocaleTimeString();
-      receivedEl.innerHTML +=
-        '<span class="arrived">[' + ts + ']</span> ' +
-        escapeHtml(envelope.message) +
-        (fromMe ? '<span class="self"> (you)</span>' : '') + '\n' +
-        '  msgId:  ' + envelope.msgId + '\n' +
-        '  signer: ' + (envelope.signerPubkey || '') + '\n\n';
-      receivedEl.scrollTop = receivedEl.scrollHeight;
-    }, { publisher, since: 'all' });
-    document.getElementById('subTopicId').textContent = sub.topicId;
-    log('subscribed', { topicId: sub.topicId, synaptomeSize: node.synaptome.size });
-    setStatus('connected', `subscribed · topicId=${sub.topicId.slice(0, 8)}… · synaptome=${node.synaptome.size}`);
-
-    // ── 7. Publish button ───────────────────────────────────────────
-    const pubBtn    = document.getElementById('pubBtn');
-    const msgInput  = document.getElementById('msgInput');
-    const nameInput = document.getElementById('nameInput');
-    pubBtn.disabled = false;
-
-    const lastMsgIdEl = document.getElementById('lastMsgId');
-    async function publishOnce() {
-      const name = (nameInput.value || 'Alice').trim();
-      const msg  = (msgInput.value  || '').trim();
-      if (!msg) { msgInput.focus(); return; }
-      const wireMsg = name + ': ' + msg;
-      pubBtn.disabled = true;
-      try {
-        const msgId = await peer.pub(TOPIC, wireMsg, { publisher });
-        lastMsgIdEl.textContent = msgId;
-        log('published', {
-          wireMsg,
-          topicId,       // publish location — same on every peer
-          msgId,         // per-message content hash — unique per publish
-          synaptomeSize: node.synaptome.size,
-        });
-      } catch (err) {
-        lastMsgIdEl.textContent = '(error: ' + err.message + ')';
-        log('publish error', err.message);
-      }
-      pubBtn.disabled = false;
-      msgInput.focus();
-      msgInput.select();
-    }
-    pubBtn.addEventListener('click', publishOnce);
-    msgInput.addEventListener('keydown', (e) => {
-      if (e.key === 'Enter' && !pubBtn.disabled) publishOnce();
-    });
-
-    function escapeHtml(s) {
-      return String(s).replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;');
-    }
-  </script>
 </body>
 </html>
