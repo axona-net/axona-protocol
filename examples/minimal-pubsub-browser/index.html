@@ -287,7 +287,16 @@ import { webTransport } from '/src/transport/web/index.js';
 const BRIDGE_URL = new URLSearchParams(window.location.search).get('bridge')
                 || 'wss://bridge.axona.net';
 const VIRGINIA   = { lat: 38.0, lng: -77.0 };
-const TOPIC      = 'hello-world';
+// axona-peer composes topic names as `${regionId}/${eventName}` (see
+// axona-peer/src/client.js line 1230).  Use the same composition here
+// so the demo's hello-world topic at us-east is the EXACT topic that
+// axona-peer subscribers on us-east/hello-world see.  Without this,
+// the 0x89 anchor matches but the body hash differs and the two apps
+// never converge.  EVENT is what we show in the UI tile; TOPIC is
+// what crosses the wire.
+const REGION_ID  = 'us-east';
+const EVENT      = 'hello-world';
+const TOPIC      = `${REGION_ID}/${EVENT}`;
 const MAX_DOTS   = 100;
 
 // ─── DOM ─────────────────────────────────────────────────────────────
