@@ -298,6 +298,74 @@ console.log('\n── Hilbert numbering ──');
         directionChanges > 60);
 }
 
+// ─── Interop with standard S2: our 8-bit IDs == real-S2-level-3 top-8 ───
+// Build a reference S2-level-3 implementation here (independent of
+// src/utils/s2.js).  If our geoCellId matches it on every coordinate,
+// then anyone using a published S2 library can recover our IDs by
+// computing level 3 + truncating to the top 8 bits.
+console.log('\n── interop with standard S2 (level 3 truncated) ──');
+{
+  const FACE_AXES_REF = [
+    [[0, +1], [1, +1], [2, +1]],
+    [[1, +1], [0, -1], [2, +1]],
+    [[2, +1], [0, -1], [1, -1]],
+    [[0, -1], [2, -1], [1, -1]],
+    [[1, -1], [2, -1], [0, +1]],
+    [[2, -1], [1, +1], [0, +1]],
+  ];
+  const DEG_R = Math.PI / 180;
+  function llxyz(lat, lng) {
+    const c = Math.cos(lat * DEG_R);
+    return { x: c * Math.cos(lng * DEG_R), y: c * Math.sin(lng * DEG_R), z: Math.sin(lat * DEG_R) };
+  }
+  function pickFace(x, y, z) {
+    const ax=Math.abs(x), ay=Math.abs(y), az=Math.abs(z);
+    if (ax >= ay && ax >= az) return x >= 0 ? 0 : 3;
+    if (ay >= az)             return y >= 0 ? 1 : 4;
+    return                          z >= 0 ? 2 : 5;
+  }
+  function faceUV(face, x, y, z) {
+    const xyz=[x,y,z];
+    const [[na,ns],[ua,us],[va,vs]] = FACE_AXES_REF[face];
+    const n = ns * xyz[na];
+    return { u:(us*xyz[ua])/n, v:(vs*xyz[va])/n };
+  }
+  function uv2st(u) { return u >= 0 ? 0.5*Math.sqrt(1+3*u) : 1 - 0.5*Math.sqrt(1-3*u); }
+  function hilbert8_ref(x, y) {
+    const N=8; let d=0;
+    for (let s = N>>1; s>0; s>>=1) {
+      const rx = (x & s) > 0 ? 1 : 0;
+      const ry = (y & s) > 0 ? 1 : 0;
+      d += s*s * ((3*rx) ^ ry);
+      if (ry === 0) {
+        if (rx === 1) { x = (N-1) - x; y = (N-1) - y; }
+        const t=x; x=y; y=t;
+      }
+    }
+    return d;
+  }
+  function refCellId(lat, lng) {
+    const {x,y,z} = llxyz(lat, lng);
+    const face = pickFace(x, y, z);
+    const {u,v} = faceUV(face, x, y, z);
+    const s = uv2st(u), t = uv2st(v);
+    const sBin = Math.min(7, Math.max(0, Math.floor(s * 8)));
+    const tBin = Math.min(7, Math.max(0, Math.floor(t * 8)));
+    const h3 = hilbert8_ref(sBin, tBin);
+    return (face << 5) | (h3 >> 1);
+  }
+  let matches=0, mismatches=0;
+  for (let lat=-89.5; lat<90; lat+=2) {
+    for (let lng=-179.5; lng<180; lng+=2) {
+      if (geoCellId(lat, lng, 8) === refCellId(lat, lng)) matches++;
+      else mismatches++;
+    }
+  }
+  console.log(`    matched ${matches} / ${matches + mismatches} samples`);
+  check('every globe sample matches standard S2 level-3 top-8 bits',
+        mismatches === 0);
+}
+
 // ─── Summary ───
 console.log(`\nResult: ${passed} passed, ${failed} failed`);
 if (failed > 0) process.exit(1);

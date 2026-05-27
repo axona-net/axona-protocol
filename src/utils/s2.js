@@ -35,12 +35,15 @@
 /** Number of cube faces (S2's hierarchical foundation). */
 export const S2_FACES = 6;
 
-/** Cell subdivisions per face axis. */
-const S_BINS = 4;
+/** Cell subdivisions per face axis at S2 level 3 (real S2). */
+const S_BINS = 8;
 const T_BINS = 8;
 
-/** Cells per face. */
-const CELLS_PER_FACE = S_BINS * T_BINS;   // 32
+/** Cells per face at level 3. */
+const CELLS_PER_FACE_L3 = S_BINS * T_BINS;            // 64
+
+/** Cells per face after truncating level-3 Hilbert by one bit. */
+const CELLS_PER_FACE = CELLS_PER_FACE_L3 >> 1;        // 32
 
 /** Total valid 8-bit cell IDs. */
 export const S2_CELL_COUNT = S2_FACES * CELLS_PER_FACE;   // 192
@@ -120,35 +123,29 @@ function faceUVToXYZ(face, u, v) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Hilbert curve for cell numbering within a face
+// Hilbert curve for cell numbering within a face — real S2 level-3
 //
-// Real S2 numbers cells inside each face along a Hilbert curve so
-// consecutive cell IDs are guaranteed spatial neighbours.  Our per-
-// face grid is 4×8 — not a Hilbert-native square — so we build the
-// curve as two 4×4 Hilbert blocks stacked along the long (t) axis,
-// with the second block reflected so its d=0 cell is spatially
-// adjacent to the first block's d=15 cell.
+// Real S2 at level 3 partitions each face into an 8×8 grid (64 cells)
+// numbered along a Hilbert curve.  The Google S2 64-bit cell ID
+// encodes face in the top 3 bits and the level-3 Hilbert position in
+// the next 6 bits.  Truncating to 8 bits keeps the top 3 (face) + the
+// top 5 of the Hilbert position — i.e. pairs of consecutive level-3
+// cells along the Hilbert curve.  6 × 32 = 192 truncated cells total.
 //
-// Standard 4×4 Hilbert with start (0,0) ends at (3,0).  We arrange
-// block A at t ∈ [0, 3] (ends at sBin=3, tBin=0... wait, careful with
-// orientation: we use s as the rows, t as the columns, so the curve
-// visits within the (s, t) plane and its endpoint after block A is at
-// (s=3, t=0).  No — actually depending on starting orientation it
-// ends at one of the corners.  We pick orientations so the endpoint
-// of block A and the start of block B share an edge.
+// This guarantees that anyone using a standard S2 library at level 3
+// can recover our 8-bit cell ID by computing the level-3 ID and
+// shifting right by 1 — full interop.
 // ─────────────────────────────────────────────────────────────────────────────
 
 /**
- * Hilbert 4×4 xy → d.  (x, y) ∈ [0..3]², returns d ∈ [0..15].
+ * Hilbert 8×8 xy → d.  Used at S2 level 3 (8×8 grid per face).
+ * (x, y) ∈ [0..7]², returns d ∈ [0..63].
  *
- * Wikipedia's xy2d uses `n-1 - x` in the rotation (the full grid size
- * stays constant across iterations); using `s-1 - x` here would push
- * intermediate coordinates negative and corrupt later iterations.
- *
- * Standard 4×4 Hilbert: starts at (0,0), ends at (3,0).
+ * Wikipedia xy2d rotation uses `n-1 - x` (full-grid size) to keep
+ * intermediate values in range.
  */
-function hilbert4x4_xy2d(x, y) {
-  const N = 4, NM1 = N - 1;
+function hilbert8x8_xy2d(x, y) {
+  const N = 8, NM1 = N - 1;
   let d = 0;
   for (let s = N >> 1; s > 0; s >>= 1) {
     const rx = (x & s) > 0 ? 1 : 0;
@@ -163,14 +160,12 @@ function hilbert4x4_xy2d(x, y) {
 }
 
 /**
- * Hilbert 4×4 d → xy.  d ∈ [0..15], returns {x, y} ∈ [0..3]².
- *
- * The inverse uses `s-1 - x` (Wikipedia d2xy convention — different
- * from xy2d because here (x, y) is built up progressively in [0, s)).
+ * Hilbert 8×8 d → xy.  d ∈ [0..63], returns {x, y} ∈ [0..7]².
+ * Wikipedia d2xy rotation uses `s-1 - x` (iteration size).
  */
-function hilbert4x4_d2xy(d) {
+function hilbert8x8_d2xy(d) {
   let x = 0, y = 0, t = d;
-  for (let s = 1; s < 4; s <<= 1) {
+  for (let s = 1; s < 8; s <<= 1) {
     const rx = 1 & (t >> 1);
     const ry = 1 & (t ^ rx);
     if (ry === 0) {
@@ -182,44 +177,6 @@ function hilbert4x4_d2xy(d) {
     t >>= 2;
   }
   return { x, y };
-}
-
-/**
- * Hilbert numbering for the 4×8 (sBin × tBin) per-face grid.
- *
- * The 4×4 Hilbert curve starts at (0, 0) and ends at (3, 0).  Naive
- * stacking of two 4×4 blocks at t ∈ [0, 3] and [4, 7] would have
- * block A end at (s=3, t=0) — *not* adjacent to block B's start.
- *
- * Fix: rotate block A by swapping its (x, y) so it ends at (s=0, t=3)
- * along the t-axis boundary.  Block B then starts at (s=0, t=4),
- * directly adjacent — single step in t, no step in s.
- *
- *   Block A  (d ∈ [0, 15], t ∈ [0, 3]):
- *     d = hilbert4x4_xy2d(tBin, sBin)        ← swap to rotate
- *   Block B  (d ∈ [16, 31], t ∈ [4, 7]):
- *     d = 16 + hilbert4x4_xy2d(sBin, tBin-4) ← standard orientation
- *
- * Block A endpoint: cell d=15 at (s=0, t=3).
- * Block B start:    cell d=16 at (s=0, t=4) — neighbours. ✓
- *
- * @param {number} sBin – row index ∈ [0..3]
- * @param {number} tBin – col index ∈ [0..7]
- * @returns {number}      d ∈ [0..31]
- */
-function faceCellIndex(sBin, tBin) {
-  if (tBin < 4) return hilbert4x4_xy2d(tBin, sBin);
-  return 16 + hilbert4x4_xy2d(sBin, tBin - 4);
-}
-
-/** Inverse of faceCellIndex.  d ∈ [0..31] → {sBin, tBin}. */
-function faceCellIndexInverse(d) {
-  if (d < 16) {
-    const { x, y } = hilbert4x4_d2xy(d);
-    return { sBin: y, tBin: x };       // un-swap (block A rotation)
-  }
-  const { x, y } = hilbert4x4_d2xy(d - 16);
-  return { sBin: x, tBin: y + 4 };
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -265,7 +222,9 @@ export function geoCellId(lat, lng, bits) {
   const t = uvToST(v);
   const sBin = clamp(Math.floor(s * S_BINS), 0, S_BINS - 1);
   const tBin = clamp(Math.floor(t * T_BINS), 0, T_BINS - 1);
-  return face * CELLS_PER_FACE + faceCellIndex(sBin, tBin);
+  const h3 = hilbert8x8_xy2d(sBin, tBin);        // 0..63  (level 3)
+  // Top 8 bits of the S2 cell ID: face (3) || h3 >> 1 (5).
+  return (face << 5) | (h3 >> 1);
 }
 
 /**
@@ -280,11 +239,16 @@ export function geoCellId(lat, lng, bits) {
  */
 export function geoCellCenter(cellId) {
   if (!isValidCellId(cellId)) return null;
-  const face = Math.floor(cellId / CELLS_PER_FACE);
-  const inFace = cellId - face * CELLS_PER_FACE;
-  const { sBin, tBin } = faceCellIndexInverse(inFace);
-  const s = (sBin + 0.5) / S_BINS;     // center of bin in s
-  const t = (tBin + 0.5) / T_BINS;     // center of bin in t
+  const face = cellId >> 5;
+  const trunc = cellId & 0x1F;                    // 5-bit truncated Hilbert
+  // Two level-3 cells share this truncated index: positions 2*trunc and 2*trunc+1.
+  const a = hilbert8x8_d2xy(trunc << 1);
+  const b = hilbert8x8_d2xy((trunc << 1) | 1);
+  // Midpoint in face-local (sBin, tBin), then to ST → UV → xyz → lat/lng.
+  const sMid = (a.x + 0.5 + b.x + 0.5) / 2;       // in [0, 8]
+  const tMid = (a.y + 0.5 + b.y + 0.5) / 2;
+  const s = sMid / S_BINS;
+  const t = tMid / T_BINS;
   const u = stToUV(s);
   const v = stToUV(t);
   const { x, y, z } = faceUVToXYZ(face, u, v);
@@ -304,16 +268,21 @@ export function geoCellCenter(cellId) {
  */
 export function geoCellCorners(cellId) {
   if (!isValidCellId(cellId)) return null;
-  const face = Math.floor(cellId / CELLS_PER_FACE);
-  const inFace = cellId - face * CELLS_PER_FACE;
-  const { sBin, tBin } = faceCellIndexInverse(inFace);
-  const s0 = sBin / S_BINS,       s1 = (sBin + 1) / S_BINS;
-  const t0 = tBin / T_BINS,       t1 = (tBin + 1) / T_BINS;
+  const face = cellId >> 5;
+  const trunc = cellId & 0x1F;
+  const a = hilbert8x8_d2xy(trunc << 1);
+  const b = hilbert8x8_d2xy((trunc << 1) | 1);
+  // Union of two adjacent level-3 cells is always a 1×2 or 2×1
+  // rectangle in the 8×8 face grid.  Find its bounding box in
+  // (sBin, tBin) coordinates.
+  const sLo = Math.min(a.x, b.x), sHi = Math.max(a.x, b.x);
+  const tLo = Math.min(a.y, b.y), tHi = Math.max(a.y, b.y);
+  const s0 = sLo / S_BINS,        s1 = (sHi + 1) / S_BINS;
+  const t0 = tLo / T_BINS,        t1 = (tHi + 1) / T_BINS;
   const ll = (s, t) => {
     const { x, y, z } = faceUVToXYZ(face, stToUV(s), stToUV(t));
     return xyzToLatLng(x, y, z);
   };
-  // Go around: (s0,t0) → (s1,t0) → (s1,t1) → (s0,t1)
   return [ll(s0, t0), ll(s1, t0), ll(s1, t1), ll(s0, t1)];
 }
 
@@ -323,7 +292,7 @@ export function geoCellCorners(cellId) {
  */
 export function geoCellFace(cellId) {
   if (!isValidCellId(cellId)) return -1;
-  return Math.floor(cellId / CELLS_PER_FACE);
+  return cellId >> 5;
 }
 
 /** True iff cellId is in the valid [0, 192) range. */
