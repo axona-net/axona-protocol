@@ -264,16 +264,24 @@
     // pubsub:subscribe-k address.  Both peers MUST see this same
     // value; if not, they can't find each other.
     //
-    // For this hello-world demo we use a GLOBAL topic (publisher =
-    // null → topicId = sha256(topicName), prefix '00'), so anyone
-    // running the demo anywhere in the world lands at the same
-    // topicId and can chat.  Regional topics are an option too —
-    // pass `publisher: regionSynthPublisher(geo)` to confine
-    // chat to your S2 region (~800 km radius).
+    // For this hello-world demo we pin the topic to a single global
+    // coordinate — Virginia (38° N, 77° W) — using a synthetic
+    // publisher whose top 8 bits = Virginia's S2 cell (0x89 under
+    // standard S2 level-3 truncated).  Every demo peer worldwide
+    // computes the SAME topicId starting with 0x89, so they all
+    // arrive at the same K-closest anchor set; the deployed bridge
+    // (nodeId 0x895bf03e58…) is naturally one of those anchors.
+    //
+    // We deliberately do NOT use publisher: null here.  Public-mode
+    // null produces a 0x00-prefixed topic, which would route every
+    // demo publish through whichever peers happen to have low-byte
+    // nodeIds — a hotspot at the southern-Atlantic edge of the
+    // address space.  Pinning to Virginia is both simple and
+    // illustrative of how an application chooses its own regional
+    // anchor for a globally-shared topic.
+    const VIRGINIA  = { lat: 38.0, lng: -77.0 };
     const TOPIC     = 'hello-world';
-    const publisher = null;   // global public topic; swap for
-                              // regionSynthPublisher(geo) to
-                              // make it regional.
+    const publisher = regionSynthPublisher(VIRGINIA);
     const topicId   = await deriveTopicId(publisher, TOPIC);
     document.getElementById('topicIdDisplay').textContent = topicId;
     log('topicId derived', { topicId, publisher, topicName: TOPIC });
