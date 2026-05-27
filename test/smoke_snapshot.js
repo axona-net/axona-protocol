@@ -18,7 +18,7 @@ const LONDON = { lat: 51.5074, lng: -0.1278 };
 const PEER1  = 'bb' + 'b2'.repeat(32);
 const PEER2  = 'cc' + 'c3'.repeat(32);
 
-class MockAxonManager {
+class MockAxonaManager {
   constructor() {
     this.nodeId = '';
     this._publishCounter = 0;
@@ -42,7 +42,7 @@ async function makePeer({ synaptomeIds = [], subscriptions = [] } = {}) {
     engine: { onEvent: () => () => {} },
     node,
     identity,
-    axonManager: new MockAxonManager(),
+    axonaManager: new MockAxonaManager(),
   });
   // pre-register subscriptions via peer.sub so _subscriptions populates.
   const subs = [];
@@ -138,7 +138,7 @@ async function testFromSnapshotIdentityReusable() {
 
   const restored = await AxonaPeer.fromSnapshot(JSON.parse(JSON.stringify(snap)), {
     engine: { onEvent: () => () => {} },
-    axonManager: new MockAxonManager(),
+    axonaManager: new MockAxonaManager(),
   });
 
   // Verify the restored identity is usable by signing through pub().

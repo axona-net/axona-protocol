@@ -1,7 +1,7 @@
 // =====================================================================
 // smoke_envelope.js — signed-publish envelope: build, verify, tamper.
 //                      Plus end-to-end through AxonaPeer.pub() / sub()
-//                      against a mock AxonManager.
+//                      against a mock AxonaManager.
 // Run: node test/smoke_envelope.js
 // =====================================================================
 
@@ -23,9 +23,9 @@ function check(label, condition) {
 
 const LONDON = { lat: 51.5074, lng: -0.1278 };
 
-// ── Mock AxonManager (same shape as A1 smoke) ────────────────────────
+// ── Mock AxonaManager (same shape as A1 smoke) ────────────────────────
 
-class MockAxonManager {
+class MockAxonaManager {
   constructor(nodeId) {
     this.nodeId = nodeId;
     this.published = [];
@@ -178,10 +178,10 @@ async function testPeerSignedRoundTrip() {
   console.log('\n── peer.pub signed → peer.sub envelope (e2e) ──');
   const id = await deriveIdentity(LONDON);
   const node = { id: id.id, alive: true };
-  const am = new MockAxonManager(id.id);
+  const am = new MockAxonaManager(id.id);
   const peer = new AxonaPeer({
     engine: { onEvent: () => () => {} },
-    node, axonManager: am, identity: id,
+    node, axonaManager: am, identity: id,
   });
 
   const received = [];
@@ -190,7 +190,7 @@ async function testPeerSignedRoundTrip() {
   const msgId = await peer.pub('cats', { meow: 1 });
   check('pub returns content-derived msgId (64-char hex)',
     typeof msgId === 'string' && msgId.length === 64 && /^[0-9a-f]+$/.test(msgId));
-  check('AxonManager.pubsubPublish called',
+  check('AxonaManager.pubsubPublish called',
     am.published.length === 1);
 
   // Trigger delivery with the same JSON the publisher wrote.
@@ -216,10 +216,10 @@ async function testPeerUnsignedRoundTrip() {
   console.log('\n── peer.pub({ sign: false }) → unsigned envelope ──');
   const id = await deriveIdentity(LONDON);
   const node = { id: id.id, alive: true };
-  const am = new MockAxonManager(id.id);
+  const am = new MockAxonaManager(id.id);
   const peer = new AxonaPeer({
     engine: { onEvent: () => () => {} },
-    node, axonManager: am, identity: id,
+    node, axonaManager: am, identity: id,
   });
 
   const received = [];
@@ -245,10 +245,10 @@ async function testPeerUnsignedRoundTrip() {
 async function testPeerSignWithoutIdentity() {
   console.log('\n── peer.pub(sign:true) without identity throws ──');
   const node = { id: 'aa' + 'a1'.repeat(32), alive: true };
-  const am = new MockAxonManager(node.id);
+  const am = new MockAxonaManager(node.id);
   const peer = new AxonaPeer({
     engine: { onEvent: () => () => {} },
-    node, axonManager: am, /* no identity */
+    node, axonaManager: am, /* no identity */
   });
 
   let err = null;
@@ -269,10 +269,10 @@ async function testPeerCrossSignerVerification() {
   const bob   = await deriveIdentity({ lat: 35.6762, lng: 139.6503 });
 
   const aliceNode = { id: alice.id, alive: true };
-  const aliceAm   = new MockAxonManager(alice.id);
+  const aliceAm   = new MockAxonaManager(alice.id);
   const alicePeer = new AxonaPeer({
     engine: { onEvent: () => () => {} },
-    node: aliceNode, axonManager: aliceAm, identity: alice,
+    node: aliceNode, axonaManager: aliceAm, identity: alice,
   });
 
   await alicePeer.pub('news', { headline: 'mesh launch' });

@@ -46,7 +46,7 @@ anything you build against it will port to real transports unchanged.
 
 - `deriveIdentity({ lat, lng })` — 264-bit Ed25519 identity anchored to an S2 cell
 - Two `simTransport()`s on a shared `SimNetwork` — the kernel's in-process router
-- Composing `AxonaPeer` + `AxonManager` from the kernel primitives
+- Composing `AxonaPeer` + `AxonaManager` from the kernel primitives
 - Region-keyed topics via a synthetic publisher
 - `peer.pub()` / `peer.sub()` roundtrip across two distinct peers
 

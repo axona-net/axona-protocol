@@ -16,7 +16,7 @@ function check(label, condition) {
 const SELF  = 'aa' + 'a1'.repeat(32);
 const PEER1 = 'bb' + 'b2'.repeat(32);
 
-class MockAxonManager {
+class MockAxonaManager {
   constructor() {
     this.nodeId = SELF;
     this._publishCounter = 0;
@@ -46,7 +46,7 @@ function makePeer({ withAm = true, withTransport = false, synaptome = [] } = {})
   return new AxonaPeer({
     engine: { onEvent: () => () => {} },
     node,
-    axonManager: withAm ? new MockAxonManager() : null,
+    axonaManager: withAm ? new MockAxonaManager() : null,
     transport:   withTransport ? new MockTransport() : null,
   });
 }

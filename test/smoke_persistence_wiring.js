@@ -24,7 +24,7 @@ function check(label, condition) {
 
 const LONDON = { lat: 51.5074, lng: -0.1278 };
 
-class MockAxonManager {
+class MockAxonaManager {
   constructor() {
     this.nodeId = '';
     this._publishCounter = 0;
@@ -50,7 +50,7 @@ async function testIdentityLoadOnStart() {
   const peer = new AxonaPeer({
     engine: { onEvent: () => () => {} },
     node, persist,
-    axonManager: new MockAxonManager(),
+    axonaManager: new MockAxonaManager(),
   });
   check('no identity before start',   peer._identity === null);
 
@@ -75,7 +75,7 @@ async function testIdentityFromConstructorWins() {
   const peer = new AxonaPeer({
     engine: { onEvent: () => () => {} },
     node, identity: ctor, persist,
-    axonManager: new MockAxonManager(),
+    axonaManager: new MockAxonaManager(),
   });
   await peer.start();
   check('constructor identity preserved',
@@ -88,12 +88,12 @@ async function testSubscriptionsPersisted() {
   console.log('\n── subscriptions persisted on sub() + leave() flushes ──');
   const persist = new InMemoryPersistence();
   const id = await deriveIdentity(LONDON);
-  const am = new MockAxonManager();
+  const am = new MockAxonaManager();
 
   const peer = new AxonaPeer({
     engine: { onEvent: () => () => {} },
     node: { id: id.id, alive: true, synaptome: new Map() },
-    identity: id, persist, axonManager: am,
+    identity: id, persist, axonaManager: am,
   });
   // Tighten the debounce so the test doesn't wait forever.
   peer._persistFlushMs = 50;
@@ -128,12 +128,12 @@ async function testSubscriptionStopPersisted() {
   console.log('\n── sub.stop() flushes subscriptions ──');
   const persist = new InMemoryPersistence();
   const id = await deriveIdentity(LONDON);
-  const am = new MockAxonManager();
+  const am = new MockAxonaManager();
 
   const peer = new AxonaPeer({
     engine: { onEvent: () => () => {} },
     node: { id: id.id, alive: true, synaptome: new Map() },
-    identity: id, persist, axonManager: am,
+    identity: id, persist, axonaManager: am,
   });
   peer._persistFlushMs = 50;
 
@@ -157,12 +157,12 @@ async function testRoundTrip() {
   console.log('\n── kill peer + rebuild against same persist ──');
   const persist = new InMemoryPersistence();
   const id1 = await deriveIdentity(LONDON);
-  const am1 = new MockAxonManager();
+  const am1 = new MockAxonaManager();
 
   const peer1 = new AxonaPeer({
     engine: { onEvent: () => () => {} },
     node: { id: id1.id, alive: true, synaptome: new Map() },
-    identity: id1, persist, axonManager: am1,
+    identity: id1, persist, axonaManager: am1,
   });
   peer1._persistFlushMs = 50;
 
@@ -176,7 +176,7 @@ async function testRoundTrip() {
   const peer2 = new AxonaPeer({
     engine: { onEvent: () => () => {} },
     node: { id: id1.id, alive: true, synaptome: new Map() },
-    persist, axonManager: new MockAxonManager(),
+    persist, axonaManager: new MockAxonaManager(),
   });
   await peer2.start();
 
@@ -206,7 +206,7 @@ async function testNoPersistNoLoad() {
   const peer = new AxonaPeer({
     engine: { onEvent: () => () => {} },
     node: { id: id.id, alive: true, synaptome: new Map() },
-    identity: id, axonManager: new MockAxonManager(),
+    identity: id, axonaManager: new MockAxonaManager(),
     /* no persist */
   });
   await peer.start();
@@ -225,7 +225,7 @@ async function testCorruptedIdentityIgnored() {
     engine: { onEvent: () => () => {} },
     node: { id: id.id, alive: true, synaptome: new Map() },
     /* no constructor identity → persist load attempted */
-    persist, axonManager: new MockAxonManager(),
+    persist, axonaManager: new MockAxonaManager(),
   });
 
   await peer.start();

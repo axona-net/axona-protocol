@@ -1,6 +1,6 @@
 // =====================================================================
 // smoke_pubsub_unified.js — verify AxonaPeer.pub() / sub() / stop()
-//                            against a mock AxonManager.
+//                            against a mock AxonaManager.
 // Run: node test/smoke_pubsub_unified.js
 //
 // Covers the unified-API contract (A1 surface):
@@ -12,7 +12,7 @@
 //   - `since` modes seed lastSeenTs correctly
 //   - input validation
 //
-// Full pub/sub end-to-end against the production AxonManager + Engine
+// Full pub/sub end-to-end against the production AxonaManager + Engine
 // is exercised by axona-peer/src/smoke_pubsub*.js and (post-T-I2) the
 // dht-sim regression suite — those validate the wiring layer.
 // =====================================================================
@@ -31,9 +31,9 @@ function check(label, condition) {
 
 const NODE_ID = 'aa' + 'a1'.repeat(32);   // 66-char hex
 
-// ── MockAxonManager: implements just the surface AxonaPeer needs ─────
+// ── MockAxonaManager: implements just the surface AxonaPeer needs ─────
 
-class MockAxonManager {
+class MockAxonaManager {
   constructor() {
     this.nodeId = NODE_ID;
     this.published = [];            // [{ topicId, json, meta }]
@@ -60,14 +60,14 @@ class MockAxonManager {
 
 // ── MockNode + mockEngine just enough for AxonaPeer constructor ──────
 
-function makePeer({ withAxonManager = true } = {}) {
+function makePeer({ withAxonaManager = true } = {}) {
   const node    = { id: NODE_ID, alive: true };
   const engine  = {
     onEvent: (_cb) => () => {},
     simEpoch: 0,
   };
-  const am = withAxonManager ? new MockAxonManager() : null;
-  const peer = new AxonaPeer({ engine, node, axonManager: am });
+  const am = withAxonaManager ? new MockAxonaManager() : null;
+  const peer = new AxonaPeer({ engine, node, axonaManager: am });
   return { peer, am };
 }
 
@@ -82,9 +82,9 @@ async function testPubBasics() {
 
   check('pub resolves with msgId string',
     typeof msgId === 'string' && msgId.length === 64);
-  check('AxonManager.pubsubPublish called once',
+  check('AxonaManager.pubsubPublish called once',
     am.published.length === 1);
-  // Kernel passes BigInt topicId to AxonManager (post-v1.5 refactor).
+  // Kernel passes BigInt topicId to AxonaManager (post-v1.5 refactor).
   check('topicId is bigint',
     typeof am.published[0].topicId === 'bigint');
 
@@ -130,12 +130,12 @@ async function testPubValidation() {
 }
 
 async function testPubNoManager() {
-  console.log('\n── peer.pub() without AxonManager ──');
-  const { peer } = makePeer({ withAxonManager: false });
+  console.log('\n── peer.pub() without AxonaManager ──');
+  const { peer } = makePeer({ withAxonaManager: false });
   let err = null;
   try { await peer.pub('cats', null, { sign: false }); }
   catch (e) { err = e; }
-  check('no AxonManager → PublishError', err instanceof PublishError);
+  check('no AxonaManager → PublishError', err instanceof PublishError);
 }
 
 async function testSubReceives() {
@@ -148,8 +148,8 @@ async function testSubReceives() {
   check('sub.topicName preserved',  sub.topicName === 'cats');
   // Public sub.topicId is hex (display form); kernel uses BigInt internally.
   check('sub.topicId is hex',       isHexId(sub.topicId));
-  // AxonManager.pubsubSubscribe is called with BigInt topicId.
-  check('AxonManager.pubsubSubscribe called',
+  // AxonaManager.pubsubSubscribe is called with BigInt topicId.
+  check('AxonaManager.pubsubSubscribe called',
     am.subscribed.length === 1 && am.subscribed[0] === sub._topicId);
 
   // Synthesize a JSON envelope.  triggerDelivery must use the BigInt
@@ -178,7 +178,7 @@ async function testMultipleSubsSameTopic() {
   const subA = await peer.sub('cats', e => a.push(e));
   const subB = await peer.sub('cats', e => b.push(e));
 
-  check('AxonManager.pubsubSubscribe called twice',
+  check('AxonaManager.pubsubSubscribe called twice',
     am.subscribed.length === 2);
 
   const payload = JSON.stringify({
@@ -266,32 +266,32 @@ async function testSinceModes() {
 }
 
 async function testEngineFallback() {
-  console.log('\n── AxonManager fallback via engine.axonManagerFor() ──');
+  console.log('\n── AxonaManager fallback via engine.axonaManagerFor() ──');
   const node = { id: NODE_ID, alive: true };
-  const am   = new MockAxonManager();
+  const am   = new MockAxonaManager();
   const engine = {
     onEvent: () => () => {},
-    axonManagerFor: (n) => (n === node ? am : null),
+    axonaManagerFor: (n) => (n === node ? am : null),
   };
   const peer = new AxonaPeer({ engine, node });
 
   const msgId = await peer.pub('topic', { hi: 1 }, { sign: false });
-  check('engine.axonManagerFor wired through',
+  check('engine.axonaManagerFor wired through',
     typeof msgId === 'string' && am.published.length === 1);
 }
 
 async function testEngineFallbackMapShape() {
-  console.log('\n── AxonManager fallback via engine._axonManagers Map ──');
+  console.log('\n── AxonaManager fallback via engine._axonaManagers Map ──');
   const node = { id: NODE_ID, alive: true };
-  const am   = new MockAxonManager();
+  const am   = new MockAxonaManager();
   const engine = {
     onEvent: () => () => {},
-    _axonManagers: new Map([[NODE_ID, am]]),
+    _axonaManagers: new Map([[NODE_ID, am]]),
   };
   const peer = new AxonaPeer({ engine, node });
 
   await peer.pub('topic', { hi: 1 }, { sign: false });
-  check('engine._axonManagers Map wired through',
+  check('engine._axonaManagers Map wired through',
     am.published.length === 1);
 }
 

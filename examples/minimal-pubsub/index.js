@@ -4,7 +4,7 @@
 // What this demonstrates:
 //   * deriveIdentity → 264-bit Ed25519 identity in a chosen S2 cell
 //   * Two SimTransports on a shared SimNetwork (kernel's in-process router)
-//   * Composing AxonaPeer + AxonManager from the kernel primitives
+//   * Composing AxonaPeer + AxonaManager from the kernel primitives
 //   * Region-keyed topics via a synthetic publisher
 //   * peer.pub / peer.sub roundtrip across two distinct peers
 //
@@ -16,7 +16,7 @@
 // =====================================================================
 
 import {
-  AxonaPeer, AxonaDomain, NeuronNode, AxonManager, Synapse,
+  AxonaPeer, AxonaDomain, NeuronNode, AxonaManager, Synapse,
   SimNetwork, simTransport,
   deriveIdentity,
   geoCellId, clz264,
@@ -34,7 +34,7 @@ function regionSynthPublisher({ lat, lng }) {
 
 // ── 2. Build a peer ──────────────────────────────────────────────────
 // One function, called twice — once for alice, once for bob — wires
-// identity + transport + node + AxonaPeer + AxonManager together.
+// identity + transport + node + AxonaPeer + AxonaManager together.
 
 async function makePeer({ network, region }) {
   // 2a. Derive a 264-bit Ed25519 identity in this region's S2 cell.
@@ -59,7 +59,7 @@ async function makePeer({ network, region }) {
   const peer = new AxonaPeer({ domain, node, identity, transport });
   await peer.start();
 
-  // 2e. AxonManager handles pub/sub.  It needs a `dht` adapter that
+  // 2e. AxonaManager handles pub/sub.  It needs a `dht` adapter that
   //     forwards K-closest, sendDirect, routeMessage, and handler
   //     registration to our AxonaPeer.  Most of these are 1-line
   //     delegations; sendDirect special-cases self-target for local
@@ -81,8 +81,8 @@ async function makePeer({ network, region }) {
     onRoutedMessage: (type, h) => peer.onRoutedMessage(type, h),
     onDirectMessage: (type, h) => peer.onDirectMessage(type, h),
   };
-  const axonManager = new AxonManager({ dht });
-  peer._axonManager = axonManager;       // hand the AM directly to the peer
+  const axonaManager = new AxonaManager({ dht });
+  peer._axonaManager = axonaManager;       // hand the AM directly to the peer
   return { peer, identity };
 }
 

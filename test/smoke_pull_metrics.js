@@ -1,7 +1,7 @@
 // =====================================================================
 // smoke_pull_metrics.js — peer.pull(msgId, {topic, publisher}) and
 //                          peer.metrics(topic, {publisher}) against a
-//                          mock AxonManager that implements
+//                          mock AxonaManager that implements
 //                          requestPull / requestMetrics.
 // Run: node test/smoke_pull_metrics.js
 // =====================================================================
@@ -21,9 +21,9 @@ function check(label, condition) {
 
 const LONDON = { lat: 51.5074, lng: -0.1278 };
 
-// ── MockAxonManager with replay cache + counter store ────────────────
+// ── MockAxonaManager with replay cache + counter store ────────────────
 
-class MockAxonManager {
+class MockAxonaManager {
   constructor(nodeId) {
     this.nodeId = nodeId;
     this._publishCounter = 0;
@@ -93,10 +93,10 @@ class MockAxonManager {
 async function setupPeer() {
   const identity = await deriveIdentity(LONDON);
   const node     = { id: identity.id, alive: true };
-  const am       = new MockAxonManager(identity.id);
+  const am       = new MockAxonaManager(identity.id);
   const peer = new AxonaPeer({
     engine: { onEvent: () => () => {} },
-    node, axonManager: am, identity,
+    node, axonaManager: am, identity,
   });
   return { peer, am, identity };
 }
@@ -109,7 +109,7 @@ async function testPullHappy() {
 
   const msgId = await peer.pub('cats', { meow: 1 });
   check('pub succeeded', typeof msgId === 'string');
-  // Kernel passes BigInt topicId to AxonManager now.
+  // Kernel passes BigInt topicId to AxonaManager now.
   check('replay cache populated with postHash',
     am._replay.get(await deriveTopicIdBig(fromHex(identity.id), 'cats'))?.[0]?.postHash === msgId);
 
@@ -230,7 +230,7 @@ async function testCrossPublisherIsolation() {
   const alice = await setupPeer();
   const bob   = await setupPeer();
 
-  // Alice publishes; pull from her own AxonManager (which is what
+  // Alice publishes; pull from her own AxonaManager (which is what
   // the production routing eventually resolves to via K-closest).
   const m = await alice.peer.pub('news', { headline: 'launch' });
   const pulled = await alice.peer.pull(m, {
