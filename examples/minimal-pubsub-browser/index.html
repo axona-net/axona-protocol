@@ -78,7 +78,7 @@
     This tab is an Axona peer connected to <code>wss://bridge.axona.net</code> via
     <code>webTransport</code>. Open this page in multiple tabs (or share the URL
     with a friend) and every connected peer publishing to
-    <code>us-east/hello-world</code> shows up in the received list.
+    <code>hello-world</code> shows up in the received list.
   </p>
 
   <div class="status">
@@ -102,6 +102,8 @@
       <div class="nodeId" id="lastMsgId">—</div>
       <div class="label">Your nodeId</div>
       <div class="nodeId" id="myId">…</div>
+      <div class="label">Your location (top 8 bits of nodeId = S2 cell of this lat/lng)</div>
+      <div class="nodeId" id="myLocation">…</div>
       <div class="label">Synaptome (peers known to your DHT)</div>
       <div class="nodeId" id="synSize">…</div>
       <div class="label">Bridge</div>
@@ -109,7 +111,7 @@
     </div>
 
     <div class="pane">
-      <h2>Subscribe — <code>us-east/hello-world</code></h2>
+      <h2>Subscribe — <code>hello-world</code></h2>
       <div class="label">Subscribed to topic ID (must match publisher's)</div>
       <div class="nodeId" id="subTopicId">…</div>
       <div class="received" id="receivedLog"><span class="empty">(waiting for messages…)</span></div>
@@ -167,15 +169,51 @@
       document.getElementById('kernelVer').textContent = pkg.version;
     } catch { document.getElementById('kernelVer').textContent = '?'; }
 
-    // ── 1. Identity (264-bit Ed25519, US-east region anchor) ────────
-    const US_EAST = { lat: 38.0, lng: -77.0 };
+    // ── 1. Geolocation ──────────────────────────────────────────────
+    //
+    // The top 8 bits of every Axona nodeId are the S2 cell of the
+    // peer's lat/lng, so peers in the same region are naturally
+    // XOR-closest to topics anchored at that region.  We ask the
+    // browser for a real location; fall back to (0, 0) — a point in
+    // the Gulf of Guinea — if the user denies or the API is
+    // unavailable.  That gives every "no-permission" peer the same
+    // S2 prefix so they still form a coherent regional cluster.
+    function getLocation() {
+      const FALLBACK = { lat: 0, lng: 0, source: 'fallback (Gulf of Guinea)' };
+      if (!navigator.geolocation) return Promise.resolve(FALLBACK);
+      return new Promise(resolve => {
+        navigator.geolocation.getCurrentPosition(
+          pos => resolve({
+            lat: pos.coords.latitude,
+            lng: pos.coords.longitude,
+            source: 'browser geolocation',
+          }),
+          err => {
+            log('geolocation denied', { reason: err.message });
+            resolve(FALLBACK);
+          },
+          { enableHighAccuracy: false, timeout: 8000, maximumAge: 600_000 },
+        );
+      });
+    }
 
+    const location = await getLocation();
+    document.getElementById('myLocation').textContent =
+      `${location.lat.toFixed(4)}, ${location.lng.toFixed(4)} · ${location.source}`;
+    log('location resolved', location);
+
+    // The "regional synthetic publisher" is a nodeId-shaped hash whose
+    // top 8 bits are the S2 cell of this lat/lng and whose bottom 256
+    // bits are zero.  Topic IDs derived from it inherit that S2
+    // prefix, so subscribers in the same region land XOR-close to
+    // those topics.
     function regionSynthPublisher({ lat, lng }) {
       const s2 = geoCellId(lat, lng, 8);
       return s2.toString(16).padStart(2, '0') + '0'.repeat(64);
     }
 
-    const identity = await deriveIdentity(US_EAST);
+    // ── 2. Identity (264-bit Ed25519, anchored at the resolved location)
+    const identity = await deriveIdentity({ lat: location.lat, lng: location.lng });
     document.getElementById('myId').textContent = identity.id;
     log('identity derived', { id: identity.id.slice(0, 16) + '…' });
 
@@ -194,7 +232,8 @@
 
     const node = new NeuronNode({
       id:  BigInt('0x' + identity.id),
-      lat: US_EAST.lat, lng: US_EAST.lng,
+      lat: location.lat,
+      lng: location.lng,
     });
     node.transport = transport;
     const domain = new AxonaDomain({ k: 20 });
@@ -218,8 +257,17 @@
     // same 264-bit hex topicId, which is what pubsub:publish-k and
     // pubsub:subscribe-k address.  Both peers MUST see this same
     // value; if not, they can't find each other.
-    const TOPIC     = 'us-east/hello-world';
-    const publisher = regionSynthPublisher(US_EAST);
+    //
+    // For this hello-world demo we use a GLOBAL topic (publisher =
+    // null → topicId = sha256(topicName), prefix '00'), so anyone
+    // running the demo anywhere in the world lands at the same
+    // topicId and can chat.  Regional topics are an option too —
+    // pass `publisher: regionSynthPublisher(location)` to confine
+    // chat to your S2 region (~800 km radius).
+    const TOPIC     = 'hello-world';
+    const publisher = null;   // global public topic; swap for
+                              // regionSynthPublisher(location) to
+                              // make it regional.
     const topicId   = await deriveTopicId(publisher, TOPIC);
     document.getElementById('topicIdDisplay').textContent = topicId;
     log('topicId derived', { topicId, publisher, topicName: TOPIC });
