@@ -183,18 +183,29 @@
         <input type="checkbox" id="toggleLabels"> Show cell ID labels
       </label>
       <label class="toggle">
+        <input type="checkbox" id="toggleHilbert"> Show Hilbert path (0x00 → 0xFF)
+      </label>
+      <label class="toggle">
         <input type="checkbox" id="toggleAutorotate" checked> Auto-rotate
       </label>
     </div>
 
     <div class="card">
-      <h2>Cell index (0x00 – 0xFF)</h2>
-      <div style="font-size:0.85rem; color: var(--muted); margin-bottom: 0.3rem;">
+      <h2>Cell index</h2>
+      <div style="font-size:0.85rem; color: var(--muted); margin-bottom: 0.4rem;">
         Click a cell to highlight it on the globe.
       </div>
+      <div style="display:flex; gap:0.6rem; font-size:0.85rem; margin-bottom: 0.5rem;">
+        <label class="toggle" style="font-size:0.85rem;">
+          <input type="radio" name="legendLayout" value="index" checked> Index order
+        </label>
+        <label class="toggle" style="font-size:0.85rem;">
+          <input type="radio" name="legendLayout" value="spatial"> Globe layout
+        </label>
+      </div>
       <div id="legend"></div>
-      <div style="font-size:0.85rem; color: var(--muted); margin-top: 0.4rem;">
-        Cells are numbered by their position along the Hilbert curve over the 16×16 lat/lng grid.
+      <div style="font-size:0.82rem; color: var(--muted); margin-top: 0.4rem;" id="legendCaption">
+        Cells are numbered by Hilbert-curve order 0x00 to 0xFF.
       </div>
     </div>
 
@@ -351,6 +362,56 @@ function buildCellTexture(highlightCellId = null) {
   return c;
 }
 
+/**
+ * Hilbert-path texture: draws a single continuous polyline visiting
+ * each cell center in numerical order 0x00 → 0xFF.  Demonstrates that
+ * consecutive cell IDs are also geographically adjacent — the locality
+ * property that motivates using a space-filling curve in the first
+ * place.
+ */
+function buildHilbertTexture() {
+  const c = document.createElement('canvas');
+  c.width = TEX_W; c.height = TEX_H;
+  const ctx = c.getContext('2d');
+  ctx.clearRect(0, 0, TEX_W, TEX_H);
+
+  // Build the path: cell 0x00 → 0x01 → ... → 0xFF.
+  const pts = [];
+  for (let i = 0; i < 256; i++) {
+    const xy = reverseCell.get(i);
+    if (!xy) continue;
+    const lat = -90  + (xy.gx + 0.5) * CELL_DLAT;
+    const lng = -180 + (xy.gy + 0.5) * CELL_DLNG;
+    pts.push({
+      px: (lng + 180) / 360 * TEX_W,
+      py: (90  - lat) / 180 * TEX_H,
+    });
+  }
+
+  // Path stroke — wide light halo behind, then the curve itself.
+  ctx.strokeStyle = 'rgba(255, 255, 255, 0.65)';
+  ctx.lineWidth   = 6;
+  ctx.beginPath();
+  ctx.moveTo(pts[0].px, pts[0].py);
+  for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i].px, pts[i].py);
+  ctx.stroke();
+
+  ctx.strokeStyle = 'rgba(180, 60, 30, 0.95)';
+  ctx.lineWidth   = 2.4;
+  ctx.beginPath();
+  ctx.moveTo(pts[0].px, pts[0].py);
+  for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i].px, pts[i].py);
+  ctx.stroke();
+
+  // Endpoint markers
+  ctx.fillStyle = 'rgba(20, 90, 30, 1)';   // start (0x00) — green dot
+  ctx.beginPath(); ctx.arc(pts[0].px, pts[0].py, 8, 0, Math.PI * 2); ctx.fill();
+  ctx.fillStyle = 'rgba(120, 20, 20, 1)';  // end (0xFF) — dark red dot
+  ctx.beginPath(); ctx.arc(pts[pts.length-1].px, pts[pts.length-1].py, 8, 0, Math.PI * 2); ctx.fill();
+
+  return c;
+}
+
 function buildLandTexture(geoJSON, withBorders) {
   const c = document.createElement('canvas');
   c.width = TEX_W; c.height = TEX_H;
@@ -376,28 +437,62 @@ function buildLandTexture(geoJSON, withBorders) {
   }
   return c;
 }
+// Antimeridian-aware polygon fill / stroke.  Ported from dht-sim's
+// Globe.js — fixes Russia, Fiji, Aleutians, Antarctic rings that
+// would otherwise spill straight across the canvas.
 function fillRing(ctx, ring) {
   if (ring.length < 3) return;
-  ctx.beginPath();
+  // Unwrap longitudes so consecutive points are within 180° of each other.
+  const pts = [];
   for (let i = 0; i < ring.length; i++) {
-    const lng = ring[i][0], lat = ring[i][1];
-    const px = (lng + 180) / 360 * TEX_W;
-    const py = (90  - lat) / 180 * TEX_H;
-    if (i === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
+    let lng = ring[i][0], lat = ring[i][1];
+    if (i > 0) {
+      const pLng = pts[i - 1][0];
+      while (lng - pLng >  180) lng -= 360;
+      while (lng - pLng < -180) lng += 360;
+    }
+    pts.push([lng, lat]);
   }
-  ctx.closePath();
-  ctx.fill();
+  let minLng = pts[0][0], maxLng = pts[0][0];
+  for (const [lng] of pts) {
+    if (lng < minLng) minLng = lng;
+    if (lng > maxLng) maxLng = lng;
+  }
+  const drawFill = (shift) => {
+    ctx.beginPath();
+    for (let i = 0; i < pts.length; i++) {
+      const x = ((pts[i][0] + shift + 180) / 360) * TEX_W;
+      const y = ((90 - pts[i][1]) / 180) * TEX_H;
+      if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+    }
+    ctx.closePath();
+    ctx.fill();
+  };
+  drawFill(0);
+  if (maxLng >  180) drawFill(-360);
+  if (minLng < -180) drawFill( 360);
 }
 function strokeRing(ctx, ring) {
   if (ring.length < 3) return;
   ctx.beginPath();
-  for (let i = 0; i < ring.length; i++) {
-    const lng = ring[i][0], lat = ring[i][1];
-    const px = (lng + 180) / 360 * TEX_W;
-    const py = (90  - lat) / 180 * TEX_H;
-    if (i === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
+  let started = false, pLng = null, pLat = null;
+  for (const [lng, lat] of ring) {
+    const x = ((lng + 180) / 360) * TEX_W;
+    const y = ((90  - lat) / 180) * TEX_H;
+    if (started && pLng !== null && Math.abs(lng - pLng) > 180) {
+      const adjLng = lng + (lng - pLng > 180 ? -360 : 360);
+      const bndLng = adjLng < pLng ? -180 : 180;
+      const tCross = (bndLng - pLng) / (adjLng - pLng);
+      const bndLat = pLat + tCross * (lat - pLat);
+      ctx.lineTo(((bndLng + 180) / 360) * TEX_W, ((90 - bndLat) / 180) * TEX_H);
+      ctx.stroke();
+      ctx.beginPath();
+      ctx.moveTo(((-bndLng + 180) / 360) * TEX_W, ((90 - bndLat) / 180) * TEX_H);
+    }
+    if (!started) { ctx.moveTo(x, y); started = true; }
+    else ctx.lineTo(x, y);
+    pLng = lng; pLat = lat;
   }
-  ctx.closePath();
   ctx.stroke();
 }
 
@@ -468,7 +563,7 @@ const geom = new THREE.SphereGeometry(1, 96, 96);
 //   borders    (radius 1.004, transparent)  — built into land tex for now
 //   labels     (radius 1.006, transparent)
 
-let landMesh, cellMesh, labelMesh;
+let landMesh, cellMesh, labelMesh, hilbertMesh;
 let cellHighlightId = null;
 let geoJSON = null;
 
@@ -487,10 +582,10 @@ function makeMesh(texCanvas, radius, transparent) {
 
 function rebuild() {
   // Remove existing
-  for (const m of [landMesh, cellMesh, labelMesh]) {
+  for (const m of [landMesh, cellMesh, hilbertMesh, labelMesh]) {
     if (m) { scene.remove(m); m.geometry.dispose(); m.material.map.dispose(); m.material.dispose(); }
   }
-  landMesh = cellMesh = labelMesh = null;
+  landMesh = cellMesh = hilbertMesh = labelMesh = null;
 
   if (geoJSON) {
     const showBorders = document.getElementById('toggleBorders').checked;
@@ -500,6 +595,10 @@ function rebuild() {
   if (document.getElementById('toggleCells').checked) {
     cellMesh = makeMesh(buildCellTexture(cellHighlightId), 1.002, true);
     scene.add(cellMesh);
+  }
+  if (document.getElementById('toggleHilbert').checked) {
+    hilbertMesh = makeMesh(buildHilbertTexture(), 1.004, true);
+    scene.add(hilbertMesh);
   }
   if (document.getElementById('toggleLabels').checked) {
     labelMesh = makeMesh(buildLabelTexture(), 1.006, true);
@@ -549,19 +648,64 @@ canvas.addEventListener('pointermove', e => updateHover(e.clientX, e.clientY));
 // Legend (256 cell swatches)
 // ─────────────────────────────────────────────────────────────────────
 
-const legend = document.getElementById('legend');
-for (let i = 0; i < 256; i++) {
-  const s = document.createElement('div');
-  s.className = 'swatch';
-  s.textContent = i.toString(16).padStart(2, '0').toUpperCase();
-  s.title = '0x' + i.toString(16).padStart(2, '0').toUpperCase() + '  (' + i + ')';
-  s.addEventListener('click', () => {
-    cellHighlightId = (cellHighlightId === i) ? null : i;
-    for (const sw of legend.children) sw.classList.remove('selected');
-    if (cellHighlightId !== null) s.classList.add('selected');
-    rebuild();
-  });
-  legend.appendChild(s);
+const legend       = document.getElementById('legend');
+const legendCaption = document.getElementById('legendCaption');
+
+/**
+ * Render the 256-cell legend in one of two layouts:
+ *
+ *   "index"   — swatches in numerical reading order: 00,01,02…0F,
+ *               10,11…FF.  Position in the legend grid has no
+ *               geographic meaning.
+ *
+ *   "spatial" — swatches arranged so the legend cell at row R, col C
+ *               is the cell that lives at the same geographic
+ *               position on the globe (R=0 → north, C=0 → west).
+ *               Each swatch still shows its Hilbert hex ID, but its
+ *               position in the grid matches the globe layout.
+ *
+ * Switching between the two shows the Hilbert curve's job: the
+ * spatial layout reveals which adjacent cells on the globe share
+ * adjacent Hilbert indices and which jump across the byte range.
+ */
+function renderLegend(mode) {
+  legend.innerHTML = '';
+  const order = []; // sequence of cell-IDs to place into the 16x16 grid
+  if (mode === 'spatial') {
+    // Top row = north (gx=15); left col = west (gy=0).
+    for (let row = 0; row < GRID; row++) {
+      const gx = GRID - 1 - row;
+      for (let gy = 0; gy < GRID; gy++) {
+        const lat = -90  + (gx + 0.5) * CELL_DLAT;
+        const lng = -180 + (gy + 0.5) * CELL_DLNG;
+        order.push(geoCellId(lat, lng, 8));
+      }
+    }
+  } else {
+    for (let i = 0; i < 256; i++) order.push(i);
+  }
+  for (const cid of order) {
+    const s = document.createElement('div');
+    s.className = 'swatch';
+    if (cid === cellHighlightId) s.classList.add('selected');
+    s.textContent = cid.toString(16).padStart(2, '0').toUpperCase();
+    s.title = '0x' + cid.toString(16).padStart(2, '0').toUpperCase() + '  (' + cid + ')';
+    s.addEventListener('click', () => {
+      cellHighlightId = (cellHighlightId === cid) ? null : cid;
+      renderLegend(mode);
+      rebuild();
+    });
+    legend.appendChild(s);
+  }
+  legendCaption.textContent = mode === 'spatial'
+    ? 'Each row is a latitude band (top = north); each column a longitude band (left = west). Cell numbers reveal the Hilbert curve\'s zigzag.'
+    : 'Cells laid out in numerical order. Consecutive numbers are geographically adjacent on the globe — the Hilbert-curve locality property.';
+}
+renderLegend('index');
+
+// Legend layout toggle
+for (const radio of document.querySelectorAll('input[name="legendLayout"]')) {
+  radio.addEventListener('change', e => renderLegend(e.target.value));
 }
 
 // ─────────────────────────────────────────────────────────────────────
@@ -604,7 +748,7 @@ function addOrUpdatePin(lat, lng) {
 // Toggles
 // ─────────────────────────────────────────────────────────────────────
 
-for (const id of ['toggleCells', 'toggleBorders', 'toggleLabels']) {
+for (const id of ['toggleCells', 'toggleBorders', 'toggleLabels', 'toggleHilbert']) {
   document.getElementById(id).addEventListener('change', rebuild);
 }
 document.getElementById('toggleAutorotate').addEventListener('change', e => {
