@@ -488,6 +488,41 @@ const sub = await peer.sub(TOPIC, (envelope) => {
   appendMessage(name, body, new Date());
 }, { publisher, since: 'all' });
 
+// Arm the kernel's AxonaManager periodic refresh timer.  By default
+// AxonaPeer._buildDefaultAxonaManager() does NOT call am.start() (the
+// comment in AxonaPeer.js:1820 says "applications call peer.sub after
+// the mesh has stabilised, so the initial K-closest is already wide
+// and refresh isn't needed").  That assumption holds for the dht-sim
+// simulator's steady-state runs but NOT for a browser mesh, where
+// WebRTC peers come and go on every page reload.  Without this, a
+// subscription registered at the initial K-closest set becomes stale
+// as the mesh churns, and publishes routed through a new K-closest
+// set miss the stale subscribers.  Arming refreshTick at the 10 s
+// default keeps the subscription pinned to whoever is K-closest
+// right now.
+peer._axonaManager?.start?.();
+
+// Reconcile the dot strip every 2 s against transport.boundPeers().
+// onPeerDied catches most disconnections but some die silently
+// (network drop, page suspended, browser throttled tab); polling
+// boundPeers is the ground truth.
+setInterval(() => {
+  const live = new Set();
+  for (const peerId of transport.boundPeers?.() || []) live.add(asHex(peerId));
+  let changed = false;
+  for (const [hex, state] of peerStates) {
+    if (live.has(hex)) {
+      if (state !== 'open')  { peerStates.set(hex, 'open');  changed = true; }
+    } else {
+      if (state === 'open')  { peerStates.set(hex, 'dead');  changed = true; }
+    }
+  }
+  for (const hex of live) {
+    if (!peerStates.has(hex)) { peerStates.set(hex, 'open'); changed = true; }
+  }
+  if (changed) renderDots();
+}, 2000);
+
 // Subscription is registered — safe to publish now.
 $status.textContent = 'connected';
 $pubBtn.disabled    = false;
