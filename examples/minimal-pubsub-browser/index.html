@@ -366,12 +366,16 @@ const peer     = new AxonaPeer({ domain, node, identity, transport });
 //
 // Cap at MAX_DOTS; if more peers, we just truncate (rare in a single
 // browser tab — typically 5–20 connections).
-const peerStates = new Map();   // hex peerId → 'open'|'pending'|'dead'
-let   bridgeUp   = false;
+// Render the dot strip directly from transport.boundPeers() — the
+// transport's own ground truth.  This matches axona-peer's pattern
+// (client.js:455 — for each render tick it diffs mesh.peers()
+// against the existing rows and DOM-removes anything no longer
+// present).  There's no separate death-tracking map: a peer that
+// dies just stops appearing.  No grey-dot accumulation.
+let bridgeUp = false;
 
 // Transport callbacks deliver peerIds as BigInts (kernel canonical
-// form).  Normalize to lowercase 66-char hex for use as a Map key
-// and for the dot's tooltip.
+// form).  Normalise to lowercase 66-char hex for the dot's tooltip.
 function asHex(peerId) {
   if (typeof peerId === 'bigint') return peerId.toString(16).padStart(66, '0');
   if (typeof peerId === 'string') return peerId.toLowerCase();
@@ -385,25 +389,22 @@ function renderDots() {
   b.className = 'dot bridge' + (bridgeUp ? ' open' : ' pending');
   b.title = 'bridge';
   $dots.appendChild(b);
-  // Up to MAX_DOTS-1 peer dots
-  const peers = [...peerStates.entries()].slice(0, MAX_DOTS - 1);
-  for (const [hex, state] of peers) {
+  // Currently-bound peers (kernel reports only live channels)
+  const peers = [...(transport.boundPeers?.() || [])].slice(0, MAX_DOTS - 1);
+  for (const peerId of peers) {
+    const hex = asHex(peerId);
     const d = document.createElement('div');
-    d.className = 'dot ' + state;
+    d.className = 'dot open';
     d.title = hex.slice(0, 12) + '…';
     $dots.appendChild(d);
   }
 }
 renderDots();
 
-transport.onPeerBound?.(peerId => {
-  peerStates.set(asHex(peerId), 'open');
-  renderDots();
-});
-transport.onPeerDied?.(peerId => {
-  peerStates.set(asHex(peerId), 'dead');
-  renderDots();
-});
+// onPeerBound / onPeerDied are just render triggers — boundPeers()
+// is the source of truth, so we re-read it on every event.
+transport.onPeerBound?.(() => renderDots());
+transport.onPeerDied?.(() => renderDots());
 
 // ─── Connect ─────────────────────────────────────────────────────────
 //
@@ -436,13 +437,7 @@ try {
   await peer.start();
   bridgeUp = true;
   $status.textContent = 'stabilising mesh…';
-
-  // Seed the dot strip from boundPeers() at startup — onPeerBound
-  // only fires for new arrivals after our hook installed.
-  for (const peerId of transport.boundPeers?.() || []) {
-    peerStates.set(asHex(peerId), 'open');
-  }
-  renderDots();
+  renderDots();    // bridge dot + any peers already bound
 
   await waitForMeshReady();
   // Subscription happens just below (top-level await) — gate the
@@ -502,26 +497,12 @@ const sub = await peer.sub(TOPIC, (envelope) => {
 // right now.
 peer._axonaManager?.start?.();
 
-// Reconcile the dot strip every 2 s against transport.boundPeers().
-// onPeerDied catches most disconnections but some die silently
-// (network drop, page suspended, browser throttled tab); polling
-// boundPeers is the ground truth.
-setInterval(() => {
-  const live = new Set();
-  for (const peerId of transport.boundPeers?.() || []) live.add(asHex(peerId));
-  let changed = false;
-  for (const [hex, state] of peerStates) {
-    if (live.has(hex)) {
-      if (state !== 'open')  { peerStates.set(hex, 'open');  changed = true; }
-    } else {
-      if (state === 'open')  { peerStates.set(hex, 'dead');  changed = true; }
-    }
-  }
-  for (const hex of live) {
-    if (!peerStates.has(hex)) { peerStates.set(hex, 'open'); changed = true; }
-  }
-  if (changed) renderDots();
-}, 2000);
+// Backstop re-render every 2 s.  onPeerBound / onPeerDied catch
+// most transitions, but some peers die silently (network drop, page
+// suspended, browser throttled tab).  A periodic re-read of
+// transport.boundPeers() keeps the strip honest without a
+// state-tracking map.
+setInterval(renderDots, 2000);
 
 // Subscription is registered — safe to publish now.
 $status.textContent = 'connected';
