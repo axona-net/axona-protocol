@@ -270,7 +270,7 @@
   </div>
 
   <footer>
-    <span>kernel v<span id="kernelVer">…</span></span>
+    <span>demo v<span id="demoVer">…</span> · kernel v<span id="kernelVer">…</span></span>
     <a href="https://github.com/axona-net/axona-protocol">source</a>
   </footer>
 
@@ -284,9 +284,13 @@ import {
 import { webTransport } from '/src/transport/web/index.js';
 
 // ─── Constants ────────────────────────────────────────────────────────
-const BRIDGE_URL = new URLSearchParams(window.location.search).get('bridge')
-                || 'wss://bridge.axona.net';
-const VIRGINIA   = { lat: 38.0, lng: -77.0 };
+// Bump the middle digit on every code change to this file so the
+// footer reflects what's actually running and stale browser tabs are
+// distinguishable.
+const DEMO_VERSION = '1.1.0';
+const BRIDGE_URL   = new URLSearchParams(window.location.search).get('bridge')
+                  || 'wss://bridge.axona.net';
+const VIRGINIA     = { lat: 38.0, lng: -77.0 };
 // axona-peer composes topic names as `${regionId}/${eventName}` (see
 // axona-peer/src/client.js line 1230).  Use the same composition here
 // so the demo's hello-world topic at us-east is the EXACT topic that
@@ -310,7 +314,8 @@ const $msg     = document.getElementById('msgInput');
 const $pubBtn  = document.getElementById('pubBtn');
 const $feed    = document.getElementById('feed');
 
-// ─── Footer kernel version ───────────────────────────────────────────
+// ─── Footer versions ─────────────────────────────────────────────────
+document.getElementById('demoVer').textContent = DEMO_VERSION;
 try {
   const pkg = await fetch('/package.json').then(r => r.json());
   $kernel.textContent = pkg.version;
