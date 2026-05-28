@@ -298,7 +298,7 @@ import { webTransport } from '/src/transport/web/index.js';
 // Bump the middle digit on every code change to this file so the
 // footer reflects what's actually running and stale browser tabs are
 // distinguishable.
-const DEMO_VERSION = '1.5.0';
+const DEMO_VERSION = '1.6.0';
 const BRIDGE_URL   = new URLSearchParams(window.location.search).get('bridge')
                   || 'wss://bridge.axona.net';
 const VIRGINIA     = { lat: 38.0, lng: -77.0 };
@@ -551,6 +551,31 @@ peer._axonaManager?.start?.();
 // transport.boundPeers() keeps the strip honest without a
 // state-tracking map.
 setInterval(renderDots, 2000);
+
+// ─── Resume recovery (laptop sleep / tab background) ─────────────────
+// The kernel transport already self-heals after a connection freeze:
+// dead WebRTC channels are evicted on heartbeat timeout (mesh v2.1.1)
+// and the bridge socket auto-reconnects with backoff.  This is the
+// optional *application-layer* accelerator the peer at axona.net also
+// uses — on a genuine resume event, tear the mesh down at once
+// (mesh.reset() fires onPeerLost so the synaptome clears too) and force
+// an immediate bridge reconnect, so recovery is snappy rather than
+// waiting out the per-peer timeouts.  A macOS screensaver may fire NONE
+// of these events (the tab never goes hidden); that's exactly the case
+// the kernel-side eviction backstops.
+function onResume(reason) {
+  console.log('[demo] resume:', reason);
+  try { transport.mesh?.reset?.(); } catch { /* mesh may already be gone */ }
+  transport.reconnectNow?.();
+}
+let hiddenAt = 0;
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'hidden') { hiddenAt = Date.now(); return; }
+  if (hiddenAt && Date.now() - hiddenAt >= 5000) onResume('visible');
+  hiddenAt = 0;
+});
+window.addEventListener('online',   () => onResume('online'));
+window.addEventListener('pageshow', (e) => { if (e.persisted) onResume('bfcache'); });
 
 // Subscription is registered — safe to publish now.
 $status.textContent = 'connected';
