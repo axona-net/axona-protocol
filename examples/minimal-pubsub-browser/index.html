@@ -69,12 +69,23 @@
       height: 7px;
       border-radius: 50%;
       background: var(--dot-dead);
-      transition: background 0.15s;
+      transition: background 0.15s, transform 0.15s, opacity 0.15s;
+      opacity: 0.55;                 /* resting (no recent traffic) */
     }
     .dot.bridge  { background: var(--dot-bridge); width: 9px; height: 9px; }
     .dot.open    { background: var(--dot-open); }
     .dot.pending { background: var(--dot-pending); }
     .dot.dead    { background: var(--dot-dead); }
+
+    /* v2.0.2: pulse-on-ping.  The dot brightens when a ping/pong
+       frame crosses its channel.  Class added on event, removed
+       400 ms later → dot fades back to its resting opacity.  Steady
+       channels at 1 Hz visibly blink twice/second; stalled channels
+       go dim within ~1 s. */
+    .dot.pulse {
+      opacity: 1;
+      transform: scale(1.35);
+    }
 
     /* ── Topic info row ─────────────────────────────────────────────── */
     .topic-row {
@@ -287,7 +298,7 @@ import { webTransport } from '/src/transport/web/index.js';
 // Bump the middle digit on every code change to this file so the
 // footer reflects what's actually running and stale browser tabs are
 // distinguishable.
-const DEMO_VERSION = '1.1.0';
+const DEMO_VERSION = '1.2.0';
 const BRIDGE_URL   = new URLSearchParams(window.location.search).get('bridge')
                   || 'wss://bridge.axona.net';
 const VIRGINIA     = { lat: 38.0, lng: -77.0 };
@@ -387,13 +398,20 @@ function asHex(peerId) {
   return String(peerId);
 }
 
+// Map peerHex → its current dot DOM node, so onPingTraffic can flash
+// the right dot without re-walking the children every event.  Cleared
+// on each renderDots(); rebuilt as we create children.
+const dotByPeer = new Map();
+let   bridgeDot = null;
+
 function renderDots() {
   $dots.innerHTML = '';
+  dotByPeer.clear();
   // Bridge dot first
-  const b = document.createElement('div');
-  b.className = 'dot bridge' + (bridgeUp ? ' open' : ' pending');
-  b.title = 'bridge';
-  $dots.appendChild(b);
+  bridgeDot = document.createElement('div');
+  bridgeDot.className = 'dot bridge' + (bridgeUp ? ' open' : ' pending');
+  bridgeDot.title = 'bridge';
+  $dots.appendChild(bridgeDot);
   // Currently-bound peers (kernel reports only live channels)
   const peers = [...(transport.boundPeers?.() || [])].slice(0, MAX_DOTS - 1);
   for (const peerId of peers) {
@@ -402,9 +420,34 @@ function renderDots() {
     d.className = 'dot open';
     d.title = hex.slice(0, 12) + '…';
     $dots.appendChild(d);
+    dotByPeer.set(hex, d);
   }
 }
 renderDots();
+
+// v2.0.2: pulse a dot on every ping-sent / pong-received frame on
+// that peer's channel.  Class is removed 400 ms later so a steady
+// 1 Hz traffic looks like a soft, regular blink and a stalled
+// channel goes dim within a second.
+function pulse(dot) {
+  if (!dot) return;
+  dot.classList.add('pulse');
+  // clearTimeout existing handle if any, to avoid premature class removal
+  // when two events arrive in quick succession.
+  if (dot._pulseTimer) clearTimeout(dot._pulseTimer);
+  dot._pulseTimer = setTimeout(() => dot.classList.remove('pulse'), 400);
+}
+
+transport.onPingTraffic?.((peerId /*, kind */) => {
+  const hex = asHex(peerId);
+  // Bridge ping/pong attributes to the bridge's nodeId — the same
+  // hex appears in boundPeers() as the bridge connection.  If the
+  // hex matches the bridge's nodeId, pulse the bridge dot; otherwise
+  // look up the per-peer dot.
+  const bridgeHex = transport.bridgeNodeId ? asHex(transport.bridgeNodeId) : null;
+  if (bridgeHex && hex === bridgeHex) pulse(bridgeDot);
+  else                                pulse(dotByPeer.get(hex));
+});
 
 // onPeerBound / onPeerDied are just render triggers — boundPeers()
 // is the source of truth, so we re-read it on every event.
