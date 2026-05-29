@@ -5,10 +5,12 @@ One node, one package — give it a Transport and it speaks the Axona wire
 protocol. Runs unchanged in browsers, Node servers, and the dht-sim
 simulator.
 
-**v1.1.3** — production kernel. Powers [axona.net](https://axona.net) (browser
+**v2.2.0** — production kernel. Powers [axona.net](https://axona.net) (browser
 peers), [bridge.axona.net](https://bridge.axona.net) (signaling broker), and
 the [`dht-sim`](https://github.com/axona-net/dht-sim) reference simulator at
-50,000 peers.
+50,000 peers. Every link is mutually authenticated — peers prove their routing
+identity with an Ed25519 signature before they can join (see
+[Authenticated handshake](#authenticated-handshake)).
 
 ## Install
 
@@ -84,11 +86,11 @@ The protocol layer can't tell which one it's running on.
 | Factory | Where it runs | Use case |
 |---|---|---|
 | [`simTransport({ network, identity })`](src/transport/sim/) | In-process | Tests, dht-sim, multi-peer-in-one-process demos |
-| [`Transport.web({ identity, bridgeUrl })`](src/transport/web/) | Browser | WebRTC data channels + WebSocket bridge fallback. Used by [`axona-peer`](https://github.com/axona-net/axona-peer). |
-| [`Transport.node({ identity, listen | bridgeUrl })`](src/transport/node/) | Headless server | Raw WebSocket. Used by [`axona-bridge`](https://github.com/axona-net/axona-bridge). |
+| [`webTransport({ identity, bridgeUrl })`](src/transport/web/) | Browser | WebRTC data channels + WebSocket bridge fallback. Used by [`axona-peer`](https://github.com/axona-net/axona-peer). |
+| [`serverTransport` / `clientTransport`](src/transport/node/) | Headless server | Raw WebSocket (also bundled as `nodeTransport.server` / `nodeTransport.client`). Used by [`axona-bridge`](https://github.com/axona-net/axona-bridge). |
 
-All three speak the same wire protocol (`v1.1.x`); a peer using one can
-communicate with a peer using either of the others.
+All three speak the same authenticated wire protocol (`axona/4`); a peer using
+one can communicate with a peer using either of the others.
 
 ## Persistence
 
@@ -124,14 +126,44 @@ import { deriveIdentity, dumpIdentity, loadIdentity } from '@axona/protocol';
 
 const identity = await deriveIdentity({ lat: 38, lng: -77 });
 console.log(identity.id);                       // 66-char hex nodeId
-console.log(identity.publicKeyHex);             // 64-char hex pubkey
+console.log(identity.pubkeyHex);                // 64-char hex pubkey
 
 const blob = await dumpIdentity(identity);      // round-trip via JSON
 const same = await loadIdentity(blob);
 ```
 
-`nodeId = [8-bit S2 prefix] || [256-bit SHA-256(publicKey)]`. Topic IDs share
+`nodeId = [8-bit S2 prefix] || [256-bit SHA-256(pubkey)]`. Topic IDs share
 the same 264-bit keyspace.
+
+## Authenticated handshake
+
+A `nodeId`'s lower 256 bits are `SHA-256(pubkey)`, but that alone proves
+nothing — pubkeys are public, so anyone could re-broadcast another peer's
+identity. Every fresh channel therefore runs the `axona/4` handshake, which
+gates admission on three checks:
+
+1. **Bind** — `SHA-256(pubkey)` equals the nodeId's 256-bit suffix. (The 8-bit
+   S2 prefix is *not* bound — it's a routing hint, like an area code, so a
+   travelling peer keeps its identity.)
+2. **Possess** — an Ed25519 signature proves the peer holds the matching
+   private key.
+3. **Channel-bind** — the signed transcript folds in a per-connection
+   *channel-binding value* (CBV), so a captured hello can't be replayed onto a
+   different connection.
+
+The primitive is transport-agnostic and exported for reuse:
+
+```js
+import {
+  buildAuthHello, verifyAuthHello, AUTH_PROTO,   // 'axona/4'
+  makeNonce, cbvFromNonces, pubkeyMatchesNodeId,
+} from '@axona/protocol';
+```
+
+A peer speaking an older protocol is cleanly rejected: the bridge closes the
+WebSocket with code **4426** and an `upgrade required` reason, and the client
+logs a developer-visible `UPGRADE REQUIRED` console error telling it to update
+`@axona/protocol`. `UpgradeRequiredError` (below) is the typed form.
 
 ## Errors
 
@@ -182,7 +214,8 @@ Full list: `AxonaError`, `IdentityError`, `TransportError`, `PublishError`,
 │   ├── sim/            # in-process router + simTransport — tests, dht-sim
 │   ├── web/            # WebRTC + WebSocket-bridge composite — browsers (axona-peer)
 │   ├── node/           # raw WebSocket — Node servers (axona-bridge)
-│   ├── handshake.js    # version negotiation on every fresh channel
+│   ├── handshake.js    # version negotiation + KERNEL_VERSION on every fresh channel
+│   ├── handshake-auth.js  # axona/4 authenticated-identity handshake (bind + possess + channel-bind)
 │   └── wire.js         # frame shape, codecs
 │
 ├── persistence/
@@ -224,7 +257,7 @@ Full list: `AxonaError`, `IdentityError`, `TransportError`, `PublishError`,
   [`demo.axona.net`](https://demo.axona.net). Connects to the production
   bridge over WebSocket and runs a kernel peer in the page.
 - [`examples/s2-region-visualizer/`](examples/s2-region-visualizer/)
-  — interactive 3D globe showing the 256 S2 cells that anchor every
+  — interactive 3D globe showing the 192 S2 cells that anchor every
   Axona nodeId and pub/sub topic. Click a cell in the legend to see
   it lit up on the globe; hit "Detect my location" to find your own
   region. Useful when explaining why polar cells shrink, or for
@@ -250,8 +283,10 @@ The full programmer-facing documentation lives in
 
 The frame shapes, message-type vocabulary, version handshake, and bridge
 wire format are in [`axona-docs/implementation/`](https://github.com/axona-net/axona-docs/tree/main/implementation).
-The handshake module at [`src/transport/handshake.js`](src/transport/handshake.js)
-is the canonical implementation reference.
+The handshake modules at [`src/transport/handshake.js`](src/transport/handshake.js)
+(version negotiation) and [`src/transport/handshake-auth.js`](src/transport/handshake-auth.js)
+(the `axona/4` authenticated-identity gate) are the canonical implementation
+reference.
 
 ## Tests
 
@@ -259,10 +294,12 @@ is the canonical implementation reference.
 npm test
 ```
 
-Runs 21 smoke suites covering addressing, errors, persistence (in-memory,
-file, IndexedDB), identity, all three transports, version handshake, pub/sub
-(unified API, envelope, pull, metrics), direct messaging, mesh introspection,
-health, lifecycle (join/leave/snapshot), and Ed25519 post signing.
+Runs 26 smoke suites covering addressing, errors, persistence (in-memory,
+file, IndexedDB), identity, all three transports, version handshake, the
+`axona/4` authenticated handshake (primitive + sim-transport enforcement),
+pub/sub (unified API, envelope, pull, metrics), direct messaging, mesh
+introspection + eviction, health, lifecycle (join/leave/snapshot), and Ed25519
+post signing.
 
 ## License
 
