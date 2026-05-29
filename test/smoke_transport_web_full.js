@@ -21,6 +21,8 @@ import {
 } from '../src/transport/web/index.js';
 import { TransportError, ErrorCodes } from '../src/errors.js';
 import { fromHex } from '../src/utils/hexid.js';
+import { deriveIdentity } from '../src/identity/index.js';
+import { buildAuthHello, cbvFromNonces } from '../src/transport/handshake-auth.js';
 
 let passed = 0, failed = 0;
 function check(label, condition) {
@@ -373,53 +375,74 @@ async function testWebTransportFactory() {
 async function testWebTransportAutoHandshake() {
   console.log('\n── webTransport factory: autoHandshake (default) ──');
 
+  // axona/4 — the handshake is now authenticated: real identities, a
+  // serverNonce-bound CBV, and Ed25519 proof-of-possession both ways.
+  const alice    = await deriveIdentity({ lat: 40.71, lng: -74.0 });
+  const bridgeId = await deriveIdentity({ lat: 51.5,  lng: -0.12 });
+
   const t = webTransport({
     bridgeUrl: 'wss://test.example',
-    identity:  { id: ALICE_HEX },
+    identity:  alice,
     WebSocketImpl: FakeWebSocket,
     // autoHandshake defaults to true
     handshakeTimeoutMs: 1000,
   });
 
-  // Kick start, then simulate the bridge's hello before the timeout.
   const startPromise = t.start();
-
-  // Wait one microtask so the FakeWebSocket opens + client-hello sends.
   await new Promise(r => queueMicrotask(r));
-  // Also drain the next microtask for sub-transport start order.
   await new Promise(r => setTimeout(r, 0));
 
-  // (a) Confirm the client-hello went out as the first send.
+  // (a) client-hello goes out first.
   const firstFrame = t.socket.sent[0] ? JSON.parse(t.socket.sent[0]) : null;
   check('autoHandshake sends client-hello as first frame',
     firstFrame && firstFrame.type === 'client-hello' && typeof firstFrame.version === 'string');
 
-  // (b) Simulate the bridge replying with `axona`-framed hello.  Wire
-  // payload nodeId is hex.
+  // (b) welcome seeds the per-connection serverNonce + connId (the CBV).
+  const serverNonce = 'beefcafe'.repeat(4);
+  const connId      = 'zz';
   t.socket._deliver(JSON.stringify({
-    type: 'axona',
-    payload: { k: 'ntf', type: 'hello', body: {
-      proto: 'axona/3', nodeId: BRIDGE_HEX,
-    }},
+    type: 'welcome', connId, serverNonce, version: '9.9.9', kernelVersion: '9.9.9',
   }));
 
-  // start() should now resolve.
-  await startPromise;
-  check('autoHandshake: start() resolves after bridge hello arrives', true);
-  // bridgeNodeId is the display surface (hex).  bridgeNodeIdBig is the
-  // kernel form (BigInt).
-  check('autoHandshake: bridgeNodeId is set (hex display)', t.bridgeNodeId === BRIDGE_HEX);
-  check('autoHandshake: bridgeNodeIdBig is set (BigInt)', t.bridgeNodeIdBig === BRIDGE);
-  check('autoHandshake: bridge is bound', t.bridge.ownsPeer(BRIDGE) === true);
-  // bridgeReady resolves with BigInt (kernel form).
-  check('autoHandshake: bridgeReady resolves with the bridge BigInt nodeId',
-    (await t.bridgeReady) === BRIDGE);
+  // (c) bridge replies with an AUTHENTICATED hello, signed over the CBV.
+  const cbv = cbvFromNonces(serverNonce, connId, 'bridge');
+  const bridgeHello = await buildAuthHello({ identity: bridgeId, cbv });
+  t.socket._deliver(JSON.stringify({
+    type: 'axona', payload: { k: 'ntf', type: 'hello', body: bridgeHello },
+  }));
 
-  // (c) Confirm we sent a hello-ack back to the bridge.  Wire payload hex.
-  const helloAckFrame = t.socket.sent.map(s => JSON.parse(s))
+  await startPromise;
+  check('autoHandshake: start() resolves after authenticated bridge hello', true);
+  check('autoHandshake: bridgeNodeId is the proven bridge id', t.bridgeNodeId === bridgeId.id);
+  check('autoHandshake: bridgeNodeIdBig is set (BigInt)', t.bridgeNodeIdBig === fromHex(bridgeId.id));
+  check('autoHandshake: bridge is bound', t.bridge.ownsPeer(fromHex(bridgeId.id)) === true);
+  check('autoHandshake: bridgeReady resolves with the proven bridge id',
+    (await t.bridgeReady) === fromHex(bridgeId.id));
+
+  // (d) our reply is an AUTHENTICATED hello-ack: our id, our pubkey, a sig.
+  const ack = t.socket.sent.map(s => JSON.parse(s))
     .find(f => f.type === 'axona' && f.payload?.type === 'hello-ack');
-  check('autoHandshake: hello-ack was sent in reply',
-    helloAckFrame && helloAckFrame.payload.body.nodeId === ALICE_HEX);
+  check('autoHandshake: authenticated hello-ack sent in reply',
+    ack && ack.payload.body.nodeId === alice.id
+        && ack.payload.body.pubkey === alice.pubkeyHex
+        && typeof ack.payload.body.sig === 'string'
+        && ack.payload.body.sig.startsWith('ed25519:'));
+
+  // (e) a hello a forger can't sign for is refused: present the bridge's
+  // id+pubkey but a signature from a DIFFERENT key → not bound.
+  const t2 = webTransport({ bridgeUrl: 'wss://test.example', identity: alice, WebSocketImpl: FakeWebSocket, handshakeTimeoutMs: 300 });
+  const sp2 = t2.start();
+  await new Promise(r => setTimeout(r, 0));
+  t2.socket._deliver(JSON.stringify({ type: 'welcome', connId: 'yy', serverNonce: 'aa'.repeat(16) }));
+  const forgedCbv = cbvFromNonces('aa'.repeat(16), 'yy', 'bridge');
+  const aliceSig  = await buildAuthHello({ identity: alice, cbv: forgedCbv });   // alice's sig
+  const forged    = { proto: 'axona/4', nodeId: bridgeId.id, pubkey: bridgeId.pubkeyHex, sig: aliceSig.sig };
+  t2.socket._deliver(JSON.stringify({ type: 'axona', payload: { k: 'ntf', type: 'hello', body: forged } }));
+  let rejected2 = false;
+  try { await sp2; } catch { rejected2 = true; }
+  check('autoHandshake: forged bridge hello (wrong key) is NOT bound',
+    rejected2 && t2.bridgeNodeIdBig === null);
+  await t2.stop();
 
   await t.stop();
 }
@@ -427,9 +450,10 @@ async function testWebTransportAutoHandshake() {
 async function testWebTransportAutoHandshakeTimeout() {
   console.log('\n── webTransport factory: autoHandshake timeout ──');
 
+  const alice = await deriveIdentity({ lat: 1, lng: 1 });
   const t = webTransport({
     bridgeUrl: 'wss://test.example',
-    identity:  { id: ALICE_HEX },
+    identity:  alice,
     WebSocketImpl: FakeWebSocket,
     handshakeTimeoutMs: 50,   // tight timeout so we fail fast
   });

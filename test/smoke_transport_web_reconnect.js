@@ -1,17 +1,20 @@
 // =====================================================================
-// smoke_transport_web_reconnect.js — webTransport() v2.1 connection
+// smoke_transport_web_reconnect.js — webTransport() connection
 // management: welcome capture, ping/pong RTT, bridge-state events,
 // auto-reconnect with re-handshake, and 4426 upgrade-required.
 //
-// Uses a fake WebSocket whose instances are tracked so the test can
-// drive the bridge's replies and simulate socket drops across
-// reconnects.
+// axona/4 — the bridge handshake is authenticated: welcome seeds a
+// per-connection serverNonce, and the bridge proves its nodeId with an
+// Ed25519 signature over the CBV.  This smoke uses a real bridge
+// identity and signs each (re)handshake.
 //
-// Run:  node test/smoke_transport_web_reconnect.js
+// Run: node test/smoke_transport_web_reconnect.js
 // =====================================================================
 
 import { webTransport } from '../src/transport/web/index.js';
-import { fromHex, toHex } from '../src/utils/hexid.js';
+import { fromHex }      from '../src/utils/hexid.js';
+import { deriveIdentity } from '../src/identity/index.js';
+import { buildAuthHello, cbvFromNonces } from '../src/transport/handshake-auth.js';
 
 let passed = 0, failed = 0;
 function check(label, cond) {
@@ -20,9 +23,9 @@ function check(label, cond) {
 }
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
-const ALICE_HEX  = 'aa' + '0'.repeat(64);
-const BRIDGE_HEX = '89' + '0'.repeat(63) + '1';
-const BRIDGE_BIG = fromHex(BRIDGE_HEX);
+// Fixed per-connection bridge channel-binding inputs for the test.
+const SERVER_NONCE = 'beefcafe'.repeat(4);
+const CONN_ID      = 'zz';
 
 // ── Fake WebSocket with instance tracking + close codes ─────────────
 let liveSockets = [];
@@ -52,26 +55,37 @@ class FakeWS {
   deliver(obj) { this._fire('message', { data: JSON.stringify(obj) }); }
 }
 
-// Feed the bridge's `axona`-framed hello so the handshake completes
-// against whatever socket is currently live.
-function feedBridgeHello(sock) {
-  sock.deliver({ type: 'axona', payload: {
-    k: 'ntf', type: 'hello', body: { proto: 'axona/3', nodeId: BRIDGE_HEX },
-  }});
+let bridgeIdent;   // the bridge's real identity (set in main)
+
+// welcome seeds the serverNonce + connId (the CBV) BEFORE the hello.
+function feedWelcome(sock) {
+  sock.deliver({ type: 'welcome', connId: CONN_ID, serverNonce: SERVER_NONCE,
+                 version: '2.2.0', kernelVersion: '2.1.0', turn: null });
+}
+
+// Authenticated bridge hello, signed over the per-connection CBV.
+async function feedBridgeHello(sock) {
+  const cbv   = cbvFromNonces(SERVER_NONCE, CONN_ID, 'bridge');
+  const hello = await buildAuthHello({ identity: bridgeIdent, cbv });
+  sock.deliver({ type: 'axona', payload: { k: 'ntf', type: 'hello', body: hello } });
 }
 
 async function main() {
-  console.log('webTransport v2.1 — reconnect + welcome/RTT/state\n');
+  console.log('webTransport — reconnect + welcome/RTT/state (axona/4 auth)\n');
+
+  const alice = await deriveIdentity({ lat: 40.71, lng: -74.0 });
+  bridgeIdent = await deriveIdentity({ lat: 51.5,  lng: -0.12 });
+  const BRIDGE_BIG = fromHex(bridgeIdent.id);
 
   liveSockets = [];
   const states = [];
   const welcomes = [];
   const t = webTransport({
     bridgeUrl: 'wss://test.example',
-    identity:  { id: ALICE_HEX },
+    identity:  alice,
     WebSocketImpl: FakeWS,
     handshakeTimeoutMs: 2000,
-    reconnectInitialMs: 60,    // fast backoff for the test
+    reconnectInitialMs: 60,
     reconnectMaxMs:     60,
   });
   t.onBridgeState((s) => states.push(s));
@@ -79,26 +93,24 @@ async function main() {
 
   // ── First connection ──────────────────────────────────────────────
   const startP = t.start();
-  await sleep(5);                       // socket opens, client-hello sent
+  await sleep(5);
   const sock1 = t.socket;
   check('first socket created', !!sock1 && liveSockets.length === 1);
   const firstFrame = sock1.sent[0] ? JSON.parse(sock1.sent[0]) : null;
-  check('client-hello sent first on open',
-    firstFrame && firstFrame.type === 'client-hello');
+  check('client-hello sent first on open', firstFrame && firstFrame.type === 'client-hello');
   check('state went connecting', states.includes('connecting'));
 
-  feedBridgeHello(sock1);
-  await startP;
-  check('start() resolves after hello', true);
-  check('state went open', states.includes('open'));
-  check('bridge bound', t.bridge.ownsPeer(BRIDGE_BIG) === true);
-
-  // ── welcome capture ───────────────────────────────────────────────
-  sock1.deliver({ type: 'welcome', connId: 'zz', version: '2.2.0', kernelVersion: '2.0.3', turn: null });
+  feedWelcome(sock1);
   check('bridgeInfo captured version',
-    t.bridgeInfo && t.bridgeInfo.version === '2.2.0' && t.bridgeInfo.kernelVersion === '2.0.3');
-  check('bridgeInfo connId', t.bridgeInfo.connId === 'zz');
+    t.bridgeInfo && t.bridgeInfo.version === '2.2.0' && t.bridgeInfo.kernelVersion === '2.1.0');
+  check('bridgeInfo connId', t.bridgeInfo.connId === CONN_ID);
   check('onWelcome fired', welcomes.length >= 1 && welcomes.at(-1).version === '2.2.0');
+
+  await feedBridgeHello(sock1);
+  await startP;
+  check('start() resolves after authenticated hello', true);
+  check('state went open', states.includes('open'));
+  check('bridge bound to proven id', t.bridge.ownsPeer(BRIDGE_BIG) === true);
 
   // ── RTT from pong ─────────────────────────────────────────────────
   sock1.deliver({ type: 'pong', t: Date.now() - 40 });
@@ -109,15 +121,16 @@ async function main() {
   const socketsBefore = liveSockets.length;
   sock1.close();                        // no code → reconnect path
   check('state went disconnected on close', states.includes('disconnected'));
-  await sleep(120);                     // backoff (60ms) + open microtask
+  await sleep(120);
   check('a NEW socket was opened by reconnect', liveSockets.length === socketsBefore + 1);
   const sock2 = t.socket;
   check('current socket is the fresh instance', sock2 && sock2 !== sock1);
   const reFrame = sock2.sent[0] ? JSON.parse(sock2.sent[0]) : null;
   check('reconnect re-sent client-hello', reFrame && reFrame.type === 'client-hello');
 
-  // Re-handshake on the new socket.
-  feedBridgeHello(sock2);
+  // Re-handshake on the new socket (welcome reseeds the CBV first).
+  feedWelcome(sock2);
+  await feedBridgeHello(sock2);
   await sleep(5);
   check('state returned to open after re-handshake', t.bridgeState === 'open');
   check('bridge re-bound after reconnect', t.bridge.ownsPeer(BRIDGE_BIG) === true);
@@ -127,25 +140,23 @@ async function main() {
 
   // ── 4426 upgrade-required: no reconnect ───────────────────────────
   liveSockets = [];
-  const states2 = [];
   const t2 = webTransport({
     bridgeUrl: 'wss://test.example',
-    identity:  { id: ALICE_HEX },
+    identity:  alice,
     WebSocketImpl: FakeWS,
     handshakeTimeoutMs: 2000,
     reconnectInitialMs: 30,
     reconnectMaxMs:     30,
   });
-  t2.onBridgeState((s) => states2.push(s));
   const startP2 = t2.start();
   await sleep(5);
   const us = t2.socket;
-  feedBridgeHello(us);
+  feedWelcome(us);
+  await feedBridgeHello(us);
   await startP2;
   const countAtOpen = liveSockets.length;
   us.close(4426, 'client out of date');
-  check('4426 → upgrade-required state',
-    t2.bridgeState === 'upgrade-required');
+  check('4426 → upgrade-required state', t2.bridgeState === 'upgrade-required');
   check('4426 → upgradeReason surfaced',
     typeof t2.upgradeReason === 'string' && t2.upgradeReason.length > 0);
   await sleep(120);
