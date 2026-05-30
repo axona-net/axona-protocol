@@ -370,6 +370,27 @@ node.transport = transport;
 const domain   = new AxonaDomain({ k: 20 });
 const peer     = new AxonaPeer({ domain, node, identity, transport });
 
+// DEBUG (opt-in via ?debug) — surface a mesh-health readout so the
+// auth-bound set (boundPeers) can be compared against the raw WebRTC
+// DC-level rows (mesh.getPeers) and the synaptome.  This is what exposed
+// the mesh-auth CBV bug: many DCs `open` + pinging, but boundCount stuck
+// at 1.  Gated and identity-free (no key material on window) so it's safe
+// to ship.  Read `window.__demo.report()` in the console.
+if (new URLSearchParams(location.search).has('debug')) {
+  window.__demo = {
+    report() {
+      const mp = (transport.mesh?.getPeers?.() || [])
+        .map(p => ({ state: p.state, pongs: p.pongs }));
+      return {
+        boundCount:    (transport.boundPeers?.() || []).length,
+        meshDataChans: mp.length,
+        meshOpen:      mp.filter(p => p.state === 'open').length,
+        synaptomeSize: node.synaptome?.size ?? null,
+      };
+    },
+  };
+}
+
 // ─── Peer-state tracking for the dot strip ───────────────────────────
 //
 // We render one dot per known peer.  Bridge is always the first
