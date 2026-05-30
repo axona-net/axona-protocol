@@ -143,12 +143,55 @@ async function testRejection() {
   check('loadIdentity rejects mismatched id ↔ pubkey/region', threw);
 }
 
+async function testNonExtractableKey() {
+  console.log('\n── H4: non-extractable signing key ──');
+  const id = await deriveIdentity({ ...LONDON, extractable: false });
+  check('derives a usable identity', isHexId(id.id) && id.pubkeyHex.length === 64);
+  // The private key still signs…
+  const msg = new TextEncoder().encode('hello');
+  const sig = await id.sign(msg);
+  check('non-extractable key still signs', sig instanceof Uint8Array && sig.length === 64);
+  check('its signature verifies', await id.verify(msg, sig));
+  // …but it cannot be exported (exfiltrated).
+  let exportThrew = false;
+  try { await crypto.subtle.exportKey('pkcs8', id.privateKey); }
+  catch { exportThrew = true; }
+  check('private key cannot be exported (pkcs8)', exportThrew);
+  // dumpIdentity therefore refuses (persistence requires extractable).
+  let dumpThrew = false;
+  try { await dumpIdentity(id); }
+  catch (e) { dumpThrew = e instanceof IdentityError; }
+  check('dumpIdentity refuses a non-extractable identity', dumpThrew);
+  // The default (extractable) identity still dumps fine.
+  const persistable = await deriveIdentity(LONDON);
+  const env = await dumpIdentity(persistable);
+  check('default identity remains persistable', typeof env.privkey === 'string');
+}
+
+async function testLoadIdentityKeyMismatch() {
+  console.log('\n── M5: loadIdentity verifies privkey ↔ pubkey ──');
+  const a = await dumpIdentity(await deriveIdentity(LONDON));
+  const b = await dumpIdentity(await deriveIdentity(LONDON));
+  // Graft b's private key onto a's id/pubkey/region — internally the
+  // nodeId still matches a's pubkey, but the private key is the wrong one.
+  const frankenstein = { ...a, privkey: b.privkey };
+  let threw = false;
+  try { await loadIdentity(frankenstein); }
+  catch (e) { threw = e instanceof IdentityError; }
+  check('loadIdentity rejects privkey that does not match pubkey', threw);
+  // Sanity: an intact envelope still loads.
+  const ok = await loadIdentity(a);
+  check('intact envelope still loads', ok.id === a.id);
+}
+
 async function main() {
   console.log('Axona identity smoke');
   await testDerive();
   await testNodeIdDeterminism();
   await testSignVerify();
   await testDumpLoadRoundtrip();
+  await testNonExtractableKey();
+  await testLoadIdentityKeyMismatch();
   await testRejection();
   console.log(`\nResult: ${passed} passed, ${failed} failed`);
   process.exit(failed === 0 ? 0 : 1);

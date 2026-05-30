@@ -133,16 +133,21 @@ async function testMakePostSigned() {
     !(await verifySignature(tampered, verifier, pubBytes)));
 }
 
-async function testStubSignatureCompat() {
-  console.log('\n── Backward-compat: stub: signatures pass verifySignature ──');
+async function testStubSignatureNotAuthenticated() {
+  console.log('\n── Security (M4): stub: signatures are NOT signature-verified ──');
   const post = await makePost({
     publisher: ALICE,
     topicName: 'test',
     content:   {},
   });
-  // No verifier needed — stub: short-circuits to true (simulator mode).
+  // An unsigned (stub:) post carries no proof of origin.  verifySignature
+  // must report it as NOT valid — returning true here was a forgery hole
+  // (a stub:<any-publisher> placeholder would pass as authentic).
   const result = await verifySignature(post, null, null);
-  check('stub: signature returns true (sim mode)', result === true);
+  check('stub: signature returns false (unsigned ≠ authenticated)', result === false);
+  // A forged stub claiming someone else is likewise not authenticated.
+  const forged = { ...post, signature: 'stub:' + BOB };
+  check('forged stub: also returns false', (await verifySignature(forged, null, null)) === false);
 }
 
 async function main() {
@@ -153,7 +158,7 @@ async function main() {
   await testVerifyTopicOwnership();
   await testEd25519RoundTrip();
   await testMakePostSigned();
-  await testStubSignatureCompat();
+  await testStubSignatureNotAuthenticated();
   console.log(`\nResult: ${passed} passed, ${failed} failed`);
   process.exit(failed === 0 ? 0 : 1);
 }

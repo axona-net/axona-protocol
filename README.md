@@ -294,12 +294,13 @@ reference.
 npm test
 ```
 
-Runs 27 smoke suites covering addressing, errors, persistence (in-memory,
-file, IndexedDB), identity, all three transports, version handshake, the
-`axona/4` authenticated handshake (primitive + sim- and node-transport
-enforcement), pub/sub (unified API, envelope, pull, metrics), direct
-messaging, mesh introspection + eviction, health, lifecycle
-(join/leave/snapshot), and Ed25519 post signing.
+Runs 29 smoke suites covering addressing, errors, persistence (in-memory,
+file, IndexedDB), identity (incl. non-extractable keys + key-correspondence
+checks), all three transports, version handshake, the `axona/4`
+authenticated handshake (primitive + sim- and node-transport enforcement),
+pub/sub (unified API, envelope, pull, metrics, subscribe authorization,
+replay idempotency), direct messaging, mesh introspection + eviction,
+health, lifecycle (join/leave/snapshot), and Ed25519 post signing.
 
 ## License
 
