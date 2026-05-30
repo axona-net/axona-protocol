@@ -39,6 +39,23 @@ class MockTransport {
   }
 }
 
+// Web-shaped transport: boundPeers() + .mesh.getPeers() + .webrtc.boundPeers()
+// so we can exercise health().transport / meshDegraded.
+class MockWebTransport {
+  constructor({ openChannels = 0, meshBound = 0, bridgeBound = 1 } = {}) {
+    this.wireVersion = '4.0';
+    this.bridgeState = 'connected';
+    this._log = () => {};
+    const open  = Array.from({ length: openChannels }, (_, i) => ({ peerId: `c${i}`, state: 'open' }));
+    this.mesh   = { getPeers: () => open };
+    // mesh-only bound set
+    this.webrtc = { boundPeers: () => Array.from({ length: meshBound }, (_, i) => BigInt(i + 1)) };
+    // aggregate bound = bridge + mesh
+    this._boundTotal = bridgeBound + meshBound;
+  }
+  boundPeers() { return Array.from({ length: this._boundTotal }, (_, i) => BigInt(i + 1)); }
+}
+
 function makePeer({ withAm = true, withTransport = false, synaptome = [] } = {}) {
   const syn = new Map();
   for (const id of synaptome) syn.set(id, {});
@@ -71,6 +88,49 @@ function testHealthWithoutTransport() {
   const peer = makePeer({ withTransport: false });
   const h = peer.health();
   check('wireVersion = null when no transport', h.wireVersion === null);
+}
+
+function makeWebPeer(opts) {
+  return new AxonaPeer({
+    engine: { onEvent: () => () => {} },
+    node:   { id: SELF, alive: true, synaptome: new Map() },
+    transport: new MockWebTransport(opts),
+  });
+}
+
+function testHealthTransportSurface() {
+  console.log('\n── health().transport surface ──');
+  const h = makeWebPeer({ openChannels: 8, meshBound: 8, bridgeBound: 1 }).health();
+  check('transport object present',     h.transport !== null);
+  check('boundCount = bridge+mesh (9)', h.transport.boundCount === 9);
+  check('meshChannels = 8',             h.transport.meshChannels === 8);
+  check('meshOpen = 8',                 h.transport.meshOpen === 8);
+  check('meshBound = 8',                h.transport.meshBound === 8);
+  check('bridgeState surfaced',         h.transport.bridgeState === 'connected');
+  check('sim transport has null transport block', makePeer({ withTransport: true }).health().transport === null);
+}
+
+function testMeshDegradedInvariant() {
+  console.log('\n── health().meshDegraded (routing-truth) ──');
+  // The v2.4.0 bug: 9 DCs open, none bound past the bridge.
+  const buggy = makeWebPeer({ openChannels: 9, meshBound: 0, bridgeBound: 1 }).health();
+  check('9 open / 0 mesh-bound ⇒ degraded', buggy.meshDegraded === true);
+
+  // Healthy steady state: every open channel is bound.
+  const healthy = makeWebPeer({ openChannels: 8, meshBound: 8, bridgeBound: 1 }).health();
+  check('8 open / 8 bound ⇒ not degraded', healthy.meshDegraded === false);
+
+  // Mid-handshake transient: one channel still binding — not flagged.
+  const transient = makeWebPeer({ openChannels: 3, meshBound: 2, bridgeBound: 1 }).health();
+  check('3 open / 2 bound (gap 1) ⇒ not degraded', transient.meshDegraded === false);
+
+  // Sustained gap ≥2 ⇒ flagged.
+  const gap = makeWebPeer({ openChannels: 5, meshBound: 2, bridgeBound: 1 }).health();
+  check('5 open / 2 bound (gap 3) ⇒ degraded', gap.meshDegraded === true);
+
+  // Empty mesh ⇒ never degraded.
+  const empty = makeWebPeer({ openChannels: 0, meshBound: 0, bridgeBound: 1 }).health();
+  check('0 open ⇒ not degraded', empty.meshDegraded === false);
 }
 
 function testOnLogValidation() {
@@ -163,6 +223,8 @@ function main() {
   console.log('Axona health + onLog/onError (A6) smoke');
   testHealthShape();
   testHealthWithoutTransport();
+  testHealthTransportSurface();
+  testMeshDegradedInvariant();
   testOnLogValidation();
   testOnLogReceives();
   testOnLogUnsubscribe();
