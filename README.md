@@ -76,7 +76,7 @@ clusters:
 | **Snapshot escape hatch** | `snapshot()` · `fromSnapshot(blob)` |
 
 Full reference with parameter types, return shapes, and worked examples:
-[axona-docs Programmer Guide §API Reference](https://github.com/axona-net/axona-docs/blob/main/programmer-guide/API-Reference-v2.8.0.md).
+[axona-docs Programmer Guide §API Reference](https://github.com/axona-net/axona-docs/blob/main/programmer-guide/API-Reference-v2.8.2.md).
 
 ## Transports
 
@@ -275,9 +275,9 @@ The full programmer-facing documentation lives in
 
 | Document | When to read |
 |---|---|
-| [Quick Start](https://github.com/axona-net/axona-docs/blob/main/programmer-guide/Quick-Start-v2.8.0.md) | You want a working pub/sub roundtrip in 5 minutes |
-| [API Reference](https://github.com/axona-net/axona-docs/blob/main/programmer-guide/API-Reference-v2.8.0.md) | You're building and need a specific call's signature |
-| [Programmer Guide](https://github.com/axona-net/axona-docs/blob/main/programmer-guide/Axona-Programmer-Guide-v2.8.0.md) | You're starting a new application against Axona |
+| [Quick Start](https://github.com/axona-net/axona-docs/blob/main/programmer-guide/Quick-Start-v2.8.2.md) | You want a working pub/sub roundtrip in 5 minutes |
+| [API Reference](https://github.com/axona-net/axona-docs/blob/main/programmer-guide/API-Reference-v2.8.2.md) | You're building and need a specific call's signature |
+| [Programmer Guide](https://github.com/axona-net/axona-docs/blob/main/programmer-guide/Axona-Programmer-Guide-v2.8.2.md) | You're starting a new application against Axona |
 
 ## Wire protocol
 
