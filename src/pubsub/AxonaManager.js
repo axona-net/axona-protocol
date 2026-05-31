@@ -89,6 +89,15 @@ const SEQ_REORDER_TOLERANCE_MS = 60_000;
 const TOMBSTONE_TTL_MS = 24 * 60 * 60 * 1000;
 const MAX_TOMBSTONES   = 4096;
 
+// Phase A #5: message hold time.  A message expires (is swept from replay
+// caches and no longer served/pulled) at its (signed, freshness-clamped)
+// timestamp + the hold.  DEFAULT_HOLD_MS is the ownerless/default; MAX_HOLD_MS
+// is the absolute ceiling no sliding-pull (#6) may extend past.  Owner-set
+// per-topic holds (≤ MAX_HOLD_MS) arrive with the config object (Phase B);
+// role.maxHoldMs is the hook.
+const DEFAULT_HOLD_MS = 24 * 60 * 60 * 1000;   // 24h
+const MAX_HOLD_MS      = 48 * 60 * 60 * 1000;   // 48h ceiling
+
 // ── Helpers ────────────────────────────────────────────────────────────────
 
 /**
@@ -755,6 +764,27 @@ export class AxonaManager {
     return true;
   }
 
+  // ── Hold time / expiry (Phase A #5) ────────────────────────────────────
+
+  /** Has this cache entry passed its hold-time expiry? */
+  _isExpired(entry, now = this._now()) {
+    return typeof entry?.expiresAt === 'number' && now > entry.expiresAt;
+  }
+
+  /** Drop expired entries from one role's replay cache (in place). */
+  _sweepRole(role, now = this._now()) {
+    const cache = role?.replayCache;
+    if (!cache || cache.length === 0) return;
+    for (let i = cache.length - 1; i >= 0; i--) {
+      if (this._isExpired(cache[i], now)) cache.splice(i, 1);
+    }
+  }
+
+  /** Sweep expired messages from every hosted topic (called on refreshTick). */
+  _sweepExpired(now = this._now()) {
+    for (const role of this.axonRoles.values()) this._sweepRole(role, now);
+  }
+
   // ── Unpub (owner-only queue removal, Phase A #3) ───────────────────────
 
   /** Routed unpub ingress.  Returns a routing verdict. */
@@ -1146,6 +1176,14 @@ export class AxonaManager {
       entry.ts           = (env && typeof env.ts  === 'number') ? env.ts  : (entry.publishTs || 0);
       entry.signerPubkey = (env && typeof env.signerPubkey === 'string') ? env.signerPubkey : null;
     }
+    // Hold time (Phase A #5): absolute expiry off the signed, freshness-
+    // clamped ts.  ceilingAt is the hard cap a sliding pull (#6) can't pass.
+    if (entry.expiresAt === undefined) {
+      const baseTs = (typeof entry.ts === 'number' && entry.ts > 0) ? entry.ts : this._now();
+      const holdMs = Math.min(role.maxHoldMs || DEFAULT_HOLD_MS, MAX_HOLD_MS);
+      entry.ceilingAt = baseTs + MAX_HOLD_MS;
+      entry.expiresAt = Math.min(baseTs + holdMs, entry.ceilingAt);
+    }
     const cache = role.replayCache;
     cache.push(entry);
     const max = role.maxMessages || this.replayCacheSize;
@@ -1443,6 +1481,8 @@ export class AxonaManager {
    */
   async _maybeSendReplay(topicId, role, subscriberId, lastSeenTs) {
     if (!subscriberId) return;
+    // Phase A #5: never replay expired messages; sweep them first.
+    this._sweepRole(role, this._now());
     const cache = role.replayCache;
     if (!cache || cache.length === 0) return;
 
@@ -1594,6 +1634,10 @@ export class AxonaManager {
 
   async refreshTick() {
     const now = this._now();
+
+    // Phase A #5: drop messages past their hold-time expiry from every
+    // hosted topic before the rest of the refresh runs.
+    this._sweepExpired(now);
 
     // 0. Drop the K-closest cache so every re-subscribe / re-publish
     //    below recomputes against the CURRENT synaptome.  The cache is
@@ -1759,8 +1803,12 @@ export class AxonaManager {
   _findInReplayCache(role, postHash) {
     const cache = role?.replayCache;
     if (!cache) return null;
+    const now = this._now();
     for (let i = cache.length - 1; i >= 0; i--) {
-      if (cache[i].postHash === postHash) return cache[i];
+      if (cache[i].postHash !== postHash) continue;
+      // Phase A #5: an expired message is gone — drop it and report a miss.
+      if (this._isExpired(cache[i], now)) { cache.splice(i, 1); return null; }
+      return cache[i];
     }
     return null;
   }
