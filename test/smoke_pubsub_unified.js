@@ -121,12 +121,24 @@ async function testPubValidation() {
   try { await peer.pub('cats', cyclic, { sign: false }); }
   catch (e) { err = e; }
   // Cyclic payloads explode inside canonical() during envelope build
-  // (msgId hashing).  The pub() entry point catches that as
-  // PUBLISH_SIGN_FAILED — sign-or-not, the envelope step always runs.
+  // (msgId hashing), caught as PUBLISH_SIGN_FAILED; a payload that
+  // survives canonical but not JSON.stringify(envelope) → PUBLISH_INVALID_MESSAGE.
   check('un-stringifiable payload → PublishError',
     err instanceof PublishError &&
-    (err.code === ErrorCodes.PUBLISH_PAYLOAD_TOO_LARGE ||
-     err.code === ErrorCodes.PUBLISH_SIGN_FAILED));
+    (err.code === ErrorCodes.PUBLISH_SIGN_FAILED ||
+     err.code === ErrorCodes.PUBLISH_INVALID_MESSAGE));
+
+  // Oversize: peer.pub fails fast with PUBLISH_PAYLOAD_TOO_LARGE (client-side
+  // guard) rather than letting the message be silently dropped at ingress.
+  err = null;
+  try { await peer.pub('cats', 'x'.repeat(256 * 1024 + 16), { sign: false }); }
+  catch (e) { err = e; }
+  check('oversize message → PUBLISH_PAYLOAD_TOO_LARGE',
+    err instanceof PublishError && err.code === ErrorCodes.PUBLISH_PAYLOAD_TOO_LARGE);
+
+  // A message comfortably under the 256 KiB cap still publishes.
+  const okId = await peer.pub('cats', 'y'.repeat(100 * 1024), { sign: false });
+  check('under-cap (100 KiB) message publishes', typeof okId === 'string' && okId.length === 64);
 }
 
 async function testPubNoManager() {
