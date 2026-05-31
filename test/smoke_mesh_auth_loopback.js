@@ -103,10 +103,79 @@ async function testForgedPeerNotBound() {
   check('neither side binds when proofs never arrive', aliceBound.length === 0 && bobBound.length === 0);
 }
 
+// ── A-1: DTLS-fingerprint channel binding ───────────────────────────
+// When a `fingerprints` callback is supplied, the CBV folds in each
+// side's DTLS cert fingerprint.  Honest peers see matching cross-views
+// (alice's local == bob's remote, and vice-versa) so the sorted
+// fingerprint CBV agrees and both bind.  A bridge that terminates DTLS
+// to MITM presents a DIFFERENT cert on each leg, so each side's "remote"
+// fingerprint is the bridge's (not the true peer's) — the composite CBVs
+// diverge and the mutual signature fails.
+
+async function testHonestFingerprintsBind() {
+  console.log('\n── honest DTLS fingerprints → both bind ──');
+  const aliceId = await deriveIdentity({ lat: 40.7, lng: -74.0 });
+  const bobId   = await deriveIdentity({ lat: 51.5, lng: -0.1 });
+  const connA = 'cA', connB = 'cB';
+  const fpA = 'sha-256 aaaa', fpB = 'sha-256 bbbb';
+
+  const aliceBound = [], bobBound = [];
+  const alice = {}, bob = {};
+  const { aliceSend, bobSend } = wire2(alice, bob, connA, connB);
+  alice.auth = new MeshAuth({
+    identity: aliceId, send: aliceSend,
+    bindPeer: (n) => aliceBound.push(n),
+    fingerprints: () => ({ local: fpA, remote: fpB }),   // alice sees B as remote
+  });
+  bob.auth = new MeshAuth({
+    identity: bobId, send: bobSend,
+    bindPeer: (n) => bobBound.push(n),
+    fingerprints: () => ({ local: fpB, remote: fpA }),   // bob sees A as remote
+  });
+  alice.auth.onChannelOpen(connB);
+  bob.auth.onChannelOpen(connA);
+  for (let i = 0; i < 10 && (aliceBound.length === 0 || bobBound.length === 0); i++) await settle();
+  check('Alice bound Bob (fingerprints agree)', aliceBound[0] === bobId.id);
+  check('Bob bound Alice (fingerprints agree)', bobBound[0] === aliceId.id);
+}
+
+async function testMitmFingerprintsRejected() {
+  console.log('\n── bridge MITM rewrites fingerprints → neither binds ──');
+  const aliceId = await deriveIdentity({ lat: 40.7, lng: -74.0 });
+  const bobId   = await deriveIdentity({ lat: 51.5, lng: -0.1 });
+  const connA = 'cA', connB = 'cB';
+  // A negotiated DTLS with the bridge (thinking it's B); B negotiated
+  // with the bridge (thinking it's A).  Each side's "remote" is the
+  // bridge's per-leg cert, NOT the true peer's.
+  const fpA = 'sha-256 aaaa', fpB = 'sha-256 bbbb';
+  const fpBridgeOnA = 'sha-256 d00d', fpBridgeOnB = 'sha-256 beef';
+
+  const aliceBound = [], bobBound = [];
+  const alice = {}, bob = {};
+  const { aliceSend, bobSend } = wire2(alice, bob, connA, connB);
+  alice.auth = new MeshAuth({
+    identity: aliceId, send: aliceSend,
+    bindPeer: (n) => aliceBound.push(n),
+    fingerprints: () => ({ local: fpA, remote: fpBridgeOnA }),
+  });
+  bob.auth = new MeshAuth({
+    identity: bobId, send: bobSend,
+    bindPeer: (n) => bobBound.push(n),
+    fingerprints: () => ({ local: fpB, remote: fpBridgeOnB }),
+  });
+  alice.auth.onChannelOpen(connB);
+  bob.auth.onChannelOpen(connA);
+  for (let i = 0; i < 12; i++) await settle();
+  check('Alice did NOT bind (CBV diverged)', aliceBound.length === 0 && !alice.auth.isBound(connB));
+  check('Bob did NOT bind (CBV diverged)',   bobBound.length === 0 && !bob.auth.isBound(connA));
+}
+
 async function main() {
   console.log('WebRTC-mesh MeshAuth loopback integration');
   await testTwoPeerBindAcrossAsymmetricConnIds();
   await testForgedPeerNotBound();
+  await testHonestFingerprintsBind();
+  await testMitmFingerprintsRejected();
   console.log(`\nResult: ${passed} passed, ${failed} failed`);
   process.exit(failed === 0 ? 0 : 1);
 }
