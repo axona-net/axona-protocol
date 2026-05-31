@@ -260,9 +260,14 @@ async function testAdoptRespectsMaxDirectSubs() {
 async function testOversizePublishDropped() {
   console.log('\n── D-1: oversize publish payload dropped at ingress ──');
   const { am } = makeManager();
-  const huge = 'x'.repeat(64 * 1024 + 1);   // > MAX_PUBLISH_BYTES
+  const huge = 'x'.repeat(256 * 1024 + 1);   // > MAX_PUBLISH_BYTES (256 KiB)
   await am._onPublishDirect({ topicId: TOPIC, publisher: null, json: huge, publishId: 'big:1', publishTs: 1 });
-  check('oversize publish not cached/promoted', am.axonRoles.get(big(TOPIC)) == null);
+  check('oversize publish (>256 KiB) not cached/promoted', am.axonRoles.get(big(TOPIC)) == null);
+  // A payload under the cap is accepted (verifies the threshold moved, not just "huge fails").
+  const { am: am2 } = makeManager();
+  const under = 'y'.repeat(200 * 1024);      // < 256 KiB
+  await am2._onPublishDirect({ topicId: TOPIC, publisher: null, json: under, publishId: 'big:2', publishTs: 2 });
+  check('200 KiB publish accepted (under 256 KiB cap)', am2.axonRoles.get(big(TOPIC)) != null);
 }
 
 async function main() {
