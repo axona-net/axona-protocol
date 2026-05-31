@@ -1286,6 +1286,50 @@ export class AxonaPeer extends DHT {
     return sub;
   }
 
+  /**
+   * Unsubscribe from `topic` by name — the counterpart to `peer.sub`.
+   *
+   * Convenience over `subscription.stop()`: stops EVERY local subscription
+   * this peer holds for the topic (you don't need to have kept the handle),
+   * and — once the last one goes — sends the network unsubscribe so the
+   * topic's root axons drop this peer from their subscriber set.  That
+   * routed/​direct unsubscribe is self-only by construction: a peer may only
+   * remove its OWN subscriberId (the B-1 invariant enforced at ingress), so
+   * `unsub` can never be used to silence another peer.
+   *
+   * Idempotent: unsubscribing a topic you're not subscribed to is a no-op
+   * that returns `{ ok: true, removed: 0 }`.
+   *
+   * `opts.publisher` selects the topic-id derivation mode — it MUST match
+   * what you passed to `sub` (default = this peer's own feed, `null` =
+   * public topic, a hex id = someone else's feed), or the derived topicId
+   * won't match your subscription.
+   *
+   * @param {string} topic
+   * @param {object} [opts]
+   * @param {string|null} [opts.publisher]
+   * @returns {Promise<{ ok: boolean, removed: number }>}
+   */
+  async unsub(topic, opts = {}) {
+    if (typeof topic !== 'string' || topic.length === 0) {
+      throw new SubscribeError(ErrorCodes.SUBSCRIBE_INVALID_TOPIC,
+        `peer.unsub: topic must be a non-empty string, got ${typeof topic}`,
+        { context: { topic } });
+    }
+    // Derive the topicId exactly as sub() does so we target the same feed.
+    const publisherId  = 'publisher' in opts ? opts.publisher : this._nodeIdHex();
+    const publisherBig = publisherId === null ? null : fromHex(publisherId);
+    const topicIdBig   = await deriveTopicIdBig(publisherBig, topic);
+
+    const set = this._subscriptions.get(topicIdBig);
+    if (!set || set.size === 0) return { ok: true, removed: 0 };
+    // Snapshot first — sub.stop() → _unsubscribeInternal mutates the set,
+    // and the final removal triggers the network-level pubsubUnsubscribe.
+    const subs = [...set];
+    for (const sub of subs) await sub.stop();
+    return { ok: true, removed: subs.length };
+  }
+
   /** @internal — called by Subscription.stop() */
   async _unsubscribeInternal(sub) {
     // sub._topicId is the BigInt key (kernel form); sub.topicId getter
