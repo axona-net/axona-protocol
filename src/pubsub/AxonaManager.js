@@ -1176,10 +1176,16 @@ export class AxonaManager {
       entry.ts           = (env && typeof env.ts  === 'number') ? env.ts  : (entry.publishTs || 0);
       entry.signerPubkey = (env && typeof env.signerPubkey === 'string') ? env.signerPubkey : null;
     }
-    // Hold time (Phase A #5): absolute expiry off the signed, freshness-
-    // clamped ts.  ceilingAt is the hard cap a sliding pull (#6) can't pass.
+    // Hold time (Phase A #5): absolute expiry off the message ts, CLAMPED to
+    // receive-time.  Real (signed) traffic is within the C-2 freshness window
+    // so its ts ≈ now and is used directly; an out-of-window ts (unsigned/
+    // legacy toy timestamps, or a spoofed far-future value) falls back to the
+    // receiver's clock, so hold time can't be gamed and "held for N hours"
+    // means N hours from when this replica received it.  ceilingAt is the
+    // hard 48h cap a sliding pull (#6) can't extend past.
     if (entry.expiresAt === undefined) {
-      const baseTs = (typeof entry.ts === 'number' && entry.ts > 0) ? entry.ts : this._now();
+      const now    = this._now();
+      const baseTs = (typeof entry.ts === 'number' && Math.abs(now - entry.ts) <= MAX_HOLD_MS) ? entry.ts : now;
       const holdMs = Math.min(role.maxHoldMs || DEFAULT_HOLD_MS, MAX_HOLD_MS);
       entry.ceilingAt = baseTs + MAX_HOLD_MS;
       entry.expiresAt = Math.min(baseTs + holdMs, entry.ceilingAt);
