@@ -43,8 +43,9 @@ import { Subscription }   from './Subscription.js';
 import { clz264, toHex, fromHex, isHexId } from '../utils/hexid.js';
 import { deriveTopicId, deriveTopicIdBig } from '../pubsub/post.js';
 import { buildEnvelope }  from '../pubsub/envelope.js';
+import { buildKill }      from '../pubsub/kill.js';
 import { AxonaManager, MAX_PUBLISH_BYTES } from '../pubsub/AxonaManager.js';
-import { PublishError, SubscribeError, PullError, MetricsError, ErrorCodes } from '../errors.js';
+import { PublishError, SubscribeError, KillError, PullError, MetricsError, ErrorCodes } from '../errors.js';
 
 // ── B-3 (eclipse prevention) tunables ───────────────────────────────
 // Max concurrent verification probes triggered by gossip introductions —
@@ -1226,6 +1227,72 @@ export class AxonaPeer extends DHT {
   }
 
   /**
+   * Retract a previously-published message (Phase A #2) — "unsend".
+   *
+   * Only the ORIGINAL creator can kill a message: the kill is signed with
+   * this peer's identity, and the topic's root axons accept it only if the
+   * signing key matches the signer of the cached message. So you can only
+   * kill messages you yourself signed. The kill is routed to the topic's
+   * K-closest root axons, which drop it from their replay cache, record a
+   * short-lived tombstone (so a lagging replica can't resurrect it), and
+   * forward a delete marker to current subscribers — whose `sub` handlers
+   * receive `{ topic, msgId, deleted: true }` so they can drop their local
+   * copy.
+   *
+   * Best-effort, not a cryptographic unsend: a subscriber that already has
+   * the plaintext can keep it; an offline subscriber may never see the
+   * purge. And an anonymous (`sign:false`) message can't be killed — it has
+   * no provable creator.
+   *
+   * @param {string} topic    the topic the message was published to
+   * @param {string} msgId    the msgId returned by `peer.pub` (64-char hex)
+   * @param {object} [opts]
+   * @param {string|null} [opts.publisher]  topic-id mode; MUST match `pub`
+   * @returns {Promise<{ ok: boolean }>}  ok:true once the kill is dispatched
+   */
+  async kill(topic, msgId, opts = {}) {
+    if (typeof topic !== 'string' || topic.length === 0) {
+      throw new KillError(ErrorCodes.KILL_INVALID_TOPIC,
+        `peer.kill: topic must be a non-empty string, got ${typeof topic}`,
+        { context: { topic } });
+    }
+    if (typeof msgId !== 'string' || !/^[0-9a-f]{64}$/.test(msgId)) {
+      throw new KillError(ErrorCodes.KILL_INVALID_MSGID,
+        `peer.kill: msgId must be a 64-char hex string (the value peer.pub returned)`,
+        { context: { topic, msgId } });
+    }
+    if (!this._identity) {
+      throw new KillError(ErrorCodes.KILL_SIGN_FAILED,
+        'peer.kill: identity required — a kill must be signed by the message creator',
+        { context: { topic } });
+    }
+    const am           = this._requireAxonaManager('kill');
+    const publisherId  = 'publisher' in opts ? opts.publisher : this._nodeIdHex();
+    const publisherBig = publisherId === null ? null : fromHex(publisherId);
+    const topicIdBig   = await deriveTopicIdBig(publisherBig, topic);
+    const topicIdHex   = publisherBig === null
+      ? await deriveTopicId(null, topic)
+      : await deriveTopicId(publisherId, topic);
+
+    let kill;
+    try {
+      kill = await buildKill({
+        topicId: topicIdHex,
+        msgId,
+        seq:      this._nextPubSeq(),
+        identity: this._identity,
+      });
+    } catch (cause) {
+      throw new KillError(ErrorCodes.KILL_SIGN_FAILED,
+        `peer.kill: signing the kill failed (${cause.message})`,
+        { cause, context: { topic, msgId } });
+    }
+
+    am.pubsubKill(topicIdBig, kill);
+    return { ok: true };
+  }
+
+  /**
    * Subscribe to `topic`.  Handler is invoked with the full envelope
    * `{ msgId, ts, topic, message, publisher }` for each delivery.
    *
@@ -1999,6 +2066,15 @@ export class AxonaPeer extends DHT {
     let envelope;
     try {
       envelope = JSON.parse(json);
+      // Kill / retraction (Phase A #2): a delete marker is delivered on the
+      // same handler so apps can drop their local copy.  It carries no
+      // message/ts — deliver it as-is, { msgId, topic, deleted: true }, and
+      // skip the normal envelope shape check.
+      if (envelope && typeof envelope === 'object' && envelope.deleted === true &&
+          typeof envelope.msgId === 'string') {
+        for (const sub of set) sub._deliver({ msgId: envelope.msgId, topic: envelope.topic ?? null, deleted: true });
+        return;
+      }
       // Defence: enforce envelope shape so apps always see consistent
       // fields even if a malformed peer sends garbage.
       if (!envelope || typeof envelope !== 'object' ||

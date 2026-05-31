@@ -40,6 +40,7 @@
 
 import { toHex, fromHex, isHexId } from '../utils/hexid.js';
 import { verifyEnvelope, checkFreshness, MAX_PUBLISH_SKEW_MS } from './envelope.js';
+import { verifyKill } from './kill.js';
 
 // ── Defaults (simulator-tuned; production would use much longer values) ────
 
@@ -77,6 +78,14 @@ const MAX_REPLAY_BATCH         = DEFAULT_REPLAY_CACHE_SIZE; // replay-batch mess
 // a slower path arrives with a slightly lower seq and is still accepted);
 // far tighter than the freshness window so the two gates reinforce.
 const SEQ_REORDER_TOLERANCE_MS = 60_000;
+
+// Phase A #2 (kill): how long a root axon keeps a tombstone for a killed
+// msgId, so a lagging/rejoining replica can't resurrect the message by
+// re-gossiping it after the kill.  Sized to the default message hold (24 h);
+// once per-message TTL lands (#5) this aligns to the message's own remaining
+// hold.  Bounded by MAX_TOMBSTONES (LRU) so it can't grow without limit.
+const TOMBSTONE_TTL_MS = 24 * 60 * 60 * 1000;
+const MAX_TOMBSTONES   = 4096;
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 
@@ -162,6 +171,12 @@ export class AxonaManager {
     this._publisherSeq    = new Map();   // signerPubkey(hex) -> highestSeq (number)
     this._publisherSeqCap = 4096;
 
+    // Phase A #2 (kill): tombstones for retracted messages + a dedup set for
+    // kill objects we've already processed (keyed by the kill's signature).
+    this._tombstones  = new Map();       // msgId(hex) -> expiresAt (ms)
+    this._seenKills   = new Map();       // kill.signature -> insertedAt (ms)
+    this._seenKillCap = 4096;
+
     // Exactly-once gate for delivery to the LOCAL application callback.
     // Deliberately SEPARATE from `_seenPublishes`: that set means "this
     // node has processed/relayed this publish in some role" and is marked
@@ -213,6 +228,8 @@ export class AxonaManager {
     dht.onRoutedMessage('pubsub:subscribe',    (p, m) => this._onSubscribe(p, m));
     dht.onRoutedMessage('pubsub:unsubscribe',  (p, m) => this._onUnsubscribe(p, m));
     dht.onRoutedMessage('pubsub:publish',      (p, m) => this._onPublish(p, m));
+    dht.onRoutedMessage('pubsub:kill',         (p, m) => this._onKill(p, m));
+    dht.onDirectMessage('pubsub:kill-k',       (p, m) => this._onKillDirect(p, m));
     dht.onDirectMessage('pubsub:deliver',      (p, m) => this._onDeliver(p, m));
     dht.onDirectMessage('pubsub:promote-axon',     (p, m) => this._onPromoteAxon(p, m));
     dht.onDirectMessage('pubsub:adopt-subscribers',(p, m) => this._onAdoptSubscribers(p, m));
@@ -279,6 +296,8 @@ export class AxonaManager {
     this._receivedPublishIds.clear();
     this._seenPublishes.clear();
     this._publisherSeq.clear();
+    this._tombstones.clear();
+    this._seenKills.clear();
     this._kClosestCache.clear();
     this._kClosestEpoch = 0;
     this._deliveryCallback = null;
@@ -306,6 +325,41 @@ export class AxonaManager {
     this._asyncPublish(topicId, json, publishId, publishTs, meta)
       .catch(err => console.error('AxonaManager: publish failed:', err));
     return publishId;
+  }
+
+  /**
+   * Retract a message (Phase A #2).  Routes the signed `kill` object to the
+   * topic's K-closest root axons, which authorize it (signer must match the
+   * killed message's signer), drop it from their replay caches, tombstone
+   * the msgId, and purge subscribers.  Fire-and-forget, same as publish.
+   *
+   * @param {bigint} topicId   BigInt 264-bit topic id (kernel-canonical).
+   * @param {object} kill      signed kill object (see pubsub/kill.js).
+   */
+  pubsubKill(topicId, kill) {
+    if (typeof topicId !== 'bigint') {
+      throw new TypeError(`AxonaManager.pubsubKill: topicId must be bigint, got ${typeof topicId}`);
+    }
+    this._asyncKill(topicId, kill)
+      .catch(err => console.error('AxonaManager: kill failed:', err));
+  }
+
+  /** @private — route the kill to K-closest roots (mirrors _asyncPublish). */
+  async _asyncKill(topicId, kill) {
+    const topicIdHex = toHex(topicId);
+    const payload = { topicId: topicIdHex, kill };
+    if (this._useKClosestMode()) {
+      const roots = await this._findKClosest(topicId, this.rootSetSize);
+      if (roots.length > 0) {
+        for (const target of roots) this.dht.sendDirect(target, 'pubsub:kill-k', payload);
+        // Also apply locally if we're one of the roots (sendDirect to self
+        // may be a no-op on some transports).
+        if (roots.includes(this.nodeId)) this._handleKill(topicId, kill);
+        return;
+      }
+    }
+    // Axonal/routed fallback.
+    this.dht.routeMessage(topicId, 'pubsub:kill', payload);
   }
 
   /**
@@ -574,6 +628,100 @@ export class AxonaManager {
     return { ok: true };
   }
 
+  // ── Kill (creator-only retraction, Phase A #2) ─────────────────────────
+
+  /** Routed kill ingress.  Returns a routing verdict ('consumed'|'forward'). */
+  async _onKill(payload, meta) {
+    return this._handleKill(_wire(payload.topicId), payload?.kill);
+  }
+
+  /** Direct (K-closest) kill ingress.  We're a targeted root; verdict unused. */
+  async _onKillDirect(payload, meta) {
+    await this._handleKill(_wire(payload.topicId), payload?.kill);
+  }
+
+  /**
+   * Core kill handler (shared by routed + direct paths).  Verifies the kill
+   * signature + freshness, dedups, then — if we host the topic and hold the
+   * target message — checks the kill signer matches the MESSAGE signer
+   * (creator-only), drops it from the replay cache, tombstones the msgId so
+   * a lagging replica can't resurrect it, and delivers a delete marker to
+   * subscribers.  Self-authenticating: authority to kill IS authorship.
+   *
+   * @returns {Promise<'consumed'|'forward'>}
+   */
+  async _handleKill(topicId, kill) {
+    // 1. signature.
+    let v;
+    try { v = await verifyKill(kill); } catch { v = { ok: false }; }
+    if (!v.ok) { this._emitLog?.('debug', 'kill-bad-signature-dropped', {}); return 'consumed'; }
+    // 2. freshness on the kill's OWN ts (anti-replay of the kill).
+    if (!checkFreshness(kill, { now: this._now() }).ok) {
+      this._emitLog?.('debug', 'kill-stale-dropped', {}); return 'consumed';
+    }
+    // 3. dedup by kill signature.
+    if (this._seenKills.has(kill.signature)) return 'consumed';
+    this._seenKills.set(kill.signature, this._now());
+    if (this._seenKills.size > this._seenKillCap) {
+      const toDrop = this._seenKillCap / 2; let i = 0;
+      for (const k of this._seenKills.keys()) { if (i++ >= toDrop) break; this._seenKills.delete(k); }
+    }
+    // 4. do we host the topic?
+    const role = this.axonRoles.get(topicId);
+    if (!role) return 'forward';                       // not hosting → route onward to a root
+    // 5. find the target message in our replay cache.
+    const cache = role.replayCache || [];
+    const idx   = cache.findIndex(e => e.postHash === kill.msgId);
+    if (idx === -1) return 'forward';                  // not here (yet/anymore) → let a root with it act
+    // 6. authorize: the kill signer MUST be the message signer (creator-only).
+    let env = null;
+    try { env = JSON.parse(cache[idx].json); } catch { /* unparseable */ }
+    const msgSigner = (env && typeof env.signerPubkey === 'string') ? env.signerPubkey : null;
+    if (!msgSigner || msgSigner !== kill.signerPubkey) {
+      this._emitLog?.('debug', 'kill-unauthorized-dropped', { msgId: kill.msgId });
+      return 'consumed';                               // wrong signer (or unsigned msg) → reject, handled
+    }
+    // 7. retract: drop from cache + tombstone so it can't be resurrected.
+    const topicName = (env && typeof env.topic === 'string') ? env.topic : null;
+    cache.splice(idx, 1);
+    this._addTombstone(kill.msgId);
+    // 8. purge subscribers — delete-marked delivery on their sub() handler.
+    const deleteJson = JSON.stringify({ deleted: true, msgId: kill.msgId, topic: topicName });
+    const deliveryId = `kill:${kill.msgId}`;
+    const topicIdHex = toHex(topicId);
+    const now = this._now();
+    const dead = [];
+    for (const [childId] of role.children) {
+      if (childId === this.nodeId) { this._deliverToApp(topicId, deleteJson, deliveryId, now); continue; }
+      const ok = await this.dht.sendDirect(childId, 'pubsub:deliver', {
+        topicId: topicIdHex, json: deleteJson, publishId: deliveryId, publishTs: now, postHash: kill.msgId,
+      });
+      if (!ok) dead.push(childId);
+    }
+    for (const d of dead) role.children.delete(d);
+    this._emitLog?.('debug', 'kill-applied', { topicId: topicIdHex, msgId: kill.msgId });
+    return 'consumed';
+  }
+
+  /** Record a tombstone for a killed msgId (bounded LRU). */
+  _addTombstone(msgId) {
+    if (!msgId) return;
+    this._tombstones.set(msgId, this._now() + TOMBSTONE_TTL_MS);
+    if (this._tombstones.size > MAX_TOMBSTONES) {
+      const toDrop = MAX_TOMBSTONES / 2; let i = 0;
+      for (const k of this._tombstones.keys()) { if (i++ >= toDrop) break; this._tombstones.delete(k); }
+    }
+  }
+
+  /** Is `msgId` tombstoned (killed, still within the tombstone window)? */
+  _isTombstoned(msgId) {
+    if (!msgId) return false;
+    const exp = this._tombstones.get(msgId);
+    if (exp === undefined) return false;
+    if (this._now() > exp) { this._tombstones.delete(msgId); return false; }
+    return true;
+  }
+
   onPubsubDelivery(callback) {
     this._deliveryCallback = callback;
   }
@@ -827,6 +975,12 @@ export class AxonaManager {
     const fo = this._publishFreshAndOrdered(json, this._now());
     if (!fo.ok) {
       this._emitLog?.('debug', 'publish-stale-dropped', { topicId: toHex(topicId), reason: fo.reason });
+      return 'consumed';
+    }
+    // Phase A #2: a killed message must not be resurrected by a lagging
+    // replica re-gossiping it.
+    if (this._isTombstoned(postHash)) {
+      this._emitLog?.('debug', 'publish-tombstoned-dropped', { topicId: toHex(topicId), msgId: postHash });
       return 'consumed';
     }
 
@@ -1189,6 +1343,10 @@ export class AxonaManager {
     const fo = this._publishFreshAndOrdered(json, this._now());
     if (!fo.ok) {
       this._emitLog?.('debug', 'publish-stale-dropped', { topicId: toHex(topicId), reason: fo.reason });
+      return;
+    }
+    if (this._isTombstoned(postHash)) {
+      this._emitLog?.('debug', 'publish-tombstoned-dropped', { topicId: toHex(topicId), msgId: postHash });
       return;
     }
     let role = this.axonRoles.get(topicId);

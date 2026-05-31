@@ -23,6 +23,7 @@ export {
   TransportError,
   PublishError,
   SubscribeError,
+  KillError,
   PullError,
   MetricsError,
   UpgradeRequiredError,
@@ -116,6 +117,11 @@ export {
   ENVELOPE_DOMAIN,
   MAX_PUBLISH_SKEW_MS,
 } from './pubsub/envelope.js';
+export {
+  buildKill,
+  verifyKill,
+  KILL_DOMAIN,
+} from './pubsub/kill.js';
 
 // ── Ed25519 helpers (Web Crypto wrapper) ─────────────────────────
 // Optional companion to post.js for runtimes that support Web Crypto
