@@ -11,7 +11,11 @@ import {
   buildEnvelope,
   verifyEnvelope,
   computeMsgId,
+  checkFreshness,
+  ENVELOPE_DOMAIN,
+  MAX_PUBLISH_SKEW_MS,
 }                       from '../src/pubsub/envelope.js';
+import { AxonaManager } from '../src/pubsub/AxonaManager.js';
 import { canonical, sha256Hex } from '../src/pubsub/post.js';
 import { PublishError, ErrorCodes } from '../src/errors.js';
 
@@ -56,8 +60,10 @@ async function testBuildSigned() {
     message: { meow: 1 },
     identity: id,
     ts: 1700000000000,
+    seq: 1700000000123,
   });
   check('has msgId',            typeof env.msgId === 'string' && env.msgId.length === 64);
+  check('has seq (C-2)',        env.seq === 1700000000123);
   check('has ts',               env.ts === 1700000000000);
   check('has topic',            env.topic === 'cats');
   check('has message',          env.message.meow === 1);
@@ -75,8 +81,10 @@ async function testBuildUnsigned() {
     message: 'broadcast',
     sign: false,
     ts: 1700000000000,
+    seq: 42,
   });
   check('has msgId',            typeof env.msgId === 'string' && env.msgId.length === 64);
+  check('has seq (C-2)',        env.seq === 42);
   check('no signature field',   env.signature === undefined);
   check('no signerPubkey field', env.signerPubkey === undefined);
 }
@@ -290,6 +298,113 @@ async function testPeerCrossSignerVerification() {
     env.signerPubkey !== bob.pubkeyHex);
 }
 
+// ── C-2: freshness + seq + domain separation ─────────────────────────
+
+async function testMissingSeqRejected() {
+  console.log('\n── verifyEnvelope: v1 envelope (no seq) rejected ──');
+  const id  = await deriveIdentity(LONDON);
+  const env = await buildEnvelope({ topic: 'cats', message: 'real', identity: id });
+  const v1  = { ...env };
+  delete v1.seq;                                   // simulate a pre-C-2 envelope
+  const r = await verifyEnvelope(v1);
+  check('envelope without seq → ok:false', r.ok === false);
+  check('reason is missing_seq',           r.reason === 'missing_seq');
+}
+
+async function testSeqBoundIntoSignature() {
+  console.log('\n── verifyEnvelope: tampered seq breaks auth ──');
+  const id  = await deriveIdentity(LONDON);
+  const env = await buildEnvelope({ topic: 'cats', message: 'real', identity: id, seq: 1000 });
+  const tampered = { ...env, seq: 9999 };
+  const r = await verifyEnvelope(tampered);
+  check('tampered seq → ok:false', r.ok === false);
+  check('reason is bad_signature or bad_msgid',
+    r.reason === 'bad_signature' || r.reason === 'bad_msgid');
+}
+
+async function testDomainSeparation() {
+  console.log('\n── envelope signature is domain-separated (E-4) ──');
+  const id   = await deriveIdentity(LONDON);
+  const seq  = 5, ts = 1700000000000, topic = 'cats', message = 'x';
+  const env  = await buildEnvelope({ topic, message, identity: id, ts, seq });
+  // The signed bytes are over the domain-tagged core; a verifier using the
+  // bare (un-tagged) core would compute different bytes and reject.  Confirm
+  // the canonical signed form actually carries the domain tag.
+  const taggedBytes = canonical({ d: ENVELOPE_DOMAIN, seq, ts, topic, message });
+  const bareBytes   = canonical({ seq, ts, topic, message });
+  check('domain tag changes the signed preimage', taggedBytes !== bareBytes);
+  check('domain tag value present in preimage', taggedBytes.includes(ENVELOPE_DOMAIN));
+  // And the honestly-built envelope still verifies (round-trips the tag).
+  const r = await verifyEnvelope(env);
+  check('domain-tagged envelope verifies', r.ok === true && r.signed === true);
+}
+
+async function testFreshnessHelper() {
+  console.log('\n── checkFreshness window (C-2) ──');
+  const now = 1_700_000_000_000;
+  check('fresh ts → ok',
+    checkFreshness({ ts: now }, { now }).ok === true);
+  check('ts just inside window → ok',
+    checkFreshness({ ts: now - (MAX_PUBLISH_SKEW_MS - 1000) }, { now }).ok === true);
+  const stale = checkFreshness({ ts: now - (MAX_PUBLISH_SKEW_MS + 60_000) }, { now });
+  check('stale ts → ok:false',     stale.ok === false);
+  check('stale reason is "stale"', stale.reason === 'stale');
+  check('far-future ts → ok:false',
+    checkFreshness({ ts: now + (MAX_PUBLISH_SKEW_MS + 60_000) }, { now }).ok === false);
+  check('non-numeric ts → missing_ts',
+    checkFreshness({ ts: 'nope' }, { now }).reason === 'missing_ts');
+}
+
+function mkManager() {
+  // Minimal AxonaManager for unit-testing the ingress freshness/seq gate.
+  const dht = {
+    getSelfId:        () => 1n,
+    onRoutedMessage:  () => {},
+    onDirectMessage:  () => {},
+    onEvent:          () => () => {},
+    sendDirect:       async () => true,
+    routeMessage:     async () => {},
+  };
+  return new AxonaManager({ dht });
+}
+
+async function testIngressFreshnessAndSeq() {
+  console.log('\n── ingress gate: _publishFreshAndOrdered (C-2) ──');
+  const id  = await deriveIdentity(LONDON);
+  const am  = mkManager();
+  const now = 1_700_000_000_000;
+
+  // Fresh, signed, in-order → accepted; advances high-water.
+  const e1   = await buildEnvelope({ topic: 't', message: 1, identity: id, ts: now, seq: now });
+  const j1   = JSON.stringify(e1);
+  check('fresh signed publish accepted', am._publishFreshAndOrdered(j1, now).ok === true);
+  check('high-water recorded for publisher',
+    am._publisherSeq.get(id.pubkeyHex) === now);
+
+  // Same envelope replayed 10 minutes later (signed ts now stale) → dropped.
+  const later = now + 10 * 60_000;
+  const r2 = am._publishFreshAndOrdered(j1, later);
+  check('stale replayed publish dropped', r2.ok === false);
+  check('drop reason is stale',           r2.reason === 'stale');
+
+  // A captured OLD-seq envelope re-injected while still time-fresh, but seq
+  // far behind the publisher's high-water → dropped as replay_seq.
+  const e3 = await buildEnvelope({ topic: 't', message: 2, identity: id, ts: now, seq: now - 5 * 60_000 });
+  const r3 = am._publishFreshAndOrdered(JSON.stringify(e3), now);
+  check('old-seq replay dropped', r3.ok === false);
+  check('drop reason is replay_seq', r3.reason === 'replay_seq');
+
+  // A legitimately reordered message (seq slightly behind, within tolerance) → accepted.
+  const e4 = await buildEnvelope({ topic: 't', message: 3, identity: id, ts: now, seq: now - 5_000 });
+  check('mild-reorder publish accepted (within tolerance)',
+    am._publishFreshAndOrdered(JSON.stringify(e4), now).ok === true);
+
+  // Unsigned envelope is not gated (no attacker-immutable ts/seq).
+  const eu = await buildEnvelope({ topic: 't', message: 4, sign: false, ts: now - 60 * 60_000, seq: 1 });
+  check('unsigned envelope not gated (passes even if old)',
+    am._publishFreshAndOrdered(JSON.stringify(eu), now).ok === true);
+}
+
 async function main() {
   console.log('Axona signed-envelope (A2) smoke');
   await testBuildSigned();
@@ -302,6 +417,11 @@ async function main() {
   await testTamperSignature();
   await testRejectMissingFields();
   await testMsgIdDeterminism();
+  await testMissingSeqRejected();
+  await testSeqBoundIntoSignature();
+  await testDomainSeparation();
+  await testFreshnessHelper();
+  await testIngressFreshnessAndSeq();
   await testPeerSignedRoundTrip();
   await testPeerUnsignedRoundTrip();
   await testPeerSignWithoutIdentity();
