@@ -1090,7 +1090,8 @@ export class AxonaManager {
       return 'consumed';
     }
 
-    this._addToReplayCache(role, { json, publishId, publishTs, postHash, publisher });
+    const quotaPerPublisher = await this._openTopicQuota(role, json, topicId);
+    this._addToReplayCache(role, { json, publishId, publishTs, postHash, publisher }, { quotaPerPublisher });
     this._recordReceived(topicId, publishId, publishTs);
 
     const topicIdHex  = toHex(topicId);
@@ -1118,10 +1119,88 @@ export class AxonaManager {
     return 'consumed';
   }
 
-  _addToReplayCache(role, entry) {
+  /**
+   * Add a message to a role's replay cache with a BOUNDED size and
+   * DETERMINISTIC eviction (Phase A #4).
+   *
+   * Eviction order is the signed (seq, ts, msgId) tuple — derived entirely
+   * from fields under the publisher's signature — so every replica evicts
+   * the SAME message and the caches converge.  At maxMessages = 1 this is a
+   * retained / latest-value slot (a new publish, higher seq, replaces the
+   * prior one).
+   *
+   * `opts.quotaPerPublisher` (set only for OPEN/Model-1 topics — see
+   * _openTopicQuota) caps how many of the queue's slots one `signerPubkey`
+   * may hold, so a single anonymous publisher can't flood the topic and
+   * evict everyone else.  Owned topics pass no quota (the owner-signed
+   * publish ACL governs them — and the owner shouldn't be limited in their
+   * own topic).
+   */
+  _addToReplayCache(role, entry, opts = {}) {
     if (!role.replayCache) role.replayCache = [];
-    role.replayCache.push(entry);
-    while (role.replayCache.length > this.replayCacheSize) role.replayCache.shift();
+    // Enrich with the ordering key (parse once from the signed envelope).
+    if (entry.seq === undefined) {
+      let env = null;
+      try { env = JSON.parse(entry.json); } catch { /* non-envelope */ }
+      entry.seq          = (env && typeof env.seq === 'number') ? env.seq : 0;
+      entry.ts           = (env && typeof env.ts  === 'number') ? env.ts  : (entry.publishTs || 0);
+      entry.signerPubkey = (env && typeof env.signerPubkey === 'string') ? env.signerPubkey : null;
+    }
+    const cache = role.replayCache;
+    cache.push(entry);
+    const max = role.maxMessages || this.replayCacheSize;
+
+    // Per-publisher quota (open topics): evict THIS publisher's own
+    // lowest-ordered entries first, so flooding self-limits.
+    const quota = opts.quotaPerPublisher;
+    if (quota && entry.signerPubkey) {
+      let mine = cache.filter(e => e.signerPubkey === entry.signerPubkey);
+      while (mine.length > quota) {
+        const victim = this._lowestOrdered(mine);
+        cache.splice(cache.indexOf(victim), 1);
+        mine = mine.filter(e => e !== victim);
+      }
+    }
+    // Global bound: evict the lowest-ordered until within maxMessages.
+    while (cache.length > max) {
+      const victim = this._lowestOrdered(cache);
+      cache.splice(cache.indexOf(victim), 1);
+    }
+  }
+
+  /** The lowest-ordered (oldest) cache entry by (seq, ts, msgId). */
+  _lowestOrdered(entries) {
+    return entries.reduce((a, b) => (this._orderLt(a, b) ? a : b));
+  }
+
+  /** True iff entry `a` is strictly lower-ordered (older) than `b`. */
+  _orderLt(a, b) {
+    const sa = a.seq ?? 0, sb = b.seq ?? 0;
+    if (sa !== sb) return sa < sb;
+    const ta = a.ts ?? 0, tb = b.ts ?? 0;
+    if (ta !== tb) return ta < tb;
+    return String(a.postHash ?? '') < String(b.postHash ?? '');
+  }
+
+  /**
+   * Per-publisher quota for an OPEN (Model 1 / public) topic, else null.
+   * A topic is open iff its id is the public-mode derivation of its name —
+   * `deriveTopicId(null, env.topic) === topicId` — which is verifiable from
+   * the SIGNED `topic` field and can't be spoofed by the unsigned wire
+   * `publisher` field.  Owned (publisher-keyed) topics return null.
+   */
+  async _openTopicQuota(role, json, topicId) {
+    try {
+      const env = JSON.parse(json);
+      if (env && typeof env.topic === 'string') {
+        const publicId = await deriveTopicId(null, env.topic);
+        if (publicId === toHex(topicId)) {
+          const max = role.maxMessages || this.replayCacheSize;
+          return Math.max(1, Math.ceil(max / 4));
+        }
+      }
+    } catch { /* non-envelope */ }
+    return null;
   }
 
   /** Record reception of a publishId + timestamp for this topic.  Topic
@@ -1484,7 +1563,8 @@ export class AxonaManager {
       this.axonRoles.set(topicId, role);
     }
 
-    this._addToReplayCache(role, { json, publishId, publishTs, postHash, publisher });
+    const quotaPerPublisher = await this._openTopicQuota(role, json, topicId);
+    this._addToReplayCache(role, { json, publishId, publishTs, postHash, publisher }, { quotaPerPublisher });
     this._recordReceived(topicId, publishId, publishTs);
 
     const topicIdHex   = toHex(topicId);
