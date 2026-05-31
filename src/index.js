@@ -24,6 +24,7 @@ export {
   PublishError,
   SubscribeError,
   KillError,
+  UnpubError,
   PullError,
   MetricsError,
   UpgradeRequiredError,
@@ -122,6 +123,11 @@ export {
   verifyKill,
   KILL_DOMAIN,
 } from './pubsub/kill.js';
+export {
+  buildUnpub,
+  verifyUnpub,
+  UNPUB_DOMAIN,
+} from './pubsub/unpub.js';
 
 // ── Ed25519 helpers (Web Crypto wrapper) ─────────────────────────
 // Optional companion to post.js for runtimes that support Web Crypto

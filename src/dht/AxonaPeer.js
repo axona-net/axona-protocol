@@ -44,8 +44,9 @@ import { clz264, toHex, fromHex, isHexId } from '../utils/hexid.js';
 import { deriveTopicId, deriveTopicIdBig } from '../pubsub/post.js';
 import { buildEnvelope }  from '../pubsub/envelope.js';
 import { buildKill }      from '../pubsub/kill.js';
+import { buildUnpub }     from '../pubsub/unpub.js';
 import { AxonaManager, MAX_PUBLISH_BYTES } from '../pubsub/AxonaManager.js';
-import { PublishError, SubscribeError, KillError, PullError, MetricsError, ErrorCodes } from '../errors.js';
+import { PublishError, SubscribeError, KillError, UnpubError, PullError, MetricsError, ErrorCodes } from '../errors.js';
 
 // ── B-3 (eclipse prevention) tunables ───────────────────────────────
 // Max concurrent verification probes triggered by gossip introductions —
@@ -1289,6 +1290,72 @@ export class AxonaPeer extends DHT {
     }
 
     am.pubsubKill(topicIdBig, kill);
+    return { ok: true };
+  }
+
+  /**
+   * Remove a topic's message queue (Phase A #3) — owner-only.
+   *
+   * Only the topic OWNER (the identity whose nodeId seeds the topic id) can
+   * unpub.  The topic's root axons verify ownership self-authenticatingly:
+   * the signer's pubkey must bind to the owner nodeId, and that nodeId must
+   * derive the topicId.  Two modes:
+   *   - default            → drop the message queue (tombstone the msgIds so
+   *                          a lagging replica can't resurrect them); any
+   *                          topic config/ACL is kept so the owner can keep
+   *                          publishing.
+   *   - `{ destroy: true }`→ TOTAL removal: messages AND config/ACL AND the
+   *                          hosting role state. The topicId can be
+   *                          re-derived and the topic re-created later, but
+   *                          it comes back with defaults, not its old state.
+   *
+   * Ownerless (public) topics have no owner key and cannot be unpubbed.
+   *
+   * @param {string} topic
+   * @param {object} [opts]
+   * @param {boolean} [opts.destroy=false]
+   * @param {string|null} [opts.publisher]  owner selector; default = this peer
+   * @returns {Promise<{ ok: boolean }>}
+   */
+  async unpub(topic, opts = {}) {
+    if (typeof topic !== 'string' || topic.length === 0) {
+      throw new UnpubError(ErrorCodes.UNPUB_INVALID_TOPIC,
+        `peer.unpub: topic must be a non-empty string, got ${typeof topic}`,
+        { context: { topic } });
+    }
+    const publisherId = 'publisher' in opts ? opts.publisher : this._nodeIdHex();
+    if (publisherId === null) {
+      throw new UnpubError(ErrorCodes.UNPUB_PUBLIC_TOPIC,
+        'peer.unpub: public (ownerless) topics have no owner and cannot be unpublished',
+        { context: { topic } });
+    }
+    if (!this._identity) {
+      throw new UnpubError(ErrorCodes.UNPUB_SIGN_FAILED,
+        'peer.unpub: identity required — an unpub must be signed by the topic owner',
+        { context: { topic } });
+    }
+    const am           = this._requireAxonaManager('unpub');
+    const publisherBig = fromHex(publisherId);
+    const topicIdBig   = await deriveTopicIdBig(publisherBig, topic);
+    const topicIdHex   = await deriveTopicId(publisherId, topic);
+
+    let unpub;
+    try {
+      unpub = await buildUnpub({
+        topicId:     topicIdHex,
+        topicName:   topic,
+        ownerNodeId: publisherId,
+        destroy:     opts.destroy === true,
+        seq:         this._nextPubSeq(),
+        identity:    this._identity,
+      });
+    } catch (cause) {
+      throw new UnpubError(ErrorCodes.UNPUB_SIGN_FAILED,
+        `peer.unpub: signing the unpub failed (${cause.message})`,
+        { cause, context: { topic } });
+    }
+
+    am.pubsubUnpub(topicIdBig, unpub);
     return { ok: true };
   }
 

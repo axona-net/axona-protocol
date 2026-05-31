@@ -41,6 +41,8 @@
 import { toHex, fromHex, isHexId } from '../utils/hexid.js';
 import { verifyEnvelope, checkFreshness, MAX_PUBLISH_SKEW_MS } from './envelope.js';
 import { verifyKill } from './kill.js';
+import { verifyUnpub } from './unpub.js';
+import { deriveTopicId, sha256Hex } from './post.js';
 
 // ── Defaults (simulator-tuned; production would use much longer values) ────
 
@@ -230,6 +232,8 @@ export class AxonaManager {
     dht.onRoutedMessage('pubsub:publish',      (p, m) => this._onPublish(p, m));
     dht.onRoutedMessage('pubsub:kill',         (p, m) => this._onKill(p, m));
     dht.onDirectMessage('pubsub:kill-k',       (p, m) => this._onKillDirect(p, m));
+    dht.onRoutedMessage('pubsub:unpub',        (p, m) => this._onUnpub(p, m));
+    dht.onDirectMessage('pubsub:unpub-k',      (p, m) => this._onUnpubDirect(p, m));
     dht.onDirectMessage('pubsub:deliver',      (p, m) => this._onDeliver(p, m));
     dht.onDirectMessage('pubsub:promote-axon',     (p, m) => this._onPromoteAxon(p, m));
     dht.onDirectMessage('pubsub:adopt-subscribers',(p, m) => this._onAdoptSubscribers(p, m));
@@ -360,6 +364,35 @@ export class AxonaManager {
     }
     // Axonal/routed fallback.
     this.dht.routeMessage(topicId, 'pubsub:kill', payload);
+  }
+
+  /**
+   * Remove a topic's message queue (Phase A #3) — owner-only.  Routes the
+   * signed `unpub` to the topic's K-closest roots.  Fire-and-forget.
+   *
+   * @param {bigint} topicId
+   * @param {object} unpub   signed unpub object (see pubsub/unpub.js).
+   */
+  pubsubUnpub(topicId, unpub) {
+    if (typeof topicId !== 'bigint') {
+      throw new TypeError(`AxonaManager.pubsubUnpub: topicId must be bigint, got ${typeof topicId}`);
+    }
+    this._asyncUnpub(topicId, unpub)
+      .catch(err => console.error('AxonaManager: unpub failed:', err));
+  }
+
+  /** @private — route the unpub to K-closest roots (mirrors _asyncKill). */
+  async _asyncUnpub(topicId, unpub) {
+    const payload = { topicId: toHex(topicId), unpub };
+    if (this._useKClosestMode()) {
+      const roots = await this._findKClosest(topicId, this.rootSetSize);
+      if (roots.length > 0) {
+        for (const target of roots) this.dht.sendDirect(target, 'pubsub:unpub-k', payload);
+        if (roots.includes(this.nodeId)) await this._handleUnpub(topicId, unpub);
+        return;
+      }
+    }
+    this.dht.routeMessage(topicId, 'pubsub:unpub', payload);
   }
 
   /**
@@ -720,6 +753,79 @@ export class AxonaManager {
     if (exp === undefined) return false;
     if (this._now() > exp) { this._tombstones.delete(msgId); return false; }
     return true;
+  }
+
+  // ── Unpub (owner-only queue removal, Phase A #3) ───────────────────────
+
+  /** Routed unpub ingress.  Returns a routing verdict. */
+  async _onUnpub(payload, meta) {
+    return this._handleUnpub(_wire(payload.topicId), payload?.unpub);
+  }
+
+  /** Direct (K-closest) unpub ingress.  Verdict unused. */
+  async _onUnpubDirect(payload, meta) {
+    await this._handleUnpub(_wire(payload.topicId), payload?.unpub);
+  }
+
+  /**
+   * Core unpub handler.  Verifies the unpub signature + freshness, dedups,
+   * then authorizes it as coming from the topic OWNER — self-authenticatingly,
+   * with no registry:
+   *   (1) sha256(signerPubkey) === ownerNodeId[8:]   (pubkey ↔ nodeId bind;
+   *       the 8-bit geo prefix is the owner's own choice, so only the suffix
+   *       is checked), and
+   *   (2) deriveTopicId(ownerNodeId, topicName) === topicId.
+   * Only the genuine owner satisfies both.  On success: drop the whole
+   * replay cache (tombstoning each msgId so it can't be resurrected) and,
+   * when `destroy`, delete the hosting role entirely.
+   *
+   * @returns {Promise<'consumed'|'forward'>}
+   */
+  async _handleUnpub(topicId, unpub) {
+    // 1. signature.
+    let v;
+    try { v = await verifyUnpub(unpub); } catch { v = { ok: false }; }
+    if (!v.ok) { this._emitLog?.('debug', 'unpub-bad-signature-dropped', {}); return 'consumed'; }
+    // 2. freshness on the unpub's own ts.
+    if (!checkFreshness(unpub, { now: this._now() }).ok) {
+      this._emitLog?.('debug', 'unpub-stale-dropped', {}); return 'consumed';
+    }
+    // 3. dedup (shares the kill seen-set; signatures are unique).
+    if (this._seenKills.has(unpub.signature)) return 'consumed';
+    this._seenKills.set(unpub.signature, this._now());
+    // 4. owner authorization — fully self-authenticating.
+    let pubSuffix = null;
+    try {
+      const pkBytes = new Uint8Array((unpub.signerPubkey.match(/../g) || []).map(h => parseInt(h, 16)));
+      pubSuffix = await sha256Hex(pkBytes);
+    } catch { /* malformed pubkey */ }
+    const ownerNodeId = typeof unpub.ownerNodeId === 'string' ? unpub.ownerNodeId : '';
+    if (!pubSuffix || pubSuffix !== ownerNodeId.slice(2).toLowerCase()) {
+      this._emitLog?.('debug', 'unpub-pubkey-not-owner', {});
+      return 'consumed';                               // pubkey doesn't own the claimed nodeId
+    }
+    let derivedTopicId = null;
+    try { derivedTopicId = await deriveTopicId(ownerNodeId, unpub.topicName); } catch { /* bad inputs */ }
+    if (!derivedTopicId || derivedTopicId.toLowerCase() !== toHex(topicId).toLowerCase()) {
+      this._emitLog?.('debug', 'unpub-topic-not-owned', {});
+      return 'consumed';                               // owner didn't create this topic
+    }
+    // 5. authorized — find the role.
+    const role = this.axonRoles.get(topicId);
+    if (!role) return 'forward';                       // not hosting → route onward to a root
+    // 6. drop the queue + tombstone every msgId so it can't be resurrected.
+    const cache = role.replayCache || [];
+    for (const e of cache) this._addTombstone(e.postHash);
+    role.replayCache = [];
+    // 7. destroy → remove the hosting role state entirely (Phase A: no
+    //    separate config/ACL objects yet; this clears all topic state we hold).
+    if (unpub.destroy === true) {
+      this.axonRoles.delete(topicId);
+      this._receivedPublishIds.delete(topicId);
+      this._lastSeenTsByTopic.delete(topicId);
+    }
+    this._emitLog?.('debug', 'unpub-applied', { topicId: toHex(topicId), destroy: unpub.destroy === true });
+    return 'consumed';
   }
 
   onPubsubDelivery(callback) {
