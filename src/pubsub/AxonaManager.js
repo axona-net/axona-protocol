@@ -1820,6 +1820,23 @@ export class AxonaManager {
   }
 
   /**
+   * The most-recent LIVE message in a role's replay cache — highest-ordered
+   * by the signed (seq, ts, msgId) tuple (Phase A #6, `pull` with no msgId).
+   * Returns null if the cache is empty or all entries are expired.
+   */
+  _latestInReplayCache(role) {
+    const cache = role?.replayCache;
+    if (!cache || cache.length === 0) return null;
+    const now = this._now();
+    let best = null;
+    for (const e of cache) {
+      if (this._isExpired(e, now)) continue;
+      if (best === null || this._orderLt(best, e)) best = e;
+    }
+    return best;
+  }
+
+  /**
    * Common access-control + response shape for metricsReq/Broadcast.
    * Wire fields are hex; payload comes in raw and we don't pre-convert
    * here (we only need topicId BigInt for the counter lookup).
@@ -1913,16 +1930,27 @@ export class AxonaManager {
     const role = this.axonRoles.get(topicId);
     if (!role) return 'forward';
 
-    const cached = this._findInReplayCache(role, postHash);
+    // Phase A #6: a null/absent postHash means "give me the latest" — the
+    // highest-ordered (by signed seq, ts, msgId) live message in the topic.
+    const cached = postHash
+      ? this._findInReplayCache(role, postHash)
+      : this._latestInReplayCache(role);
     if (cached) {
+      // Sliding hold (Phase A #6): a pull extends the message's life to
+      // now + hold, BOUNDED by its absolute ceiling (it can never live past
+      // ceilingAt).  Local to this replica — a read is not fanned as a write.
+      if (typeof cached.ceilingAt === 'number') {
+        const holdMs = Math.min(role.maxHoldMs || DEFAULT_HOLD_MS, MAX_HOLD_MS);
+        cached.expiresAt = Math.min(this._now() + holdMs, cached.ceilingAt);
+      }
       this.dht.sendDirect(requesterId, 'pubsub:pullResp', {
         requestId,
-        postHash,
+        postHash:    cached.postHash,         // the actual msgId served (latest may differ from request)
         status:      'FOUND',
         post:        cached.json,
         responderId: toHex(this.nodeId),
       });
-      this._bumpPull(topicId, postHash);
+      this._bumpPull(topicId, cached.postHash);
       return 'consumed';
     }
     if (role.isRoot) {

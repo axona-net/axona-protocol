@@ -1503,9 +1503,12 @@ export class AxonaPeer extends DHT {
    * @returns {Promise<object | null>} envelope or null
    */
   async pull(msgId, { topic, publisher, timeoutMs = 1000 } = {}) {
-    if (typeof msgId !== 'string' || msgId.length !== 64) {
+    // Phase A #6: msgId is OPTIONAL — pass null (or omit) to fetch the topic's
+    // most-recent message; pass a 64-char hex msgId for a specific one.
+    const wantsLatest = msgId === null || msgId === undefined;
+    if (!wantsLatest && (typeof msgId !== 'string' || msgId.length !== 64)) {
       throw new PullError(ErrorCodes.PULL_INVALID_MSGID,
-        `peer.pull: msgId must be 64-char hex, got length ${msgId?.length}`,
+        `peer.pull: msgId must be a 64-char hex string, or null/omitted for the latest message`,
         { context: { msgId } });
     }
     if (typeof topic !== 'string' || topic.length === 0) {
@@ -1529,7 +1532,7 @@ export class AxonaPeer extends DHT {
     }
     const publisherBig = publisher === null ? null : fromHex(publisher);
     const topicIdBig   = await deriveTopicIdBig(publisherBig, topic);
-    const result = await am.requestPull(topicIdBig, msgId, { timeoutMs });
+    const result = await am.requestPull(topicIdBig, wantsLatest ? null : msgId, { timeoutMs });
     if (!result) return null;
 
     // requestPull returns the parsed payload — which is the JSON we
