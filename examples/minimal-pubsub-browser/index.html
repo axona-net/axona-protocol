@@ -298,7 +298,7 @@ import { webTransport } from '/src/transport/web/index.js';
 // Bump the middle digit on every code change to this file so the
 // footer reflects what's actually running and stale browser tabs are
 // distinguishable.
-const DEMO_VERSION = '1.7.0';
+const DEMO_VERSION = '1.8.0';
 const BRIDGE_URL   = new URLSearchParams(window.location.search).get('bridge')
                   || 'wss://bridge.axona.net';
 const VIRGINIA     = { lat: 38.0, lng: -77.0 };
@@ -585,7 +585,14 @@ setInterval(renderDots, 2000);
 // of these events (the tab never goes hidden); that's exactly the case
 // the kernel-side eviction backstops.
 function onResume(reason) {
-  console.log('[demo] resume:', reason);
+  // After a sleep/background, the WebRTC channels and bridge socket are
+  // zombie. The browser logs its own "Error sending string through
+  // RTCDataChannel" / "WebSocket connection lost" errors when sends hit
+  // those dead channels — those come from WebKit itself (the kernel already
+  // catches and treats them as expected), and self-heal once we reset the
+  // mesh and reconnect below. This note explains the red lines above.
+  console.info(`[demo] resume (${reason}) — re-establishing mesh + bridge; ` +
+    `any RTCDataChannel/WebSocket errors just above are expected and self-heal.`);
   try { transport.mesh?.reset?.(); } catch { /* mesh may already be gone */ }
   transport.reconnectNow?.();
 }
