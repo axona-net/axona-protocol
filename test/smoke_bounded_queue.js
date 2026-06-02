@@ -15,6 +15,7 @@ import { AxonaManager }   from '../src/pubsub/AxonaManager.js';
 import { deriveTopicId }  from '../src/pubsub/post.js';
 import { deriveIdentity } from '../src/identity/index.js';
 import { buildEnvelope }  from '../src/pubsub/envelope.js';
+import { fromHex }        from '../src/utils/hexid.js';
 
 let passed = 0, failed = 0;
 function check(label, cond) {
@@ -135,6 +136,32 @@ async function testMetricsResponseShape() {
   check('current_count = 1 (one live, one expired)', sent?.current_count === 1);
 }
 
+async function testMetricsOwnership() {
+  console.log('\n── metrics gate: owned = owner-only, public/synthetic = anyone ──');
+  const now = 1_700_000_000_000;
+  const ownerId    = (await deriveIdentity({ lat: 38, lng: -77 })).id;   // real anchor
+  const ownerBig   = fromHex(ownerId);
+  const strangerId = (await deriveIdentity({ lat: 0,  lng: 0   })).id;
+  const synthBig   = fromHex('89' + '0'.repeat(64));   // synthetic regional anchor (low 256 = 0)
+
+  function respond(anchorBig, requesterId) {
+    let sent = null;
+    const dht = { ...stubDht(), sendDirect: async (_t, _y, p) => { sent = p; return true; } };
+    const am2 = new AxonaManager({ dht, now: () => now });
+    const role = {
+      replayCache: [{ ...entry(1, 'A'), publisher: anchorBig }],
+      children: new Map([[1n, {}]]),
+    };
+    am2.axonRoles.set(99n, role);
+    const ok = am2._maybeRespondMetrics({ requesterId, requestId: 'r', postHashes: null }, role, 99n);
+    return { ok, sent };
+  }
+
+  check('owned topic: non-owner is blocked', respond(ownerBig, strangerId).ok === false);
+  check('owned topic: owner is allowed',     respond(ownerBig, ownerId).ok === true);
+  check('synthetic anchor: stranger allowed (unowned)', respond(synthBig, strangerId).ok === true);
+}
+
 async function main() {
   console.log('Axona bounded queue + per-publisher quota (Phase A #4) smoke');
   testOrderedEviction();
@@ -143,6 +170,7 @@ async function main() {
   testOwnedTopicNoQuota();
   testLiveCacheCount();
   await testMetricsResponseShape();
+  await testMetricsOwnership();
   await testOpenTopicDetection();
   console.log(`\nResult: ${passed} passed, ${failed} failed`);
   process.exit(failed === 0 ? 0 : 1);
