@@ -77,6 +77,7 @@ class MockAxonaManager {
       entries,
       timestamp: Date.now(),
       subscribers: (this._replay.get(topicId)?.length ?? 0),  // proxy
+      current_count: (this._replay.get(topicId)?.length ?? 0), // live retained
     }];
   }
 
@@ -192,6 +193,7 @@ async function testMetricsAggregation() {
 
   const m = await peer.metrics('cats', { publisher: identity.id });
   check('publishes count = 3',     m.publishes === 3);
+  check('current_count = 3',       m.current_count === 3);
   check('deliveries = 15',         m.deliveries === 15);
   check('pulls = 2',               m.pulls === 2);
   check('reshares = 0',            m.reshares === 0);
@@ -205,6 +207,7 @@ async function testMetricsEmpty() {
 
   const m = await peer.metrics('never-published', { publisher: identity.id });
   check('publishes = 0',  m.publishes === 0);
+  check('current_count = 0', m.current_count === 0);
   check('deliveries = 0', m.deliveries === 0);
   check('pulls = 0',      m.pulls === 0);
   check('relayCount = 0 (no relays responded)', m.relayCount === 0);

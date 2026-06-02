@@ -95,12 +95,25 @@ async function testOpenTopicDetection() {
   check('owned topic → no quota (null)', qOwned === null);
 }
 
+function testLiveCacheCount() {
+  console.log('\n── _liveCacheCount: current_count = live, non-expired entries ──');
+  const now = 1_700_000_000_000;
+  const live1 = { ...entry(1, 'A') };                       // no expiresAt → live
+  const live2 = { ...entry(2, 'A'), expiresAt: now + 1000 }; // future → live
+  const dead  = { ...entry(3, 'A'), expiresAt: now - 1000 }; // past → expired
+  const role  = { replayCache: [live1, live2, dead] };
+  check('counts only live entries (2 of 3)', am._liveCacheCount(role) === 2);
+  check('empty role → 0', am._liveCacheCount({ replayCache: [] }) === 0);
+  check('missing role → 0', am._liveCacheCount(undefined) === 0);
+}
+
 async function main() {
   console.log('Axona bounded queue + per-publisher quota (Phase A #4) smoke');
   testOrderedEviction();
   testRetainedSlot();
   testPerPublisherQuotaOpen();
   testOwnedTopicNoQuota();
+  testLiveCacheCount();
   await testOpenTopicDetection();
   console.log(`\nResult: ${passed} passed, ${failed} failed`);
   process.exit(failed === 0 ? 0 : 1);
