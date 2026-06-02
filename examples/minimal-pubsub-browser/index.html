@@ -258,6 +258,21 @@
     </div>
   </div>
 
+  <div class="topic-row">
+    <div class="tile">
+      <span class="k">Live events</span>
+      <span class="v" id="mLive">—</span>
+    </div>
+    <div class="tile">
+      <span class="k">Subscribers</span>
+      <span class="v" id="mSubs">—</span>
+    </div>
+    <div class="tile">
+      <span class="k">Publishes</span>
+      <span class="v" id="mPub">—</span>
+    </div>
+  </div>
+
   <div class="panes">
     <div class="pane">
       <h2>Publish</h2>
@@ -298,7 +313,7 @@ import { webTransport } from '/src/transport/web/index.js';
 // Bump the middle digit on every code change to this file so the
 // footer reflects what's actually running and stale browser tabs are
 // distinguishable.
-const DEMO_VERSION = '1.10.0';
+const DEMO_VERSION = '1.11.0';
 const BRIDGE_URL   = new URLSearchParams(window.location.search).get('bridge')
                   || 'wss://bridge.axona.net';
 const VIRGINIA     = { lat: 38.0, lng: -77.0 };
@@ -324,6 +339,9 @@ const $name    = document.getElementById('nameInput');
 const $msg     = document.getElementById('msgInput');
 const $pubBtn  = document.getElementById('pubBtn');
 const $feed    = document.getElementById('feed');
+const $mLive   = document.getElementById('mLive');
+const $mSubs   = document.getElementById('mSubs');
+const $mPub    = document.getElementById('mPub');
 
 // ─── Footer versions ─────────────────────────────────────────────────
 document.getElementById('demoVer').textContent = DEMO_VERSION;
@@ -572,6 +590,25 @@ peer._axonaManager?.start?.();
 // transport.boundPeers() keeps the strip honest without a
 // state-tracking map.
 setInterval(renderDots, 2000);
+
+// ─── Topic metrics (peer.metrics — kernel v2.12.0) ───────────────────
+// This topic is anchored at a SYNTHETIC regional publisher (prefix||0^256;
+// nobody holds that key), so it is UNOWNED — and as of kernel v2.12.0 an
+// unowned topic's metrics are readable by anyone.  We poll the axon tree:
+//   current_count — events retained in the tree right now (≤ queue cap / TTL)
+//   subscribers   — max direct subscribers at a responding relay
+//   publishes     — distinct messages the relays have seen
+// Best-effort: whatever relays answer within the timeout.
+async function pollMetrics() {
+  try {
+    const m = await peer.metrics(TOPIC, { publisher });
+    $mLive.textContent = String(m.current_count ?? 0);
+    $mSubs.textContent = String(m.subscribers   ?? 0);
+    $mPub.textContent  = String(m.publishes     ?? 0);
+  } catch { /* best-effort — keep last-known values */ }
+}
+pollMetrics();
+setInterval(pollMetrics, 4000);
 
 // ─── Resume recovery (laptop sleep / tab background) ─────────────────
 // The kernel transport already self-heals after a connection freeze:
