@@ -8,6 +8,7 @@ import { AxonaPeer }                  from '../src/dht/AxonaPeer.js';
 import { SimNetwork, simTransport }   from '../src/transport/sim/index.js';
 import { deriveIdentity }             from '../src/identity/index.js';
 import { TransportError }             from '../src/errors.js';
+import { fromHex }                    from '../src/utils/hexid.js';
 
 let passed = 0, failed = 0;
 function check(label, condition) {
@@ -37,6 +38,10 @@ async function makePeer(network, region) {
       }
     },
   };
+  // Mirror production wiring (bridge/peer set node.transport = transport)
+  // so the kernel installs its routing/notification handlers — including
+  // the graceful-departure `peer-leaving` fast path — at construction.
+  node.transport = transport;
   const peer = new AxonaPeer({ engine, node, identity: id, transport });
   return { peer, id, transport, engine };
 }
@@ -128,6 +133,40 @@ async function testLeaveNotify() {
   await bob.peer.leave({ drain: false, notify: false });
 }
 
+async function testPeerLeavingEviction() {
+  console.log('\n── receiving peer-leaving proactively evicts the (authenticated) sender ──');
+  const net = new SimNetwork();
+  const alice = await makePeer(net, LONDON);
+  const bob   = await makePeer(net, TOKYO);
+  await bob.peer.join();
+  await alice.peer.join(bob.id.id);     // alice now holds bob → leave() notifies him
+
+  // Production keys the synaptome by BigInt nodeId (the join path stores
+  // BigInt; peers() renders hex).  Seed bob with alice + an unrelated
+  // third party (carol) bob also holds.
+  const aliceBig = fromHex(alice.id.id);
+  const carolId  = await deriveIdentity(LONDON);
+  const carolBig = fromHex(carolId.id);
+  bob.engine.addSynapse(bob.peer._node, aliceBig, { addedBy: 'test' });
+  bob.engine.addSynapse(bob.peer._node, carolBig, { addedBy: 'test' });
+  check('precondition: bob holds alice', bob.peer._node.synaptome.has(aliceBig));
+  check('precondition: bob holds carol', bob.peer._node.synaptome.has(carolBig));
+
+  // Alice announces graceful departure; bob's kernel handler should
+  // evict her *now* rather than waiting for the 10 s refreshTick.
+  await alice.peer.leave({ drain: false, notify: true });
+  await new Promise(r => setTimeout(r, 30));
+
+  check('bob proactively evicted alice on peer-leaving',
+    !bob.peer._node.synaptome.has(aliceBig));
+  // Safety: the eviction subject is the authenticated SENDER only — a
+  // third party bob also holds is untouched (can't force-evict others).
+  check('bob did NOT evict the unrelated third party (carol)',
+    bob.peer._node.synaptome.has(carolBig));
+
+  await bob.peer.leave({ drain: false, notify: false });
+}
+
 async function testLeaveSilent() {
   console.log('\n── leave({ notify: false }) is silent ──');
   const net = new SimNetwork();
@@ -177,6 +216,7 @@ async function main() {
   await testSponsorJoin();
   await testJoinRejectsBadSponsor();
   await testLeaveNotify();
+  await testPeerLeavingEviction();
   await testLeaveSilent();
   await testLeaveIdempotent();
   await testJoinAfterLeave();
