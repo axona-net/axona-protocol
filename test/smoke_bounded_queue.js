@@ -107,6 +107,34 @@ function testLiveCacheCount() {
   check('missing role → 0', am._liveCacheCount(undefined) === 0);
 }
 
+async function testMetricsResponseShape() {
+  console.log('\n── metricsResp carries current_count + subscribers ──');
+  const requester = (await deriveIdentity({ lat: 0, lng: 0 })).id;  // 66-char hex
+  let sent = null;
+  const dht = {
+    getSelfId: () => 1n, onRoutedMessage: () => {}, onDirectMessage: () => {},
+    onEvent: () => () => {}, routeMessage: async () => {},
+    sendDirect: async (_to, _type, payload) => { sent = payload; return true; },
+  };
+  const now = 1_700_000_000_000;
+  const am2 = new AxonaManager({ dht, now: () => now });
+  const topicId = 42n;
+  const role = {
+    isRoot: true,
+    children: new Map([[10n, {}], [11n, {}], [12n, {}]]),   // 3 direct subscribers
+    replayCache: [
+      { ...entry(1, 'A') },                       // live (no expiresAt)
+      { ...entry(2, 'A'), expiresAt: now - 1 },   // expired
+    ],
+  };
+  am2.axonRoles.set(topicId, role);
+  const ok = am2._maybeRespondMetrics(
+    { requesterId: requester, requestId: 'r1', postHashes: null }, role, topicId);
+  check('responded', ok === true);
+  check('subscribers = 3 (direct children)', sent?.subscribers === 3);
+  check('current_count = 1 (one live, one expired)', sent?.current_count === 1);
+}
+
 async function main() {
   console.log('Axona bounded queue + per-publisher quota (Phase A #4) smoke');
   testOrderedEviction();
@@ -114,6 +142,7 @@ async function main() {
   testPerPublisherQuotaOpen();
   testOwnedTopicNoQuota();
   testLiveCacheCount();
+  await testMetricsResponseShape();
   await testOpenTopicDetection();
   console.log(`\nResult: ${passed} passed, ${failed} failed`);
   process.exit(failed === 0 ? 0 : 1);

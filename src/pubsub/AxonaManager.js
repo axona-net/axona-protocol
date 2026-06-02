@@ -1878,6 +1878,7 @@ export class AxonaManager {
       responderId: toHex(this.nodeId),
       entries,
       current_count: this._liveCacheCount(role),
+      subscribers:   role.children?.size ?? 0,
       timestamp: this._now(),
     });
     return true;

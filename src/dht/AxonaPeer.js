@@ -1568,7 +1568,9 @@ export class AxonaPeer extends DHT {
    * @returns {Promise<{ publishes: number, current_count: number, subscribers: number, deliveries: number, pulls: number, reshares: number, relayCount: number }>}
    *   `current_count` is the number of published events currently retained
    *   (live, non-expired, non-killed) in the topic's tree — the max reported
-   *   across responding root relays.
+   *   across responding root relays.  `subscribers` is the max direct-child
+   *   count reported by any single responding relay — exact for an unsplit
+   *   topic (single root), a lower bound once the tree has split into sub-axons.
    */
   async metrics(topic, { publisher, timeoutMs = 500 } = {}) {
     if (typeof topic !== 'string' || topic.length === 0) {
