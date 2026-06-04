@@ -109,6 +109,57 @@ async function testTombstoneBlocksResurrection() {
     am.axonRoles.get(TOPIC_BIG).replayCache.length === 0);
 }
 
+async function testKillAfterReplayAcquisition() {
+  console.log('\n── a message acquired via REPLAY is still killable (postHash preserved) ──');
+  const alice = await deriveIdentity(LONDON);
+  const { am, deliveries } = mkManager();
+  const env  = await buildEnvelope({ topic: 'cats', message: 'hi', identity: alice, ts: T, seq: T });
+  const json = JSON.stringify(env);
+
+  // Relay hosts the topic but holds NOTHING yet; it acquires the message the
+  // way a freshly-subscribed relay does — through a replay batch.
+  am.axonRoles.set(TOPIC_BIG, { isRoot: true, children: new Map([[am.nodeId, {}]]), replayCache: [] });
+  am._onReplayBatch(
+    { topicId: TOPIC_HEX, messages: [{ json, publishId: 'r1', publishTs: T, postHash: env.msgId, publisher: null }] },
+    {});
+  check('replay populated the cache', am.axonRoles.get(TOPIC_BIG).replayCache.length === 1);
+  check('replay-cached entry retained its postHash',
+    am.axonRoles.get(TOPIC_BIG).replayCache[0].postHash === env.msgId);
+
+  // Creator kills it — must match and remove despite being replay-acquired.
+  const verdict = await am._handleKill(TOPIC_BIG,
+    await buildKill({ topicId: TOPIC_HEX, msgId: env.msgId, ts: T, seq: T, identity: alice }));
+  check('kill consumed', verdict === 'consumed');
+  check('replay-acquired message removed from cache',
+    am.axonRoles.get(TOPIC_BIG).replayCache.length === 0);
+  check('delete marker delivered', deliveries.some(d => d.deleted === true && d.msgId === env.msgId));
+}
+
+async function testReplayDoesNotResurrectKilled() {
+  console.log('\n── a replay batch cannot resurrect a killed message (tombstone guard) ──');
+  const alice = await deriveIdentity(LONDON);
+  const { am } = mkManager();
+  const env  = await buildEnvelope({ topic: 'cats', message: 'hi', identity: alice, ts: T, seq: T });
+  const json = JSON.stringify(env);
+
+  // Host + hold the message, then kill it (tombstone set, cache emptied).
+  am.axonRoles.set(TOPIC_BIG, {
+    isRoot: true, children: new Map(),
+    replayCache: [{ json, publishId: 'p1', publishTs: T, postHash: env.msgId, publisher: null }],
+  });
+  await am._handleKill(TOPIC_BIG,
+    await buildKill({ topicId: TOPIC_HEX, msgId: env.msgId, ts: T, seq: T, identity: alice }));
+  check('killed: cache empty + tombstoned',
+    am.axonRoles.get(TOPIC_BIG).replayCache.length === 0 && am._isTombstoned(env.msgId) === true);
+
+  // A lagging replica replays the killed message with a fresh publishId.
+  am._onReplayBatch(
+    { topicId: TOPIC_HEX, messages: [{ json, publishId: 'r9', publishTs: T, postHash: env.msgId, publisher: null }] },
+    {});
+  check('replay did NOT resurrect the killed message',
+    am.axonRoles.get(TOPIC_BIG).replayCache.length === 0);
+}
+
 async function testUnauthorizedKillRejected() {
   console.log('\n── a non-creator cannot kill someone else’s message ──');
   const alice = await deriveIdentity(LONDON);
@@ -146,6 +197,8 @@ async function main() {
   await testKillObject();
   await testAuthorizedKill();
   await testTombstoneBlocksResurrection();
+  await testKillAfterReplayAcquisition();
+  await testReplayDoesNotResurrectKilled();
   await testUnauthorizedKillRejected();
   await testPeerValidation();
   console.log(`\nResult: ${passed} passed, ${failed} failed`);
