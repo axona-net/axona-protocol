@@ -124,6 +124,13 @@ export function webTransport({
   reconnect = true,
   reconnectInitialMs = RECONNECT_BACKOFF_INITIAL_MS,
   reconnectMaxMs     = RECONNECT_BACKOFF_MAX_MS,
+  // Peer-relayed signaling (bridgeless connect), capability-flagged.  When
+  // true, sendSignal prefers routing SDP/ICE through the mesh (via an
+  // AxonaPeer relay registered with setSignalRelay) over the bridge, and
+  // connectViaRelay() can form a new WebRTC edge to a nodeId without the
+  // bridge.  Default false → behaviour is identical to the bridge-only path.
+  // Design: axona-docs/implementation/Peer-Relayed-Signaling-v0.1.md.
+  meshRelay = false,
 } = {}) {
   if (typeof bridgeUrl !== 'string' || !/^wss?:\/\//.test(bridgeUrl)) {
     throw new TransportError(ErrorCodes.TRANSPORT_NOT_STARTED,
@@ -196,6 +203,7 @@ export function webTransport({
           socket.send(JSON.stringify({
             type:    'client-hello',
             version: peerVersion || KERNEL_VERSION,
+            ...(meshRelay ? { capabilities: ['mesh-relay'] } : {}),
           }));
         } catch (err) {
           log('auto-handshake-client-hello-failed', { err: err.message });
@@ -269,8 +277,22 @@ export function webTransport({
   // Wrap them in the bridge's `signal` envelope so the bridge can
   // route the payload to the destination peer.  Pattern matches
   // axona-peer/src/client.js's MeshManager setup verbatim.
+  // Peer-relayed signaling: an AxonaPeer registers its routed-delivery sink
+  // here via composite.setSignalRelay().  When meshRelay is enabled and the
+  // destination is a nodeId (hex meshId — the bridgeless connectViaRelay
+  // path uses nodeIds as meshIds, whereas the bridge path uses 3-char
+  // connIds), we offer the frame to the relay first; it returns true if it
+  // took ownership (will route through the mesh), else we fall back to the
+  // bridge.  Pure bridge behaviour is preserved when meshRelay is off.
+  let signalRelay = null;
   const mesh = new MeshManager({
     sendSignal: (toPeerId, payload) => {
+      if (meshRelay && typeof signalRelay === 'function' && isHexId(toPeerId)) {
+        let took = false;
+        try { took = signalRelay(toPeerId, payload) === true; }
+        catch (err) { log('signal-relay-threw', { to: toPeerId, err: err.message }); }
+        if (took) return;
+      }
       if (!socketOpen) {
         log('signal-drop-no-bridge', { to: toPeerId });
         return;
@@ -714,6 +736,47 @@ export function webTransport({
   composite.mesh    = mesh;
   composite.webrtc  = webrtc;
   composite.bridge  = bridge;
+
+  // ── Peer-relayed signaling surface (bridgeless connect) ──────────────
+  // Only meaningful when meshRelay is enabled; an AxonaPeer detects these
+  // methods on its transport and wires itself up on start().
+  //
+  // setSignalRelay(fn): register the outbound relay sink.  fn(toHexId,
+  //   payload) → boolean ("took ownership").  Consumed by the sendSignal
+  //   closure above.
+  composite.setSignalRelay = (fn) => {
+    if (fn !== null && typeof fn !== 'function') {
+      throw new TypeError('setSignalRelay: fn must be a function or null');
+    }
+    signalRelay = fn;
+  };
+  // deliverMeshSignal(fromHex, payload): terminal ingress — a relayed
+  //   `mesh:signal` reached us as its target; feed it into the SAME mesh
+  //   signaling state machine the bridge path drives (offerer/responder/ICE).
+  composite.deliverMeshSignal = (fromHex, payload) => {
+    if (typeof mesh.onSignal !== 'function') return;
+    try { return mesh.onSignal(fromHex, payload); }
+    catch (err) { log('mesh-signal-deliver-threw', { from: fromHex, err: err.message }); }
+  };
+  // connectViaRelay(toHex): initiate a new direct WebRTC channel to a nodeId
+  //   we hold no binding for, using the nodeId as the meshId.  The offer's
+  //   SDP/ICE then rides the relay sink above.  No-op when meshRelay is off,
+  //   when we already own a binding/channel to the target, or for self.
+  composite.connectViaRelay = (toHex) => {
+    if (!meshRelay) { log('relay-connect-disabled', { to: toHex }); return false; }
+    if (typeof toHex !== 'string' || !isHexId(toHex)) return false;
+    if (toHex === localNodeIdHex) return false;
+    try {
+      const toBig = fromHex(toHex);
+      if (webrtc.ownsPeer(toBig) || mesh.isConnected(toHex)) return false;
+    } catch { return false; }
+    log('relay-connect-initiate', { to: toHex });
+    mesh._initiateTo(toHex);
+    return true;
+  };
+  // Advisory capability surface (forward-compat; functional gate is the flag).
+  composite.capabilities = () => (meshRelay ? ['mesh-relay'] : []);
+  composite.hasCapability = (cap) => composite.capabilities().includes(cap);
   Object.defineProperty(composite, 'socket',          { get() { return socket; } });
   Object.defineProperty(composite, 'bridgeReady',     { get() { return bridgeReady; } });
   // Display surface: hex (derived from BigInt).  External UI / log

@@ -57,6 +57,11 @@ const MAX_VERIFY_PROBES = 8;
 // Max peers disclosed by a single local_probe reply (D-4): enough for an
 // honest annealing/dead-replace pick, too few to cheaply map the mesh.
 const LOCAL_PROBE_MAX   = 8;
+// Peer-relayed signaling: how long a "target is reachable over the mesh"
+// verdict (from the iterative lookup, per Peer-Relayed-Signaling §8b
+// finding 6) stays cached, so per-ICE-candidate signal frames within one
+// negotiation don't each pay a full lookup.
+const RELAY_REACH_TTL_MS = 5000;
 
 export class AxonaPeer extends DHT {
   /**
@@ -235,6 +240,16 @@ export class AxonaPeer extends DHT {
     // either way).
     if (this._node?.transport && typeof this._node.transport.onRequest === 'function') {
       this._installRoutingHandlers();
+    }
+
+    // Peer-relayed signaling (bridgeless connect): if the transport exposes
+    // a signal-relay hook (the web transport, when meshRelay is enabled),
+    // register our routed delivery as the relay sink.  The transport's
+    // sendSignal then prefers routing SDP/ICE through the mesh over the
+    // bridge.  Transports without this hook (sim/node) are unaffected.
+    const relayTransport = this._node?.transport;
+    if (relayTransport && typeof relayTransport.setSignalRelay === 'function') {
+      relayTransport.setSignalRelay((toHexId, signal) => this._relaySignalSink(toHexId, signal));
     }
 
     // Auto-admit any peers the transport has already bound for us
@@ -578,6 +593,30 @@ export class AxonaPeer extends DHT {
       } catch {
         return { consumed: false, atNode: meId, hops, exhausted: true };
       }
+    });
+
+    // ── mesh:signal — peer-relayed WebRTC signaling (bridgeless connect) ──
+    // A routed message carrying an opaque SDP/ICE payload toward a target
+    // nodeId the originator has no direct channel to.  Intermediaries
+    // forward (return falsy); only the terminal node (we ARE the target)
+    // consumes, handing the payload to the transport's mesh-signal ingress
+    // (transport.deliverMeshSignal → MeshManager.onSignal), which drives the
+    // SAME offerer/responder/ICE state machine the bridge path uses — only
+    // the transport of the signaling bytes differs.  The resulting WebRTC
+    // channel is still authenticated end-to-end (axona/4 + DTLS-fingerprint
+    // binding), so a relay can drop/observe but never MITM.  Design:
+    // axona-docs/implementation/Peer-Relayed-Signaling-v0.1.md §3.1.
+    this.onRoutedMessage('mesh:signal', async (payload, meta) => {
+      if (meta.targetId !== node.id) return null;       // not us — forward
+      const t = node.transport;
+      if (t && typeof t.deliverMeshSignal === 'function'
+          && payload && typeof payload.from === 'string') {
+        try { await t.deliverMeshSignal(payload.from, payload.signal); }
+        catch (err) {
+          this._domain?._emit?.({ type: 'mesh-signal-deliver-failed', err: err?.message });
+        }
+      }
+      return 'consumed';
     });
 
     this._routingHandlersInstalled = true;
@@ -3047,6 +3086,64 @@ export class AxonaPeer extends DHT {
     } catch {
       return { consumed: false, atNode: originNode.id, hops: 0, exhausted: true };
     }
+  }
+
+  // ── Peer-relayed signaling sink (bridgeless connect) ────────────────
+  //
+  // Registered as the web transport's `setSignalRelay` hook on start().
+  // The transport's sendSignal calls this with (toNodeIdHex, signalPayload)
+  // when it wants to deliver an SDP/ICE frame; we route it through the mesh
+  // as a `mesh:signal` to the target.  Synchronous "took ownership" return:
+  //   true  → we will deliver via the mesh (the sink skips the bridge)
+  //   false → we can't (not meshed / bad id) — the sink falls back to the
+  //           bridge, the cold-bootstrap rendezvous path (design §3.3).
+  _relaySignalSink(toHexId, signal) {
+    if (!this._started || !this._node?.alive) return false;
+    if (typeof toHexId !== 'string') return false;
+    if (this._node.synaptome.size === 0) return false;   // not meshed → bridge
+    let toBig;
+    try { toBig = fromHex(toHexId); } catch { return false; }
+    if (toBig === this._node.id) return false;
+    // Fire-and-forget; the negotiation's own retry/timeout (mesh layer)
+    // re-drives if a frame is lost (design §6).
+    this._relayMeshSignal(toBig, toHexId, signal).catch(() => {});
+    return true;
+  }
+
+  /** Deliver one signaling frame to `toBig` over the mesh as a routed
+   *  `mesh:signal`.  Reachability is gated on the iterative lookup
+   *  (alpha-parallel, dead-peer-aware — Peer-Relayed-Signaling §8b
+   *  finding 6), cached briefly; delivery is route_msg with one retry. */
+  async _relayMeshSignal(toBig, toHexId, signal) {
+    if (!(await this._relayReachable(toBig))) {
+      this._domain?._emit?.({ type: 'mesh-signal-unreachable', to: toHexId });
+      return;
+    }
+    // Canonical 66-char hex (the web transport's meshId form) so the
+    // responder's answer routes back via fromHex() without a width mismatch.
+    const body = { from: toHex(this._node.id), signal };
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        const r = await this.routeMessage(toBig, 'mesh:signal', body);
+        if (r && r.consumed) return;
+      } catch { /* retry */ }
+    }
+    this._domain?._emit?.({ type: 'mesh-signal-relay-failed', to: toHexId });
+  }
+
+  /** Is `toBig` reachable over the mesh right now?  Verdict cached for
+   *  RELAY_REACH_TTL_MS so per-ICE-candidate frames don't each lookup. */
+  async _relayReachable(toBig) {
+    const key = toBig.toString(16);
+    if (!this._relayReach) this._relayReach = new Map();
+    const cached = this._relayReach.get(key);
+    const now = Date.now();
+    if (cached && (now - cached.ts) < RELAY_REACH_TTL_MS) return cached.ok;
+    let ok = false;
+    try { const lk = await this.lookup(toBig); ok = !!(lk && lk.found); }
+    catch { ok = false; }
+    this._relayReach.set(key, { ok, ts: Date.now() });
+    return ok;
   }
 
   /**
