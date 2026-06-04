@@ -17,6 +17,7 @@ import { AxonaPeer }      from '../src/dht/AxonaPeer.js';
 import { deriveIdentity } from '../src/identity/index.js';
 import { buildEnvelope }  from '../src/pubsub/envelope.js';
 import { buildTouch, verifyTouch } from '../src/pubsub/touch.js';
+import { fromHex }        from '../src/utils/hexid.js';
 import { TouchError, ErrorCodes } from '../src/errors.js';
 
 let passed = 0, failed = 0;
@@ -59,27 +60,29 @@ async function testTouchObject() {
   check('missing signature → ok:false', (await verifyTouch(noSig)).ok === false);
 }
 
-async function testAuthorizedTouchResetsAndHeads() {
-  console.log('\n── creator touch resets hold, moves to head, bumps recency ──');
+async function testOwnerTouchResetsAndHeads() {
+  console.log('\n── OWNED topic: the owner touch resets hold, moves to head, bumps recency ──');
   const alice = await deriveIdentity(LONDON);
   const am = mkManager();
   const { env, json } = await aliceMsg(alice);
+  const aliceAnchor = fromHex(alice.id);          // owned: anchor low-256 = sha256(alice pubkey) ≠ 0
   // Entry near expiry; another (untouched) entry sits ahead of it.
   am.axonRoles.set(TOPIC_BIG, {
     isRoot: true, children: new Map(),
     replayCache: [
-      { json: '{}', publishId: 'x', publishTs: T, postHash: 'c'.repeat(64), seq: 5 },
+      { json: '{}', publishId: 'x', publishTs: T, postHash: 'c'.repeat(64), seq: 5, publisher: aliceAnchor },
       { json, publishId: 'p1', publishTs: T, postHash: env.msgId, seq: 1,
-        expiresAt: T + 1000, ceilingAt: T + CEIL_MS },
+        expiresAt: T + 1000, ceilingAt: T + CEIL_MS, publisher: aliceAnchor },
     ],
   });
 
+  // Alice IS the owner (her pubkey hashes to the anchor suffix).
   await am._handleTouch(TOPIC_BIG,
     await buildTouch({ topicId: TOPIC_HEX, msgId: env.msgId, ts: T, seq: T, identity: alice }));
 
   const cache = am.axonRoles.get(TOPIC_BIG).replayCache;
   const e = cache.find(x => x.postHash === env.msgId);
-  check('hold-time expiry reset to now + hold', e.expiresAt === T + HOLD_MS);
+  check('owner accepted: hold-time expiry reset to now + hold', e.expiresAt === T + HOLD_MS);
   check('touchedTs stamped to the touch ts', e.touchedTs === T);
   check('moved to the head of the queue', cache[0].postHash === env.msgId);
 }
@@ -137,22 +140,43 @@ async function testTouchAfterReplayAcquisition() {
   check('replay-acquired entry was touched', am.axonRoles.get(TOPIC_BIG).replayCache[0].touchedTs === T);
 }
 
-async function testUnauthorizedTouchRejected() {
-  console.log('\n── a non-creator cannot touch someone else’s message ──');
-  const alice = await deriveIdentity(LONDON);
-  const bob   = await deriveIdentity(TOKYO);
+async function testOwnedTopicNonOwnerRejected() {
+  console.log('\n── OWNED topic: a non-owner cannot touch ──');
+  const alice = await deriveIdentity(LONDON);   // owner (anchor)
+  const bob   = await deriveIdentity(TOKYO);    // stranger
   const am = mkManager();
   const { env, json } = await aliceMsg(alice);
+  const aliceAnchor = fromHex(alice.id);
   am.axonRoles.set(TOPIC_BIG, {
     isRoot: true, children: new Map(),
     replayCache: [{ json, publishId: 'p1', publishTs: T, postHash: env.msgId, seq: 1,
-                    expiresAt: T + 1000, ceilingAt: T + CEIL_MS }],
+                    expiresAt: T + 1000, ceilingAt: T + CEIL_MS, publisher: aliceAnchor }],
   });
   await am._handleTouch(TOPIC_BIG,
     await buildTouch({ topicId: TOPIC_HEX, msgId: env.msgId, ts: T, seq: T, identity: bob }));
   const e = am.axonRoles.get(TOPIC_BIG).replayCache[0];
-  check('expiry NOT extended (bob is not the creator)', e.expiresAt === T + 1000);
+  check('expiry NOT extended (bob is not the owner)', e.expiresAt === T + 1000);
   check('not stamped with touchedTs', e.touchedTs === undefined);
+}
+
+async function testOpenTopicAnyoneCanTouch() {
+  console.log('\n── UNOWNED (open) topic: anyone may touch ──');
+  const alice = await deriveIdentity(LONDON);   // published the message
+  const carol = await deriveIdentity(TOKYO);    // a stranger, not the author
+  const am = mkManager();
+  const { env, json } = await aliceMsg(alice);
+  const synthAnchor = fromHex('89' + '0'.repeat(64));   // synthetic regional anchor → low-256 = 0 → UNOWNED
+  am.axonRoles.set(TOPIC_BIG, {
+    isRoot: true, children: new Map(),
+    replayCache: [{ json, publishId: 'p1', publishTs: T, postHash: env.msgId, seq: 1,
+                    expiresAt: T + 1000, ceilingAt: T + CEIL_MS, publisher: synthAnchor }],
+  });
+  // Carol is neither the author nor an owner — but the topic is unowned.
+  await am._handleTouch(TOPIC_BIG,
+    await buildTouch({ topicId: TOPIC_HEX, msgId: env.msgId, ts: T, seq: T, identity: carol }));
+  const e = am.axonRoles.get(TOPIC_BIG).replayCache[0];
+  check('stranger accepted on an open topic: expiry extended', e.expiresAt === T + HOLD_MS);
+  check('touchedTs stamped', e.touchedTs === T);
 }
 
 async function testPeerValidation() {
@@ -174,11 +198,12 @@ async function testPeerValidation() {
 async function main() {
   console.log('Axona touch / keep-alive (Phase A #7) smoke');
   await testTouchObject();
-  await testAuthorizedTouchResetsAndHeads();
+  await testOwnerTouchResetsAndHeads();
   await testTouchBoundedByCeiling();
   await testTouchedSurvivesEviction();
   await testTouchAfterReplayAcquisition();
-  await testUnauthorizedTouchRejected();
+  await testOwnedTopicNonOwnerRejected();
+  await testOpenTopicAnyoneCanTouch();
   await testPeerValidation();
   console.log(`\nResult: ${passed} passed, ${failed} failed`);
   process.exit(failed === 0 ? 0 : 1);
