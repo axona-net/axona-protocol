@@ -305,6 +305,38 @@ export class AxonaPeer extends DHT {
       });
     }
 
+    // Symmetric counterpart to onPeerBound: when a peer's channel dies
+    // (heartbeat timeout / send-fail eviction at the transport, or a bridge
+    // socket close), EVICT it from the synaptome immediately.  Until this
+    // existed, AxonaPeer only ever *admitted* peers; a dead synapse lingered
+    // until lazy anneal cleanup, and routing (greedy lookup_step / route_msg)
+    // would still pick that dead peer when it was XOR-near a target — the send
+    // failed and the route died one hop short.  This is acutely fatal for
+    // bridgeless peer-relay right after the central bridge drops: the dead
+    // bridge synapse poisons lookup()/routeMessage toward many targets, so a
+    // relayed answer/ICE never finds its way back.  Eager eviction keeps the
+    // routing table honest (every synapse is a live channel) the moment a peer
+    // goes; the synapse re-admits via onPeerBound if the channel re-forms.
+    if (transport && typeof transport.onPeerDied === 'function') {
+      this._onPeerDiedUnsub = transport.onPeerDied((peerBig) => {
+        try {
+          const dead = (typeof peerBig === 'bigint') ? peerBig
+            : (typeof peerBig === 'string' && isHexId(peerBig)) ? fromHex(peerBig) : null;
+          if (dead === null) return;
+          const node = this._node;
+          if (!node) return;
+          node.synaptome?.delete(dead);
+          node.incomingSynapses?.delete(dead);
+          node.connections?.delete(dead);
+          (node._deadPeers ??= new Set()).add(dead);
+          this._axonaManager?.invalidateKClosestCache?.();
+          this._emitLog?.('info', 'peer-died-evicted', { peer: toHex(dead) });
+        } catch (err) {
+          if (typeof console !== 'undefined') console.warn('AxonaPeer.onPeerDied: eviction failed', err);
+        }
+      });
+    }
+
     this._started = true;
   }
 
@@ -540,10 +572,19 @@ export class AxonaPeer extends DHT {
         ? targetId
         : BigInt('0x' + String(targetId));
 
-      // Greedy 1-hop forward
+      // Greedy 1-hop forward — only over synapses we are actually connected
+      // to (skip dead/unbound entries, e.g. the bridge after it drops; see
+      // _greedyNextHopToward).  Without this a dead synapse that is XOR-near
+      // the target is picked, the send throws, and the relay dies one hop
+      // short — breaking bridgeless peer-relay right when it's needed.
+      const connOk = (typeof node.transport?.isConnected === 'function')
+        ? node.transport.isConnected.bind(node.transport) : null;
+      const deadSet = node._deadPeers;
       let nextHopId = null;
       let bestDist  = node.id ^ targetBig;
       for (const syn of node.synaptome.values()) {
+        if (deadSet && deadSet.has(syn.peerId)) continue;
+        if (connOk && !connOk(syn.peerId)) continue;
         const d = syn.peerId ^ targetBig;
         if (d < bestDist) { bestDist = d; nextHopId = syn.peerId; }
       }
@@ -644,6 +685,10 @@ export class AxonaPeer extends DHT {
     if (this._onPeerBoundUnsub) {
       this._onPeerBoundUnsub();
       this._onPeerBoundUnsub = null;
+    }
+    if (this._onPeerDiedUnsub) {
+      this._onPeerDiedUnsub();
+      this._onPeerDiedUnsub = null;
     }
     this._started = false;
   }
@@ -2544,9 +2589,21 @@ export class AxonaPeer extends DHT {
     const target = (typeof targetId === 'bigint')
       ? targetId
       : BigInt('0x' + targetId);
+    // Only forward to a synapse we are ACTUALLY connected to.  A dead synapse
+    // (e.g. the bridge after it dies — peers keep the synapse until anneal
+    // cleans it) is XOR-near many targets and would be picked as the greedy
+    // best, then transport.send() throws and the single-path forward gives up
+    // one hop short.  Skipping unconnected synapses lets routing pick the
+    // next-best LIVE hop and route around the dead node — essential for
+    // bridgeless peer-relay right after the central bridge drops.
+    const t = this._node.transport;
+    const connOk = (typeof t?.isConnected === 'function') ? t.isConnected.bind(t) : null;
+    const dead   = this._node._deadPeers;
     let bestPeerId = null;
     let bestDist   = this._node.id ^ target;
     for (const syn of this._node.synaptome.values()) {
+      if (dead && dead.has(syn.peerId)) continue;
+      if (connOk && !connOk(syn.peerId)) continue;
       const d = syn.peerId ^ target;
       if (d < bestDist) { bestDist = d; bestPeerId = syn.peerId; }
     }
@@ -2556,9 +2613,19 @@ export class AxonaPeer extends DHT {
   /**
    * Bounded 2-hop "anyone closer than me?" check.  Parallel
    * `lookahead_probe` RPCs to each first-hop synapse; aggregates the
-   * 2-hop responses + incomingSynapses-as-reverse-routing; returns
-   * the globally-closest peer id strictly closer than self, or null
-   * if this peer is a true 2-hop terminal.
+   * 2-hop responses + incomingSynapses-as-reverse-routing.
+   *
+   * Returns the **first-hop synapse** (a peer we are DIRECTLY connected to)
+   * that leads to the closest 2-hop node strictly closer than self — i.e. the
+   * NEXT HOP to forward to, NOT the 2-hop destination.  This is the routed-
+   * message forwarder's fallback when greedy finds no 1-hop progress; the
+   * caller does `transport.send(<return>, 'route_msg', …)`, so it MUST be an
+   * adjacent peer.  Returning the 2-hop node here (the old behaviour) made the
+   * forwarder send route_msg to a peer it has no channel to → the send threw
+   * and routing died one hop short — breaking peer-relayed signaling whenever
+   * greedy fell through to the 2-hop path.  Each candidate first hop is one
+   * that just ANSWERED a probe, so the channel to it is proven live.
+   * Returns null if this peer is a true 2-hop terminal.
    */
   async _findCloserInTwoHops(targetId) {
     const node = this._node;
@@ -2566,7 +2633,7 @@ export class AxonaPeer extends DHT {
       ? targetId
       : BigInt('0x' + targetId);
     const myDist = node.id ^ target;
-    let bestPeerId = null;
+    let bestPeerId = null;        // the FIRST-HOP (adjacent) peer to forward to
     let bestDist   = myDist;
 
     const probeTargets = [...node.synaptome.values()].map(s => s.peerId);
@@ -2576,15 +2643,21 @@ export class AxonaPeer extends DHT {
           node.transport.send(peerId, 'lookahead_probe', { target, fromDist: myDist })
         )
       );
-      for (const r of settled) {
+      // settled[i] corresponds to probeTargets[i] (Promise.allSettled preserves
+      // order).  r.value.peerId is the 2-hop node that first hop would forward
+      // to; we score by ITS distance but forward to the FIRST HOP (probeTargets[i]).
+      for (let i = 0; i < settled.length; i++) {
+        const r = settled[i];
         if (r.status !== 'fulfilled' || !r.value || r.value.terminal) continue;
         const d = r.value.peerId ^ target;
         if (d < bestDist) {
           bestDist   = d;
-          bestPeerId = r.value.peerId;
+          bestPeerId = probeTargets[i];   // adjacent next hop, not the 2-hop node
         }
       }
     }
+    // incomingSynapses are reverse channels — the peer IS directly connected,
+    // so the peer id itself is a valid (adjacent) next hop.
     for (const syn of node.incomingSynapses.values()) {
       const d = syn.peerId ^ target;
       if (d < bestDist) { bestDist = d; bestPeerId = syn.peerId; }
