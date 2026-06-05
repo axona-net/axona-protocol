@@ -274,6 +274,20 @@ export class MeshManager {
   }
 
   /**
+   * Whether we hold ANY peer state for `peerId` — including an in-progress
+   * negotiation (new / signaling / datachannel-opening), not just an open
+   * channel.  connectViaRelay uses this so a repeated connect request (peer
+   * discovery fires more than once) does NOT call `_initiateTo` again and
+   * overwrite the in-flight RTCPeerConnection, which would restart ICE and
+   * prevent the negotiation from ever completing.  A failed/timed-out
+   * negotiation is torn down (`_teardown` deletes the entry), so this frees up
+   * for a genuine retry.
+   */
+  hasPeer(peerId) {
+    return this._peers.has(peerId);
+  }
+
+  /**
    * v0.4.0 — Most recent RTT to peer in milliseconds, or -1 if not
    * known yet (no completed ping/pong round-trip).  Equivalent to the
    * Transport contract's `getLatency`.

@@ -287,6 +287,11 @@ export class AxonaPeer extends DHT {
     // onPeerBound handler receives BigInt (contract).
     if (transport && typeof transport.onPeerBound === 'function') {
       this._onPeerBoundUnsub = transport.onPeerBound((peerBig) => {
+        // A (re)bound peer is alive — clear any dead-mark from a prior drop,
+        // or it would stay shadow-banned: routing skips _deadPeers, and the
+        // synaptome-seed below would re-add a synapse the router then ignores.
+        // Symmetric counterpart to the onPeerDied eviction.
+        this._node?._deadPeers?.delete(peerBig);
         try { this._seedSynaptomeWithSponsor(peerBig); }
         catch (err) {
           if (typeof console !== 'undefined') {
@@ -2810,9 +2815,27 @@ export class AxonaPeer extends DHT {
       // and onPeerBound admits on success. Never binds ⇒ never admitted.
       if ((this._verifyProbes ?? 0) >= MAX_VERIFY_PROBES) return;
       this._verifyProbes = (this._verifyProbes ?? 0) + 1;
-      try { await t.openConnection(peerId); }
+      let opened = false;
+      try { opened = await t.openConnection(peerId); }
       catch { /* unverifiable → not admitted */ }
       finally { this._verifyProbes = Math.max(0, (this._verifyProbes ?? 1) - 1); }
+      // AUTONOMOUS BRIDGELESS CONNECT.  openConnection only succeeds for a
+      // peer the transport already has a (bridge-assigned) binding for; a peer
+      // discovered purely peer-to-peer (triadic_introduce / hop_cache /
+      // lateral_spread) has none, so without the bridge it could never be
+      // connected.  When the transport supports peer-relay (web transport with
+      // meshRelay on), fall back to forming the edge by relaying the WebRTC
+      // signaling THROUGH the mesh — no bridge required.  The axona/4 handshake
+      // on the resulting channel binds the identity and onPeerBound admits it,
+      // so a forged introduction still can't poison the table.  This is what
+      // makes new-connection formation independent of the bridge in steady
+      // state; connectViaRelay itself no-ops when meshRelay is disabled, when
+      // we're not yet meshed (cold bootstrap still needs the rendezvous), or
+      // when a channel/binding to the peer already exists.
+      if (!opened && typeof t.connectViaRelay === 'function') {
+        try { t.connectViaRelay(toHex(peerId)); }
+        catch { /* best-effort; falls back to bridge if relay can't route */ }
+      }
       return;
     }
 

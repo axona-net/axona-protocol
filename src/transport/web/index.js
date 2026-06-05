@@ -124,13 +124,17 @@ export function webTransport({
   reconnect = true,
   reconnectInitialMs = RECONNECT_BACKOFF_INITIAL_MS,
   reconnectMaxMs     = RECONNECT_BACKOFF_MAX_MS,
-  // Peer-relayed signaling (bridgeless connect), capability-flagged.  When
-  // true, sendSignal prefers routing SDP/ICE through the mesh (via an
-  // AxonaPeer relay registered with setSignalRelay) over the bridge, and
-  // connectViaRelay() can form a new WebRTC edge to a nodeId without the
-  // bridge.  Default false → behaviour is identical to the bridge-only path.
-  // Design: axona-docs/implementation/Peer-Relayed-Signaling-v0.1.md.
-  meshRelay = false,
+  // Peer-relayed signaling (bridgeless connect).  When true (the default as of
+  // kernel v2.19.0, after the end-to-end verification in Peer-Relayed-Signaling
+  // §8d), sendSignal prefers routing SDP/ICE through the mesh (via an AxonaPeer
+  // relay registered with setSignalRelay) over the bridge, and connectViaRelay()
+  // forms a new WebRTC edge to a nodeId without the bridge — driven autonomously
+  // by AxonaPeer._considerCandidate on peer discovery.  Pass `false` to pin the
+  // legacy bridge-only behaviour (the bridge bootstrap path is unaffected either
+  // way: it signals by 3-char connId, which is not a hex nodeId, so the relay
+  // sink never intercepts it).  Design:
+  // axona-docs/implementation/Peer-Relayed-Signaling-v0.1.md.
+  meshRelay = true,
 } = {}) {
   if (typeof bridgeUrl !== 'string' || !/^wss?:\/\//.test(bridgeUrl)) {
     throw new TransportError(ErrorCodes.TRANSPORT_NOT_STARTED,
@@ -768,7 +772,12 @@ export function webTransport({
     if (toHex === localNodeIdHex) return false;
     try {
       const toBig = fromHex(toHex);
-      if (webrtc.ownsPeer(toBig) || mesh.isConnected(toHex)) return false;
+      // No-op if we already own a binding, an open channel, OR an in-flight
+      // negotiation to this peer.  The last guard is essential: peer discovery
+      // (triadic_introduce etc.) fires connectViaRelay repeatedly, and without
+      // it each call would re-run _initiateTo and overwrite the in-progress
+      // RTCPeerConnection, restarting ICE so the channel never opens.
+      if (webrtc.ownsPeer(toBig) || mesh.isConnected(toHex) || mesh.hasPeer(toHex)) return false;
     } catch { return false; }
     log('relay-connect-initiate', { to: toHex });
     mesh._initiateTo(toHex);
