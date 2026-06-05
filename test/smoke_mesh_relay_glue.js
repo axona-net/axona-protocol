@@ -110,6 +110,27 @@ async function main() {
     check('connectViaRelay returns false for a non-hex id', tOn.connectViaRelay('abc') === false);
   }
 
+  // ── connectViaRelay backpressure: cap concurrent in-flight negotiations ──
+  {
+    const { t: tOn } = makeTransport(me, { meshRelay: true });
+    check('pendingNegotiations() starts at 0', tOn.mesh.pendingNegotiations() === 0);
+    // An OPEN peer (openedAt>0) does not count; only never-opened negotiations do.
+    tOn.mesh._peers.set('open-peer', { openedAt: Date.now() });
+    for (let i = 0; i < 64; i++) tOn.mesh._peers.set('neg-' + i, { openedAt: 0 });
+    check('pendingNegotiations() counts only never-opened (64, not 65)',
+      tOn.mesh.pendingNegotiations() === 64);
+    // At the cap, a NEW relay connect to an unrelated peer is throttled (returns
+    // false BEFORE _initiateTo — so no RTCPeerConnection is needed in this unit
+    // env). This is the DoS bound: a flood of fabricated peerIds can't drive
+    // unbounded concurrent negotiations.
+    check('connectViaRelay throttled at the pending-negotiation cap',
+      tOn.connectViaRelay(otherHex) === false);
+    // The watchdog reaps stuck never-opened entries; emulate one freeing → the
+    // count drops below the ceiling, so a future connect would proceed again.
+    tOn.mesh._peers.delete('neg-0');
+    check('cap self-frees as negotiations are reaped', tOn.mesh.pendingNegotiations() === 63);
+  }
+
   // ── capability surface ───────────────────────────────────────────────
   {
     const { t: tOn }  = makeTransport(me, { meshRelay: true });

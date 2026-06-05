@@ -304,6 +304,23 @@ export class MeshManager {
   }
 
   /**
+   * Count of peers still NEGOTIATING — a channel is forming but has never
+   * opened (`openedAt === 0`).  Each holds a live RTCPeerConnection, so this is
+   * the in-flight connection-setup load.  Used to throttle new relay connects
+   * (connectViaRelay): an attacker spraying gossip introductions with distinct
+   * fabricated peerIds would otherwise drive unbounded concurrent negotiations.
+   * Self-healing: the negotiation watchdog reaps a stuck never-opened entry
+   * after NEGOTIATION_DEADLINE_MS, so the count falls again on its own — no
+   * external completion signal needed (a never-opened teardown fires no
+   * onPeerLost, so a counter maintained elsewhere could not be decremented).
+   */
+  pendingNegotiations() {
+    let n = 0;
+    for (const st of this._peers.values()) if (!(st.openedAt > 0)) n++;
+    return n;
+  }
+
+  /**
    * v0.4.0 — Most recent RTT to peer in milliseconds, or -1 if not
    * known yet (no completed ping/pong round-trip).  Equivalent to the
    * Transport contract's `getLatency`.

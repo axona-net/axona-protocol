@@ -105,6 +105,17 @@ const RECONNECT_BACKOFF_MAX_MS     = 16000;
 const UPGRADE_CLOSE_CODE = 4426;
 /** Window of recent RTT samples kept for the average. */
 const RTT_WINDOW = 10;
+// Ceiling on concurrent in-flight relay negotiations a node will START. The
+// autonomous bridgeless-connect path (connectViaRelay, fired from peer
+// discovery) is otherwise unbounded: a peer that sprays gossip introductions
+// (triadic_introduce / hop_cache / lateral_spread) with distinct fabricated
+// nodeIds could drive an arbitrary number of concurrent RTCPeerConnection
+// negotiations. We throttle on the mesh's never-opened count, which the
+// negotiation watchdog reaps on its own — so the cap frees up without any
+// completion bookkeeping. Generous: normal nodes open channels in seconds and
+// sit far below this; legitimate relay connects past the cap simply retry on
+// the next discovery tick.
+const MAX_PENDING_RELAY_NEGOTIATIONS = 64;
 
 export function webTransport({
   bridgeUrl,
@@ -779,6 +790,15 @@ export function webTransport({
       // RTCPeerConnection, restarting ICE so the channel never opens.
       if (webrtc.ownsPeer(toBig) || mesh.isConnected(toHex) || mesh.hasPeer(toHex)) return false;
     } catch { return false; }
+    // Backpressure: cap concurrent in-flight relay negotiations so a flood of
+    // gossip-introduced fake peerIds can't drive unbounded RTCPeerConnection
+    // setup. The watchdog reaps stuck never-opened negotiations, so the cap
+    // self-frees; a throttled connect retries on the next discovery tick.
+    const pending = mesh.pendingNegotiations();
+    if (pending >= MAX_PENDING_RELAY_NEGOTIATIONS) {
+      log('relay-connect-throttled', { to: toHex, pending });
+      return false;
+    }
     log('relay-connect-initiate', { to: toHex });
     mesh._initiateTo(toHex);
     return true;
