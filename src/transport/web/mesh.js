@@ -497,21 +497,7 @@ export class MeshManager {
       });
     };
 
-    pc.onconnectionstatechange = () => {
-      this._log('pc-state', {
-        peerId: state.peerId,
-        pc:     pc.connectionState,
-      });
-      if (pc.connectionState === 'failed') {
-        state.state = 'failed';
-        this._refreshPath(state, 'on-failed');
-        this._scheduleRetry(state);
-        this._notify();
-      } else if (pc.connectionState === 'closed') {
-        state.state = 'closed';
-        this._notify();
-      }
-    };
+    pc.onconnectionstatechange = () => this._onConnState(state, pc.connectionState);
 
     // ICE-level state transitions: 'new' → 'checking' → 'connected' →
     // 'completed' → 'disconnected' → 'failed' → 'closed'.  More
@@ -820,6 +806,36 @@ export class MeshManager {
       return 'recovered';
     }
     return 'none';
+  }
+
+  // Extracted from pc.onconnectionstatechange so the terminal-state policy is
+  // unit-testable (see smoke_mesh_closed_teardown.js).
+  //   failed → mark + refresh path + one scheduled retry (PC may recover via a
+  //            fresh negotiation).
+  //   closed → terminal; the PC can never be reused. If THIS entry is still the
+  //            live one (i.e. we did NOT initiate the close via _teardown, which
+  //            already deleted it), the channel died out from under us (remote
+  //            close / abrupt drop) — tear it down so the slot frees: hasPeer →
+  //            false, onPeerLost fires for upper layers to route around, and
+  //            discovery (_considerCandidate → connectViaRelay) can re-drive a
+  //            FRESH negotiation. Without this the peer wedges in 'closed'
+  //            forever and connectViaRelay's idempotency guard no-ops
+  //            permanently — a peer discovered after such a drop could never
+  //            reconnect bridgeless.
+  _onConnState(state, connectionState) {
+    this._log('pc-state', { peerId: state.peerId, pc: connectionState });
+    if (connectionState === 'failed') {
+      state.state = 'failed';
+      this._refreshPath(state, 'on-failed');
+      this._scheduleRetry(state);
+      this._notify();
+    } else if (connectionState === 'closed') {
+      state.state = 'closed';
+      if (this._peers.get(state.peerId) === state) {
+        this._teardown(state.peerId, 'pc-closed');
+      }
+      this._notify();
+    }
   }
 
   _scheduleRetry(state) {
