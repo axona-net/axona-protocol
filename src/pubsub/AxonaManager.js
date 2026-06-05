@@ -39,7 +39,7 @@
  */
 
 import { toHex, fromHex, isHexId } from '../utils/hexid.js';
-import { verifyEnvelope, checkFreshness, MAX_PUBLISH_SKEW_MS } from './envelope.js';
+import { verifyEnvelope, checkFreshness, computeMsgId, MAX_PUBLISH_SKEW_MS } from './envelope.js';
 import { verifyKill } from './kill.js';
 import { verifyTouch } from './touch.js';
 import { verifyUnpub } from './unpub.js';
@@ -656,6 +656,47 @@ export class AxonaManager {
   }
 
   /**
+   * Reconcile the UNSIGNED wire `postHash` against the content-derived msgId of
+   * the (already signature-verified) envelope.  postHash is the key the replay
+   * cache, pull(), and kill()/tombstones all index on — but it travels as a
+   * sibling wire field, NOT inside the signed bytes, so without this check a
+   * publisher or relay could cache content under a postHash that is NOT its
+   * true content hash.  That would defeat the v2.18.0 content-address guarantee
+   * (pull(realMsgId) would miss, kill(realMsgId) would never match → an
+   * un-killable message), and let an attacker poison a different message's id.
+   *
+   * The honest publish path sets `postHash = envelope.msgId = computeMsgId(...)`
+   * (AxonaPeer.pub), so this is a no-op for honest traffic; it only drops a
+   * tampered postHash.  Non-envelope / message-less payloads carry no canonical
+   * content hash to reconcile and pass through (matching `_publishSignatureOk`'s
+   * "nothing to forge" stance) — the protection targets the envelope path,
+   * which is the only one `pub()` produces.
+   *
+   * @param {string} json          serialized envelope
+   * @param {string} wirePostHash  the unsigned wire postHash
+   * @returns {Promise<boolean>}   true if consistent (or nothing to reconcile)
+   */
+  async _postHashConsistent(json, wirePostHash) {
+    // Only a PRESENT postHash is reconciled. An absent one asserts no content
+    // address to verify — the message is simply un-addressable (pull/kill by id
+    // can't reach it), which is no worse than before and never a poisoning
+    // lever; the attack the reconciliation closes requires a postHash set to a
+    // SPECIFIC value, which is exactly the present case. Honest publishes always
+    // carry postHash = envelope.msgId (AxonaPeer.pub), so this never drops them.
+    if (typeof wirePostHash !== 'string' || wirePostHash.length === 0) return true;
+    if (typeof json !== 'string') return true;
+    let env;
+    try { env = JSON.parse(json); } catch { return true; }
+    if (!env || typeof env !== 'object' || !('message' in env)) return true;
+    const publisher = (typeof env.signature === 'string' && typeof env.signerPubkey === 'string')
+      ? env.signerPubkey : null;
+    let expected;
+    try { expected = await computeMsgId({ publisher, message: env.message }); }
+    catch { return false; }                          // can't hash the content → suspicious, drop
+    return wirePostHash === expected;
+  }
+
+  /**
    * C-2 ingress freshness + per-publisher monotonic-seq gate.  Run at a
    * root axon on the LIVE-publish path ONLY (never on the replay path,
    * which deliberately serves cached history older than the freshness
@@ -1248,6 +1289,14 @@ export class AxonaManager {
       this._emitLog?.('debug', 'publish-stale-dropped', { topicId: toHex(topicId), reason: fo.reason });
       return 'consumed';
     }
+    // Content-address integrity: the cache/pull/kill key (postHash) must equal
+    // the verified content hash, or the message is dropped (see
+    // _postHashConsistent).  Keep this AFTER the signature check so the
+    // signerPubkey it folds in is genuine.
+    if (!(await this._postHashConsistent(json, postHash))) {
+      this._emitLog?.('debug', 'publish-posthash-mismatch-dropped', { topicId: toHex(topicId) });
+      return 'consumed';
+    }
     // Phase A #2: a killed message must not be resurrected by a lagging
     // replica re-gossiping it.
     if (this._isTombstoned(postHash)) {
@@ -1725,6 +1774,11 @@ export class AxonaManager {
     const fo = this._publishFreshAndOrdered(json, this._now());
     if (!fo.ok) {
       this._emitLog?.('debug', 'publish-stale-dropped', { topicId: toHex(topicId), reason: fo.reason });
+      return;
+    }
+    // Content-address integrity (see _postHashConsistent / _onPublish).
+    if (!(await this._postHashConsistent(json, postHash))) {
+      this._emitLog?.('debug', 'publish-posthash-mismatch-dropped', { topicId: toHex(topicId) });
       return;
     }
     if (this._isTombstoned(postHash)) {
