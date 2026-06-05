@@ -170,12 +170,62 @@ async function testMitmFingerprintsRejected() {
   check('Bob did NOT bind (CBV diverged)',   bobBound.length === 0 && !bob.auth.isBound(connA));
 }
 
+// A transient throw from bindPeer (or an id-mismatch return) must NOT leave the
+// channel wedged: _progress sets st.verifying=true before verifyAuthHello, and
+// if that flag isn't cleared on a non-success exit, the guard
+// `!st.verifying && !st.bound` blocks EVERY future retry — the channel stays
+// authenticated-but-never-bound forever. This drives a bindPeer that throws
+// once and asserts the channel RECOVERS on a re-driven hello-sig.
+async function testTransientBindThrowRecovers() {
+  console.log('\n── a transient bindPeer throw recovers (no verifying-wedge) ──');
+  const aliceId = await deriveIdentity({ lat: 12.3, lng: 45.6 });
+  const bobId   = await deriveIdentity({ lat: 65.4, lng: -32.1 });
+  const connA = 'cA', connB = 'cB';
+
+  let throwArmed = true;
+  const aliceBound = [];
+  let lastSigToAlice = null;
+
+  const alice = {}, bob = {};
+  const aliceSend = (_m, frame) => {
+    if (frame.type === 'hello')          queueMicrotask(() => bob.auth.onHello(connA, frame.body));
+    else if (frame.type === 'hello-sig') queueMicrotask(() => bob.auth.onHelloSig(connA, frame.body));
+  };
+  const bobSend = (_m, frame) => {
+    if (frame.type === 'hello')          queueMicrotask(() => alice.auth.onHello(connB, frame.body));
+    else if (frame.type === 'hello-sig') { lastSigToAlice = frame.body; queueMicrotask(() => alice.auth.onHelloSig(connB, frame.body)); }
+  };
+
+  alice.auth = new MeshAuth({
+    identity: aliceId, send: aliceSend,
+    bindPeer: (nodeIdHex, meshId) => {
+      if (throwArmed) { throwArmed = false; throw new Error('transient bind failure'); }
+      aliceBound.push({ nodeIdHex, meshId });
+    },
+  });
+  bob.auth = new MeshAuth({ identity: bobId, send: bobSend, bindPeer: () => {} });
+
+  alice.auth.onChannelOpen(connB);
+  bob.auth.onChannelOpen(connA);
+
+  for (let i = 0; i < 12; i++) await settle();             // alice's first bind throws
+  check('alice did NOT bind on the throwing attempt', aliceBound.length === 0);
+  check('alice is not wedged after the throw (can retry)', !alice.auth.isBound(connB));
+
+  // Re-drive the same proof: only succeeds if st.verifying was reset on the throw.
+  if (lastSigToAlice) alice.auth.onHelloSig(connB, lastSigToAlice);
+  for (let i = 0; i < 12 && aliceBound.length === 0; i++) await settle();
+  check('alice REBINDS after the transient failure (verifying was cleared)',
+    aliceBound.length === 1 && alice.auth.isBound(connB));
+}
+
 async function main() {
   console.log('WebRTC-mesh MeshAuth loopback integration');
   await testTwoPeerBindAcrossAsymmetricConnIds();
   await testForgedPeerNotBound();
   await testHonestFingerprintsBind();
   await testMitmFingerprintsRejected();
+  await testTransientBindThrowRecovers();
   console.log(`\nResult: ${passed} passed, ${failed} failed`);
   process.exit(failed === 0 ? 0 : 1);
 }
