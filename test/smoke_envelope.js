@@ -150,8 +150,8 @@ async function testTamperSignature() {
   const tampered = { ...env, signature: flippedHex };
   const r = await verifyEnvelope(tampered);
   check('tampered signature → ok:false', r.ok === false);
-  // Either bad_signature (sig doesn't verify) or bad_msgid (msgId
-  // includes the signature) — both are valid rejection reasons.
+  // msgId = hash(publisher+message) no longer folds in the signature, so a
+  // flipped signature is caught by the Ed25519 check → bad_signature.
   check('reason is bad_signature or bad_msgid',
     r.reason === 'bad_signature' || r.reason === 'bad_msgid');
 }
@@ -171,13 +171,28 @@ async function testRejectMissingFields() {
 }
 
 async function testMsgIdDeterminism() {
-  console.log('\n── computeMsgId determinism ──');
-  const a = await computeMsgId({ ts: 100, topic: 't', message: { a: 1, b: 2 } });
-  const b = await computeMsgId({ ts: 100, topic: 't', message: { b: 2, a: 1 } });
+  console.log('\n── computeMsgId determinism (hash(publisher+message)) ──');
+  const a = await computeMsgId({ publisher: 'pubA', message: { a: 1, b: 2 } });
+  const b = await computeMsgId({ publisher: 'pubA', message: { b: 2, a: 1 } });
   check('msgId independent of object key order', a === b);
 
-  const c = await computeMsgId({ ts: 101, topic: 't', message: { a: 1, b: 2 } });
-  check('different ts → different msgId', a !== c);
+  // The id is a content address of (publisher, message): it does NOT depend
+  // on time. Same (publisher, message) ⇒ same id regardless of when sent.
+  const sameContentLater = await computeMsgId({ publisher: 'pubA', message: { a: 1, b: 2 } });
+  check('id is time-independent (same publisher+message → same id)', a === sameContentLater);
+
+  // Different publisher ⇒ different id.
+  const otherPub = await computeMsgId({ publisher: 'pubB', message: { a: 1, b: 2 } });
+  check('different publisher → different msgId', a !== otherPub);
+
+  // Different message (e.g. publisher-added nonce) ⇒ different id.
+  const withNonce = await computeMsgId({ publisher: 'pubA', message: { a: 1, b: 2, nonce: 7 } });
+  check('publisher nonce in message → different msgId', a !== withNonce);
+
+  // Unsigned (publisher = null) is well-defined and stable.
+  const anon1 = await computeMsgId({ message: { a: 1 } });
+  const anon2 = await computeMsgId({ publisher: null, message: { a: 1 } });
+  check('unsigned (null publisher) is stable', anon1 === anon2);
 }
 
 // ── End-to-end through AxonaPeer ─────────────────────────────────────
