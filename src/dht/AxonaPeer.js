@@ -62,6 +62,25 @@ const LOCAL_PROBE_MAX   = 8;
 // finding 6) stays cached, so per-ICE-candidate signal frames within one
 // negotiation don't each pay a full lookup.
 const RELAY_REACH_TTL_MS = 5000;
+// Memory bounds for two caches that the TTL/threshold logic alone does NOT
+// bound by entry COUNT: the relay-reachability verdict cache keeps one entry
+// per distinct peer-id ever checked (TTL only gates freshness, never evicts),
+// and the triadic transit cache keeps one entry per (origin,next) pair that
+// never reaches TRIADIC_THRESHOLD. Both leak slowly on a churny/large mesh.
+const RELAY_REACH_CAP   = 1024;
+const TRANSIT_CACHE_CAP = 4096;
+
+/** Evict the oldest-inserted half of a Map once it exceeds `cap` (cheap FIFO
+ *  bound for caches whose entries are individually cheap to recompute). */
+function capOldest(map, cap) {
+  if (map.size <= cap) return;
+  const drop = cap / 2;
+  let i = 0;
+  for (const k of map.keys()) {
+    if (i++ >= drop) break;
+    map.delete(k);
+  }
+}
 
 export class AxonaPeer extends DHT {
   /**
@@ -2930,6 +2949,7 @@ export class AxonaPeer extends DHT {
         .catch(() => { /* opportunistic — see _reinforceWave comment */ });
     } else {
       node.transitCache.set(key, count);
+      capOldest(node.transitCache, TRANSIT_CACHE_CAP);
     }
   }
 
@@ -3246,6 +3266,7 @@ export class AxonaPeer extends DHT {
     try { const lk = await this.lookup(toBig); ok = !!(lk && lk.found); }
     catch { ok = false; }
     this._relayReach.set(key, { ok, ts: Date.now() });
+    capOldest(this._relayReach, RELAY_REACH_CAP);
     return ok;
   }
 

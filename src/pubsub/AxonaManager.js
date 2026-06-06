@@ -240,6 +240,14 @@ export class AxonaManager {
     //   inner key: postHash string (content hash, not a DHT address)
     /** @type {Map<bigint, Map<string, RelayCounters>>} */
     this._counters = new Map();
+    // Post-level metrics are best-effort observability, so bound both
+    // dimensions: a long-lived root axon would otherwise accumulate one inner
+    // entry per post EVER seen on every topic it hosts, without eviction. Cap
+    // posts-per-topic and total topics; oldest entries age out (metrics for
+    // very old posts simply stop being reported — they're past the replay
+    // window anyway). See _counterFor.
+    this._countersTopicCap = 1024;
+    this._countersPostCap  = 4096;
 
     /** requestId(string) -> { accumulated: [{responderId(hex), entries[]}] } */
     this._pendingMetricsReqs = new Map();
@@ -783,6 +791,13 @@ export class AxonaManager {
         return { ok: false, reason: 'replay_seq' };
       }
       if (hw === undefined || env.seq > hw) {
+        // LRU-touch: delete + re-insert so this publisher moves to the MRU end.
+        // Critical for replay protection — a plain Map.set on an existing key
+        // keeps its ORIGINAL insertion position, so _capStore (drop oldest-
+        // inserted) would evict the longest-ACTIVE publishers first, reopening
+        // their replay window precisely for the publishers that matter most.
+        // With the touch, the cap evicts genuinely-idle publishers instead.
+        this._publisherSeq.delete(key);
         this._publisherSeq.set(key, env.seq);
         this._capStore(this._publisherSeq, this._publisherSeqCap);
       }
@@ -1988,7 +2003,13 @@ export class AxonaManager {
 
   _counterFor(topicId, postHash) {
     let byTopic = this._counters.get(topicId);
-    if (!byTopic) { byTopic = new Map(); this._counters.set(topicId, byTopic); }
+    if (!byTopic) {
+      byTopic = new Map();
+      this._counters.set(topicId, byTopic);
+      // Bound the number of topics tracked (evicts oldest; the just-added
+      // topic is newest so it survives).
+      this._capStore(this._counters, this._countersTopicCap);
+    }
     let c = byTopic.get(postHash);
     if (!c) {
       c = {
@@ -2001,6 +2022,8 @@ export class AxonaManager {
         last_updated:     this._now(),
       };
       byTopic.set(postHash, c);
+      // Bound posts-per-topic (oldest posts' metrics age out).
+      this._capStore(byTopic, this._countersPostCap);
     }
     return c;
   }
