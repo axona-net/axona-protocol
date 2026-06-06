@@ -98,10 +98,52 @@ async function testLazyAxonCatchUpStillWorks() {
   check('no re-delivery of backlog on later refreshes', delivered.length === 2);
 }
 
+async function testRemoteReplayBatchAfterRelayAsRoot() {
+  console.log('\n── remote replay-batch delivers backlog even when the node relayed it as a root ──');
+  // The masking bug: a node that is a K-closest ROOT for a topic relays
+  // publishes (marking them in _seenPublishes) BEFORE its local app
+  // subscribes — so they are cached/relayed but never app-delivered. When
+  // the app later subscribes (since:'all'), the backlog can arrive from a
+  // *different* root as a pubsub:replay-batch. _onReplayBatch must NOT gate
+  // app delivery on _seenPublishes (the network-level "I've relayed this"
+  // set) — that's _appDelivered's job. Otherwise the backlog is silently
+  // dropped for exactly the subscribers that happen to also be roots, which
+  // is non-deterministic per topic/K-closest membership.
+  const { am, delivered } = makeManager();
+
+  // Node relayed these as a root (marks _seenPublishes; no app delivery).
+  await deliverPublish(am, 'x1', 401);
+  await deliverPublish(am, 'x2', 402);
+  check('relayed-as-root backlog not delivered before subscribe', delivered.length === 0);
+
+  // App subscribes; a REMOTE root replays the backlog to us.
+  await am._onReplayBatch({
+    topicId: TOPIC,
+    messages: [
+      { json: JSON.stringify({ m: 'x1' }), publishId: 'x1', publishTs: 401, publisher: OTHER },
+      { json: JSON.stringify({ m: 'x2' }), publishId: 'x2', publishTs: 402, publisher: OTHER },
+    ],
+  }, { fromId: OTHER });
+  check('remote replay-batch delivers full backlog to the app', delivered.length === 2);
+  check('backlog is exactly x1,x2', delivered.slice().sort().join(',') === 'x1,x2');
+
+  // Idempotency: a second identical replay-batch (e.g. from another root)
+  // must NOT re-deliver — _appDelivered makes app delivery exactly-once.
+  await am._onReplayBatch({
+    topicId: TOPIC,
+    messages: [
+      { json: JSON.stringify({ m: 'x1' }), publishId: 'x1', publishTs: 401, publisher: OTHER },
+      { json: JSON.stringify({ m: 'x2' }), publishId: 'x2', publishTs: 402, publisher: OTHER },
+    ],
+  }, { fromId: OTHER });
+  check('duplicate replay-batch does not re-deliver', delivered.length === 2);
+}
+
 async function main() {
   console.log('Axona pub/sub replay-idempotency smoke');
   await testNoReDeliveryOnRefresh();
   await testLazyAxonCatchUpStillWorks();
+  await testRemoteReplayBatchAfterRelayAsRoot();
   console.log(`\nResult: ${passed} passed, ${failed} failed`);
   process.exit(failed === 0 ? 0 : 1);
 }
