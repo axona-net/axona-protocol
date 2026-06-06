@@ -1181,7 +1181,6 @@ export class AxonaPeer extends DHT {
 
   async lookup(targetKey) {
     const node   = this._node;
-    const engine = this._engine;
     const domain = this._domain;
     if (!node || !node.alive) return null;
 
@@ -2162,8 +2161,20 @@ export class AxonaPeer extends DHT {
 
   // ── AxonaManager glue ────────────────────────────────────────────
 
+  // Forward AxonaManager's 24 security drop-path logs (bad-signature, stale,
+  // oversize, posthash-mismatch, unauthorized kill/touch/unpub, …) to this
+  // peer's onLog surface. Idempotent per manager instance; defensively
+  // optional so an older vendored AxonaManager without setLogSink is a no-op.
+  _wireManagerLog(am) {
+    if (am && typeof am.setLogSink === 'function' && this._managerLogWired !== am) {
+      am.setLogSink((level, msg, context) => this._emitLog(level, msg, context));
+      this._managerLogWired = am;
+    }
+    return am;
+  }
+
   _requireAxonaManager(callerName) {
-    if (this._axonaManager) return this._axonaManager;
+    if (this._axonaManager) return this._wireManagerLog(this._axonaManager);
     // Fallback 1: ask the engine for this node's AxonaManager.  Different
     // engine builds expose this differently; we probe in priority
     // order and cache the result.
@@ -2193,7 +2204,7 @@ export class AxonaPeer extends DHT {
       );
     }
     this._axonaManager = am;
-    return am;
+    return this._wireManagerLog(am);
   }
 
   /**
@@ -2851,7 +2862,6 @@ export class AxonaPeer extends DHT {
   /** Admission gate.  Same logic as engine._addByVitality verbatim. */
   async _addByVitality(newSyn) {
     const node   = this._node;
-    const engine = this._engine;
     const domain = this._domain;
     const cap = node._maxSynaptome ?? domain.MAX_SYNAPTOME;
 
@@ -2931,7 +2941,6 @@ export class AxonaPeer extends DHT {
    */
   async _tryAnneal() {
     const node   = this._node;
-    const engine = this._engine;
     const domain = this._domain;
     if (!node.alive || node.synaptome.size === 0) return;
 
@@ -2981,7 +2990,6 @@ export class AxonaPeer extends DHT {
    */
   async _evictAndReplace(deadSyn) {
     const node   = this._node;
-    const engine = this._engine;
     const domain = this._domain;
 
     node.synaptome.delete(deadSyn.peerId);
@@ -3017,7 +3025,6 @@ export class AxonaPeer extends DHT {
    */
   async _localCandidate(lo, hi) {
     const node   = this._node;
-    const engine = this._engine;
     const domain = this._domain;
 
     const probeTargets = [...node.synaptome.values()].map(s => s.peerId);
@@ -3406,7 +3413,6 @@ export class AxonaPeer extends DHT {
   //
   async _lookupStep(ctx) {
     const node   = this._node;
-    const engine = this._engine;
     const domain = this._domain;
     if (!node || !node.alive) {
       return this._lookupResult(ctx, false);

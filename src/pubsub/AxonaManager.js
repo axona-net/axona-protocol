@@ -139,6 +139,9 @@ export class AxonaManager {
     pickRelayPeer        = null,   // NX-17+ batch-adoption path override
     shouldRecruitSubAxon = null,   // protocol-specific override
     now                  = () => Date.now(),
+    emitLog              = null,   // (level, msg, context) sink — forwards the
+                                   // 24 security-drop logs to peer.onLog. When
+                                   // null the `this._emitLog?.()` calls no-op.
   } = {}) {
     if (!dht) throw Error('AxonaManager: dht is required');
 
@@ -153,6 +156,13 @@ export class AxonaManager {
     this.crossFragmentRoots    = crossFragmentRoots;
     this.replayCacheSize       = replayCacheSize;
     this._now                  = now;
+    // Security/observability log sink. Until this is wired (see setLogSink),
+    // the 24 `this._emitLog?.(...)` drop-path calls — bad-signature, stale,
+    // oversize, posthash-mismatch, unauthorized kill/touch/unpub, etc. — are
+    // silent no-ops. Production attaches the peer's onLog surface so dropped
+    // (potentially hostile) messages are actually observable.
+    /** @type {((level: string, msg: string, context?: object) => void) | null} */
+    this._emitLog              = emitLog;
 
     // Publisher-side: highest publishTs we have observed for each topic.
     // BigInt topicId key.
@@ -171,7 +181,10 @@ export class AxonaManager {
     // Per-node LRU of publishIds we have already processed (string keys).
     this._seenPublishes = new Map();     // publishId(string) -> insertedAt (ms)
     this._seenPublishCap = 4096;
-    this._seenPublishTtlMs = 60_000;
+    // NB: dedup is size-capped only, NOT TTL-expired — expiring a "seen"
+    // entry on a timer would let a publish replayed after the window
+    // re-deliver, breaking exactly-once. The C-2 freshness window bounds
+    // replays instead.
 
     // C-2: per-publisher monotonic-seq high-water marks, keyed by the
     // signed `signerPubkey` (64-char hex).  Bounded LRU.  Used at live
@@ -270,6 +283,36 @@ export class AxonaManager {
     dht.onRoutedMessage('pubsub:reshareNotify', (p, m) => this._onReshareNotify(p, m));
 
     this._timer = null;
+  }
+
+  /**
+   * Attach (or replace) the security/observability log sink after construction.
+   * Lets a peer that resolves an externally- or engine-supplied AxonaManager
+   * forward the drop-path logs to its own onLog surface without re-constructing.
+   * Idempotent and cheap; pass null to detach.
+   * @param {((level: string, msg: string, context?: object) => void) | null} fn
+   */
+  setLogSink(fn) {
+    this._emitLog = (typeof fn === 'function') ? fn : null;
+  }
+
+  /**
+   * Bound a dedup/replay store to `cap` entries: when it overflows, evict the
+   * oldest-inserted half (Map and Set both iterate keys in insertion order, so
+   * this is a cheap FIFO-LRU). The single home for the eviction idiom that was
+   * copy-pasted across every bounded store (_seenPublishes, _appDelivered,
+   * _seenKills, _seenTouches, _publisherSeq, _seenMetricsReqs).
+   * @param {Map<any,any>|Set<any>} store
+   * @param {number} cap
+   */
+  _capStore(store, cap) {
+    if (store.size <= cap) return;
+    const toDrop = cap / 2;
+    let i = 0;
+    for (const k of store.keys()) {     // Set.keys() aliases values()
+      if (i++ >= toDrop) break;
+      store.delete(k);
+    }
   }
 
   /** Start the periodic refresh/sweep timer. Idempotent. */
@@ -741,15 +784,7 @@ export class AxonaManager {
       }
       if (hw === undefined || env.seq > hw) {
         this._publisherSeq.set(key, env.seq);
-        if (this._publisherSeq.size > this._publisherSeqCap) {
-          // Evict oldest-inserted half (Map preserves insertion order).
-          const toDrop = this._publisherSeqCap / 2;
-          let i = 0;
-          for (const k of this._publisherSeq.keys()) {
-            if (i++ >= toDrop) break;
-            this._publisherSeq.delete(k);
-          }
-        }
+        this._capStore(this._publisherSeq, this._publisherSeqCap);
       }
     }
     return { ok: true };
@@ -789,10 +824,7 @@ export class AxonaManager {
     // 3. dedup by kill signature.
     if (this._seenKills.has(kill.signature)) return 'consumed';
     this._seenKills.set(kill.signature, this._now());
-    if (this._seenKills.size > this._seenKillCap) {
-      const toDrop = this._seenKillCap / 2; let i = 0;
-      for (const k of this._seenKills.keys()) { if (i++ >= toDrop) break; this._seenKills.delete(k); }
-    }
+    this._capStore(this._seenKills, this._seenKillCap);
     // 4. do we host the topic?
     const role = this.axonRoles.get(topicId);
     if (!role) return 'forward';                       // not hosting → route onward to a root
@@ -866,10 +898,7 @@ export class AxonaManager {
     // 3. dedup by touch signature.
     if (this._seenTouches.has(touch.signature)) return 'consumed';
     this._seenTouches.set(touch.signature, this._now());
-    if (this._seenTouches.size > this._seenTouchCap) {
-      const toDrop = this._seenTouchCap / 2; let i = 0;
-      for (const k of this._seenTouches.keys()) { if (i++ >= toDrop) break; this._seenTouches.delete(k); }
-    }
+    this._capStore(this._seenTouches, this._seenTouchCap);
     // 4. do we host the topic?
     const role = this.axonRoles.get(topicId);
     if (!role) return 'forward';                       // not hosting → route onward to a root
@@ -1454,19 +1483,9 @@ export class AxonaManager {
   _alreadySeenPublish(publishId) {
     if (!publishId) return false;
     const now = this._now();
-    if (this._seenPublishes.has(publishId)) {
-      this._seenPublishes.get(publishId);
-      return true;
-    }
+    if (this._seenPublishes.has(publishId)) return true;
     this._seenPublishes.set(publishId, now);
-    if (this._seenPublishes.size > this._seenPublishCap) {
-      const toDrop = this._seenPublishCap / 2;
-      let i = 0;
-      for (const k of this._seenPublishes.keys()) {
-        if (i++ >= toDrop) break;
-        this._seenPublishes.delete(k);
-      }
-    }
+    this._capStore(this._seenPublishes, this._seenPublishCap);
     return false;
   }
 
@@ -1482,14 +1501,7 @@ export class AxonaManager {
     if (publishId) {
       if (this._appDelivered.has(publishId)) return;     // already delivered locally
       this._appDelivered.set(publishId, this._now());
-      if (this._appDelivered.size > this._appDeliveredCap) {
-        const toDrop = this._appDeliveredCap / 2;
-        let i = 0;
-        for (const k of this._appDelivered.keys()) {
-          if (i++ >= toDrop) break;
-          this._appDelivered.delete(k);
-        }
-      }
+      this._capStore(this._appDelivered, this._appDeliveredCap);
     }
     try {
       this._deliveryCallback(topicId, json, publishId, publishTs);
@@ -2114,14 +2126,7 @@ export class AxonaManager {
   _markMetricsReqSeen(requestId) {
     if (this._seenMetricsReqs.has(requestId)) return true;
     this._seenMetricsReqs.add(requestId);
-    if (this._seenMetricsReqs.size > this._seenMetricsReqCap) {
-      const drop = this._seenMetricsReqCap / 2;
-      let i = 0;
-      for (const k of this._seenMetricsReqs) {
-        if (i++ >= drop) break;
-        this._seenMetricsReqs.delete(k);
-      }
-    }
+    this._capStore(this._seenMetricsReqs, this._seenMetricsReqCap);
     return false;
   }
 
