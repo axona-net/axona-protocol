@@ -167,7 +167,7 @@ async function testServerFactoryBeginsAuth() {
   await settle();
   const hello = sent.find(s => s.cid === 'conn-1' && s.msg?.payload?.type === AUTH_HELLO_TYPE);
   check('attach.added emitted an auth-hello', hello != null);
-  check('auth-hello advertises axona/4', hello?.msg?.payload?.body?.proto === 'axona/4');
+  check('auth-hello advertises axona/5', hello?.msg?.payload?.body?.proto === 'axona/5');
   check('auth-hello carries a nonce', typeof hello?.msg?.payload?.body?.nonce === 'string');
 
   // Factory rejects authenticate mode without a signer.

@@ -38,7 +38,7 @@ import { BridgeTransport, BRIDGE_CONN_ID_EXPORT as BRIDGE_CONN_ID } from './brid
 import { CompositeTransport } from './composite.js';
 import { isHexId, toHex, fromHex } from '../../utils/hexid.js';
 import { TransportError, ErrorCodes, UpgradeRequiredError } from '../../errors.js';
-import { KERNEL_VERSION }    from '../handshake.js';
+import { KERNEL_VERSION, WIRE_VERSION } from '../handshake.js';
 import {
   buildAuthHello, verifyAuthHello, cbvFromNonces, AUTH_PROTO,
 } from '../handshake-auth.js';
@@ -216,8 +216,10 @@ export function webTransport({
         // re-clears the gate without bespoke caller logic.
         try {
           socket.send(JSON.stringify({
-            type:    'client-hello',
-            version: peerVersion || KERNEL_VERSION,
+            type:        'client-hello',
+            version:     peerVersion || KERNEL_VERSION,
+            wireVersion: WIRE_VERSION,   // major-compat axis; the bridge gate
+                                         // rejects a mismatched major (4426)
             ...(meshRelay ? { capabilities: ['mesh-relay'] } : {}),
           }));
         } catch (err) {

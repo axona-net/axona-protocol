@@ -436,7 +436,7 @@ async function testWebTransportAutoHandshake() {
   t2.socket._deliver(JSON.stringify({ type: 'welcome', connId: 'yy', serverNonce: 'aa'.repeat(16) }));
   const forgedCbv = cbvFromNonces('aa'.repeat(16), 'yy', 'bridge');
   const aliceSig  = await buildAuthHello({ identity: alice, cbv: forgedCbv });   // alice's sig
-  const forged    = { proto: 'axona/4', nodeId: bridgeId.id, pubkey: bridgeId.pubkeyHex, sig: aliceSig.sig };
+  const forged    = { proto: 'axona/5', nodeId: bridgeId.id, pubkey: bridgeId.pubkeyHex, sig: aliceSig.sig };
   t2.socket._deliver(JSON.stringify({ type: 'axona', payload: { k: 'ntf', type: 'hello', body: forged } }));
   let rejected2 = false;
   try { await sp2; } catch { rejected2 = true; }
