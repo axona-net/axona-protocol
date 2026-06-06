@@ -4,22 +4,26 @@
 //
 // Regression guard for the failed/never-opened wedge (the symmetric twin of
 // the 'closed' wedge). A PeerConnection that fails ICE does NOT autonomously
-// reach 'closed', and the ping/stale/send-fail eviction timers only run on
-// ALREADY-OPEN channels — so a responder (which gets no retry) stuck in
-// 'failed'/'signaling'/'new' would otherwise sit in `_peers` forever, keeping
-// `hasPeer` true and no-op'ing `connectViaRelay`'s idempotency guard
-// permanently: it could never reconnect bridgeless. The negotiation watchdog
-// (MeshManager._armNegotiationWatchdog / _onNegotiationDeadline) tears such a
-// peer down, freeing the slot, and bounds the offerer retry loop.
+// reach 'closed', and the open-channel death checks only apply ONCE a channel
+// is open — so a responder (which gets no retry) stuck in 'failed'/'signaling'/
+// 'new' would otherwise sit in `_peers` forever, keeping `hasPeer` true and
+// no-op'ing `connectViaRelay`'s idempotency guard permanently: it could never
+// reconnect bridgeless.
+//
+// Since the lifecycle consolidation, the never-opened deadline is enforced by
+// the SINGLE reaper (_reapTick) — the same method that, once a channel is open,
+// also does pong-timeout / send-fail eviction. This drives _reapTick / _armReaper
+// / _retire directly.
 //
 // Contract:
-//   · _onNegotiationDeadline on a live, never-opened entry → _teardown
+//   · _reapTick on a live, never-opened entry past its deadline → _retire
 //     (hasPeer→false; NO onPeerLost since the channel never opened; deadline
-//     cleared so a future re-drive gets a fresh window).
-//   · an entry that opened (openedAt>0) is left alone.
-//   · a stale closure for a REPLACED entry must not tear down the fresh one.
+//     cleared so a future re-drive gets a fresh window) → 'reaped-negotiation'.
+//   · an entry that opened (openedAt>0) is left alone → 'live'.
+//   · a reap on a REPLACED/removed entry is a no-op → 'gone'.
 //   · the deadline is ABSOLUTE per peer — preserved across a retry
-//     (_teardownButKeep keeps it; re-arm reuses it), cleared on full teardown.
+//     (_retire{keepDeadline:true} keeps it; re-arm reuses it), cleared on a
+//     normal _retire.
 //   · _scheduleRetry refuses to schedule past the deadline (bounds the loop).
 //
 // Run: node test/smoke_mesh_negotiation_watchdog.js
@@ -42,14 +46,14 @@ function fakeState(over = {}) {
     pc: { close() {} }, dc: null,
     since: Date.now(), openedAt: 0,
     pings: 0, pongs: 0, lastPongAt: 0, rttBuffer: [], pendingCandidates: [],
-    pingTimer: null, staleTimer: null, retryTimer: null, negotiationTimer: null,
+    pingTimer: null, reaperTimer: null, sendFailures: 0, retryTimer: null,
     retryUsed: false, localCand: null, remoteCand: null, pathPollTimer: null,
     ...over,
   };
 }
 
 function main() {
-  console.log('MeshManager never-opened negotiation watchdog (failed/responder wedge guard)\n');
+  console.log('MeshManager never-opened negotiation reaper (failed/responder wedge guard)\n');
 
   // ── responder stuck in 'failed', never opened → torn down, no peer-death ──
   {
@@ -60,53 +64,54 @@ function main() {
     mesh._peers.set(PEER, st);
     mesh._negotiationDeadline.set(PEER, Date.now() - 1);   // deadline already passed
     check('precondition: hasPeer true while wedged in failed', mesh.hasPeer(PEER));
-    mesh._onNegotiationDeadline(st);
-    check('never-opened peer torn down at deadline', !mesh._peers.has(PEER));
+    const r = mesh._reapTick(st);
+    check('never-opened peer reaped at deadline', r === 'reaped-negotiation');
     check('hasPeer → false (connectViaRelay guard clears)', !mesh.hasPeer(PEER));
     check('onPeerLost NOT fired (channel never opened)', lost.length === 0);
     check('absolute deadline cleared on teardown', !mesh._negotiationDeadline.has(PEER));
   }
 
-  // ── an OPENED peer is left alone by the watchdog ─────────────────────────
+  // ── an OPENED peer is left alone by the reaper's negotiation branch ───────
   {
     const mesh = newMesh();
-    const st = fakeState({ state: 'open', openedAt: Date.now() });
+    const st = fakeState({ state: 'open', openedAt: Date.now(), lastPongAt: Date.now() });
     mesh._peers.set(PEER, st);
-    mesh._negotiationDeadline.set(PEER, Date.now() - 1);
-    mesh._onNegotiationDeadline(st);
-    check('opened peer NOT torn down (openedAt>0 guard)', mesh._peers.has(PEER));
+    mesh._negotiationDeadline.set(PEER, Date.now() - 1);   // past, but channel is OPEN
+    const r = mesh._reapTick(st);
+    check('opened peer NOT torn down (openedAt>0)', mesh._peers.has(PEER) && r === 'live');
   }
 
-  // ── stale closure must not tear down a REPLACED entry ────────────────────
+  // ── a reap on a REPLACED entry is a no-op ────────────────────────────────
   {
     const mesh = newMesh();
     const stale = fakeState();
     const fresh = fakeState();
     mesh._peers.set(PEER, fresh);
-    mesh._onNegotiationDeadline(stale);    // stale !== current live entry
-    check('fresh entry NOT torn down by stale watchdog', mesh._peers.get(PEER) === fresh);
+    const r = mesh._reapTick(stale);       // stale !== current live entry
+    check('fresh entry NOT torn down by a stale reap', mesh._peers.get(PEER) === fresh && r === 'gone');
   }
 
-  // ── absolute deadline survives a retry, cleared on full teardown ─────────
+  // ── absolute deadline survives a retry, cleared on a normal retire ───────
   {
     const mesh = newMesh();
     const st1 = fakeState({ role: 'offerer' });
     mesh._peers.set(PEER, st1);
-    mesh._armNegotiationWatchdog(st1);
+    mesh._armReaper(st1);
     const d1 = mesh._negotiationDeadline.get(PEER);
     check('arming sets an absolute deadline', typeof d1 === 'number');
-    check('a real watchdog timer is armed', st1.negotiationTimer != null);
+    check('a real reaper timer is armed', st1.reaperTimer != null);
 
-    mesh._teardownButKeep(PEER);            // retry path: drop entry, KEEP deadline
+    // retry path: drop entry, KEEP deadline, don't fire onPeerLost
+    mesh._retire(PEER, 'retry', { keepDeadline: true, notifyLost: false });
     check('retry teardown preserves the deadline', mesh._negotiationDeadline.get(PEER) === d1);
 
     const st2 = fakeState({ role: 'offerer' });
     mesh._peers.set(PEER, st2);
-    mesh._armNegotiationWatchdog(st2);      // fresh state re-arms against SAME deadline
+    mesh._armReaper(st2);                   // fresh state re-arms against SAME deadline
     check('re-arm after retry reuses the original deadline', mesh._negotiationDeadline.get(PEER) === d1);
 
-    mesh._teardown(PEER, 'cleanup');        // full teardown clears it
-    check('full teardown clears the deadline', !mesh._negotiationDeadline.has(PEER));
+    mesh._retire(PEER, 'cleanup');          // normal retire clears it
+    check('normal retire clears the deadline', !mesh._negotiationDeadline.has(PEER));
   }
 
   // ── _scheduleRetry refuses to schedule past the deadline ─────────────────

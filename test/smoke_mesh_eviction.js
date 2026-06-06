@@ -3,13 +3,18 @@
 //
 // Regression guard for the Safari-after-sleep failure: a data channel
 // whose pongs stop (or whose send() throws) while readyState still lies
-// 'open' must be evicted — _teardown + onPeerLost fire — so the mesh
-// heals and routes around it.  Before this, the stale-checker only
-// oscillated open↔stale and nothing ever tore a silent-but-'open'
-// channel down, so it stuck at yellow/red forever.
+// 'open' must be evicted — _retire + onPeerLost fire — so the mesh heals
+// and routes around it.  Before this, the stale-checker only oscillated
+// open↔stale and nothing ever tore a silent-but-'open' channel down, so
+// it stuck at yellow/red forever.
 //
-// Drives the extracted _staleCheckTick / _pingTick directly so the
-// time-based logic is testable without waiting on real intervals.
+// As of the lifecycle consolidation (one reaper + one _retire), the open-
+// channel death decisions live in a SINGLE method, _reapTick: it folds the
+// pong-timeout and send-fail evictions plus the stale↔open display flip.
+// _pingTick is now a pure ACTION that only records the send-failure streak
+// (returns 'sent'|'skip'|'fail'|'fail-limit'); the reaper does the eviction.
+// This drives those two methods directly so the time-based logic is testable
+// without waiting on real intervals.
 //
 // Run: node test/smoke_mesh_eviction.js
 // =====================================================================
@@ -46,7 +51,7 @@ function fakeState(over = {}) {
 }
 
 function main() {
-  console.log('MeshManager heartbeat-timeout eviction\n');
+  console.log('MeshManager heartbeat-timeout eviction (reaper)\n');
 
   // ── pong-timeout → eviction ───────────────────────────────────────
   {
@@ -55,8 +60,8 @@ function main() {
     mesh.onPeerLost(id => lost.push(id));
     const st = fakeState({ lastPongAt: Date.now() - 11_000 });  // > DEAD_PONG_MS (10s)
     mesh._peers.set(PEER, st);
-    const r = mesh._staleCheckTick(st);
-    check('pong-timeout returns evicted',        r === 'evicted');
+    const r = mesh._reapTick(st);
+    check('pong-timeout reaped',                 r === 'reaped-pong');
     check('peer removed from _peers',            !mesh._peers.has(PEER));
     check('onPeerLost fired with peerId',        lost.length === 1 && lost[0] === PEER);
   }
@@ -68,7 +73,7 @@ function main() {
     mesh.onPeerLost(id => lost.push(id));
     const st = fakeState({ lastPongAt: Date.now() - 4_000 });
     mesh._peers.set(PEER, st);
-    const r = mesh._staleCheckTick(st);
+    const r = mesh._reapTick(st);
     check('stale gap returns stale',             r === 'stale');
     check('state flipped to stale',              st.state === 'stale');
     check('peer NOT evicted while merely stale',  mesh._peers.has(PEER) && lost.length === 0);
@@ -79,7 +84,7 @@ function main() {
     const mesh = newMesh();
     const st = fakeState({ state: 'stale', lastPongAt: Date.now() });
     mesh._peers.set(PEER, st);
-    const r = mesh._staleCheckTick(st);
+    const r = mesh._reapTick(st);
     check('fresh pong returns recovered',        r === 'recovered');
     check('state flipped back to open',          st.state === 'open');
   }
@@ -94,7 +99,7 @@ function main() {
     check('sendFailures reset to 0 on success',  st.sendFailures === 0);
   }
 
-  // ── throwing send (dc lies 'open') → evict after SEND_FAIL_LIMIT ──
+  // ── throwing send (dc lies 'open') → reaper evicts after SEND_FAIL_LIMIT
   {
     const mesh = newMesh();
     const lost = [];
@@ -103,10 +108,14 @@ function main() {
       dc: { readyState: 'open', send() { throw new Error('InvalidStateError'); }, close() {} },
     });
     mesh._peers.set(PEER, st);
-    check('1st throw → fail (not yet evicted)',  mesh._pingTick(st) === 'fail');
-    check('2nd throw → fail (not yet evicted)',  mesh._pingTick(st) === 'fail');
-    const r3 = mesh._pingTick(st);
-    check('3rd throw → evicted',                 r3 === 'evicted');
+    // _pingTick records the streak but never tears down itself.
+    check('1st throw → fail (streak 1)',         mesh._pingTick(st) === 'fail');
+    check('2nd throw → fail (streak 2)',         mesh._pingTick(st) === 'fail');
+    check('3rd throw → fail-limit (streak 3)',   mesh._pingTick(st) === 'fail-limit');
+    check('still present until the reaper runs', mesh._peers.has(PEER) && lost.length === 0);
+    // The reaper is the single eviction point.
+    const r = mesh._reapTick(st);
+    check('reaper evicts on the streak',         r === 'reaped-send');
     check('peer removed after send-fail limit',  !mesh._peers.has(PEER));
     check('onPeerLost fired on send-fail evict',  lost.length === 1 && lost[0] === PEER);
   }

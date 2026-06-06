@@ -53,6 +53,12 @@ const RETRY_AFTER_MS   = 5000;   // single retry after pc-failed (B10)
 // discovery can re-drive, and bounds the offerer retry loop. Generous so it is
 // a safety net, not a primary mechanism: healthy channels open in well under it.
 const NEGOTIATION_DEADLINE_MS = 30000;
+// One reaper interval drives EVERY per-peer liveness decision (see _reapTick):
+// while never-opened it enforces NEGOTIATION_DEADLINE_MS; once open it folds the
+// pong-timeout (DEAD_PONG_MS), send-fail (SEND_FAIL_LIMIT) and stale-display
+// transitions that used to live in three separate timers/methods. Must be ≤
+// STALE_PONG_MS so the stale→open display flip is observed promptly.
+const REAP_INTERVAL_MS = 500;
 
 /**
  * Pull the DTLS certificate fingerprint out of an SDP blob.  WebRTC SDP
@@ -117,7 +123,8 @@ const STUN_SERVERS = [
  * @property {number[]} rttBuffer
  * @property {RTCIceCandidateInit[]} pendingCandidates  — queued before remote desc
  * @property {number | null} pingTimer
- * @property {number | null} staleTimer
+ * @property {number | null} reaperTimer  — single liveness reaper (see _reapTick)
+ * @property {number} sendFailures        — consecutive dc.send() throws
  * @property {number | null} retryTimer
  * @property {boolean} retryUsed
  * @property {string | null} localCand   — 'host'|'srflx'|'prflx'|'relay'|null
@@ -296,7 +303,7 @@ export class MeshManager {
    * discovery fires more than once) does NOT call `_initiateTo` again and
    * overwrite the in-flight RTCPeerConnection, which would restart ICE and
    * prevent the negotiation from ever completing.  A failed/timed-out
-   * negotiation is torn down (`_teardown` deletes the entry), so this frees up
+   * negotiation is torn down (`_retire` deletes the entry), so this frees up
    * for a genuine retry.
    */
   hasPeer(peerId) {
@@ -377,7 +384,7 @@ export class MeshManager {
   /** Disconnect from everyone and stop all timers. */
   dispose() {
     for (const id of [...this._peers.keys()]) {
-      this._teardown(id, 'dispose');
+      this._retire(id, 'dispose');
     }
     this._negotiationDeadline.clear();
     this._listeners.clear();
@@ -393,7 +400,7 @@ export class MeshManager {
    */
   reset() {
     for (const id of [...this._peers.keys()]) {
-      this._teardown(id, 'reset');
+      this._retire(id, 'reset');
     }
     this._negotiationDeadline.clear();
     this._notify();
@@ -411,7 +418,7 @@ export class MeshManager {
    */
   disconnect(meshId, reason = 'disconnect') {
     if (!this._peers.has(meshId)) return;
-    this._teardown(meshId, reason);
+    this._retire(meshId, reason);
     this._notify();
   }
 
@@ -441,7 +448,7 @@ export class MeshManager {
   }
 
   onPeerLeft(peerId) {
-    this._teardown(peerId, 'peer-left');
+    this._retire(peerId, 'peer-left');
     this._notify();
   }
 
@@ -500,9 +507,9 @@ export class MeshManager {
       rttBuffer: [],
       pendingCandidates: [],
       pingTimer: null,
-      staleTimer: null,
+      reaperTimer: null,
+      sendFailures: 0,
       retryTimer: null,
-      negotiationTimer: null,
       retryUsed: false,
       localCand:  null,
       remoteCand: null,
@@ -635,7 +642,7 @@ export class MeshManager {
     this._log('initiate', { peerId });
     const state = this._newPeerState(peerId, 'offerer');
     this._peers.set(peerId, state);
-    this._armNegotiationWatchdog(state);
+    this._armReaper(state);
     this._attachPc(state);
 
     // Offerer creates the DataChannel up front.
@@ -661,14 +668,14 @@ export class MeshManager {
     // Recording the peer here just gives the UI a row to show.
     const state = this._newPeerState(peerId, 'responder');
     this._peers.set(peerId, state);
-    this._armNegotiationWatchdog(state);
+    this._armReaper(state);
   }
 
   /** Build the PC for a responder that just got an offer (no prior row). */
   _initResponderState(peerId) {
     const state = this._newPeerState(peerId, 'responder');
     this._peers.set(peerId, state);
-    this._armNegotiationWatchdog(state);
+    this._armReaper(state);
     return state;
   }
 
@@ -712,11 +719,10 @@ export class MeshManager {
         clearTimeout(state.retryTimer);
         state.retryTimer = null;
       }
-      // Disarm the never-opened negotiation watchdog — we opened in time.
-      if (state.negotiationTimer) {
-        clearTimeout(state.negotiationTimer);
-        state.negotiationTimer = null;
-      }
+      // Opened in time: drop the absolute negotiation deadline so a future
+      // re-drive of this peer starts with a fresh window. The reaper itself
+      // keeps running — it self-transitions from its never-opened branch to
+      // the open-channel (pong/send-fail/stale) branch now that openedAt is set.
       this._negotiationDeadline.delete(state.peerId);
       state.retryUsed = false;
       this._log('dc-open', { peerId: state.peerId, role: state.role });
@@ -726,7 +732,6 @@ export class MeshManager {
       this._refreshPath(state, 'dc-open');
       this._startPathPoll(state);
       this._startPingLoop(state);
-      this._startStaleChecker(state);
       this._notify();
     };
 
@@ -792,9 +797,12 @@ export class MeshManager {
     state.pingTimer = setInterval(() => this._pingTick(state), PING_INTERVAL_MS);
   }
 
-  /** One heartbeat-ping send.  Extracted from the interval so the
-   *  send-failure eviction is unit-testable without a real timer.
-   *  Returns 'sent' | 'skip' | 'fail' | 'evicted'. */
+  /** One heartbeat-ping send. This is an ACTION (keepalive), not a death
+   *  detector: it only records the consecutive-failure streak on
+   *  state.sendFailures; the reaper (_reapTick) reads that streak and is the
+   *  single place that evicts. Returns 'sent' | 'skip' | 'fail' | 'fail-limit'
+   *  ('fail-limit' = the streak has reached SEND_FAIL_LIMIT and the next reap
+   *  will evict). */
   _pingTick(state) {
     if (state.dc?.readyState !== 'open') return 'skip';
     try {
@@ -807,50 +815,84 @@ export class MeshManager {
       this._log('ping-send-failed', {
         peerId: state.peerId, err: err.message,
       });
-      // A throwing send proves the channel is dead even though
-      // readyState still reads 'open' (Safari after sleep).  After a
-      // few consecutive throws, evict the peer so the mesh heals and
-      // the bridge's next peer-list rebuilds a fresh channel.
+      // A throwing send proves the channel is dead even though readyState
+      // still reads 'open' (Safari after sleep). Record the streak; the
+      // reaper evicts once it crosses SEND_FAIL_LIMIT so the mesh heals.
       state.sendFailures = (state.sendFailures || 0) + 1;
-      if (state.sendFailures >= SEND_FAIL_LIMIT) {
-        this._teardown(state.peerId, 'send-failed');
-        return 'evicted';
+      return state.sendFailures >= SEND_FAIL_LIMIT ? 'fail-limit' : 'fail';
+    }
+  }
+
+  // Arm (or re-arm, across retries) the single per-peer liveness reaper. The
+  // reaper is the ONE timer that makes every death decision for this peer; it
+  // runs from creation (covering the never-opened negotiation window) straight
+  // through the open channel's life. The absolute negotiation deadline is kept
+  // separately in _negotiationDeadline — set once on the first not-yet-connected
+  // negotiation and preserved through retries — so total negotiation time is
+  // bounded regardless of how many fresh PCs the retry path creates.
+  _armReaper(state) {
+    const peerId = state.peerId;
+    if (!this._negotiationDeadline.has(peerId)) {
+      this._negotiationDeadline.set(peerId, Date.now() + NEGOTIATION_DEADLINE_MS);
+    }
+    if (state.reaperTimer) clearInterval(state.reaperTimer);
+    state.reaperTimer = setInterval(() => this._reapTick(state), REAP_INTERVAL_MS);
+  }
+
+  /** The single liveness verdict for one peer, run by the reaper interval from
+   *  creation through death. This is the ONE place a peer dies for a
+   *  liveness reason — it folds the three open-channel death detectors that
+   *  used to be separate timers/methods (negotiation-timeout while never
+   *  opened, pong-timeout and send-fail once open) plus the stale/recovered
+   *  DISPLAY transition. Returns a verdict string for unit-testing:
+   *  'gone' | 'negotiating' | 'reaped-negotiation' | 'reaped-send' |
+   *  'reaped-pong' | 'stale' | 'recovered' | 'live'. */
+  _reapTick(state) {
+    if (this._peers.get(state.peerId) !== state) return 'gone';   // replaced/removed
+    const now = Date.now();
+
+    // ── never opened: bounded by the absolute negotiation deadline ──
+    // A PC that fails ICE never autonomously reaches 'closed', so without this
+    // a peer stuck in new/signaling/failed would wedge hasPeer() true forever
+    // and no-op connectViaRelay's idempotency guard (it could never reconnect
+    // bridgeless). Frees the slot; onPeerLost does NOT fire (no one used it).
+    if (state.openedAt === 0) {
+      const deadline = this._negotiationDeadline.get(state.peerId);
+      if (deadline != null && now >= deadline) {
+        this._log('negotiation-timeout', {
+          peerId: state.peerId, role: state.role, state: state.state,
+        });
+        this._retire(state.peerId, 'negotiation-timeout');
+        return 'reaped-negotiation';
       }
-      return 'fail';
+      return 'negotiating';
     }
-  }
 
-  _startStaleChecker(state) {
-    if (state.staleTimer) clearInterval(state.staleTimer);
-    state.staleTimer = setInterval(() => this._staleCheckTick(state), 500);
-  }
+    // ── open: a throwing send is definitive proof the channel is dead even
+    //    when readyState lies 'open' (Safari after sleep). _pingTick records
+    //    the streak; we evict one reap after it crosses the limit. ──
+    if (state.sendFailures >= SEND_FAIL_LIMIT) {
+      this._retire(state.peerId, 'send-failed');
+      return 'reaped-send';
+    }
 
-  /** One stale-checker evaluation.  Extracted from the interval so the
-   *  heartbeat-timeout eviction is unit-testable without waiting on a
-   *  real timer.  Returns 'evicted' | 'stale' | 'recovered' | 'none'. */
-  _staleCheckTick(state) {
-    if (state.state !== 'open' && state.state !== 'stale') return 'none';
-    if (state.lastPongAt === 0) return 'none';   // pre-first-pong
-    const since = Date.now() - state.lastPongAt;
-    if (since > DEAD_PONG_MS) {
-      // Heartbeat timeout: pongs stopped long enough that the channel
-      // is dead even if readyState lies 'open'.  Evict + fire
-      // onPeerLost (Transport-contract behaviour) so upper layers
-      // route around and the mesh rebuilds.  _teardown clears this
-      // very interval, so return immediately after.
-      this._teardown(state.peerId, 'pong-timeout');
-      return 'evicted';
+    // ── open: heartbeat timeout (hard death) + stale↔open display flip ──
+    if (state.lastPongAt > 0) {                    // after the first pong
+      const since = now - state.lastPongAt;
+      if (since > DEAD_PONG_MS) {
+        // Pongs stopped long enough that the channel is dead. Evict + fire
+        // onPeerLost so upper layers route around and the mesh rebuilds.
+        this._retire(state.peerId, 'pong-timeout');
+        return 'reaped-pong';
+      }
+      if (since > STALE_PONG_MS && state.state !== 'stale') {
+        state.state = 'stale'; this._notify(); return 'stale';
+      }
+      if (since <= STALE_PONG_MS && state.state === 'stale') {
+        state.state = 'open';  this._notify(); return 'recovered';
+      }
     }
-    if (since > STALE_PONG_MS && state.state !== 'stale') {
-      state.state = 'stale';
-      this._notify();
-      return 'stale';
-    } else if (since <= STALE_PONG_MS && state.state === 'stale') {
-      state.state = 'open';
-      this._notify();
-      return 'recovered';
-    }
-    return 'none';
+    return 'live';
   }
 
   // Extracted from pc.onconnectionstatechange so the terminal-state policy is
@@ -858,7 +900,7 @@ export class MeshManager {
   //   failed → mark + refresh path + one scheduled retry (PC may recover via a
   //            fresh negotiation).
   //   closed → terminal; the PC can never be reused. If THIS entry is still the
-  //            live one (i.e. we did NOT initiate the close via _teardown, which
+  //            live one (i.e. we did NOT initiate the close via _retire, which
   //            already deleted it), the channel died out from under us (remote
   //            close / abrupt drop) — tear it down so the slot frees: hasPeer →
   //            false, onPeerLost fires for upper layers to route around, and
@@ -877,7 +919,7 @@ export class MeshManager {
     } else if (connectionState === 'closed') {
       state.state = 'closed';
       if (this._peers.get(state.peerId) === state) {
-        this._teardown(state.peerId, 'pc-closed');
+        this._retire(state.peerId, 'pc-closed');
       }
       this._notify();
     }
@@ -887,7 +929,7 @@ export class MeshManager {
     if (state.retryUsed) return;            // we get one retry per peer
     if (state.retryTimer) return;
     if (state.role !== 'offerer') return;   // only offerers retry; responders wait
-    // Don't retry past the absolute negotiation deadline — the watchdog will
+    // Don't retry past the absolute negotiation deadline — the reaper will
     // tear the peer down so a LATER fresh discovery can re-drive cleanly.
     // Without this, each retry's fresh state resets retryUsed and the offerer
     // would re-offer every RETRY_AFTER_MS forever for an unreachable peer.
@@ -896,53 +938,47 @@ export class MeshManager {
     state.retryUsed = true;
     state.retryTimer = setTimeout(() => {
       state.retryTimer = null;
-      // Has peer-left arrived in the meantime?  If so, _teardown removed us.
+      // Has peer-left arrived in the meantime?  If so, _retire removed us.
       if (!this._peers.has(state.peerId)) return;
       this._log('retry', { peerId: state.peerId });
-      // Clean up the failed PC, then re-initiate.
-      this._teardownButKeep(state.peerId);
+      // Retire the failed PC but KEEP the absolute deadline (so the fresh
+      // negotiation honours the original window) and DON'T fire onPeerLost
+      // (we're immediately re-initiating), then re-offer.
+      this._retire(state.peerId, 'retry', { keepDeadline: true, notifyLost: false });
       this._initiateTo(state.peerId);
     }, RETRY_AFTER_MS);
   }
 
-  // Arm (or re-arm, across retries) the never-opened negotiation watchdog. The
-  // deadline is absolute per peerId — set once on the first not-yet-connected
-  // negotiation and preserved through retries — so total negotiation time is
-  // bounded regardless of how many fresh PCs the retry path creates.
-  _armNegotiationWatchdog(state) {
-    const peerId = state.peerId;
-    let deadline = this._negotiationDeadline.get(peerId);
-    if (deadline == null) {
-      deadline = Date.now() + NEGOTIATION_DEADLINE_MS;
-      this._negotiationDeadline.set(peerId, deadline);
-    }
-    if (state.negotiationTimer) clearTimeout(state.negotiationTimer);
-    const remaining = Math.max(0, deadline - Date.now());
-    state.negotiationTimer = setTimeout(() => this._onNegotiationDeadline(state), remaining);
-  }
-
-  _onNegotiationDeadline(state) {
-    const peerId = state.peerId;
-    if (this._peers.get(peerId) !== state) return;   // replaced by a fresh negotiation, or gone
-    if (state.openedAt > 0) return;                  // opened in the meantime — moot
-    this._log('negotiation-timeout', { peerId, role: state.role, state: state.state });
-    // _teardown frees the slot (hasPeer→false → connectViaRelay can re-drive)
-    // and deletes the deadline; onPeerLost does NOT fire (channel never opened).
-    this._teardown(peerId, 'negotiation-timeout');
-  }
-
   // ── Cleanup ──────────────────────────────────────────────────────
 
-  _teardown(peerId, reason) {
+  /**
+   * The SINGLE teardown for a peer — every death path funnels through here
+   * (dispose/reset/disconnect, peer-left, pc-closed, and the reaper's
+   * negotiation-/pong-/send-fail evictions). Clears all per-peer timers,
+   * closes the dc/pc, drops the map entry, and (by default) fires onPeerLost
+   * for a channel that had actually opened.
+   *
+   * @param {string} peerId
+   * @param {string} reason
+   * @param {object} [opts]
+   * @param {boolean} [opts.keepDeadline=false]  Keep _negotiationDeadline[peerId]
+   *        — the retry path re-creates the state via _initiateTo, whose
+   *        _armReaper must honour the ORIGINAL absolute deadline so total
+   *        negotiation time stays bounded across retries. Default clears it so a
+   *        future legitimate re-drive starts with a fresh window.
+   * @param {boolean} [opts.notifyLost=true]  Fire onPeerLost iff the channel had
+   *        opened. The retry path passes false: it's immediately re-initiating,
+   *        so the peer isn't "lost" from the Transport's perspective.
+   */
+  _retire(peerId, reason, { keepDeadline = false, notifyLost = true } = {}) {
     const state = this._peers.get(peerId);
     if (!state) return;
-    // "Was this channel ever open?" — check the openedAt timestamp set
-    // when dc.onopen first fired, NOT the dc's current readyState.  By
-    // the time _teardown runs the browser may already have flipped the
-    // dc from 'open' to 'closing'/'closed', which masked the real
-    // open-history and skipped onPeerLost notifications — that left
-    // stale bindings (unbindPeer never ran) and ghost children in
-    // AxonaManager roles across the network.
+    // "Was this channel ever open?" — check the openedAt timestamp set when
+    // dc.onopen first fired, NOT the dc's current readyState. By the time
+    // _retire runs the browser may already have flipped the dc from 'open' to
+    // 'closing'/'closed', which would mask the real open-history and skip
+    // onPeerLost — leaving stale bindings (unbindPeer never ran) and ghost
+    // children in AxonaManager roles across the network.
     const wasOpen = state.openedAt > 0;
     this._log('teardown', {
       peerId, reason,
@@ -952,22 +988,18 @@ export class MeshManager {
       pings:   state.pings,
       pongs:   state.pongs,
     });
-    if (state.pingTimer)        clearInterval(state.pingTimer);
-    if (state.staleTimer)       clearInterval(state.staleTimer);
-    if (state.retryTimer)       clearTimeout (state.retryTimer);
-    if (state.negotiationTimer) clearTimeout (state.negotiationTimer);
-    if (state.pathPollTimer)    clearInterval(state.pathPollTimer);
+    if (state.pingTimer)     clearInterval(state.pingTimer);
+    if (state.reaperTimer)   clearInterval(state.reaperTimer);
+    if (state.retryTimer)    clearTimeout (state.retryTimer);
+    if (state.pathPollTimer) clearInterval(state.pathPollTimer);
     if (state.dc) try { state.dc.close(); } catch {}
     if (state.pc) try { state.pc.close(); } catch {}
     this._peers.delete(peerId);
-    // Negotiation is fully over (not a retry) — clear the absolute deadline so
-    // a future legitimate re-drive of this peer starts with a fresh window.
-    this._negotiationDeadline.delete(peerId);
-    // v0.4.0 — fire onPeerLost for Transport listeners.  Only when the
-    // channel actually went from open → closed; teardown of a never-
-    // opened peer (e.g. failed ICE) does NOT count as a peer death
-    // from the Transport's perspective because no one was using it.
-    if (wasOpen) {
+    if (!keepDeadline) this._negotiationDeadline.delete(peerId);
+    // Fire onPeerLost for Transport listeners ONLY when the channel actually
+    // went open → closed; retiring a never-opened peer (failed ICE) does not
+    // count as a peer death because no one was using it.
+    if (notifyLost && wasOpen) {
       for (const cb of this._peerLostListeners) {
         try { cb(peerId); }
         catch (err) {
@@ -977,24 +1009,5 @@ export class MeshManager {
         }
       }
     }
-  }
-
-  /** Like _teardown but used by the retry path: keep the map entry
-   *  removed so _initiateTo can build a fresh one. */
-  _teardownButKeep(peerId) {
-    const state = this._peers.get(peerId);
-    if (!state) return;
-    if (state.pingTimer)        clearInterval(state.pingTimer);
-    if (state.staleTimer)       clearInterval(state.staleTimer);
-    if (state.retryTimer)       clearTimeout (state.retryTimer);
-    if (state.negotiationTimer) clearTimeout (state.negotiationTimer);
-    if (state.pathPollTimer)    clearInterval(state.pathPollTimer);
-    if (state.dc) try { state.dc.close(); } catch {}
-    if (state.pc) try { state.pc.close(); } catch {}
-    this._peers.delete(peerId);
-    // NB: deliberately KEEP this._negotiationDeadline[peerId] — the retry path
-    // re-creates the state via _initiateTo, whose _armNegotiationWatchdog must
-    // honour the ORIGINAL absolute deadline so total negotiation time stays
-    // bounded across retries.
   }
 }
