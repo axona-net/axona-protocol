@@ -315,7 +315,12 @@ import { webTransport } from '/src/transport/web/index.js';
 // distinguishable.
 const DEMO_VERSION = '1.15.0';
 const BRIDGE_URL   = new URLSearchParams(window.location.search).get('bridge')
-                  || 'wss://bridge.axona.net';
+                  // Served from a testnet host (e.g. demo-testnet.axona.net) →
+                  // default to the testnet bridge (2.28.0 / axona-5 / wire-2),
+                  // which also hands back the testnet TURN. Production hosts →
+                  // the prod introducer. ?bridge= still overrides either way.
+                  || (location.hostname.includes('testnet') ? 'wss://testnet.axona.net'
+                                                             : 'wss://bridge.axona.net');
 const VIRGINIA     = { lat: 38.0, lng: -77.0 };
 // axona-peer composes topic names as `${regionId}/${eventName}` (see
 // axona-peer/src/client.js line 1230).  Use the same composition here
