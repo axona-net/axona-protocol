@@ -22,10 +22,10 @@ console.log('\n── shape: 192 pairs, well-formed ──');
 check(`exactly ${S2_CELL_COUNT} regions`, REGION_NAMES.length === S2_CELL_COUNT);
 check('every entry is a [a, b] pair of strings',
   REGION_NAMES.every(p => Array.isArray(p) && p.length === 2 && p.every(s => typeof s === 'string')));
-const fmt = /^[a-z0-9_]{1,13}$/;
+const fmt = /^[a-z0-9_]{1,8}$/;
 const flat = REGION_NAMES.flat();
 const badFmt = flat.filter(n => !fmt.test(n));
-check('all names match /^[a-z0-9_]{1,13}$/', badFmt.length === 0);
+check('all names match /^[a-z0-9_]{1,8}$/', badFmt.length === 0);
 if (badFmt.length) console.log('     offenders:', badFmt.slice(0, 12));
 check('list + pairs frozen', Object.isFrozen(REGION_NAMES) && Object.isFrozen(REGION_NAMES[0]));
 

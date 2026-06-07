@@ -12,11 +12,11 @@
  * each sub-cell's geographic center and frozen here as the canonical list.
  *
  * Conventions (enforced by test/smoke_region_names.js):
- *   • names match /^[a-z0-9_]{1,13}$/  (lowercase, no spaces)
- *   • full names where they fit (colombia, scandinavia, kazakhstan)
+ *   • names match /^[a-z0-9_]{1,8}$/  (lowercase, no spaces)
+ *   • short distinct names — country, else large city (colombia, moscow, kenya); ≤8 chars
  *   • open ocean → "<oce3>_<hex>"  (pac_68, atl_0a, ind_22, sou_a3, arc_44)
  *   • a small island names only ONE cell (claim-once); large landmasses span
- *     cells with a COMPASS suffix (japanse, kamchatkas) — never a number
+ *     cells with a single-letter COMPASS suffix (japans, kamchtks) — never a number
  *   • last-resort land tiebreak is "_<hex>"
  *   • every name maps to exactly one code (name → code is well-defined)
  */
@@ -25,70 +25,198 @@ import { geoCellId, geoCellHalf, isValidCellId, S2_CELL_COUNT } from './s2.js';
 
 /** [half0, half1] region names for every code, indexed by code [0,192). */
 export const REGION_NAMES = Object.freeze([
-  ['atl_00', 'saopauloe'], ['atl_01', 'atl_01'], ['atl_02', 'atl_02'],
-  ['atl_03', 'atl_03'], ['atl_04', 'sthelena'], ['atl_05', 'ascension'],
-  ['atl_06', 'atl_06'], ['brazil', 'brazil'], ['atl_08', 'atl_08'],
-  ['capeverde', 'atl_09'], ['atl_0a', 'atl_0a'], ['azores', 'atl_0b'],
-  ['canary', 'iberiaw'], ['iberia', 'morocco'], ['mali', 'atl_0e'],
-  ['atl_0f', 'westafrica'], ['nigeria', 'congonw'], ['chad', 'niger'],
-  ['algeria', 'italysw'], ['italy', 'libya'], ['egypt', 'turkey'],
-  ['levant', 'arabia'], ['ethiopia', 'sudan'], ['congone', 'ethiopias'],
-  ['eastafrica', 'tanzaniase'], ['ind_19', 'tanzania'], ['congo', 'atl_1a'],
-  ['atl_1b', 'angola'], ['namibia', 'atl_1c'], ['atl_1d', 'atl_1d'],
-  ['southafrica', 'southafrica'], ['ind_1f', 'ind_1f'], ['ind_20', 'madagascar'],
-  ['ind_21', 'ind_21'], ['ind_22', 'ind_22'], ['ind_23', 'ind_23'],
-  ['ind_24', 'ind_24'], ['ind_25', 'ind_25'], ['ind_26', 'mauritius'],
-  ['ind_27', 'seychelles'], ['somalia', 'ind_28'], ['ind_29', 'somaliane'],
-  ['arabiae', 'iran'], ['iranne', 'pakistansw'], ['pakistan', 'pakistan'],
-  ['tibet', 'tibet'], ['southindia', 'southindia'], ['maldives', 'srilanka'],
-  ['sumatra', 'sumatra'], ['vietnam', 'myanmar'], ['bengal', 'chinanw'],
-  ['china', 'southchina'], ['taiwan', 'koreaw'], ['korea', 'pac_35'],
-  ['philippines', 'philippines'], ['borneo', 'pac_37'], ['pac_38', 'oznorth'],
-  ['pac_39', 'indonesia'], ['malaysia', 'ind_3a'], ['ind_3b', 'ind_3b'],
-  ['ind_3c', 'ind_3c'], ['ind_3d', 'ind_3d'], ['pac_3e', 'ozwest'],
-  ['ozcentral', 'ozcentral'], ['caucasus', 'ukraine'], ['russia', 'kazakhstansw'],
-  ['kazakhstan', 'pac_42'], ['siberiaw', 'urals'], ['arc_44', 'arc_44'],
-  ['svalbard', 'svalbard'], ['scandinavia', 'baltic'], ['poland', 'europe'],
-  ['uk', 'faroe'], ['atl_49', 'atl_49'], ['atl_4a', 'atl_4a'],
-  ['atl_4b', 'atl_4b'], ['quebec', 'quebec'], ['quebecsw', 'pac_4d'],
-  ['greenland', 'greenland'], ['iceland', 'arctic'], ['arc_50', 'arc_50'],
-  ['alaskane', 'arc_51'], ['canada', 'canada'], ['canadasw', 'pac_53'],
-  ['pac_54', 'uswestnw'], ['pac_55', 'pac_55'], ['pac_56', 'alaska'],
-  ['pac_57', 'pac_57'], ['pac_58', 'kamchatkas'], ['kamchatka', 'kamchatka'],
-  ['arc_5a', 'arc_5a'], ['arc_5b', 'eastsib'], ['eastsibsw', 'siberia'],
-  ['mongolia', 'mongolia'], ['koreanw', 'pac_5e'], ['pac_5f', 'japan'],
-  ['japanse', 'pac_60'], ['pac_61', 'pac_61'], ['guam', 'pac_62'],
-  ['pac_63', 'pac_63'], ['pac_64', 'marshall'], ['pac_65', 'pac_65'],
-  ['pac_66', 'pac_66'], ['pac_67', 'pac_67'], ['pac_68', 'pac_68'],
-  ['pac_69', 'pac_69'], ['pac_6a', 'pac_6a'], ['pac_6b', 'hawaii'],
-  ['pac_6c', 'pac_6c'], ['pac_6d', 'kiribati'], ['pac_6e', 'pac_6e'],
-  ['pac_6f', 'pac_6f'], ['pac_70', 'samoa'], ['pac_71', 'pac_71'],
-  ['pac_72', 'pac_72'], ['pac_73', 'tahiti'], ['pac_74', 'pac_74'],
-  ['pac_75', 'pac_75'], ['pac_76', 'pac_76'], ['tonga', 'pac_77'],
-  ['nzealand', 'nzealand'], ['pac_79', 'pac_79'], ['fiji', 'pac_7a'],
-  ['solomon', 'newcaled'], ['pac_7c', 'pac_7c'], ['png', 'png'],
-  ['ozcentralne', 'ozeastne'], ['ozeast', 'ozeast'], ['pac_80', 'uswest'],
-  ['pac_81', 'pac_81'], ['pac_82', 'pac_82'], ['pac_83', 'pac_83'],
-  ['mexicosw', 'pac_84'], ['galapagos', 'guatemala'], ['mexico', 'mexico'],
-  ['ussw', 'uscentral'], ['useastw', 'usse'], ['bahamas', 'useast'],
-  ['bermuda', 'atl_8a'], ['atl_8b', 'atl_8b'], ['venezuelane', 'atl_8c'],
-  ['atl_8d', 'venezuela'], ['colombia', 'caribbean'], ['cuba', 'pac_8f'],
-  ['pac_90', 'pac_90'], ['peru', 'peru'], ['amazon', 'brazilnw'],
-  ['brazilsw', 'bolivia'], ['argentinane', 'saopaulo'], ['atl_95', 'argentina'],
-  ['chile', 'chile'], ['pac_97', 'pac_97'], ['pac_98', 'pac_98'],
-  ['easter', 'pac_99'], ['pac_9a', 'pac_9a'], ['pac_9b', 'pac_9b'],
-  ['pac_9c', 'pac_9c'], ['pac_9d', 'pac_9d'], ['pac_9e', 'pac_9e'],
-  ['pac_9f', 'pac_9f'], ['pac_a0', 'pac_a0'], ['pac_a1', 'pac_a1'],
-  ['pac_a2', 'pac_a2'], ['sou_a3', 'sou_a3'], ['sou_a4', 'sou_a4'],
-  ['rossante', 'sou_a5'], ['sou_a6', 'sou_a6'], ['pac_a7', 'pac_a7'],
-  ['pac_a8', 'sou_a8'], ['falklands', 'patagonia'], ['patagoniae', 'atl_aa'],
-  ['atl_ab', 'atl_ab'], ['sou_ac', 'atl_ac'], ['atl_ad', 'sou_ad'],
-  ['sou_ae', 'antpenine'], ['antpenin', 'antarctica'], ['antarcticae', 'eastant'],
-  ['sou_b1', 'sou_b1'], ['sou_b2', 'atl_b2'], ['atl_b3', 'sou_b3'],
-  ['ind_b4', 'ind_b4'], ['ind_b5', 'ind_b5'], ['kerguelen', 'sou_b6'],
-  ['sou_b7', 'ind_b7'], ['ind_b8', 'ind_b8'], ['sou_b9', 'sou_b9'],
-  ['eastante', 'rossant'], ['rossantnw', 'sou_bb'], ['sou_bc', 'sou_bc'],
-  ['pac_bd', 'pac_bd'], ['pac_be', 'pac_be'], ['pac_bf', 'pac_bf'],
+  ['atl_00', 'saopaloe'],  // 0x00
+  ['atl_01', 'atl_01'],  // 0x01
+  ['atl_02', 'atl_02'],  // 0x02
+  ['atl_03', 'atl_03'],  // 0x03
+  ['atl_04', 'sthelna'],  // 0x04
+  ['atl_05', 'ascensn'],  // 0x05
+  ['atl_06', 'atl_06'],  // 0x06
+  ['brazil', 'brazil'],  // 0x07
+  ['atl_08', 'atl_08'],  // 0x08
+  ['capevrd', 'atl_09'],  // 0x09
+  ['atl_0a', 'atl_0a'],  // 0x0a
+  ['azores', 'atl_0b'],  // 0x0b
+  ['canary', 'iberiaw'],  // 0x0c
+  ['iberia', 'morocco'],  // 0x0d
+  ['mali', 'senegal'],  // 0x0e
+  ['senegals', 'westafr'],  // 0x0f
+  ['nigeria', 'congon'],  // 0x10
+  ['chad', 'niger'],  // 0x11
+  ['algeria', 'sardinia'],  // 0x12
+  ['italy', 'libya'],  // 0x13
+  ['egypt', 'turkey'],  // 0x14
+  ['levant', 'arabia'],  // 0x15
+  ['ethiopa', 'sudan'],  // 0x16
+  ['congoe', 'kenya'],  // 0x17
+  ['kenyas', 'tanzanas'],  // 0x18
+  ['zambia', 'tanzana'],  // 0x19
+  ['congo', 'atl_1a'],  // 0x1a
+  ['atl_1b', 'angola'],  // 0x1b
+  ['namibia', 'atl_1c'],  // 0x1c
+  ['atl_1d', 'atl_1d'],  // 0x1d
+  ['safrica', 'botswan'],  // 0x1e
+  ['ind_1f', 'ind_1f'],  // 0x1f
+  ['ind_20', 'madagas'],  // 0x20
+  ['ind_21', 'ind_21'],  // 0x21
+  ['ind_22', 'ind_22'],  // 0x22
+  ['ind_23', 'ind_23'],  // 0x23
+  ['ind_24', 'ind_24'],  // 0x24
+  ['ind_25', 'ind_25'],  // 0x25
+  ['ind_26', 'mauritu'],  // 0x26
+  ['ind_27', 'seychel'],  // 0x27
+  ['somalia', 'ind_28'],  // 0x28
+  ['ind_29', 'somalian'],  // 0x29
+  ['arabiae', 'iran'],  // 0x2a
+  ['afghan', 'pakistnw'],  // 0x2b
+  ['pakistn', 'afghane'],  // 0x2c
+  ['tibet', 'india_n'],  // 0x2d
+  ['india_s', 'india_s'],  // 0x2e
+  ['maldive', 'srilnka'],  // 0x2f
+  ['sumatra', 'sumatra'],  // 0x30
+  ['vietnam', 'myanmar'],  // 0x31
+  ['bengal', 'chinaw'],  // 0x32
+  ['china', 'schina'],  // 0x33
+  ['taiwan', 'koreaw'],  // 0x34
+  ['korea', 'pac_35'],  // 0x35
+  ['philpin', 'philpin'],  // 0x36
+  ['borneo', 'pac_37'],  // 0x37
+  ['pac_38', 'oznorth'],  // 0x38
+  ['pac_39', 'indonsa'],  // 0x39
+  ['malaysa', 'ind_3a'],  // 0x3a
+  ['ind_3b', 'ind_3b'],  // 0x3b
+  ['ind_3c', 'ind_3c'],  // 0x3c
+  ['ind_3d', 'ind_3d'],  // 0x3d
+  ['pac_3e', 'ozwest'],  // 0x3e
+  ['ozcentr', 'ozcentr'],  // 0x3f
+  ['caucsus', 'ukraine'],  // 0x40
+  ['moscow', 'kazakhw'],  // 0x41
+  ['kazakh', 'pac_42'],  // 0x42
+  ['siberiaw', 'urals'],  // 0x43
+  ['finland', 'arc_44'],  // 0x44
+  ['svalbrd', 'svalbrd'],  // 0x45
+  ['sweden', 'baltic'],  // 0x46
+  ['europe', 'germany'],  // 0x47
+  ['uk', 'faroe'],  // 0x48
+  ['atl_49', 'atl_49'],  // 0x49
+  ['atl_4a', 'atl_4a'],  // 0x4a
+  ['atl_4b', 'atl_4b'],  // 0x4b
+  ['quebec', 'quebec'],  // 0x4c
+  ['ontario', 'quebecw'],  // 0x4d
+  ['grnland', 'grnland'],  // 0x4e
+  ['iceland', 'arctic'],  // 0x4f
+  ['arc_50', 'arc_50'],  // 0x50
+  ['alaskae', 'arc_51'],  // 0x51
+  ['canadac', 'canadac'],  // 0x52
+  ['alberta', 'alberta'],  // 0x53
+  ['vancouvr', 'vancouvr'],  // 0x54
+  ['pac_55', 'pac_55'],  // 0x55
+  ['pac_56', 'alaska'],  // 0x56
+  ['pac_57', 'pac_57'],  // 0x57
+  ['pac_58', 'kamchtks'],  // 0x58
+  ['kamchtk', 'kamchtk'],  // 0x59
+  ['arc_5a', 'arc_5a'],  // 0x5a
+  ['arc_5b', 'eastsib'],  // 0x5b
+  ['eastsibw', 'siberia'],  // 0x5c
+  ['mongolia', 'mongolia'],  // 0x5d
+  ['korean', 'pac_5e'],  // 0x5e
+  ['pac_5f', 'japan'],  // 0x5f
+  ['japans', 'pac_60'],  // 0x60
+  ['pac_61', 'pac_61'],  // 0x61
+  ['guam', 'pac_62'],  // 0x62
+  ['pac_63', 'pac_63'],  // 0x63
+  ['pac_64', 'marshl'],  // 0x64
+  ['pac_65', 'pac_65'],  // 0x65
+  ['pac_66', 'pac_66'],  // 0x66
+  ['pac_67', 'pac_67'],  // 0x67
+  ['pac_68', 'pac_68'],  // 0x68
+  ['pac_69', 'pac_69'],  // 0x69
+  ['pac_6a', 'pac_6a'],  // 0x6a
+  ['pac_6b', 'hawaii'],  // 0x6b
+  ['pac_6c', 'pac_6c'],  // 0x6c
+  ['pac_6d', 'kiribti'],  // 0x6d
+  ['pac_6e', 'pac_6e'],  // 0x6e
+  ['pac_6f', 'pac_6f'],  // 0x6f
+  ['pac_70', 'samoa'],  // 0x70
+  ['pac_71', 'pac_71'],  // 0x71
+  ['pac_72', 'pac_72'],  // 0x72
+  ['pac_73', 'tahiti'],  // 0x73
+  ['pac_74', 'pac_74'],  // 0x74
+  ['pac_75', 'pac_75'],  // 0x75
+  ['pac_76', 'pac_76'],  // 0x76
+  ['tonga', 'pac_77'],  // 0x77
+  ['nzealnd', 'nzealnd'],  // 0x78
+  ['pac_79', 'pac_79'],  // 0x79
+  ['fiji', 'pac_7a'],  // 0x7a
+  ['solomon', 'newcald'],  // 0x7b
+  ['pac_7c', 'pac_7c'],  // 0x7c
+  ['papnewgn', 'papnewgn'],  // 0x7d
+  ['ozcentre', 'ozeastn'],  // 0x7e
+  ['ozeast', 'ozeast'],  // 0x7f
+  ['pac_80', 'uswest'],  // 0x80
+  ['pac_81', 'pac_81'],  // 0x81
+  ['pac_82', 'pac_82'],  // 0x82
+  ['pac_83', 'pac_83'],  // 0x83
+  ['mexicos', 'pac_84'],  // 0x84
+  ['galapgs', 'guatml'],  // 0x85
+  ['uss', 'mexico'],  // 0x86
+  ['ussw', 'uscentr'],  // 0x87
+  ['useastw', 'usse'],  // 0x88
+  ['bahamas', 'useast'],  // 0x89
+  ['bermuda', 'atl_8a'],  // 0x8a
+  ['atl_8b', 'atl_8b'],  // 0x8b
+  ['caracas', 'atl_8c'],  // 0x8c
+  ['guyana', 'guyana'],  // 0x8d
+  ['colombia', 'caribbn'],  // 0x8e
+  ['cuba', 'pac_8f'],  // 0x8f
+  ['pac_90', 'pac_90'],  // 0x90
+  ['peru', 'peru'],  // 0x91
+  ['amazon', 'braziln'],  // 0x92
+  ['brazilw', 'bolivia'],  // 0x93
+  ['paragwy', 'saopalo'],  // 0x94
+  ['atl_95', 'argentn'],  // 0x95
+  ['chile', 'chile'],  // 0x96
+  ['pac_97', 'pac_97'],  // 0x97
+  ['pac_98', 'pac_98'],  // 0x98
+  ['easter', 'pac_99'],  // 0x99
+  ['pac_9a', 'pac_9a'],  // 0x9a
+  ['pac_9b', 'pac_9b'],  // 0x9b
+  ['pac_9c', 'pac_9c'],  // 0x9c
+  ['pac_9d', 'pac_9d'],  // 0x9d
+  ['pac_9e', 'pac_9e'],  // 0x9e
+  ['pac_9f', 'pac_9f'],  // 0x9f
+  ['pac_a0', 'pac_a0'],  // 0xa0
+  ['pac_a1', 'pac_a1'],  // 0xa1
+  ['pac_a2', 'pac_a2'],  // 0xa2
+  ['sou_a3', 'sou_a3'],  // 0xa3
+  ['sou_a4', 'sou_a4'],  // 0xa4
+  ['rossante', 'sou_a5'],  // 0xa5
+  ['sou_a6', 'sou_a6'],  // 0xa6
+  ['pac_a7', 'pac_a7'],  // 0xa7
+  ['pac_a8', 'sou_a8'],  // 0xa8
+  ['falklnd', 'patagon'],  // 0xa9
+  ['patagone', 'atl_aa'],  // 0xaa
+  ['atl_ab', 'atl_ab'],  // 0xab
+  ['sou_ac', 'atl_ac'],  // 0xac
+  ['atl_ad', 'sou_ad'],  // 0xad
+  ['sou_ae', 'antpene'],  // 0xae
+  ['antpen', 'antarc'],  // 0xaf
+  ['antarce', 'eastant'],  // 0xb0
+  ['sou_b1', 'sou_b1'],  // 0xb1
+  ['sou_b2', 'atl_b2'],  // 0xb2
+  ['atl_b3', 'sou_b3'],  // 0xb3
+  ['ind_b4', 'ind_b4'],  // 0xb4
+  ['ind_b5', 'ind_b5'],  // 0xb5
+  ['kerguel', 'sou_b6'],  // 0xb6
+  ['sou_b7', 'ind_b7'],  // 0xb7
+  ['ind_b8', 'ind_b8'],  // 0xb8
+  ['sou_b9', 'sou_b9'],  // 0xb9
+  ['eastante', 'rossant'],  // 0xba
+  ['rossantw', 'sou_bb'],  // 0xbb
+  ['sou_bc', 'sou_bc'],  // 0xbc
+  ['pac_bd', 'pac_bd'],  // 0xbd
+  ['pac_be', 'pac_be'],  // 0xbe
+  ['pac_bf', 'pac_bf'],  // 0xbf
 ].map(Object.freeze));
 
 /** name (lowercase) → code. Built once; both half-names map to their code. */
