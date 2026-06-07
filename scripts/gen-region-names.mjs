@@ -80,7 +80,7 @@ const ANCHORS = [
 
 // Exact hand-fixes (code → {half: name}). Applied last; authoritative.
 const OVERRIDES = {
-  0x00: { 1: 'rio' },
+  0x00: { 1: 'rio' }, 0x0f: { 0: 'mru', 1: 'ghana' },
   0x12: { 1: 'sardinia' }, 0x17: { 1: 'kenya' },
   0x18: { 0: 'tanzania', 1: 'mozambiq' }, 0x19: { 1: 'congos' }, 0x1e: { 1: 'botswana' },
   0x20: { 1: 'madagass' },

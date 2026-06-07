@@ -40,7 +40,7 @@ export const REGION_NAMES = Object.freeze([
   ['canary', 'iberiaw'],  // 0x0c
   ['iberia', 'morocco'],  // 0x0d
   ['mali', 'senegal'],  // 0x0e
-  ['senegals', 'westafr'],  // 0x0f
+  ['mru', 'ghana'],  // 0x0f
   ['nigeria', 'congon'],  // 0x10
   ['chad', 'niger'],  // 0x11
   ['algeria', 'sardinia'],  // 0x12
