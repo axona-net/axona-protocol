@@ -5,12 +5,21 @@ One node, one package — give it a Transport and it speaks the Axona wire
 protocol. Runs unchanged in browsers, Node servers, and the dht-sim
 simulator.
 
-**v2.2.0** — production kernel. Powers [axona.net](https://axona.net) (browser
-peers), [bridge.axona.net](https://bridge.axona.net) (signaling broker), and
-the [`dht-sim`](https://github.com/axona-net/dht-sim) reference simulator at
-50,000 peers. Every link is mutually authenticated — peers prove their routing
-identity with an Ed25519 signature before they can join (see
+**v2.31.0.** Powers [axona.net](https://axona.net) (browser peers),
+[bridge.axona.net](https://bridge.axona.net) (signaling broker), the
+[`dht-sim`](https://github.com/axona-net/dht-sim) simulator at 50,000 peers, and
+the [`axona-relay`](https://github.com/axona-net/axona-relay) headless supernode.
+Every link is mutually authenticated — peers prove their routing identity with an
+Ed25519 signature before they can join (see
 [Authenticated handshake](#authenticated-handshake)).
+
+> **Network epoch.** This is the `axona/5` line (`WIRE_VERSION 2.0`). The
+> protocol epoch is folded into the connect-time signed transcript, so an
+> `axona/5` node and a node on the older `axona/4` epoch **cannot** complete a
+> handshake — the two networks are cryptographically partitioned by design. The
+> SF testnet (`testnet.axona.net`) runs this line; production `axona.net`/
+> `bridge.axona.net` still run `axona/4` (kernel 2.16.0) until the flag-day
+> cutover.
 
 ## Install
 
@@ -63,20 +72,21 @@ SimNetwork wiring, see [`examples/minimal-pubsub/`](examples/minimal-pubsub/).
 
 ## The AxonaPeer surface
 
-The `AxonaPeer` class is the per-node application API, organised into five
+The `AxonaPeer` class is the per-node application API, organised into the following
 clusters:
 
 | Cluster | Methods |
 |---|---|
 | **Lifecycle** | `start()` · `stop()` · `join(opts?)` · `leave({drain, notify, timeoutMs}?)` · `getNodeId()` |
-| **Pub/sub** | `pub(topic, message, opts?)` · `sub(topic, handler, opts?)` · `pull(msgId, opts?)` · `metrics(topic, opts?)` |
+| **Pub/sub** | `pub(topic, message, opts?)` · `sub(topic, handler, opts?)` · `unsub(topic)` · `pull(msgId\|topic, opts?)` · `metrics(topic, opts?)` |
+| **Pub/sub lifecycle** | `kill(topic, msgId)` (tombstone a message) · `unpub(topic, {destroy}?)` (publisher-only) — bounded queues, per-publisher quota, hold-time TTL |
 | **Direct messaging** | `send(targetId, message)` · `notify(targetId, message)` · `onMessage(handler)` |
 | **Mesh introspection** | `peers()` · `onPeerJoin(handler)` · `onPeerLeave(handler)` · `lookup(targetKey)` |
 | **Telemetry** | `health()` · `onLog(level, handler)` · `onError(handler)` |
 | **Snapshot escape hatch** | `snapshot()` · `fromSnapshot(blob)` |
 
 Full reference with parameter types, return shapes, and worked examples:
-[axona-docs Programmer Guide §API Reference](https://github.com/axona-net/axona-docs/blob/main/programmer-guide/API-Reference-v2.10.0.md).
+[axona-docs API Reference](https://github.com/axona-net/axona-docs/tree/main/programmer-guide).
 
 ## Transports
 
@@ -89,8 +99,11 @@ The protocol layer can't tell which one it's running on.
 | [`webTransport({ identity, bridgeUrl })`](src/transport/web/) | Browser | WebRTC data channels + WebSocket bridge fallback. Used by [`axona-peer`](https://github.com/axona-net/axona-peer). |
 | [`serverTransport` / `clientTransport`](src/transport/node/) | Headless server | Raw WebSocket (also bundled as `nodeTransport.server` / `nodeTransport.client`). Used by [`axona-bridge`](https://github.com/axona-net/axona-bridge). |
 
-All three speak the same authenticated wire protocol (`axona/4`); a peer using
-one can communicate with a peer using either of the others.
+All three speak the same authenticated wire protocol (`axona/5`); a peer using
+one can communicate with a peer using either of the others. On the web
+transport, once peers are on the mesh they also relay WebRTC signaling for each
+other (`meshRelay`, on by default), so two peers can connect with **no bridge in
+the signaling path** (bridgeless connection).
 
 ## Persistence
 
@@ -135,11 +148,39 @@ const same = await loadIdentity(blob);
 `nodeId = [8-bit S2 prefix] || [256-bit SHA-256(pubkey)]`. Topic IDs share
 the same 264-bit keyspace.
 
+## Regions
+
+The 8-bit S2 prefix indexes one of **192 valid region cells**
+(`face·32 + truncated-Hilbert`; codes `[0,192)`, 192–255 reserved). Each region
+carries **two human-readable names** — one for each of the cell's two S2 level-3
+sub-cells ("halves") — and **both names resolve to the same code**, so a user
+sees the label closest to their actual location while addressing stays stable.
+Homogeneous cells (a single country, open ocean) share one name.
+
+```js
+import {
+  regionNames, regionName, regionCode, resolveRegion, regionNameForLatLng,
+  geoCellId, geoCellSubCenters, geoCellHalf,
+} from '@axona/protocol';
+
+regionNames(0x89);                 // ['bahamas', 'useast']  → both map to 0x89
+regionName(0x89, 40, -75);         // half-aware: 'useast'
+regionCode('bahamas');             // 0x89
+resolveRegion('useast');           // → { code: 0x89, ... }
+regionNameForLatLng(40, -75);      // 'useast'
+```
+
+Names match `/^[a-z0-9_]{1,8}$/`; open-ocean cells are `<ocean3>_<hex>`
+(`pac_68`, `atl_0a`, …); small islands claim a single cell; large landmasses
+that span cells take a single-letter compass suffix. The interactive
+[`examples/s2-region-visualizer/`](examples/s2-region-visualizer/) renders all
+192 cells with both names and the code on a 3D globe.
+
 ## Authenticated handshake
 
 A `nodeId`'s lower 256 bits are `SHA-256(pubkey)`, but that alone proves
 nothing — pubkeys are public, so anyone could re-broadcast another peer's
-identity. Every fresh channel therefore runs the `axona/4` handshake, which
+identity. Every fresh channel therefore runs the `axona/5` handshake, which
 gates admission on three checks:
 
 1. **Bind** — `SHA-256(pubkey)` equals the nodeId's 256-bit suffix. (The 8-bit
@@ -155,7 +196,7 @@ The primitive is transport-agnostic and exported for reuse:
 
 ```js
 import {
-  buildAuthHello, verifyAuthHello, AUTH_PROTO,   // 'axona/4'
+  buildAuthHello, verifyAuthHello, AUTH_PROTO,   // 'axona/5'
   makeNonce, cbvFromNonces, pubkeyMatchesNodeId,
 } from '@axona/protocol';
 ```
@@ -215,7 +256,7 @@ Full list: `AxonaError`, `IdentityError`, `TransportError`, `PublishError`,
 │   ├── web/            # WebRTC + WebSocket-bridge composite — browsers (axona-peer)
 │   ├── node/           # raw WebSocket — Node servers (axona-bridge)
 │   ├── handshake.js    # version negotiation + KERNEL_VERSION on every fresh channel
-│   ├── handshake-auth.js  # axona/4 authenticated-identity handshake (bind + possess + channel-bind)
+│   ├── handshake-auth.js  # axona/5 authenticated-identity handshake (bind + possess + channel-bind)
 │   └── wire.js         # frame shape, codecs
 │
 ├── persistence/
@@ -242,6 +283,8 @@ Full list: `AxonaError`, `IdentityError`, `TransportError`, `PublishError`,
 - The reference browser peer with the production UI, region picker, identity
   persistence flow, and bridge fallback — that's [`axona-net/axona-peer`](https://github.com/axona-net/axona-peer).
 - The signaling broker — [`axona-net/axona-bridge`](https://github.com/axona-net/axona-bridge).
+- The headless Node supernode (real WebRTC via `node-datachannel`, console
+  dashboard) — [`axona-net/axona-relay`](https://github.com/axona-net/axona-relay).
 - The whitepaper, paper, explainer, programmer guide, and API reference —
   those live in [`axona-net/axona-docs`](https://github.com/axona-net/axona-docs).
 
@@ -253,15 +296,16 @@ Full list: `AxonaError`, `IdentityError`, `TransportError`, `PublishError`,
   picks up whatever's in `src/`. The right starting point for new
   developers.
 - [`examples/minimal-pubsub-browser/`](examples/minimal-pubsub-browser/)
-  — browser version of the same demo, served live at
-  [`demo.axona.net`](https://demo.axona.net). Connects to the production
-  bridge over WebSocket and runs a kernel peer in the page.
+  — browser version of the same demo. It detects its host and targets the
+  matching bridge (the SF testnet build runs at
+  [`demo-testnet.axona.net`](https://demo-testnet.axona.net)), connects over
+  WebSocket, and runs a kernel peer in the page.
 - [`examples/s2-region-visualizer/`](examples/s2-region-visualizer/)
   — interactive 3D globe showing the 192 S2 cells that anchor every
-  Axona nodeId and pub/sub topic. Click a cell in the legend to see
-  it lit up on the globe; hit "Detect my location" to find your own
-  region. Useful when explaining why polar cells shrink, or for
-  picking a region label for a topic.
+  Axona nodeId and pub/sub topic. Each cell shows **both** of its region
+  names and the hex code; click a cell in the legend to light it up on the
+  globe, or hit "Detect my location" to find your own region. Useful when
+  explaining why polar cells shrink, or for picking a region label for a topic.
 
 For real-world wiring (WebRTC + bridge fallback, identity persistence,
 region pickers), the canonical example is
@@ -275,9 +319,9 @@ The full programmer-facing documentation lives in
 
 | Document | When to read |
 |---|---|
-| [Quick Start](https://github.com/axona-net/axona-docs/blob/main/programmer-guide/Quick-Start-v2.10.0.md) | You want a working pub/sub roundtrip in 5 minutes |
-| [API Reference](https://github.com/axona-net/axona-docs/blob/main/programmer-guide/API-Reference-v2.10.0.md) | You're building and need a specific call's signature |
-| [Programmer Guide](https://github.com/axona-net/axona-docs/blob/main/programmer-guide/Axona-Programmer-Guide-v2.10.0.md) | You're starting a new application against Axona |
+| [Quick Start](https://github.com/axona-net/axona-docs/blob/main/programmer-guide/Quick-Start-v2.16.0.md) | You want a working pub/sub roundtrip in 5 minutes |
+| [API Reference](https://github.com/axona-net/axona-docs/blob/main/programmer-guide/Axona-API-Reference-v2.16.0.md) | You're building and need a specific call's signature |
+| [Programmer Guide](https://github.com/axona-net/axona-docs/blob/main/programmer-guide/Axona-Programmer-Guide-v2.16.0.md) | You're starting a new application against Axona |
 
 ## Wire protocol
 
@@ -285,7 +329,7 @@ The frame shapes, message-type vocabulary, version handshake, and bridge
 wire format are in [`axona-docs/implementation/`](https://github.com/axona-net/axona-docs/tree/main/implementation).
 The handshake modules at [`src/transport/handshake.js`](src/transport/handshake.js)
 (version negotiation) and [`src/transport/handshake-auth.js`](src/transport/handshake-auth.js)
-(the `axona/4` authenticated-identity gate) are the canonical implementation
+(the `axona/5` authenticated-identity gate) are the canonical implementation
 reference.
 
 ## Tests
@@ -294,10 +338,11 @@ reference.
 npm test
 ```
 
-Runs 29 smoke suites covering addressing, errors, persistence (in-memory,
-file, IndexedDB), identity (incl. non-extractable keys + key-correspondence
-checks), all three transports, version handshake, the `axona/4`
-authenticated handshake (primitive + sim- and node-transport enforcement),
+Runs 51 smoke suites covering addressing, the 192 region names (two-per-cell,
+name→code uniqueness), errors, persistence (in-memory, file, IndexedDB),
+identity (incl. non-extractable keys + key-correspondence checks), all three
+transports, version handshake, the `axona/5` authenticated handshake (primitive
++ sim- and node-transport enforcement), mesh-signal relay (bridgeless),
 pub/sub (unified API, envelope, pull, metrics, subscribe authorization,
 replay idempotency), direct messaging, mesh introspection + eviction,
 health, lifecycle (join/leave/snapshot), and Ed25519 post signing.
