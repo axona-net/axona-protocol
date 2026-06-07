@@ -145,7 +145,7 @@
     <h1>S2 region visualizer</h1>
     <p class="lede">
       The 192 S2 cells that anchor every Axona pub/sub topic and nodeId.
-      Hover the globe to see which cell a coordinate falls in; click a swatch in the legend to highlight all coordinates in that cell.
+      Hover the globe to see the region name and cell a coordinate falls in; click a swatch in the legend to highlight all coordinates in that cell.
     </p>
     <div id="globeContainer">
       <canvas id="globeCanvas"></canvas>
@@ -181,7 +181,7 @@
         <input type="checkbox" id="toggleBorders" checked> Show country borders
       </label>
       <label class="toggle">
-        <input type="checkbox" id="toggleLabels"> Show cell ID labels
+        <input type="checkbox" id="toggleLabels"> Show region names
       </label>
       <label class="toggle">
         <input type="checkbox" id="toggleHilbert"> Show Hilbert path (0x00 → 0xFF)
@@ -248,7 +248,12 @@ import {
   geoCellFace,
   S2_CELL_COUNT,
 } from '../../src/utils/s2.js';
+import { regionName } from '../../src/utils/region-names.js';
 import { KERNEL_VERSION } from '../../src/transport/handshake.js';
+
+// "useast · 0x89" — region name + hex code for a cell id.
+const cellLabel = (cid) =>
+  `${regionName(cid) ?? '?'} · 0x${cid.toString(16).padStart(2, '0').toUpperCase()}`;
 
 document.getElementById('kernelVer').textContent =
   `@axona/protocol kernel v${KERNEL_VERSION}`;
@@ -591,7 +596,7 @@ function buildLabelTexture() {
   const c = document.createElement('canvas');
   c.width = TEX_W; c.height = TEX_H;
   const ctx = c.getContext('2d');
-  ctx.font = 'bold 18px Inconsolata, monospace';
+  ctx.font = 'bold 15px Inconsolata, monospace';
   ctx.textAlign = 'center';
   ctx.textBaseline = 'middle';
   ctx.fillStyle = '#1a1a1a';
@@ -602,7 +607,7 @@ function buildLabelTexture() {
     if (!ll) continue;
     const px = (ll.lng + 180) / 360 * TEX_W;
     const py = (90  - ll.lat) / 180 * TEX_H;
-    const txt = '0x' + cid.toString(16).padStart(2, '0').toUpperCase();
+    const txt = regionName(cid) ?? '?';
     ctx.strokeText(txt, px, py);
     ctx.fillText(txt, px, py);
   }
@@ -722,7 +727,8 @@ function updateHover(clientX, clientY) {
   const b = cellBoundsApprox(cid);
   const area = cellArea(cid);
   document.getElementById('hoverCell').textContent =
-    '0x' + cid.toString(16).padStart(2, '0').toUpperCase() + '  (' + cid + ')  face ' + face;
+    (regionName(cid) ?? '?') + '  ·  0x' + cid.toString(16).padStart(2, '0').toUpperCase() +
+    '  (' + cid + ')  face ' + face;
   document.getElementById('hoverLatLng').textContent =
     lat.toFixed(2) + '°, ' + lng.toFixed(2) + '°';
   if (b) {
@@ -789,9 +795,10 @@ function renderLegend(mode) {
     }
   }
 
-  legendCaption.textContent = mode === 'spatial'
+  legendCaption.textContent = (mode === 'spatial'
     ? 'Six 4×8 mini-grids, one per cube face. Each cell sits at its face-local (s, t) position. Cell IDs are face×32 + s×8 + t.'
-    : 'Cells laid out in numerical reading order 0x00 to 0xBF (192 valid IDs). Reserved range 0xC0–0xFF is held for future system messages.';
+    : 'Cells laid out in numerical reading order 0x00 to 0xBF (192 valid IDs). Reserved range 0xC0–0xFF is held for future system messages.')
+    + ' Hover a swatch for its region name.';
 }
 
 function makeSwatch(cid, mode) {
@@ -800,7 +807,7 @@ function makeSwatch(cid, mode) {
   if (cid === cellHighlightId) s.classList.add('selected');
   s.textContent = cid.toString(16).padStart(2, '0').toUpperCase();
   const face = Math.floor(cid / 32);
-  s.title = '0x' + cid.toString(16).padStart(2, '0').toUpperCase() + '  (' + cid + ')   face ' + face;
+  s.title = cellLabel(cid) + '  (' + cid + ')   face ' + face;
   s.addEventListener('click', () => {
     cellHighlightId = (cellHighlightId === cid) ? null : cid;
     renderLegend(mode);
@@ -834,7 +841,7 @@ document.getElementById('locateBtn').addEventListener('click', () => {
       document.getElementById('myLatLng').textContent =
         lat.toFixed(3) + '°, ' + lng.toFixed(3) + '°';
       document.getElementById('myCell').textContent =
-        '0x' + cid.toString(16).padStart(2, '0').toUpperCase() + '  (' + cid + ')';
+        cellLabel(cid) + '  (' + cid + ')';
       addOrUpdatePin(lat, lng);
     },
     err => alert('Geolocation failed: ' + err.message),
