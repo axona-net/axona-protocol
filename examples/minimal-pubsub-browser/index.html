@@ -249,7 +249,7 @@
       <span class="v">hello-world</span>
     </div>
     <div class="tile prefix">
-      <span class="k">Anchor</span>
+      <span class="k">Region code</span>
       <span class="v" id="prefix">—</span>
     </div>
     <div class="tile topicid">
@@ -313,7 +313,7 @@ import { webTransport } from '/src/transport/web/index.js';
 // Bump the middle digit on every code change to this file so the
 // footer reflects what's actually running and stale browser tabs are
 // distinguishable.
-const DEMO_VERSION = '1.16.0';
+const DEMO_VERSION = '1.17.0';
 const BRIDGE_URL   = new URLSearchParams(window.location.search).get('bridge')
                   // Served from a testnet host (e.g. demo-testnet.axona.net) →
                   // default to the testnet bridge (2.28.0 / axona-5 / wire-2),
@@ -356,6 +356,9 @@ try {
 } catch { $kernel.textContent = '?'; }
 
 // ─── Topic info (Virginia-anchored) ──────────────────────────────────
+// The "region code" shown in the UI is the 8-bit S2 cell of the region —
+// a short geographic prefix (like a phone area code) that anchors the
+// topic to a place. Virginia → 0x89.
 const virginiaPrefix = geoCellId(VIRGINIA.lat, VIRGINIA.lng, 8);
 $prefix.textContent  = '0x' + virginiaPrefix.toString(16).padStart(2, '0').toUpperCase();
 
