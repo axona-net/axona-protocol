@@ -80,11 +80,15 @@ const ANCHORS = [
 
 // Exact hand-fixes (code → {half: name}). Applied last; authoritative.
 const OVERRIDES = {
+  0x00: { 1: 'rio' },
   0x12: { 1: 'sardinia' }, 0x17: { 1: 'kenya' }, 0x2b: { 0: 'afghan' },
   0x2d: { 0: 'tibet', 1: 'india_n' }, 0x2e: { 0: 'india_s', 1: 'india_s' },
-  0x41: { 0: 'moscow' }, 0x4d: { 0: 'ontario' }, 0x52: { 0: 'canadac', 1: 'canadac' },
-  0x53: { 1: 'alberta' }, 0x54: { 0: 'vancouvr' }, 0x7d: { 0: 'papnewgn', 1: 'papnewgn' },
-  0x86: { 0: 'uss', 1: 'mexico' },
+  0x34: { 1: 'chinase' }, 0x38: { 0: 'westpap' },
+  0x41: { 0: 'moscow' }, 0x46: { 0: 'scan' }, 0x48: { 1: 'iceland' },
+  0x4d: { 0: 'ontario' }, 0x4e: { 0: 'grnlands', 1: 'grnlands' }, 0x4f: { 0: 'grnlandn' },
+  0x52: { 0: 'manitoba', 1: 'manitoba' }, 0x53: { 1: 'alberta' }, 0x54: { 0: 'vancouvr' },
+  0x5e: { 0: 'chinane', 1: 'khabaro' }, 0x6b: { 1: 'pac_6b' }, 0x6c: { 0: 'hawaii', 1: 'hawaii' },
+  0x7d: { 0: 'papnewgn', 1: 'papnewgn' }, 0x86: { 0: 'uss', 1: 'mexico' },
 };
 
 const DEG = Math.PI / 180;

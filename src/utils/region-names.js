@@ -25,7 +25,7 @@ import { geoCellId, geoCellHalf, isValidCellId, S2_CELL_COUNT } from './s2.js';
 
 /** [half0, half1] region names for every code, indexed by code [0,192). */
 export const REGION_NAMES = Object.freeze([
-  ['atl_00', 'saopaloe'],  // 0x00
+  ['atl_00', 'rio'],  // 0x00
   ['atl_01', 'atl_01'],  // 0x01
   ['atl_02', 'atl_02'],  // 0x02
   ['atl_03', 'atl_03'],  // 0x03
@@ -77,11 +77,11 @@ export const REGION_NAMES = Object.freeze([
   ['vietnam', 'myanmar'],  // 0x31
   ['bengal', 'chinaw'],  // 0x32
   ['china', 'schina'],  // 0x33
-  ['taiwan', 'koreaw'],  // 0x34
+  ['taiwan', 'chinase'],  // 0x34
   ['korea', 'pac_35'],  // 0x35
   ['philpin', 'philpin'],  // 0x36
   ['borneo', 'pac_37'],  // 0x37
-  ['pac_38', 'oznorth'],  // 0x38
+  ['westpap', 'oznorth'],  // 0x38
   ['pac_39', 'indonsa'],  // 0x39
   ['malaysa', 'ind_3a'],  // 0x3a
   ['ind_3b', 'ind_3b'],  // 0x3b
@@ -95,19 +95,19 @@ export const REGION_NAMES = Object.freeze([
   ['siberiaw', 'urals'],  // 0x43
   ['finland', 'arc_44'],  // 0x44
   ['svalbrd', 'svalbrd'],  // 0x45
-  ['sweden', 'baltic'],  // 0x46
+  ['scan', 'baltic'],  // 0x46
   ['europe', 'germany'],  // 0x47
-  ['uk', 'faroe'],  // 0x48
+  ['uk', 'iceland'],  // 0x48
   ['atl_49', 'atl_49'],  // 0x49
   ['atl_4a', 'atl_4a'],  // 0x4a
   ['atl_4b', 'atl_4b'],  // 0x4b
   ['quebec', 'quebec'],  // 0x4c
   ['ontario', 'quebecw'],  // 0x4d
-  ['grnland', 'grnland'],  // 0x4e
-  ['iceland', 'arctic'],  // 0x4f
+  ['grnlands', 'grnlands'],  // 0x4e
+  ['grnlandn', 'arctic'],  // 0x4f
   ['arc_50', 'arc_50'],  // 0x50
   ['alaskae', 'arc_51'],  // 0x51
-  ['canadac', 'canadac'],  // 0x52
+  ['manitoba', 'manitoba'],  // 0x52
   ['alberta', 'alberta'],  // 0x53
   ['vancouvr', 'vancouvr'],  // 0x54
   ['pac_55', 'pac_55'],  // 0x55
@@ -119,7 +119,7 @@ export const REGION_NAMES = Object.freeze([
   ['arc_5b', 'eastsib'],  // 0x5b
   ['eastsibw', 'siberia'],  // 0x5c
   ['mongolia', 'mongolia'],  // 0x5d
-  ['korean', 'pac_5e'],  // 0x5e
+  ['chinane', 'khabaro'],  // 0x5e
   ['pac_5f', 'japan'],  // 0x5f
   ['japans', 'pac_60'],  // 0x60
   ['pac_61', 'pac_61'],  // 0x61
@@ -132,8 +132,8 @@ export const REGION_NAMES = Object.freeze([
   ['pac_68', 'pac_68'],  // 0x68
   ['pac_69', 'pac_69'],  // 0x69
   ['pac_6a', 'pac_6a'],  // 0x6a
-  ['pac_6b', 'hawaii'],  // 0x6b
-  ['pac_6c', 'pac_6c'],  // 0x6c
+  ['pac_6b', 'pac_6b'],  // 0x6b
+  ['hawaii', 'hawaii'],  // 0x6c
   ['pac_6d', 'kiribti'],  // 0x6d
   ['pac_6e', 'pac_6e'],  // 0x6e
   ['pac_6f', 'pac_6f'],  // 0x6f
