@@ -57,14 +57,14 @@ export const REGION_NAMES = Object.freeze([
   ['atl_1d', 'atl_1d'],  // 0x1d
   ['safrica', 'botswan'],  // 0x1e
   ['ind_1f', 'ind_1f'],  // 0x1f
-  ['ind_20', 'madagas'],  // 0x20
+  ['ind_20', 'madagass'],  // 0x20
   ['ind_21', 'ind_21'],  // 0x21
   ['ind_22', 'ind_22'],  // 0x22
   ['ind_23', 'ind_23'],  // 0x23
   ['ind_24', 'ind_24'],  // 0x24
   ['ind_25', 'ind_25'],  // 0x25
   ['ind_26', 'mauritu'],  // 0x26
-  ['ind_27', 'seychel'],  // 0x27
+  ['madagasn', 'seychel'],  // 0x27
   ['somalia', 'ind_28'],  // 0x28
   ['ind_29', 'somalian'],  // 0x29
   ['arabiae', 'iran'],  // 0x2a
@@ -96,7 +96,7 @@ export const REGION_NAMES = Object.freeze([
   ['finland', 'arc_44'],  // 0x44
   ['svalbrd', 'svalbrd'],  // 0x45
   ['scan', 'baltic'],  // 0x46
-  ['europe', 'germany'],  // 0x47
+  ['easteu', 'westeu'],  // 0x47
   ['uk', 'iceland'],  // 0x48
   ['atl_49', 'atl_49'],  // 0x49
   ['atl_4a', 'atl_4a'],  // 0x4a
@@ -109,7 +109,7 @@ export const REGION_NAMES = Object.freeze([
   ['alaskae', 'arc_51'],  // 0x51
   ['manitoba', 'manitoba'],  // 0x52
   ['alberta', 'alberta'],  // 0x53
-  ['vancouvr', 'vancouvr'],  // 0x54
+  ['britcol', 'usnw'],  // 0x54
   ['pac_55', 'pac_55'],  // 0x55
   ['pac_56', 'alaska'],  // 0x56
   ['pac_57', 'pac_57'],  // 0x57
@@ -166,7 +166,7 @@ export const REGION_NAMES = Object.freeze([
   ['bermuda', 'atl_8a'],  // 0x8a
   ['atl_8b', 'atl_8b'],  // 0x8b
   ['caracas', 'atl_8c'],  // 0x8c
-  ['guyana', 'guyana'],  // 0x8d
+  ['guyana', 'venezuel'],  // 0x8d
   ['colombia', 'caribbn'],  // 0x8e
   ['cuba', 'pac_8f'],  // 0x8f
   ['pac_90', 'pac_90'],  // 0x90
