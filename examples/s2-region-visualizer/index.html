@@ -605,20 +605,20 @@ function buildLabelTexture() {
   ctx.textAlign = 'center';
   ctx.textBaseline = 'middle';
   ctx.strokeStyle = 'white';
-  ctx.lineWidth = 3;
-  const NAME_FONT = 'bold 12px Inconsolata, monospace';
-  const CODE_FONT = '10px Inconsolata, monospace';
+  ctx.lineWidth = 2;
+  const NAME_FONT = 'bold 9px Inconsolata, monospace';
+  const CODE_FONT = '7px Inconsolata, monospace';
   const xy = (ll) => [ (ll.lng + 180) / 360 * TEX_W, (90 - ll.lat) / 180 * TEX_H ];
   // Region name (line 1) with the code beneath it (line 2, dimmer).
   const drawLabel = (px, py, name, code) => {
     ctx.font = NAME_FONT;
     ctx.fillStyle = '#1a1a1a';
-    ctx.strokeText(name, px, py - 7);
-    ctx.fillText(name, px, py - 7);
+    ctx.strokeText(name, px, py - 5);
+    ctx.fillText(name, px, py - 5);
     ctx.font = CODE_FONT;
     ctx.fillStyle = '#7a5a2a';
-    ctx.strokeText(hex(code), px, py + 7);
-    ctx.fillText(hex(code), px, py + 7);
+    ctx.strokeText(hex(code), px, py + 5);
+    ctx.fillText(hex(code), px, py + 5);
   };
   for (let cid = 0; cid < N_CELLS; cid++) {
     const names = regionNames(cid);

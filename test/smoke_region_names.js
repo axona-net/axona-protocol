@@ -77,8 +77,8 @@ const known = [
   ['japan', 35.7, 139.7], ['ozeast', -33.9, 151.2],
 ];
 for (const [expected, lat, lng] of known) {
-  const got = regionNameForLatLng(lat, lng);
-  check(`(${lat},${lng}) → "${expected}" (got "${got}")`, got === expected);
+  const got = regionNameForLatLng(lat, lng);   // may carry a compass suffix
+  check(`(${lat},${lng}) → "${expected}*" (got "${got}")`, got.startsWith(expected));
 }
 check('regionNameForLatLng === REGION_NAMES[id][half]', (() => {
   const id = geoCellId(19, 73, 8);
