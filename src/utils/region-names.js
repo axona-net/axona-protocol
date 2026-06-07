@@ -47,15 +47,15 @@ export const REGION_NAMES = Object.freeze([
   ['italy', 'libya'],  // 0x13
   ['egypt', 'turkey'],  // 0x14
   ['levant', 'arabia'],  // 0x15
-  ['ethiopa', 'sudan'],  // 0x16
+  ['ethiopia', 'sudan'],  // 0x16
   ['congoe', 'kenya'],  // 0x17
-  ['kenyas', 'tanzanas'],  // 0x18
-  ['zambia', 'tanzana'],  // 0x19
+  ['tanzania', 'mozambiq'],  // 0x18
+  ['zambia', 'congos'],  // 0x19
   ['congo', 'atl_1a'],  // 0x1a
   ['atl_1b', 'angola'],  // 0x1b
   ['namibia', 'atl_1c'],  // 0x1c
   ['atl_1d', 'atl_1d'],  // 0x1d
-  ['safrica', 'botswan'],  // 0x1e
+  ['safrica', 'botswana'],  // 0x1e
   ['ind_1f', 'ind_1f'],  // 0x1f
   ['ind_20', 'madagass'],  // 0x20
   ['ind_21', 'ind_21'],  // 0x21
@@ -79,7 +79,7 @@ export const REGION_NAMES = Object.freeze([
   ['china', 'schina'],  // 0x33
   ['taiwan', 'chinase'],  // 0x34
   ['korea', 'pac_35'],  // 0x35
-  ['philpin', 'philpin'],  // 0x36
+  ['philipin', 'philipin'],  // 0x36
   ['borneo', 'pac_37'],  // 0x37
   ['westpap', 'oznorth'],  // 0x38
   ['pac_39', 'indonsa'],  // 0x39
@@ -89,7 +89,7 @@ export const REGION_NAMES = Object.freeze([
   ['ind_3d', 'ind_3d'],  // 0x3d
   ['pac_3e', 'ozwest'],  // 0x3e
   ['ozcentr', 'ozcentr'],  // 0x3f
-  ['caucsus', 'ukraine'],  // 0x40
+  ['caucasus', 'ukraine'],  // 0x40
   ['moscow', 'kazakhw'],  // 0x41
   ['kazakh', 'pac_42'],  // 0x42
   ['siberiaw', 'urals'],  // 0x43

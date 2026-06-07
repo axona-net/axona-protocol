@@ -41,13 +41,13 @@ const ANCHORS = [
   ['mongolia', 47, 104, 'land'], ['kamchtk', 56, 159, 'land'], ['kazakh', 48, 67, 'land'],
   // Middle East
   ['levant', 33, 38, 'land'], ['arabia', 23, 45, 'land'], ['iraq', 33, 43, 'land'],
-  ['iran', 32, 53, 'land'], ['afghan', 34, 66, 'land'], ['caucsus', 42, 45, 'land'],
+  ['iran', 32, 53, 'land'], ['afghan', 34, 66, 'land'], ['caucasus', 42, 45, 'land'],
   // Africa
   ['morocco', 31, -7, 'land'], ['algeria', 28, 2, 'land'], ['tunisia', 34, 9, 'land'],
   ['libya', 27, 17, 'land'], ['egypt', 27, 30, 'land'], ['mali', 18, -3, 'land'],
   ['niger', 17, 9, 'land'], ['chad', 15, 18, 'land'], ['sudan', 15, 30, 'land'],
   ['senegal', 14, -15, 'land'], ['westafr', 9, -6, 'land'], ['nigeria', 9, 8, 'land'],
-  ['ethiopa', 9, 39, 'land'], ['kenya', 1, 38, 'land'], ['somalia', 6, 47, 'land'],
+  ['ethiopia', 9, 39, 'land'], ['kenya', 1, 38, 'land'], ['somalia', 6, 47, 'land'],
   ['tanzana', -6, 35, 'land'], ['congo', -2, 22, 'land'], ['angola', -12, 18, 'land'],
   ['zambia', -14, 27, 'land'], ['namibia', -22, 17, 'land'], ['botswan', -22, 24, 'land'],
   ['safrica', -30, 24, 'land'],
@@ -75,13 +75,15 @@ const ANCHORS = [
   ['svalbrd', 78, 18, 'island'], ['faroe', 62, -7, 'island'], ['cuba', 21, -78, 'island'],
   ['bahamas', 24, -76, 'island'], ['caribbn', 15, -71, 'island'], ['srilnka', 7, 81, 'island'],
   ['taiwan', 24, 121, 'island'], ['madagas', -19, 47, 'island'], ['nzealnd', -42, 172, 'island'],
-  ['borneo', 1, 114, 'island'], ['sumatra', 0, 101, 'island'], ['philpin', 13, 122, 'island'],
+  ['borneo', 1, 114, 'island'], ['sumatra', 0, 101, 'island'], ['philipin', 13, 122, 'island'],
 ];
 
 // Exact hand-fixes (code → {half: name}). Applied last; authoritative.
 const OVERRIDES = {
   0x00: { 1: 'rio' },
-  0x12: { 1: 'sardinia' }, 0x17: { 1: 'kenya' }, 0x20: { 1: 'madagass' },
+  0x12: { 1: 'sardinia' }, 0x17: { 1: 'kenya' },
+  0x18: { 0: 'tanzania', 1: 'mozambiq' }, 0x19: { 1: 'congos' }, 0x1e: { 1: 'botswana' },
+  0x20: { 1: 'madagass' },
   0x27: { 0: 'madagasn' }, 0x2b: { 0: 'afghan' },
   0x2d: { 0: 'tibet', 1: 'india_n' }, 0x2e: { 0: 'india_s', 1: 'india_s' },
   0x34: { 1: 'chinase' }, 0x38: { 0: 'westpap' },
