@@ -244,16 +244,21 @@ import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import {
   geoCellId,
   geoCellCenter,
+  geoCellSubCenters,
   geoCellCorners,
   geoCellFace,
   S2_CELL_COUNT,
 } from '../../src/utils/s2.js';
-import { regionName } from '../../src/utils/region-names.js';
+import { regionName, regionNames } from '../../src/utils/region-names.js';
 import { KERNEL_VERSION } from '../../src/transport/handshake.js';
 
-// "useast · 0x89" — region name + hex code for a cell id.
-const cellLabel = (cid) =>
-  `${regionName(cid) ?? '?'} · 0x${cid.toString(16).padStart(2, '0').toUpperCase()}`;
+const hex = (cid) => '0x' + cid.toString(16).padStart(2, '0').toUpperCase();
+
+// "useast / bahamas · 0x89" — both half-names (collapsed if identical) + code.
+const cellLabel = (cid) => {
+  const [a, b] = regionNames(cid) ?? ['?', '?'];
+  return `${a === b ? a : `${a} / ${b}`} · ${hex(cid)}`;
+};
 
 document.getElementById('kernelVer').textContent =
   `@axona/protocol kernel v${KERNEL_VERSION}`;
@@ -599,17 +604,35 @@ function buildLabelTexture() {
   ctx.font = 'bold 15px Inconsolata, monospace';
   ctx.textAlign = 'center';
   ctx.textBaseline = 'middle';
-  ctx.fillStyle = '#1a1a1a';
   ctx.strokeStyle = 'white';
   ctx.lineWidth = 3;
+  const NAME_FONT = 'bold 12px Inconsolata, monospace';
+  const CODE_FONT = '10px Inconsolata, monospace';
+  const xy = (ll) => [ (ll.lng + 180) / 360 * TEX_W, (90 - ll.lat) / 180 * TEX_H ];
+  // Region name (line 1) with the code beneath it (line 2, dimmer).
+  const drawLabel = (px, py, name, code) => {
+    ctx.font = NAME_FONT;
+    ctx.fillStyle = '#1a1a1a';
+    ctx.strokeText(name, px, py - 7);
+    ctx.fillText(name, px, py - 7);
+    ctx.font = CODE_FONT;
+    ctx.fillStyle = '#7a5a2a';
+    ctx.strokeText(hex(code), px, py + 7);
+    ctx.fillText(hex(code), px, py + 7);
+  };
   for (let cid = 0; cid < N_CELLS; cid++) {
-    const ll = geoCellCenter(cid);
-    if (!ll) continue;
-    const px = (ll.lng + 180) / 360 * TEX_W;
-    const py = (90  - ll.lat) / 180 * TEX_H;
-    const txt = regionName(cid) ?? '?';
-    ctx.strokeText(txt, px, py);
-    ctx.fillText(txt, px, py);
+    const names = regionNames(cid);
+    if (!names) continue;
+    const [a, b] = names;
+    if (a === b) {
+      const [px, py] = xy(geoCellCenter(cid));
+      drawLabel(px, py, a, cid);
+    } else {
+      // Two distinct halves — label each at its own sub-cell center.
+      const [s0, s1] = geoCellSubCenters(cid);
+      const [px0, py0] = xy(s0); drawLabel(px0, py0, a, cid);
+      const [px1, py1] = xy(s1); drawLabel(px1, py1, b, cid);
+    }
   }
   return c;
 }
@@ -727,8 +750,7 @@ function updateHover(clientX, clientY) {
   const b = cellBoundsApprox(cid);
   const area = cellArea(cid);
   document.getElementById('hoverCell').textContent =
-    (regionName(cid) ?? '?') + '  ·  0x' + cid.toString(16).padStart(2, '0').toUpperCase() +
-    '  (' + cid + ')  face ' + face;
+    cellLabel(cid) + '  (' + cid + ')  face ' + face;
   document.getElementById('hoverLatLng').textContent =
     lat.toFixed(2) + '°, ' + lng.toFixed(2) + '°';
   if (b) {
