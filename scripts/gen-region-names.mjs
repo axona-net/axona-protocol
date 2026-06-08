@@ -96,6 +96,16 @@ const OVERRIDES = {
   0x86: { 0: 'uss', 1: 'mexico' }, 0x8d: { 1: 'venezuel' },
 };
 
+// Single-name overrides (code → name), applied AFTER the two halves collapse to
+// ONE name per region. Authoritative. Used where the collapsed default isn't
+// the wanted label — a city for a multi-country cell, or an area that spans
+// cells (the same name may legitimately cover more than one code).
+const SINGLE_OVERRIDES = {
+  // North America
+  0x80: 'uswest', 0x81: 'mexico', 0x84: 'centrlam',
+  0x87: 'uscentlw', 0x88: 'uscentle', 0x89: 'useast', 0x8f: 'centrlam',
+};
+
 const DEG = Math.PI / 180;
 const unit = (lat, lng) => { const a = lat*DEG, b = lng*DEG, c = Math.cos(a); return [c*Math.cos(b), c*Math.sin(b), Math.sin(a)]; };
 const angDeg = (u, v) => Math.acos(Math.max(-1, Math.min(1, u[0]*v[0]+u[1]*v[1]+u[2]*v[2]))) / DEG;
@@ -186,22 +196,37 @@ for (const [base, group] of byBase) {
 for (const [code, m] of Object.entries(OVERRIDES))
   for (const [half, name] of Object.entries(m)) NAMES[+code][+half] = name;
 
+// Pass 5: collapse each cell's two halves to ONE name.
+//   • both halves identical → that name
+//   • one ocean half + one land half → the LAND name (ocean takes the landmass)
+//   • both halves ocean → the (shared) ocean name
+//   • two different lands → keep half 0; pick the wanted city/area via SINGLE_OVERRIDES
+const isOcean = (s) => /^(pac|atl|ind|sou|arc)_[0-9a-f]{2}$/.test(s);
+const SINGLE = NAMES.map(([a, b]) => {
+  if (a === b) return a;
+  if (isOcean(a) && !isOcean(b)) return b;
+  if (isOcean(b) && !isOcean(a)) return a;
+  return a;                                   // both ocean, or two lands → half 0
+});
+for (const [code, name] of Object.entries(SINGLE_OVERRIDES)) SINGLE[+code] = name;
+
 // ── Review → stderr ──
 const pad = (s, n) => String(s).padEnd(n);
 for (let f = 0; f < 6; f++) {
   process.stderr.write(`\n── face ${f} ──\n`);
   for (let code = f * 32; code < (f + 1) * 32; code++) {
     const [c0, c1] = geoCellSubCenters(code);
-    process.stderr.write(`0x${hex2(code)}  ${pad(NAMES[code][0], 9)} ${pad(NAMES[code][1], 9)}` +
+    process.stderr.write(`0x${hex2(code)}  ${pad(SINGLE[code], 9)}` +
       `  (${c0.lat.toFixed(0)},${c0.lng.toFixed(0)} | ${c1.lat.toFixed(0)},${c1.lng.toFixed(0)})\n`);
   }
 }
-const flat = NAMES.flat();
-const over = flat.filter(n => n.length > 8);
-process.stderr.write(`\nnames=${flat.length}  unique=${new Set(flat).size}  maxlen=${Math.max(...flat.map(n => n.length))}` +
-  (over.length ? `  OVER-8=${[...new Set(over)].join(',')}` : '  (all ≤8)') + '\n');
+const over = SINGLE.filter(n => n.length > 8);
+const dups = [...new Set(SINGLE.filter((n, i) => SINGLE.indexOf(n) !== i))];
+process.stderr.write(`\nnames=${SINGLE.length}  distinct=${new Set(SINGLE).size}  maxlen=${Math.max(...SINGLE.map(n => n.length))}` +
+  (over.length ? `  OVER-8=${[...new Set(over)].join(',')}` : '  (all ≤8)') +
+  (dups.length ? `  multi-cell=${dups.join(',')}` : '') + '\n');
 
-// ── Literal → stdout ──
+// ── Literal → stdout ──  (one name per region)
 let out = '';
-for (let code = 0; code < S2_CELL_COUNT; code++) out += `  ['${NAMES[code][0]}', '${NAMES[code][1]}'],  // 0x${hex2(code)}\n`;
+for (let code = 0; code < S2_CELL_COUNT; code++) out += `  '${SINGLE[code]}',  // 0x${hex2(code)}\n`;
 process.stdout.write(out);

@@ -254,11 +254,8 @@ import { KERNEL_VERSION } from '../../src/transport/handshake.js';
 
 const hex = (cid) => '0x' + cid.toString(16).padStart(2, '0').toUpperCase();
 
-// "useast / bahamas · 0x89" — both half-names (collapsed if identical) + code.
-const cellLabel = (cid) => {
-  const [a, b] = regionNames(cid) ?? ['?', '?'];
-  return `${a === b ? a : `${a} / ${b}`} · ${hex(cid)}`;
-};
+// "useast · 0x89" — the region's single name + code.
+const cellLabel = (cid) => `${regionName(cid) ?? '?'} · ${hex(cid)}`;
 
 document.getElementById('kernelVer').textContent =
   `@axona/protocol kernel v${KERNEL_VERSION}`;
@@ -621,18 +618,10 @@ function buildLabelTexture() {
     ctx.fillText(hex(code), px, py + 5);
   };
   for (let cid = 0; cid < N_CELLS; cid++) {
-    const names = regionNames(cid);
-    if (!names) continue;
-    const [a, b] = names;
-    if (a === b) {
-      const [px, py] = xy(geoCellCenter(cid));
-      drawLabel(px, py, a, cid);
-    } else {
-      // Two distinct halves — label each at its own sub-cell center.
-      const [s0, s1] = geoCellSubCenters(cid);
-      const [px0, py0] = xy(s0); drawLabel(px0, py0, a, cid);
-      const [px1, py1] = xy(s1); drawLabel(px1, py1, b, cid);
-    }
+    const name = regionName(cid);
+    if (!name) continue;
+    const [px, py] = xy(geoCellCenter(cid));   // one name, centered on the cell
+    drawLabel(px, py, name, cid);
   }
   return c;
 }
