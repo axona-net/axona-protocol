@@ -104,6 +104,9 @@ const SINGLE_OVERRIDES = {
   // North America
   0x80: 'uswest', 0x81: 'mexico', 0x84: 'centrlam',
   0x87: 'uscentlw', 0x88: 'uscentle', 0x89: 'useast', 0x8f: 'centrlam',
+  0x86: 'ussouth', 0x54: 'ussw',
+  // Europe / Mid-East / Asia / Pacific
+  0x48: 'britisle', 0x2a: 'arabia', 0x2e: 'india', 0x31: 'indochin', 0x7c: 'bougain',
 };
 
 const DEG = Math.PI / 180;

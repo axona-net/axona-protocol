@@ -65,14 +65,14 @@ export const REGION_NAMES = Object.freeze([
   'madagasn',  // 0x27
   'somalia',  // 0x28
   'somalian',  // 0x29
-  'arabiae',  // 0x2a
+  'arabia',  // 0x2a
   'afghan',  // 0x2b
   'pakistn',  // 0x2c
   'tibet',  // 0x2d
-  'india_s',  // 0x2e
+  'india',  // 0x2e
   'maldive',  // 0x2f
   'sumatra',  // 0x30
-  'vietnam',  // 0x31
+  'indochin',  // 0x31
   'bengal',  // 0x32
   'china',  // 0x33
   'taiwan',  // 0x34
@@ -95,7 +95,7 @@ export const REGION_NAMES = Object.freeze([
   'svalbrd',  // 0x45
   'scan',  // 0x46
   'easteu',  // 0x47
-  'uk',  // 0x48
+  'britisle',  // 0x48
   'atl_49',  // 0x49
   'atl_4a',  // 0x4a
   'atl_4b',  // 0x4b
@@ -107,7 +107,7 @@ export const REGION_NAMES = Object.freeze([
   'alaskae',  // 0x51
   'manitoba',  // 0x52
   'alberta',  // 0x53
-  'britcol',  // 0x54
+  'ussw',  // 0x54
   'pac_55',  // 0x55
   'alaska',  // 0x56
   'pac_57',  // 0x57
@@ -147,7 +147,7 @@ export const REGION_NAMES = Object.freeze([
   'pac_79',  // 0x79
   'fiji',  // 0x7a
   'solomon',  // 0x7b
-  'pac_7c',  // 0x7c
+  'bougain',  // 0x7c
   'papnewgn',  // 0x7d
   'ozcentre',  // 0x7e
   'ozeast',  // 0x7f
@@ -157,7 +157,7 @@ export const REGION_NAMES = Object.freeze([
   'pac_83',  // 0x83
   'centrlam',  // 0x84
   'galapgs',  // 0x85
-  'uss',  // 0x86
+  'ussouth',  // 0x86
   'uscentlw',  // 0x87
   'uscentle',  // 0x88
   'useast',  // 0x89
