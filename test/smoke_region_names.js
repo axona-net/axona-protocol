@@ -40,11 +40,17 @@ for (let code = 0; code < S2_CELL_COUNT; code++) {
   if (regionName(regionCode(REGION_NAMES[code])) !== REGION_NAMES[code]) { rt = false; break; }
 }
 check('regionName(regionCode(name)) === name  ∀ code', rt);
-check('regionCode returns the canonical (lowest) code for a multi-cell name',
-  regionCode('centrlam') === Math.min(...REGION_NAMES.flatMap((n, c) => n === 'centrlam' ? [c] : [])));
+const dupNames = [...new Set(REGION_NAMES.filter((n, i) => REGION_NAMES.indexOf(n) !== i))];
+check('regionCode returns the canonical (lowest) code for any repeated name',
+  dupNames.every(n => regionCode(n) === REGION_NAMES.indexOf(n)));
 
-console.log('\n── one-name fix: N. America (the reported confusions) ──');
-const expectOne = { 0x89: 'useast', 0x80: 'uswest', 0x81: 'mexico', 0x87: 'uscentlw', 0x88: 'uscentle', 0x84: 'centrlam', 0x8f: 'centrlam' };
+console.log('\n── one-name fixes (the reported confusions) ──');
+const expectOne = {
+  0x89: 'useast', 0x80: 'uswest', 0x81: 'mexico', 0x84: 'mexicow', 0x8f: 'centrlam',
+  0x86: 'usmex', 0x54: 'usswbc', 0x87: 'uscentlw', 0x88: 'uscentle',
+  0x48: 'britisle', 0x2a: 'arabia', 0x2e: 'india', 0x31: 'indochin',
+  0x34: 'chinatw', 0x7c: 'bougain', 0xbd: 'nzealnds',
+};
 for (const [code, name] of Object.entries(expectOne))
   check(`0x${(+code).toString(16)} → "${name}"`, REGION_NAMES[+code] === name);
 

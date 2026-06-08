@@ -102,11 +102,12 @@ const OVERRIDES = {
 // cells (the same name may legitimately cover more than one code).
 const SINGLE_OVERRIDES = {
   // North America
-  0x80: 'uswest', 0x81: 'mexico', 0x84: 'centrlam',
-  0x87: 'uscentlw', 0x88: 'uscentle', 0x89: 'useast', 0x8f: 'centrlam',
-  0x86: 'ussouth', 0x54: 'ussw',
+  0x80: 'uswest', 0x81: 'mexico', 0x84: 'mexicow', 0x8f: 'centrlam',
+  0x87: 'uscentlw', 0x88: 'uscentle', 0x89: 'useast',
+  0x86: 'usmex', 0x54: 'usswbc',
   // Europe / Mid-East / Asia / Pacific
-  0x48: 'britisle', 0x2a: 'arabia', 0x2e: 'india', 0x31: 'indochin', 0x7c: 'bougain',
+  0x48: 'britisle', 0x2a: 'arabia', 0x2e: 'india', 0x31: 'indochin',
+  0x34: 'chinatw', 0x7c: 'bougain', 0xbd: 'nzealnds',
 };
 
 const DEG = Math.PI / 180;
