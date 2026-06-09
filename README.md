@@ -16,10 +16,10 @@ Ed25519 signature before they can join (see
 > **Network epoch.** This is the `axona/5` line (`WIRE_VERSION 2.0`). The
 > protocol epoch is folded into the connect-time signed transcript, so an
 > `axona/5` node and a node on the older `axona/4` epoch **cannot** complete a
-> handshake — the two networks are cryptographically partitioned by design. The
-> SF testnet (`testnet.axona.net`) runs this line; production `axona.net`/
-> `bridge.axona.net` still run `axona/4` (kernel 2.16.0) until the flag-day
-> cutover.
+> handshake — older `axona/4` peers are partitioned out by design. As of the
+> **2026-06-08 flag-day cutover**, production (`axona.net` / `bridge.axona.net`)
+> and the SF testnet (`testnet.axona.net`) both run this line; the earlier
+> `axona/4` / kernel-2.16 network has been retired.
 
 ## Install
 
@@ -319,9 +319,9 @@ The full programmer-facing documentation lives in
 
 | Document | When to read |
 |---|---|
-| [Quick Start](https://github.com/axona-net/axona-docs/blob/main/programmer-guide/Quick-Start-v2.16.0.md) | You want a working pub/sub roundtrip in 5 minutes |
-| [API Reference](https://github.com/axona-net/axona-docs/blob/main/programmer-guide/Axona-API-Reference-v2.16.0.md) | You're building and need a specific call's signature |
-| [Programmer Guide](https://github.com/axona-net/axona-docs/blob/main/programmer-guide/Axona-Programmer-Guide-v2.16.0.md) | You're starting a new application against Axona |
+| [Quick Start](https://github.com/axona-net/axona-docs/blob/main/programmer-guide/Quick-Start-v2.32.0.md) | You want a working pub/sub roundtrip in 5 minutes |
+| [API Reference](https://github.com/axona-net/axona-docs/blob/main/programmer-guide/Axona-API-Reference-v2.32.0.md) | You're building and need a specific call's signature |
+| [Programmer Guide](https://github.com/axona-net/axona-docs/blob/main/programmer-guide/Axona-Programmer-Guide-v2.32.0.md) | You're starting a new application against Axona |
 
 ## Wire protocol
 
