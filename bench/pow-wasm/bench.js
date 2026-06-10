@@ -103,6 +103,22 @@ async function run() {
   $('status').textContent = error ? `done — ERROR: ${error}` : 'done';
   $('run').disabled = false;
   maybeSubmit(result);
+  if ($('autoReport')?.checked) reportNow(result);
+}
+
+// Relay the result back over the live Axona network (pub/sub) so a local node
+// collects it — no HTTP collector needed, works across the internet. Lazy: the
+// heavy kernel + WebRTC connect only loads when reporting is actually used.
+async function reportNow(result) {
+  $('report').disabled = true;
+  try {
+    const { reportToAxona } = await import('./axona-report.js');
+    await reportToAxona(result, (m) => { $('status').textContent = m; });
+  } catch (e) {
+    $('status').textContent = 'Axona report failed: ' + (e.message || e);
+  } finally {
+    $('report').disabled = false;
+  }
 }
 
 function render(r) {
@@ -142,6 +158,7 @@ window.addEventListener('DOMContentLoaded', () => {
   }
   $('dev').textContent = JSON.stringify(deviceInfo(), null, 2);
   $('run').addEventListener('click', () => run().catch((e) => { $('status').textContent = 'fatal: ' + e.message; $('run').disabled = false; }));
+  $('report').addEventListener('click', () => { if (lastResult) reportNow(lastResult); else $('status').textContent = 'run a benchmark first'; });
   $('copy').addEventListener('click', () => { if (lastResult) navigator.clipboard.writeText(JSON.stringify(lastResult)); });
   $('download').addEventListener('click', () => {
     if (!lastResult) return;

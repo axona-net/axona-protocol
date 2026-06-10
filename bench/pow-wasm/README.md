@@ -14,6 +14,37 @@ does the candidate fit without OOM, give an acceptable foreground mint, and keep
 verify at µs scale?* If neither Equihash nor Cuckoo clears it → lower difficulty,
 go background-only, or fall back to Argon2id.
 
+## Share it via a URL (deployed)
+
+The page is served by GitHub Pages at the repo root, so once this is on `main`
+it's live at:
+
+> **<https://demo.axona.net/bench/pow-wasm/>**  (testnet: `demo-testnet.axona.net/bench/pow-wasm/`)
+
+Share that link with anyone. They open it on their phone/PC, hit **Run**, and —
+with **auto-publish to Axona** on (default) — the result is published over the
+**live Axona network** to the topic `pow-bench/results`. No server to run, works
+across the internet. (`?bridge=wss://…` overrides the bridge.)
+
+> Note: GitHub Pages can't set COOP/COEP headers, so `crossOriginIsolated` is
+> false there — the core metrics (mint/verify timing + `wasmMemory.byteLength`
+> peak) work fine; only `measureUserAgentSpecificMemory()` and WASM threads need
+> the `collector.js` path below.
+
+## Collect the results on a local node (Axona pub/sub)
+
+Subscribe to the topic from any machine — your laptop becomes the data sink:
+
+```bash
+cd axona-relay
+node src/cli.js sub "pow-bench/results" --region useast --for 3600   # prints each result as it arrives
+```
+
+Every tester's device publishes its result JSON to that topic; the `--region
+useast` anchor matches the page's reporter, so you receive them all. Pipe to a
+file and tabulate however you like. This *is* the automated data-gathering loop —
+Axona relaying its own benchmark telemetry.
+
 ## Run it now (SHA-256 baseline — works today)
 
 ```bash
