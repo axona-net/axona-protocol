@@ -192,6 +192,27 @@ async function testPeerValidation() {
     e2 instanceof KillError && e2.code === ErrorCodes.KILL_SIGN_FAILED);
 }
 
+async function testKillRemovesAllDuplicates() {
+  console.log('\n── SP-11: kill removes EVERY copy of duplicate-content publishes ──');
+  const alice = await deriveIdentity(LONDON);
+  const { am } = mkManager();
+  // Identical content re-gossiped → same msgId/postHash, distinct wire publishIds,
+  // cached as separate entries. A single splice would leave a duplicate alive.
+  const env  = await buildEnvelope({ topic: 'cats', message: 'hi', identity: alice, ts: T, seq: T });
+  const json = JSON.stringify(env);
+  am.axonRoles.set(TOPIC_BIG, {
+    isRoot: true,
+    children: new Map([[am.nodeId, {}]]),
+    replayCache: [
+      { json, publishId: 'p1', publishTs: T, postHash: env.msgId, publisher: null },
+      { json, publishId: 'p2', publishTs: T, postHash: env.msgId, publisher: null },
+    ],
+  });
+  check('seeded two duplicate-content copies', am.axonRoles.get(TOPIC_BIG).replayCache.length === 2);
+  await am._handleKill(TOPIC_BIG, await buildKill({ topicId: TOPIC_HEX, msgId: env.msgId, ts: T, seq: T, identity: alice }));
+  check('one kill removed BOTH copies', am.axonRoles.get(TOPIC_BIG).replayCache.length === 0);
+}
+
 async function main() {
   console.log('Axona kill / retraction (Phase A #2) smoke');
   await testKillObject();
@@ -200,6 +221,7 @@ async function main() {
   await testKillAfterReplayAcquisition();
   await testReplayDoesNotResurrectKilled();
   await testUnauthorizedKillRejected();
+  await testKillRemovesAllDuplicates();
   await testPeerValidation();
   console.log(`\nResult: ${passed} passed, ${failed} failed`);
   process.exit(failed === 0 ? 0 : 1);
