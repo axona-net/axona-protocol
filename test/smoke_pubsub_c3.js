@@ -15,6 +15,9 @@
 // =====================================================================
 
 import { AxonaManager } from '../src/pubsub/AxonaManager.js';
+import { deriveIdentity } from '../src/identity/index.js';
+import { buildEnvelope } from '../src/pubsub/envelope.js';
+import { setPowDifficulty, resetPowDifficulty } from '../src/pow/pow.js';
 
 let passed = 0, failed = 0;
 function check(label, cond) {
@@ -55,7 +58,7 @@ let rid = 0;
 const req = ({ requesterId, fromId }) =>
   [{ topicId: TOPIC, requesterId, requestId: 'r' + (++rid), postHashes: null }, { fromId }];
 
-function run() {
+async function run() {
   console.log('C-3 metrics authorization + SP-10 quota\n');
 
   console.log('── C-3: no reflection to a named victim ──');
@@ -107,6 +110,18 @@ function run() {
     }
     const anon = role.replayCache.filter(e => (e.signerPubkey ?? 'anon') === 'anon');
     check('5 anon publishes, quota 2 → capped at 2', anon.length === 2);
+  }
+
+  console.log('\n── publish-ingress PoW gate (B-4 `_publishSignatureOk`, difficulty > 0) ──');
+  {
+    const { am } = makeManager();
+    setPowDifficulty('publish', 10);
+    const id  = await deriveIdentity({ lat: 51.5, lng: -0.12 });
+    const env = await buildEnvelope({ topic: 'cats', message: 'hi', identity: id });   // mints signerPow at 10
+    check('ingress ACCEPTS a publish with a valid signerPow', (await am._publishSignatureOk(JSON.stringify(env))) === true);
+    check('ingress DROPS a publish with the signerPow stripped',
+      (await am._publishSignatureOk(JSON.stringify({ ...env, signerPow: '' }))) === false);
+    resetPowDifficulty();
   }
 
   console.log(`\nResult: ${passed} passed, ${failed} failed`);

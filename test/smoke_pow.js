@@ -10,8 +10,9 @@
 // Run: node test/smoke_pow.js
 // =====================================================================
 
-import { POW_DIFFICULTY, powMint, powVerify, powBits, powCalibrate } from '../src/pow/pow.js';
-import { deriveIdentity }              from '../src/identity/index.js';
+import { POW_DIFFICULTY, powMint, powVerify, powBits, powCalibrate,
+         setPowDifficulty, resetPowDifficulty }   from '../src/pow/pow.js';
+import { deriveIdentity, dumpIdentity, loadIdentity } from '../src/identity/index.js';
 import { buildEnvelope, verifyEnvelope } from '../src/pubsub/envelope.js';
 import { buildAuthHello, verifyAuthHello } from '../src/transport/handshake-auth.js';
 
@@ -59,6 +60,39 @@ async function run() {
   const hello = await buildAuthHello({ identity: id, cbv });
   check('auth hello carries a pow field (=== "")', hello.pow === '');
   check('auth hello verifies (pow no-op at 0)',    (await verifyAuthHello(hello, { cbv })).ok === true);
+
+  console.log('\n── gate ENFORCEMENT at difficulty > 0 (handshake) ──');
+  setPowDifficulty('transport', 10);
+  const idH   = await deriveIdentity({ lat: 51.5, lng: -0.12 });   // mints transport pow at 10
+  const cbv2  = 'cbv:enforce';
+  const helloH = await buildAuthHello({ identity: idH, cbv: cbv2 });
+  check('identity mints a non-empty transport pow at >0', idH.pow.length > 0);
+  check('hello with a valid pow is admitted',  (await verifyAuthHello(helloH, { cbv: cbv2 })).ok === true);
+  check('hello with an EMPTY pow → bad_pow',   (await verifyAuthHello({ ...helloH, pow: '' }, { cbv: cbv2 })).reason === 'bad_pow');
+  check('hello with a WRONG pow → bad_pow',    (await verifyAuthHello({ ...helloH, pow: 'zz' }, { cbv: cbv2 })).reason === 'bad_pow');
+  resetPowDifficulty();
+  const idR = await deriveIdentity({ lat: 51.5, lng: -0.12 });
+  check('after reset, a no-pow hello is admitted again', (await verifyAuthHello(await buildAuthHello({ identity: idR, cbv: cbv2 }), { cbv: cbv2 })).ok === true);
+
+  console.log('\n── gate ENFORCEMENT at difficulty > 0 (publish signerPow) ──');
+  setPowDifficulty('publish', 10);
+  const idP  = await deriveIdentity({ lat: 51.5, lng: -0.12 });
+  const envP = await buildEnvelope({ topic: 'cats', message: 'hi', identity: idP });
+  check('envelope carries a non-empty signerPow at >0', envP.signerPow.length > 0);
+  check('valid signerPow verifies',  (await powVerify({ pubkeyHex: envP.signerPubkey, nonce: envP.signerPow, role: 'publish' })) === true);
+  check('absent signerPow is rejected', (await powVerify({ pubkeyHex: envP.signerPubkey, nonce: '', role: 'publish' })) === false);
+  resetPowDifficulty();
+
+  console.log('\n── nonce persistence (dump → load reuses the puzzle) ──');
+  setPowDifficulty('transport', 10);
+  const idA  = await deriveIdentity({ lat: 51.5, lng: -0.12 });
+  const envA = await dumpIdentity(idA);
+  check('dumped envelope persists the pow',  envA.pow === idA.pow && envA.pow.length > 0);
+  const idB  = await loadIdentity(envA);
+  check('load REUSES the persisted pow (no re-mint)', idB.pow === idA.pow);
+  resetPowDifficulty();
+  const env0 = await dumpIdentity(await deriveIdentity({ lat: 51.5, lng: -0.12 }));
+  check('at difficulty 0 the dumped pow is ""', env0.pow === '');
 
   console.log(`\nResult: ${passed} passed, ${failed} failed`);
   process.exit(failed === 0 ? 0 : 1);
