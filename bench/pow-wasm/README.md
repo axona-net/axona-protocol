@@ -21,10 +21,16 @@ it's live at:
 
 > **<https://demo.axona.net/bench/pow-wasm/>**  (testnet: `demo-testnet.axona.net/bench/pow-wasm/`)
 
-Share that link with anyone. They open it on their phone/PC, hit **Run**, and —
-with **auto-publish to Axona** on (default) — the result is published over the
-**live Axona network** to the topic `pow-bench/results`. No server to run, works
-across the internet. (`?bridge=wss://…` overrides the bridge.)
+Share that link with anyone (a **QR code** on the page makes phone-joining a
+scan). They open it on their phone/PC, hit **Run**, and — with **auto-publish to
+Axona** on (default) — the result is published over the **live Axona network** to
+the topic `pow-bench/results`. No server to run, works across the internet.
+(`?bridge=wss://…` overrides the bridge.)
+
+**Continuous mode** (user-initiated via **Run continuously**): loops run → publish
+→ wait, streaming a fresh result after *every* run — the sustained/thermal data —
+until **Stop**. With auto-publish on it connects to Axona **once** and reuses the
+connection for all iterations. The `gap` field sets the pause between runs.
 
 > Note: GitHub Pages can't set COOP/COEP headers, so `crossOriginIsolated` is
 > false there — the core metrics (mint/verify timing + `wasmMemory.byteLength`

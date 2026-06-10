@@ -41,13 +41,15 @@ async function uaMemoryBytes() {
 
 let lastResult = null;
 
-async function run() {
+// Run one full benchmark (load candidate → trials in a Worker → aggregate →
+// render → return the result). Pure; orchestration (single vs continuous,
+// reporting) is handled by the callers below.
+async function runOnce() {
   const candidateKey = $('candidate').value;
   const difficulty = parseInt($('difficulty').value, 10);
   const trials = parseInt($('trials').value, 10);
   const pubkeyHex = $('pubkey').value.trim() || 'aa'.repeat(32);
 
-  $('run').disabled = true;
   $('status').textContent = 'loading candidate…';
   const trialsData = [];
   let oom = false, error = null, candidateName = candidateKey;
@@ -100,10 +102,71 @@ async function run() {
   };
   lastResult = result;
   render(result);
-  $('status').textContent = error ? `done — ERROR: ${error}` : 'done';
+  if (error) $('status').textContent = `done — ERROR: ${error}`;
+  return result;
+}
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+// Single benchmark (the "Run" button): run once, then one-shot report if enabled.
+async function singleRun() {
+  if (continuous) return;
+  $('run').disabled = true;
+  try {
+    const r = await runOnce();
+    maybeSubmit(r);
+    if ($('autoReport').checked) await reportNow(r);
+    else $('status').textContent = 'done';
+  } catch (e) {
+    $('status').textContent = 'error: ' + (e.message || e);
+  } finally {
+    $('run').disabled = false;
+  }
+}
+
+// Continuous mode (user-initiated via "Run continuously"): loop run → publish →
+// wait, until Stop. With auto-publish on, connect to Axona ONCE and reuse it.
+let continuous = false, reporter = null, iter = 0;
+
+async function startContinuous() {
+  if (continuous) return;
+  continuous = true; iter = 0;
+  $('loop').textContent = 'Stop'; $('run').disabled = true;
+  const gap = Math.max(0, parseInt($('gap').value, 10) || 0);
+
+  if ($('autoReport').checked) {
+    try {
+      const { createReporter } = await import('./axona-report.js');
+      reporter = await createReporter((m) => { $('status').textContent = m; });
+    } catch (e) {
+      $('status').textContent = 'Axona connect failed — continuing local-only: ' + (e.message || e);
+      reporter = null;
+    }
+  }
+
+  while (continuous) {
+    iter++; $('iter').textContent = String(iter);
+    let r;
+    try { r = await runOnce(); }
+    catch (e) { $('status').textContent = 'run error: ' + (e.message || e); break; }
+    maybeSubmit(r);
+    if (reporter) {
+      try { const { msgId } = await reporter.publish(r); $('status').textContent = `iter ${iter} · published ✓ (${String(msgId).slice(0, 10)}…)`; }
+      catch (e) { $('status').textContent = `iter ${iter} · publish failed: ${e.message || e}`; }
+    } else {
+      $('status').textContent = `iter ${iter} · done (local)`;
+    }
+    if (!continuous) break;
+    await sleep(gap);
+  }
+  await stopContinuous();
+}
+
+async function stopContinuous() {
+  continuous = false;
+  $('loop').textContent = 'Run continuously';
   $('run').disabled = false;
-  maybeSubmit(result);
-  if ($('autoReport')?.checked) reportNow(result);
+  if (reporter) { try { await reporter.close(); } catch { /* */ } reporter = null; }
 }
 
 // Relay the result back over the live Axona network (pub/sub) so a local node
@@ -157,7 +220,18 @@ window.addEventListener('DOMContentLoaded', () => {
     const o = document.createElement('option'); o.value = k; o.textContent = k; sel.appendChild(o);
   }
   $('dev').textContent = JSON.stringify(deviceInfo(), null, 2);
-  $('run').addEventListener('click', () => run().catch((e) => { $('status').textContent = 'fatal: ' + e.message; $('run').disabled = false; }));
+
+  // QR + share link so a phone can join by scanning. The QR image is the only
+  // external call in the app (a public QR service) and only renders the PUBLIC
+  // page URL; the link below is the always-works fallback.
+  const shareUrl = location.origin + location.pathname;
+  const link = $('shareUrl'); link.textContent = shareUrl; link.href = shareUrl;
+  const qr = $('qr');
+  qr.src = 'https://api.qrserver.com/v1/create-qr-code/?size=180x180&margin=8&data=' + encodeURIComponent(shareUrl);
+  qr.alt = 'QR · ' + shareUrl;
+
+  $('run').addEventListener('click', () => singleRun());
+  $('loop').addEventListener('click', () => { if (continuous) stopContinuous(); else startContinuous(); });
   $('report').addEventListener('click', () => { if (lastResult) reportNow(lastResult); else $('status').textContent = 'run a benchmark first'; });
   $('copy').addEventListener('click', () => { if (lastResult) navigator.clipboard.writeText(JSON.stringify(lastResult)); });
   $('download').addEventListener('click', () => {
