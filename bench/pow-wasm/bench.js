@@ -17,10 +17,27 @@ function percentile(arr, p) {
   return s[Math.min(s.length - 1, Math.floor((p / 100) * s.length))];
 }
 
+// Stable per-device id (persisted in localStorage) so testers are distinguishable
+// beyond the UA string — survives reloads; one id per browser profile.
+function deviceId() {
+  try {
+    let id = localStorage.getItem('powbench-device-id');
+    if (!id) {
+      id = (crypto.randomUUID ? crypto.randomUUID()
+                              : Date.now().toString(36) + Math.random().toString(36).slice(2, 10));
+      localStorage.setItem('powbench-device-id', id);
+    }
+    return id;
+  } catch { return 'no-storage'; }
+}
+function deviceLabel() { try { return localStorage.getItem('powbench-device-label') || ''; } catch { return ''; } }
+
 function deviceInfo() {
   return {
+    deviceId: deviceId(),                              // stable per-device stamp
+    deviceLabel: deviceLabel(),                        // optional human name
     ua: navigator.userAgent,
-    deviceMemoryGB: navigator.deviceMemory ?? null,   // coarse (Chrome): 0.25..8
+    deviceMemoryGB: navigator.deviceMemory ?? null,    // coarse (Chrome): 0.25..8
     cores: navigator.hardwareConcurrency ?? null,
     screen: `${screen.width}x${screen.height}@${window.devicePixelRatio}`,
     crossOriginIsolated: self.crossOriginIsolated === true,
@@ -219,6 +236,14 @@ window.addEventListener('DOMContentLoaded', () => {
   for (const k of Object.keys(CANDIDATES)) {
     const o = document.createElement('option'); o.value = k; o.textContent = k; sel.appendChild(o);
   }
+  // Optional device label, persisted so it sticks across runs/reloads.
+  const lab = $('label');
+  lab.value = deviceLabel();
+  lab.addEventListener('input', () => {
+    try { localStorage.setItem('powbench-device-label', lab.value.trim()); } catch { /* */ }
+    $('dev').textContent = JSON.stringify(deviceInfo(), null, 2);
+  });
+
   $('dev').textContent = JSON.stringify(deviceInfo(), null, 2);
 
   // QR + share link so a phone can join by scanning. The QR image is the only
