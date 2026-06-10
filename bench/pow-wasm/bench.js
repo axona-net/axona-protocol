@@ -154,7 +154,7 @@ async function startContinuous() {
   if ($('autoReport').checked) {
     try {
       const { createReporter } = await import('./axona-report.js');
-      reporter = await createReporter((m) => { $('status').textContent = m; });
+      reporter = await createReporter((m) => { $('status').textContent = m; }, renderLeaderboard);
     } catch (e) {
       $('status').textContent = 'Axona connect failed — continuing local-only: ' + (e.message || e);
       reporter = null;
@@ -193,7 +193,7 @@ async function reportNow(result) {
   $('report').disabled = true;
   try {
     const { reportToAxona } = await import('./axona-report.js');
-    await reportToAxona(result, (m) => { $('status').textContent = m; });
+    await reportToAxona(result, (m) => { $('status').textContent = m; }, renderLeaderboard);
   } catch (e) {
     $('status').textContent = 'Axona report failed: ' + (e.message || e);
   } finally {
@@ -218,6 +218,45 @@ function render(r) {
   ];
   $('results').innerHTML = rows.map(([k, v]) => `<tr><td>${k}</td><td>${v}</td></tr>`).join('');
   $('json').value = JSON.stringify(r, null, 2);
+}
+
+function shortUa(ua) {
+  if (/iPhone/.test(ua)) return 'iPhone'; if (/iPad/.test(ua)) return 'iPad';
+  if (/Android/.test(ua)) return 'Android'; if (/Macintosh/.test(ua)) return 'Mac';
+  if (/Windows/.test(ua)) return 'Windows'; if (/Linux/.test(ua)) return 'Linux';
+  return ua.slice(0, 16);
+}
+
+// Render the comparison report the collector publishes back: where THIS device
+// stands among everyone running the same candidate + difficulty.
+function renderLeaderboard(report) {
+  const el = $('compare');
+  if (!el) return;
+  if (!lastResult) { el.textContent = 'run a benchmark to see how you compare.'; return; }
+  const myId = deviceId(), myUa = navigator.userAgent;
+  const cand = lastResult.candidate, diff = lastResult.difficulty;
+  const myMint = lastResult.mint_ms?.p50 != null ? Math.round(lastResult.mint_ms.p50) : null;
+  const rows = (report.devices || []).filter((e) => e.c === cand && e.d === diff).sort((a, b) => a.mint - b.mint);
+  if (!rows.length) {
+    el.innerHTML = myMint != null
+      ? `your mint p50: <b>${myMint} ms</b> — waiting for others on this candidate/difficulty…`
+      : '(no comparison data yet)';
+    return;
+  }
+  const mints = rows.map((e) => e.mint);
+  const median = mints[Math.floor((mints.length - 1) / 2)];
+  const meIdx = rows.findIndex((e) => e.id === myId || e.id === 'ua:' + myUa);
+  const rankTxt = meIdx >= 0 ? `rank <b>${meIdx + 1}</b> of ${rows.length}` : `not yet ranked (${rows.length} others)`;
+  const head =
+    `<div><b>${cand}</b> · difficulty ${diff} — ${rows.length} device(s)</div>` +
+    `<div>your mint p50: <b>${myMint ?? '?'} ms</b> · ${rankTxt}</div>` +
+    `<div class="muted">fastest ${mints[0]} ms · median ${median} ms · slowest ${mints[mints.length - 1]} ms</div>`;
+  const list = rows.slice(0, 12).map((e, i) => {
+    const me = (e.id === myId || e.id === 'ua:' + myUa);
+    const name = e.label || (e.ua ? shortUa(e.ua) : String(e.id).slice(0, 10));
+    return `<tr style="${me ? 'font-weight:700;background:#eef' : ''}"><td>${i + 1}</td><td>${name}${me ? ' (you)' : ''}</td><td>${e.mint} ms</td><td>${e.mem ?? '?'}MB</td><td>${e.oom ? 'OOM' : ''}</td></tr>`;
+  }).join('');
+  el.innerHTML = head + `<table style="margin-top:.4rem"><tbody>${list}</tbody></table>`;
 }
 
 function maybeSubmit(result) {
