@@ -3,7 +3,7 @@
 // keep going) → aggregate → render → report. See README.md.
 
 // Bump on every bench change so a stale cached app is obvious in the UI.
-const BENCH_VERSION = '0.9.0';
+const BENCH_VERSION = '0.10.0';
 
 // Register memory-hard candidates here as they compile (drop the file in
 // candidates/ implementing candidates/template.js):
@@ -288,13 +288,20 @@ function render(r) {
 // ── comparison report (collector → device) ──────────────────────────
 function renderLeaderboard(report) {
   const el = $('compare'); if (!el) return;
-  if (!lastResult) { el.textContent = 'run a benchmark to see where your device stands.'; return; }
+  // Roster of ALL distinct devices reporting (on ANY test) — each device cycles
+  // the suite independently, so the per-test comparison below only shows same-test
+  // peers; this line confirms every participant, e.g. a second browser on your
+  // own machine.
+  const seenDev = new Map();
+  (report.devices || []).forEach((e) => { if (!seenDev.has(e.id)) seenDev.set(e.id, e.label || (e.ua ? shortUa(e.ua) : String(e.id).slice(0, 10))); });
+  const roster = seenDev.size ? `<div class="muted" style="margin-top:.5rem">all devices reporting (${seenDev.size}): ${[...seenDev.values()].join(' · ')}</div>` : '';
+  if (!lastResult) { el.innerHTML = 'run a benchmark to see where your device stands.' + roster; return; }
   const myId = deviceId(), myUa = navigator.userAgent;
   const cand = lastResult.candidate, diff = lastResult.difficulty;
   const myMint = lastResult.mint_ms?.p50 != null ? Math.round(lastResult.mint_ms.p50) : null;
   const rows = (report.devices || []).filter((e) => e.c === cand && e.d === diff).sort((a, b) => a.mint - b.mint);
   if (!rows.length) {
-    el.innerHTML = myMint != null ? `your mint p50: <b>${myMint} ms</b> — waiting for others on this test…` : '(no comparison data yet)';
+    el.innerHTML = (myMint != null ? `your mint p50: <b>${myMint} ms</b> — waiting for others on this test…` : '(no comparison data yet)') + roster;
     return;
   }
   const mints = rows.map((e) => e.mint);
@@ -310,7 +317,7 @@ function renderLeaderboard(report) {
     const name = e.label || (e.ua ? shortUa(e.ua) : String(e.id).slice(0, 10));
     return `<tr style="${me ? 'font-weight:700;background:#eef' : ''}"><td>${i + 1}</td><td>${name}${me ? ' (you)' : ''}</td><td>${e.mint} ms</td><td>${e.mem ?? '?'}MB</td><td>${e.oom ? 'OOM' : ''}</td></tr>`;
   }).join('');
-  el.innerHTML = head + `<table style="margin-top:.4rem"><tbody>${list}</tbody></table>`;
+  el.innerHTML = head + `<table style="margin-top:.4rem"><tbody>${list}</tbody></table>` + roster;
 }
 
 function maybeSubmit(result) {
