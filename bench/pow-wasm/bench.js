@@ -174,7 +174,7 @@ async function runOnce(spec) {
   const candidateKey = spec ? spec.candidate : $('candidate').value;
   const difficulty   = spec ? spec.difficulty : parseInt($('difficulty').value, 10);
   const trials       = CANDIDATE_META[candidateKey]?.trials ?? Math.max(1, parseInt($('trials').value, 10) || 5);
-  const maxMs        = Math.max(2000, parseInt($('maxms').value, 10) || 20000);
+  const maxMs        = Math.max(2000, parseInt($('maxms').value, 10) || 300000);   // safety ceiling, not a tight budget — a benchmark shouldn't give up early
   const pubkeyHex    = $('pubkey').value.trim() || 'aa'.repeat(32);
 
   $('status').textContent = `loading ${candidateKey} d=${difficulty}…`;
