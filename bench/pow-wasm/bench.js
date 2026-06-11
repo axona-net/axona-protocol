@@ -3,7 +3,7 @@
 // keep going) → aggregate → render → report. See README.md.
 
 // Bump on every bench change so a stale cached app is obvious in the UI.
-const BENCH_VERSION = '0.10.0';
+const BENCH_VERSION = '0.11.0';
 
 // Register memory-hard candidates here as they compile (drop the file in
 // candidates/ implementing candidates/template.js):
@@ -177,6 +177,7 @@ function buildSuite() {
 }
 const testKey = (s) => `${s.candidate}@${s.difficulty}`;
 const suiteState = new Map();   // testKey → { status, note, lastMint, lastMem }
+let currentTest = null;         // testKey currently running, for the live highlight
 function stateFor(s) {
   let v = suiteState.get(testKey(s));
   if (!v) { v = { status: 'pending', note: '', lastMint: null, lastMem: null }; suiteState.set(testKey(s), v); }
@@ -188,12 +189,14 @@ function renderSuite() {
     const v = stateFor(s);
     const label = CANDIDATE_META[s.candidate]?.difficultyLabel || 'd';
     const over = overBudget(s);
-    const icon = v.status === 'ok' ? '✓' : v.status === 'skipped' ? '⏭' : over ? '∅' : '·';
+    const running = testKey(s) === currentTest;
+    const icon = running ? '▶' : v.status === 'ok' ? '✓' : v.status === 'skipped' ? '⏭' : over ? '∅' : '·';
     const mem = v.lastMem != null ? ` · ${v.lastMem < 10 ? v.lastMem.toFixed(1) : Math.round(v.lastMem)} MB` : '';
-    const note = v.status === 'skipped' ? `<span style="color:#b00">skipped: ${v.note}</span>`
+    const note = running ? '<span style="color:#a60">running…</span>'
+               : v.status === 'skipped' ? `<span style="color:#b00">skipped: ${v.note}</span>`
                : over ? `<span style="color:#a60">capped · est ${Math.round(estMemFor(s))}MB > ${MEM_BUDGET_MB}MB device limit</span>`
                : (v.lastMint != null ? `${v.lastMint} ms${mem}` : '');
-    return `<tr><td>${icon}</td><td>${s.candidate} · ${label}=${s.difficulty}</td><td class="muted">${note}</td></tr>`;
+    return `<tr class="${running ? 'running' : ''}"><td>${icon}</td><td>${s.candidate} · ${label}=${s.difficulty}</td><td class="muted">${note}</td></tr>`;
   }).join('') + '</tbody></table>';
 }
 
@@ -203,11 +206,11 @@ let lastResult = null;
 // Fault-tolerant: a worker OOM (worker.onerror) or a run exceeding maxMs is
 // caught and returned as a result with oom/timedOut set — never throws.
 async function runOnce(spec) {
-  const candidateKey = spec ? spec.candidate : $('candidate').value;
-  const difficulty   = spec ? spec.difficulty : parseInt($('difficulty').value, 10);
-  const trials       = CANDIDATE_META[candidateKey]?.trials ?? Math.max(1, parseInt($('trials').value, 10) || 5);
-  const maxMs        = Math.max(2000, parseInt($('maxms').value, 10) || 300000);   // safety ceiling, not a tight budget — a benchmark shouldn't give up early
-  const pubkeyHex    = $('pubkey').value.trim() || 'aa'.repeat(32);
+  const candidateKey = spec.candidate;
+  const difficulty   = spec.difficulty;
+  const trials       = CANDIDATE_META[candidateKey]?.trials ?? 5;
+  const maxMs        = 300000;                  // 5-min safety ceiling (only a wedged/OOM test trips it)
+  const pubkeyHex    = 'aa'.repeat(32);         // fixed benchmark key — not user-configurable
 
   $('status').textContent = `loading ${candidateKey} d=${difficulty}…`;
   const trialsData = [];
@@ -255,7 +258,6 @@ async function runOnce(spec) {
     oom, timedOut, error,
   };
   lastResult = result;
-  render(result);
   return result;
 }
 
@@ -269,21 +271,6 @@ function failNote(r)    {
   return 'failed';
 }
 
-function render(r) {
-  const rows = [
-    ['candidate', r.candidate],
-    ['difficulty', r.difficulty],
-    ['trials', r.trials],
-    ['mint p50 / p90 / p99 (ms)', r.mint_ms.p50 != null ? `${r.mint_ms.p50.toFixed(0)} / ${r.mint_ms.p90.toFixed(0)} / ${r.mint_ms.p99.toFixed(0)}` : '—'],
-    ['verify avg (ms)', r.verify_ms_avg != null ? r.verify_ms_avg.toFixed(3) : '—'],
-    ['peak WASM mem (MB)', r.peak_wasm_mem_mb.toFixed(1)],
-    ['witness length (chars)', r.witness_len ?? '—'],
-    ['all verified', r.all_verified ? 'yes' : 'NO'],
-    ['status', r.oom ? 'OOM' : r.timedOut ? 'TIMEOUT' : r.error ? r.error : 'ok'],
-  ];
-  $('results').innerHTML = rows.map(([k, v]) => `<tr><td>${k}</td><td>${v}</td></tr>`).join('');
-  $('json').value = JSON.stringify(r, null, 2);
-}
 
 // ── comparison report (collector → device) ──────────────────────────
 function renderLeaderboard(report) {
@@ -321,35 +308,15 @@ function renderLeaderboard(report) {
 }
 
 function maybeSubmit(result) {
-  const url = $('collector').value.trim();
+  const el = $('collector'); const url = el ? el.value.trim() : '';   // optional LAN collector (UI removed)
   if (!url) return;
   fetch(url.replace(/\/$/, '') + '/submit', {
     method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(result),
   }).catch(() => { /* best-effort */ });
 }
 
-async function reportNow(result) {
-  $('report').disabled = true;
-  try {
-    const { reportToAxona } = await import('./axona-report.js');
-    await reportToAxona(result, (m) => { $('status').textContent = m; }, renderLeaderboard);
-  } catch (e) {
-    $('status').textContent = 'Axona report failed: ' + (e.message || e);
-  } finally { $('report').disabled = false; }
-}
 
 // ── orchestration ───────────────────────────────────────────────────
-async function singleRun() {
-  if (continuous) return;
-  $('run').disabled = true;
-  try {
-    const r = await runOnce();
-    maybeSubmit(r);
-    if ($('autoReport').checked) await reportNow(r); else $('status').textContent = 'done';
-  } catch (e) { $('status').textContent = 'error: ' + (e.message || e); }
-  finally { $('run').disabled = false; }
-}
-
 let continuous = false, reporter = null, iter = 0;
 
 // Continuous mode: cycle the whole suite, repeat. A test that fails on this
@@ -358,19 +325,17 @@ let continuous = false, reporter = null, iter = 0;
 async function startContinuous() {
   if (continuous) return;
   continuous = true; iter = 0;
-  $('loop').textContent = 'Stop'; $('run').disabled = true;
-  const gap = Math.max(0, parseInt($('gap').value, 10) || 0);
+  $('run').textContent = 'Stop';
+  const gap = 3000;                                  // pause between tests
   for (const s of buildSuite()) { const v = stateFor(s); v.status = 'pending'; v.note = ''; }   // reset on start
   renderSuite();
 
-  if ($('autoReport').checked) {
-    try {
-      const { createReporter } = await import('./axona-report.js');
-      reporter = await createReporter((m) => { $('status').textContent = m; }, renderLeaderboard);
-    } catch (e) {
-      $('status').textContent = 'Axona connect failed — continuing local-only: ' + (e.message || e);
-      reporter = null;
-    }
+  try {
+    const { createReporter } = await import('./axona-report.js');
+    reporter = await createReporter((m) => { $('status').textContent = m; }, renderLeaderboard);
+  } catch (e) {
+    $('status').textContent = 'Axona connect failed — continuing local-only: ' + (e.message || e);
+    reporter = null;
   }
 
   while (continuous) {
@@ -384,10 +349,12 @@ async function startContinuous() {
         renderSuite(); continue;
       }
       ranAny = true;
-      iter++; $('iter').textContent = String(iter);
+      iter++;
+      currentTest = testKey(spec); renderSuite();        // highlight the row as it runs
       let r;
       try { r = await runOnce(spec); }
-      catch (e) { st.status = 'skipped'; st.note = 'threw: ' + (e.message || e); renderSuite(); continue; }
+      catch (e) { currentTest = null; st.status = 'skipped'; st.note = 'threw: ' + (e.message || e); renderSuite(); continue; }
+      currentTest = null;
 
       if (specFailed(r)) {
         st.status = 'skipped'; st.note = failNote(r);
@@ -414,44 +381,29 @@ async function startContinuous() {
 
 async function stopContinuous() {
   continuous = false;
-  $('loop').textContent = 'Run suite continuously';
-  $('run').disabled = false;
+  currentTest = null; renderSuite();
+  $('run').textContent = 'Run benchmark';
   if (reporter) { try { await reporter.close(); } catch { /* */ } reporter = null; }
 }
 
 // ── wiring ──────────────────────────────────────────────────────────
 window.addEventListener('DOMContentLoaded', () => {
-  const sel = $('candidate');
-  for (const k of Object.keys(CANDIDATES)) { const o = document.createElement('option'); o.value = k; o.textContent = k; sel.appendChild(o); }
-
   const lab = $('label');
   lab.value = deviceLabel();
   lab.addEventListener('input', () => {
     try { localStorage.setItem('powbench-device-label', lab.value.trim()); } catch { /* */ }
-    renderDevice();
   });
 
-  renderDevice();
-  enrichDevice();            // async: model / GPU / arch where available
+  enrichDevice();            // async: model / GPU / arch — captured into each result
   if ($('buildinfo')) $('buildinfo').textContent = `app v${BENCH_VERSION} · loading candidates…`;
   loadMeta().then(() => { renderSuite(); renderBuildInfo(); });   // suite matrix + loaded-version line
 
   const shareUrl = location.origin + location.pathname;
-  const link = $('shareUrl'); link.textContent = shareUrl; link.href = shareUrl;
+  const link = $('shareUrl'); link.textContent = 'open link'; link.href = shareUrl;
   const qr = $('qr');
   qr.src = 'https://api.qrserver.com/v1/create-qr-code/?size=180x180&margin=8&data=' + encodeURIComponent(shareUrl);
   qr.alt = 'QR · ' + shareUrl;
 
-  $('run').addEventListener('click', () => singleRun());
-  $('loop').addEventListener('click', () => { if (continuous) stopContinuous(); else startContinuous(); });
-  $('report').addEventListener('click', () => { if (lastResult) reportNow(lastResult); else $('status').textContent = 'run a benchmark first'; });
-  $('copy').addEventListener('click', () => { if (lastResult) navigator.clipboard.writeText(JSON.stringify(lastResult)); });
-  $('download').addEventListener('click', () => {
-    if (!lastResult) return;
-    const blob = new Blob([JSON.stringify(lastResult, null, 2)], { type: 'application/json' });
-    const a = document.createElement('a');
-    a.href = URL.createObjectURL(blob);
-    a.download = `powbench-${lastResult.candidateKey}-d${lastResult.difficulty}.json`;
-    a.click();
-  });
+  // single button: start / stop the continuous suite (iteration is all we run)
+  $('run').addEventListener('click', () => { if (continuous) stopContinuous(); else startContinuous(); });
 });
