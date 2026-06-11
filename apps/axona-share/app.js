@@ -4,7 +4,8 @@
 import { connectAxona } from './axona.js';
 import { chunkBytes, createReassembler, compressImage } from '../lib/file-transport.js';
 
-const APP_VERSION = '0.1.0';
+const APP_VERSION = '0.2.0';
+const CHUNK_BYTES = 64 * 1024;    // conservative: large pub/sub messages are unreliable over WebRTC
 const DEFAULT_CHANNEL = { id: 'axona-share/public-images', name: 'Public Images' };
 const MAX_IMAGE_BYTES = 1_000_000;
 const $ = (id) => document.getElementById(id);
@@ -35,19 +36,23 @@ const seenOf = (id) => { if (!seen.has(id)) seen.set(id, new Set()); return seen
 // ── incoming: a fully reassembled image for a channel ───────────────
 function onImage(channelId, { id, mime, bytes, meta }) {
   const s = seenOf(channelId);
-  if (s.has(id)) return;
+  if (s.has(id)) { console.log('[axona-share] duplicate image ignored', id); return; }
   s.add(id);
   const url = URL.createObjectURL(new Blob([bytes], { type: mime || 'image/jpeg' }));
   feedOf(channelId).push({ id, url, mime, caption: (meta && meta.caption) || '', ts: (meta && meta.ts) || Date.now() });
+  console.log(`[axona-share] display image ${id} on ${channelId} (active=${activeId})`);
   if (channelId === activeId) renderFeed();
 }
 
 async function subscribeChannel(ch) {
   if (reasm.has(ch.id)) return;
-  const r = createReassembler((file) => onImage(ch.id, file));
+  const r = createReassembler(
+    (file) => { console.log(`[axona-share] reassembled ${file.id} · ${file.bytes.length} bytes on ${ch.id}`); onImage(ch.id, file); },
+    { onProgress: (p) => console.log(`[axona-share] recv chunk ${p.have}/${p.total} (${p.id}) on ${ch.id}`) },
+  );
   reasm.set(ch.id, r);
-  try { await axona.sub(ch.id, (msg) => r.accept(msg)); }
-  catch (e) { setStatus('subscribe failed: ' + (e.message || e)); }
+  try { await axona.sub(ch.id, (msg) => r.accept(msg)); console.log('[axona-share] subscribed', ch.id); }
+  catch (e) { console.error('[axona-share] subscribe failed', ch.id, e); setStatus('subscribe failed: ' + (e.message || e)); }
 }
 
 // ── publish an image to the active channel ──────────────────────────
@@ -56,19 +61,21 @@ async function shareImage(file, caption) {
   setStatus('compressing…');
   let blob;
   try { blob = await compressImage(file, { maxBytes: MAX_IMAGE_BYTES }); }
-  catch (e) { setStatus('image error: ' + (e.message || e)); return; }
+  catch (e) { console.error('[axona-share] compress failed', e); setStatus('image error: ' + (e.message || e)); return; }
   const bytes = new Uint8Array(await blob.arrayBuffer());
   const meta = { caption: caption || '', ts: Date.now() };
-  const msgs = chunkBytes(bytes, { name: file.name || 'image.jpg', mime: 'image/jpeg', meta });
+  const msgs = chunkBytes(bytes, { name: file.name || 'image.jpg', mime: 'image/jpeg', meta, maxChunk: CHUNK_BYTES });
   const fileId = msgs[0].id;
+  console.log(`[axona-share] sharing ${fileId} · ${bytes.length} bytes · ${msgs.length} chunk(s) → ${activeId}`);
   // optimistic local card (own publishes may not echo back; seen-set dedups if they do)
   onImage(activeId, { id: fileId, mime: 'image/jpeg', bytes, meta });
   const topic = activeId;
   setStatus(`sending ${(bytes.length / 1024).toFixed(0)} KB in ${msgs.length} piece(s)…`);
   try {
     for (let i = 0; i < msgs.length; i++) { await axona.pub(topic, msgs[i]); setStatus(`sent ${i + 1}/${msgs.length}…`); }
+    console.log(`[axona-share] published all ${msgs.length} chunks for ${fileId}`);
     setStatus('shared ✓');
-  } catch (e) { setStatus('share failed: ' + (e.message || e)); }
+  } catch (e) { console.error('[axona-share] publish failed', e); setStatus('share failed: ' + (e.message || e)); }
 }
 
 // ── channels ────────────────────────────────────────────────────────
@@ -101,7 +108,8 @@ function renderChannels() {
   $('channels').innerHTML = channels.map((c) => `
     <div class="chan ${c.id === activeId ? 'active' : ''}" data-id="${c.id}">
       <span class="chan-name" title="${esc(c.id)}">${esc(c.name)}</span>
-      <button class="copy" data-copy="${esc(c.id)}" title="Copy channel ID to share">⧉</button>
+      <button class="icon" data-qr="${esc(c.id)}" title="Show QR — scan to join this channel">▦</button>
+      <button class="icon" data-copy="${esc(c.id)}" title="Copy channel ID to share">⧉</button>
     </div>`).join('');
 }
 function renderFeed() {
@@ -114,6 +122,18 @@ function renderFeed() {
 }
 const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 function setStatus(m) { $('status').textContent = m; }
+
+// A scannable link that opens the app with this channel pre-joined (id + name).
+function joinUrl(ch) {
+  return location.origin + location.pathname + '?join=' + encodeURIComponent(ch.id) + '&name=' + encodeURIComponent(ch.name);
+}
+function showQR(ch) {
+  const u = joinUrl(ch);
+  $('qrTitle').textContent = `Scan to join “${ch.name}”`;
+  $('qrImg').src = 'https://api.qrserver.com/v1/create-qr-code/?size=260x260&margin=12&data=' + encodeURIComponent(u);
+  $('qrUrl').textContent = u; $('qrUrl').href = u;
+  $('qrModal').classList.add('show');
+}
 
 // composer preview
 function setPending(file) {
@@ -139,17 +159,42 @@ const closeSidebarMobile = () => { if (window.matchMedia('(max-width:760px)').ma
 // ── wiring ──────────────────────────────────────────────────────────
 window.addEventListener('DOMContentLoaded', async () => {
   $('ver').textContent = 'v' + APP_VERSION;
+
+  // Joined via a scanned QR / shared link (?join=<id>&name=<name>): add the
+  // channel and make it active. If the app was already open in another tab on
+  // this device, the storage listener below pulls it in there too.
+  const params = new URLSearchParams(location.search);
+  const joinId = (params.get('join') || '').trim();
+  if (joinId) {
+    const name = params.get('name') || (joinId.startsWith('axona-share/') ? joinId.split('/').pop() : joinId);
+    if (!channels.find((c) => c.id === joinId)) { channels.push({ id: joinId, name }); saveChannels(); }
+    activeId = joinId;
+    history.replaceState(null, '', location.pathname);     // clean URL so a refresh doesn't re-join
+  }
+
   renderChannels(); setActive(activeId); clearComposer();
+
+  // Another tab on this device joined/created a channel → reflect it here.
+  window.addEventListener('storage', (e) => {
+    if (e.key !== 'axonashare-channels') return;
+    const before = new Set(channels.map((c) => c.id));
+    channels = loadChannels(); renderChannels();
+    if (axona) channels.filter((c) => !before.has(c.id)).forEach((c) => subscribeChannel(c));
+  });
 
   $('addChannel').addEventListener('click', () => {
     const j = confirm('OK = create a new channel\nCancel = join an existing one by ID');
     if (j) createChannel(); else joinChannel();
   });
   $('channels').addEventListener('click', (e) => {
+    const qr = e.target.closest('[data-qr]');
+    if (qr) { const ch = channels.find((c) => c.id === qr.dataset.qr); if (ch) showQR(ch); return; }
     const copy = e.target.closest('[data-copy]');
     if (copy) { navigator.clipboard?.writeText(copy.dataset.copy); setStatus('channel ID copied — send it to a friend'); return; }
     const chan = e.target.closest('.chan'); if (chan) setActive(chan.dataset.id);
   });
+  $('qrClose').addEventListener('click', () => $('qrModal').classList.remove('show'));
+  $('qrModal').addEventListener('click', (e) => { if (e.target === $('qrModal')) $('qrModal').classList.remove('show'); });
 
   $('pickBtn').addEventListener('click', () => $('fileInput').click());
   $('camBtn').addEventListener('click', () => $('camInput').click());

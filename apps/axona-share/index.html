@@ -25,8 +25,9 @@
   .chan:hover { background: #f0f4ff; }
   .chan.active { background: #e8efff; border-left: 3px solid var(--accent); }
   .chan-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .copy { background: none; border: none; cursor: pointer; font-size: 1rem; color: #888; padding: .1rem .3rem; }
-  .copy:hover { color: var(--accent); }
+  .icon { background: none; border: none; cursor: pointer; font-size: 1rem; color: #888; padding: .1rem .3rem; }
+  .icon:hover { color: var(--accent); }
+  #logo { height: 26px; width: 26px; object-fit: contain; }
   /* main */
   #main { flex: 1; display: flex; flex-direction: column; min-width: 0; }
   #main.drag { outline: 3px dashed var(--accent); outline-offset: -6px; }
@@ -45,6 +46,13 @@
   .empty { color: #999; margin-top: 2rem; text-align: center; max-width: 360px; }
   #overlay { display: none; position: fixed; inset: 0; background: rgba(0,0,0,.35); z-index: 5; }
   #overlay.show { display: block; }
+  #qrModal { display: none; position: fixed; inset: 0; background: rgba(0,0,0,.55); z-index: 10; align-items: center; justify-content: center; }
+  #qrModal.show { display: flex; }
+  .qr-box { background: #fff; border-radius: 12px; padding: 1.2rem 1.4rem; max-width: 90vw; display: flex; flex-direction: column; gap: .7rem; align-items: center; }
+  #qrTitle { font-weight: 600; }
+  #qrImg { width: 260px; height: 260px; max-width: 72vw; max-height: 72vw; }
+  #qrUrl { font-size: .72rem; color: #06c; word-break: break-all; max-width: 280px; text-align: center; }
+  #qrClose { cursor: pointer; border: 1px solid var(--line); background: #fff; border-radius: 6px; padding: .45rem 1.1rem; }
   @media (max-width: 760px) {
     #menuBtn { display: inline-block; }
     #sidebar { position: fixed; z-index: 6; top: 0; bottom: 0; left: 0; transform: translateX(-100%); transition: transform .2s; box-shadow: 2px 0 12px rgba(0,0,0,.15); }
@@ -55,6 +63,7 @@
 <body>
   <header>
     <button id="menuBtn" aria-label="channels">☰</button>
+    <img id="logo" src="axona-ant.png" alt="Axona">
     <h1>Axona-share</h1>
     <span>·</span><span id="activeName"></span>
     <span id="status"></span>
@@ -83,6 +92,16 @@
   </div>
 
   <div id="overlay"></div>
+
+  <div id="qrModal">
+    <div class="qr-box">
+      <div id="qrTitle"></div>
+      <img id="qrImg" alt="channel QR code">
+      <a id="qrUrl" target="_blank" rel="noopener"></a>
+      <button id="qrClose">Close</button>
+    </div>
+  </div>
+
   <script type="module" src="./app.js"></script>
 </body>
 </html>
