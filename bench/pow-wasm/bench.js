@@ -20,8 +20,9 @@ async function loadMeta() {
       const m = await import(url);
       CANDIDATE_META[k] = {
         name: m.name || k,
-        suiteDifficulties: Array.isArray(m.suiteDifficulties) && m.suiteDifficulties.length ? m.suiteDifficulties : [12, 16, 18, 20],
+        suiteDifficulties: Array.isArray(m.suiteDifficulties) ? m.suiteDifficulties : [12, 16, 18, 20],
         difficultyLabel: m.difficultyLabel || 'difficulty',
+        trials: Number.isInteger(m.trials) && m.trials > 0 ? m.trials : null,   // optional per-candidate override
       };
     } catch (e) {
       CANDIDATE_META[k] = { name: k, suiteDifficulties: [12, 16, 18, 20], difficultyLabel: 'difficulty', loadError: String(e.message || e) };
@@ -172,7 +173,7 @@ let lastResult = null;
 async function runOnce(spec) {
   const candidateKey = spec ? spec.candidate : $('candidate').value;
   const difficulty   = spec ? spec.difficulty : parseInt($('difficulty').value, 10);
-  const trials       = Math.max(1, parseInt($('trials').value, 10) || 5);
+  const trials       = CANDIDATE_META[candidateKey]?.trials ?? Math.max(1, parseInt($('trials').value, 10) || 5);
   const maxMs        = Math.max(2000, parseInt($('maxms').value, 10) || 20000);
   const pubkeyHex    = $('pubkey').value.trim() || 'aa'.repeat(32);
 

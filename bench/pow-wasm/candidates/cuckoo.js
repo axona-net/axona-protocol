@@ -13,32 +13,46 @@
 // L=42). Correct + measurable; an audited/optimised solver is a separate step
 // before this is the *kernel* PoW.
 
-const M = (1n << 64n) - 1n;
-const rotl = (x, b) => ((x << b) | (x >> (64n - b))) & M;
-function sipround(v) {
-  let [a, b, c, d] = v;
-  a = (a + b) & M; b = rotl(b, 13n); b ^= a; a = rotl(a, 32n);
-  c = (c + d) & M; d = rotl(d, 16n); d ^= c;
-  a = (a + d) & M; d = rotl(d, 21n); d ^= a;
-  c = (c + b) & M; b = rotl(b, 17n); b ^= c; c = rotl(c, 32n);
-  return [a, b, c, d];
+// 32-bit-limb SipHash-2-4 (BigInt was the mint bottleneck). A 64-bit value is a
+// {hi,lo} pair of uint32; all ops stay in 32-bit integer land. We only ever need
+// the LOW bits (node = hash mod 2^k, k ≤ 25), so siphashLow returns lo.
+// ZERO per-call allocation (the {hi,lo}-object version was GC-bound). 64-bit
+// state in a reused Uint32Array of 8 u32s: v0=[0,1] v1=[2,3] v2=[4,5] v3=[6,7]
+// (lo,hi). add/xor/rotl mutate in place; sipround runs the SipHash round.
+const st = new Uint32Array(8);
+function add64(a, b) { const lo = st[a] + st[b]; st[a] = lo >>> 0; st[a + 1] = (st[a + 1] + st[b + 1] + (lo > 0xffffffff ? 1 : 0)) >>> 0; }
+function xor64(a, b) { st[a] ^= st[b]; st[a + 1] ^= st[b + 1]; }
+function rotl64(a, n) {
+  const lo = st[a], hi = st[a + 1];
+  if (n === 32) { st[a] = hi; st[a + 1] = lo; return; }
+  st[a] = ((lo << n) | (hi >>> (32 - n))) >>> 0;
+  st[a + 1] = ((hi << n) | (lo >>> (32 - n))) >>> 0;
 }
-// Tromp-style siphash-2-4 over a single u64 nonce.
-function siphash(k, nonce) {
-  let v = [k[0], k[1], k[2], k[3] ^ nonce];
-  v = sipround(v); v = sipround(v);
-  v[0] ^= nonce; v[2] ^= 0xffn;
-  v = sipround(v); v = sipround(v); v = sipround(v); v = sipround(v);
-  return (v[0] ^ v[1] ^ v[2] ^ v[3]) & M;
+function sipround() {
+  add64(0, 2); rotl64(2, 13); xor64(2, 0); rotl64(0, 32);
+  add64(4, 6); rotl64(6, 16); xor64(6, 4);
+  add64(0, 6); rotl64(6, 21); xor64(6, 0);
+  add64(4, 2); rotl64(2, 17); xor64(2, 4); rotl64(4, 32);
 }
+// Tromp-style siphash-2-4 over a single u64 nonce (nonce.hi = 0 for our range).
+function siphashLow(k, nlo) {
+  st[0] = k[0].lo; st[1] = k[0].hi; st[2] = k[1].lo; st[3] = k[1].hi;
+  st[4] = k[2].lo; st[5] = k[2].hi; st[6] = (k[3].lo ^ nlo) >>> 0; st[7] = k[3].hi;
+  sipround(); sipround();
+  st[0] = (st[0] ^ nlo) >>> 0; st[4] = (st[4] ^ 0xff) >>> 0;
+  sipround(); sipround(); sipround(); sipround();
+  return (st[0] ^ st[2] ^ st[4] ^ st[6]) >>> 0;             // low 32 bits suffice
+}
+const sipnode = (k, edge2, mask) => siphashLow(k, edge2) & mask;   // node = hash mod 2^k
 async function deriveKeys(pubkeyHex, nonce) {
   const bytes = new TextEncoder().encode(`cuckoo:${pubkeyHex}:${nonce}`);
   const h = new Uint8Array(await crypto.subtle.digest('SHA-256', bytes));
   const k = [];
-  for (let i = 0; i < 4; i++) {
-    let x = 0n;
-    for (let j = 7; j >= 0; j--) x = (x << 8n) | BigInt(h[i * 8 + j]);   // little-endian u64
-    k.push(x);
+  for (let i = 0, o = 0; i < 4; i++, o += 8) {
+    k.push({
+      lo: (h[o] | (h[o + 1] << 8) | (h[o + 2] << 16) | (h[o + 3] << 24)) >>> 0,
+      hi: (h[o + 4] | (h[o + 5] << 8) | (h[o + 6] << 16) | (h[o + 7] << 24)) >>> 0,
+    });
   }
   return k;
 }
@@ -52,10 +66,10 @@ async function solveGraph(pubkeyHex, nonce, edgebits) {
   const U = new Uint32Array(nEdges);
   const V = new Uint32Array(nEdges);
   _peak = U.byteLength + V.byteLength + (2 * nps) * 4;
-  const npsB = BigInt(nps);
+  const mask = nps - 1;                            // nps is a power of 2 ⇒ mod == &
   for (let i = 0; i < nEdges; i++) {
-    U[i] = Number(siphash(k, BigInt(2 * i)) % npsB);
-    V[i] = Number(siphash(k, BigInt(2 * i + 1)) % npsB);
+    U[i] = sipnode(k, 2 * i, mask);
+    V[i] = sipnode(k, 2 * i + 1, mask);
   }
   // union-find over 2*nps nodes (U-side 0..nps-1, V-side nps..2nps-1) + a tree
   // adjacency of accepted edges, so a back-edge can be traced into a cycle.
@@ -96,10 +110,11 @@ function trace(adj, a, b) {
 }
 
 export const name = 'cuckoo-cycle (asymmetric, memory-bandwidth-hard)';
-export const suiteDifficulties = [16, 18, 20];        // EDGE-BITS → mem ≈ 2^bits·8B (~0.8MB … ~12MB).
-// NOTE: capped low because the BigInt siphash makes mint compute-bound — a
-// 32-bit-limb / WASM siphash is needed to reach the OOM-relevant 128–512 MB
-// graphs. Slow devices will timeout-skip the high end (fault tolerance).
+export const suiteDifficulties = [18, 20, 22];        // EDGE-BITS. peakMemoryBytes
+// reports the typed arrays (edges + union-find); the cycle tracer adds more, so
+// the high end (eb 22 ≈ 50MB arrays + tracer) reaches real memory pressure and
+// OOM-skips phones (the true floor = worker death). Each mint is slow, so:
+export const trials = 2;
 export const difficultyLabel = 'edge-bits';
 
 export async function mint(pubkeyHex, edgebits) {
@@ -115,14 +130,14 @@ export async function verify(pubkeyHex, witness, edgebits) {
   const { nonce, cycle } = parsed || {};
   if (!Array.isArray(cycle) || cycle.length < 4 || cycle.length % 2 !== 0) return false;
   const nps = 2 ** (edgebits - 1);
-  const npsB = BigInt(nps);
+  const mask = nps - 1;
   const k = await deriveKeys(pubkeyHex, nonce);
   // Re-derive each cycle edge's endpoints; check consecutive edges share exactly
   // one endpoint and the chain closes into a single loop (cheap — |cycle| sips).
   if (new Set(cycle).size !== cycle.length) return false;        // distinct edges
   const ep = cycle.map((e) => {
     if (!Number.isInteger(e) || e < 0 || e >= 2 ** edgebits) return null;
-    return [Number(siphash(k, BigInt(2 * e)) % npsB), nps + Number(siphash(k, BigInt(2 * e + 1)) % npsB)];
+    return [sipnode(k, 2 * e, mask), nps + sipnode(k, 2 * e + 1, mask)];
   });
   if (ep.some((x) => x === null)) return false;
   // A valid cycle is a 2-regular single loop (order-independent): build
