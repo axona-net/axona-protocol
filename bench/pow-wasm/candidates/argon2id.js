@@ -26,7 +26,10 @@ const params = (pubkeyHex, memMB) => ({
 });
 
 export const name = 'argon2id (memory-hard, symmetric verify)';
-export const suiteDifficulties = [16, 32, 64, 128, 256];   // MEMORY in MB
+// DEMOTED — the symmetric fallback, not the production pick. Empty suite ⇒ NOT
+// cycled in continuous mode (so the fleet doesn't grind a fn we won't ship);
+// still selectable for a manual single run to get fallback data if ever needed.
+export const suiteDifficulties = [];
 export const difficultyLabel = 'mem MB';
 
 export async function mint(pubkeyHex, memMB) {

@@ -5,10 +5,10 @@
 // Register memory-hard candidates here as they compile (drop the file in
 // candidates/ implementing candidates/template.js):
 const CANDIDATES = {
-  'sha256-baseline': './candidates/sha256-baseline.js',
-  'argon2id':        './candidates/argon2id.js',
-  // 'equihash':       './candidates/equihash.js',
-  // 'cuckoo':         './candidates/cuckoo.js',
+  'sha256-baseline': './candidates/sha256-baseline.js',   // reference (not memory-hard)
+  'cuckoo':          './candidates/cuckoo.js',            // asymmetric, memory-bandwidth-hard
+  'argon2id':        './candidates/argon2id.js',          // demoted symmetric fallback (not in suite)
+  // 'equihash':       './candidates/equihash.js',        // next asymmetric candidate
 };
 
 // Per-candidate suite metadata (suiteDifficulties + label), read once on load by
