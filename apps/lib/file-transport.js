@@ -18,6 +18,7 @@
 
 // Raw bytes per chunk. base64 inflates 4/3 and JSON adds a little; 150 KB raw →
 // ~205 KB message, safely under the 256 KB publish cap.
+export const VERSION = '1.0.0';                 // file-transport library version
 const DEFAULT_MAX_CHUNK = 150 * 1024;
 const FT = 1;                                   // message marker + format version
 

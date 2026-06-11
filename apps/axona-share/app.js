@@ -2,9 +2,9 @@
 // Channels are pub/sub topics; images are compressed to <1MB then sent as a set
 // of chunk-messages (file-transport.js) and reassembled on every subscriber.
 import { connectAxona } from './axona.js';
-import { chunkBytes, createReassembler, compressImage } from '../lib/file-transport.js';
+import { chunkBytes, createReassembler, compressImage, VERSION as FT_VERSION } from '../lib/file-transport.js';
 
-const APP_VERSION = '0.3.0';
+const APP_VERSION = '0.4.0';
 const CHUNK_BYTES = 64 * 1024;    // conservative: large pub/sub messages are unreliable over WebRTC
 const DEFAULT_CHANNEL = { id: 'axona-share/public-images', name: 'Public Images' };
 const MAX_IMAGE_BYTES = 1_000_000;
@@ -15,9 +15,10 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 let axona = null;
 let channels = loadChannels();
 let activeId = channels[0].id;
-const feeds = new Map();          // channelId → [{ id, url, mime, caption, ts }]
-const seen  = new Map();          // channelId → Set(fileId)   (dedup replay + own echo)
-const reasm = new Map();          // channelId → reassembler
+const feeds  = new Map();         // channelId → [{ id, url, mime, caption, ts }]
+const seen   = new Map();         // channelId → Set(fileId)   (dedup replay + own echo)
+const reasm  = new Map();         // channelId → reassembler
+const unread = new Map();         // channelId → count of images arrived while not viewing
 let pendingFile = null;           // composer: chosen File/Blob awaiting Share
 
 function loadChannels() {
@@ -42,7 +43,12 @@ function onImage(channelId, { id, mime, bytes, meta }) {
   const url = URL.createObjectURL(new Blob([bytes], { type: mime || 'image/jpeg' }));
   feedOf(channelId).push({ id, url, mime, caption: (meta && meta.caption) || '', ts: (meta && meta.ts) || Date.now() });
   console.log(`[axona-share] display image ${id} on ${channelId} (active=${activeId})`);
-  if (channelId === activeId) renderFeed();
+  if (channelId === activeId) {
+    renderFeed();
+  } else {
+    unread.set(channelId, (unread.get(channelId) || 0) + 1);   // arrived on a channel you're not viewing
+    renderChannels();
+  }
 }
 
 async function subscribeChannel(ch) {
@@ -102,6 +108,7 @@ function joinChannel() {
 }
 function setActive(id) {
   activeId = id;
+  unread.delete(id);                                  // viewing it clears its unread badge
   $('activeName').textContent = (channels.find((c) => c.id === id) || {}).name || id;
   renderChannels(); renderFeed();
   closeSidebarMobile();
@@ -109,12 +116,16 @@ function setActive(id) {
 
 // ── rendering ───────────────────────────────────────────────────────
 function renderChannels() {
-  $('channels').innerHTML = channels.map((c) => `
+  $('channels').innerHTML = channels.map((c) => {
+    const u = unread.get(c.id) || 0;
+    return `
     <div class="chan ${c.id === activeId ? 'active' : ''}" data-id="${c.id}">
       <span class="chan-name" title="${esc(c.id)}">${esc(c.name)}</span>
+      ${u ? `<span class="badge" title="${u} new image(s)">${u}</span>` : ''}
       <button class="icon" data-qr="${esc(c.id)}" title="Show QR — scan to join this channel">QR</button>
       <button class="icon" data-copy="${esc(c.id)}" title="Copy channel ID to share">Copy</button>
-    </div>`).join('');
+    </div>`;
+  }).join('');
 }
 function renderFeed() {
   const items = [...feedOf(activeId)].sort((a, b) => b.ts - a.ts);   // newest first
@@ -162,7 +173,7 @@ const closeSidebarMobile = () => { if (window.matchMedia('(max-width:760px)').ma
 
 // ── wiring ──────────────────────────────────────────────────────────
 window.addEventListener('DOMContentLoaded', async () => {
-  $('ver').textContent = 'v' + APP_VERSION;
+  $('ver').textContent = `app v${APP_VERSION} · lib v${FT_VERSION}`;
 
   // Joined via a scanned QR / shared link (?join=<id>&name=<name>): add the
   // channel and make it active. If the app was already open in another tab on
