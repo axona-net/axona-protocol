@@ -3,7 +3,7 @@
 // keep going) → aggregate → render → report. See README.md.
 
 // Bump on every bench change so a stale cached app is obvious in the UI.
-const BENCH_VERSION = '0.5.0';
+const BENCH_VERSION = '0.6.0';
 
 // Register memory-hard candidates here as they compile (drop the file in
 // candidates/ implementing candidates/template.js):
@@ -161,10 +161,10 @@ function buildSuite() {
   return specs;
 }
 const testKey = (s) => `${s.candidate}@${s.difficulty}`;
-const suiteState = new Map();   // testKey → { status, note, lastMint }
+const suiteState = new Map();   // testKey → { status, note, lastMint, lastMem }
 function stateFor(s) {
   let v = suiteState.get(testKey(s));
-  if (!v) { v = { status: 'pending', note: '', lastMint: null }; suiteState.set(testKey(s), v); }
+  if (!v) { v = { status: 'pending', note: '', lastMint: null, lastMem: null }; suiteState.set(testKey(s), v); }
   return v;
 }
 function renderSuite() {
@@ -173,8 +173,9 @@ function renderSuite() {
     const v = stateFor(s);
     const label = CANDIDATE_META[s.candidate]?.difficultyLabel || 'd';
     const icon = v.status === 'ok' ? '✓' : v.status === 'skipped' ? '⏭' : '·';
+    const mem = v.lastMem != null ? ` · ${v.lastMem < 10 ? v.lastMem.toFixed(1) : Math.round(v.lastMem)} MB` : '';
     const note = v.status === 'skipped' ? `<span style="color:#b00">skipped: ${v.note}</span>`
-               : (v.lastMint != null ? `${v.lastMint} ms` : '');
+               : (v.lastMint != null ? `${v.lastMint} ms${mem}` : '');
     return `<tr><td>${icon}</td><td>${s.candidate} · ${label}=${s.difficulty}</td><td class="muted">${note}</td></tr>`;
   }).join('') + '</tbody></table>';
 }
@@ -366,6 +367,7 @@ async function startContinuous() {
       } else {
         st.status = 'ok'; st.note = '';
         st.lastMint = r.mint_ms?.p50 != null ? Math.round(r.mint_ms.p50) : null;
+        st.lastMem = r.peak_wasm_mem_mb != null ? r.peak_wasm_mem_mb : null;
       }
       renderSuite();
 
