@@ -148,11 +148,12 @@ function solve(seedBytes, B) {
 function disjoint(a, b) { const s = new Set(a); for (const x of b) if (s.has(x)) return false; return true; }
 
 export const name = 'equihash (asymmetric, generalized-birthday, memory-capacity)';
-export const version = '0.3.0';   // limb BLAKE2b + floor-sized sweep
-export const suiteDifficulties = [14, 16, 18, 19];    // COLLISION-BITS B → N = 2^(B+1) entries
-// real working set ≈ 3MB / 260MB / 380MB / 650MB: B=14 confirms it runs + gives
-// speed, B=16-19 climb through the phone OOM floor (avoiding B=20's ~1.3GB that
-// could crash a tab rather than cleanly OOM the worker).
+export const version = '0.4.0';   // limb BLAKE2b + ceiling raised to find the OOM floor
+export const suiteDifficulties = [16, 18, 20, 21];    // COLLISION-BITS B → N = 2^(B+1) entries
+// CEILING RAISED: real devices completed B=19 (in-browser GC keeps the working
+// set under the tab limit), so the OOM floor is higher. B=16/18 complete; B=20
+// (~2M entries) / B=21 (~4M) push past it to find where phones OOM. Safe: the
+// worker is isolated, so an OOM kills the worker (→ clean skip), not the tab.
 export const difficultyLabel = 'collision-bits';
 export const trials = 2;
 

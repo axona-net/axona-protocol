@@ -3,7 +3,7 @@
 // keep going) → aggregate → render → report. See README.md.
 
 // Bump on every bench change so a stale cached app is obvious in the UI.
-const BENCH_VERSION = '0.4.0';
+const BENCH_VERSION = '0.5.0';
 
 // Register memory-hard candidates here as they compile (drop the file in
 // candidates/ implementing candidates/template.js):
