@@ -75,6 +75,24 @@ reference the real candidates must beat at the phone floor.
 > `measureUserAgentSpecificMemory()` and WASM threads are unavailable. The
 > included `collector.js` sets COOP/COEP so isolation is on.
 
+## Candidates in the suite
+
+- **`sha256-baseline`** — the not-memory-hard reference (difficulty = leading-zero
+  bits). Peak mem ~0 by design.
+- **`argon2id`** — a **real memory-hard** function (the named *symmetric* Stage-4
+  option) via `hash-wasm` (vetted WASM, lazy-loaded from a CDN). Difficulty =
+  **memory in MB** (you can't leading-zero-search a fn whose every eval costs
+  ~10–100 ms), so the suite sweeps `16/32/64/128/256 MB` — which is what finds the
+  phone floor. `verify` recomputes (symmetric — the harness measures that
+  expensive-verify cost). *This candidate carries a CDN dependency; the kernel
+  stays zero-dep, and if the CDN can't load the harness just skips it.*
+- *next:* **Equihash / Cuckoo** — the **asymmetric** (cheap-verify) family we'd
+  actually ship. No off-the-shelf browser-WASM build, so these need a compiled
+  reference solver (Emscripten / wasm-pack) dropped in as `candidates/*.js`.
+
+Each candidate declares `suiteDifficulties` + `difficultyLabel`, so the suite
+runs candidate × that candidate's own sweep.
+
 ## Add a memory-hard candidate
 
 1. Compile the reference solver to **single-threaded WASM** (Emscripten for
