@@ -3,7 +3,7 @@
 // keep going) → aggregate → render → report. See README.md.
 
 // Bump on every bench change so a stale cached app is obvious in the UI.
-const BENCH_VERSION = '0.13.0';
+const BENCH_VERSION = '0.14.0';
 
 // Register memory-hard candidates here as they compile (drop the file in
 // candidates/ implementing candidates/template.js):
@@ -263,12 +263,25 @@ async function runOnce(spec) {
 
 function specFailed(r)  { return !!r.oom || !!r.timedOut || !!r.error || r.trials === 0 || !r.all_verified; }
 function failNote(r)    {
+  if (r.skipped) return 'over budget (won\'t fit)';
   if (r.oom) return 'OOM (out of memory)';
   if (r.timedOut) return 'too slow (timeout)';
   if (r.error) return String(r.error).slice(0, 40);
   if (r.trials === 0) return 'no trials';
   if (!r.all_verified) return 'verify failed';
   return 'failed';
+}
+// A device that won't even attempt a test (estimated memory exceeds its cap) is a
+// floor signal too — publish it as a non-completing result so it shows in the chart.
+function skipResult(spec) {
+  return {
+    device: deviceInfo(),
+    candidate: spec.candidate, candidateKey: spec.candidate, difficulty: spec.difficulty, trials: 0,
+    mint_ms: { p50: null, p90: null, p99: null, min: null, max: null },
+    verify_ms_avg: null, peak_wasm_mem_mb: null, ua_mem_delta_mb: null, witness_len: null,
+    all_verified: false, oom: false, timedOut: false, error: null,
+    skipped: true, skipNote: `est ${Math.round(estMemFor(spec))}MB > ${MEM_BUDGET_MB}MB cap`,
+  };
 }
 
 
@@ -284,33 +297,43 @@ function renderLeaderboard(report) {
   const roster = seenDev.size ? `<div class="muted" style="margin-top:.5rem">all devices reporting (${seenDev.size}): ${[...seenDev.values()].join(' · ')}</div>` : '';
   if (!lastResult) { el.innerHTML = 'run a benchmark to see where your device stands.' + roster; return; }
   const myId = deviceId(), myUa = navigator.userAgent;
-  const cand = lastResult.candidate, diff = lastResult.difficulty;
+  const candName = lastResult.candidate, diff = lastResult.difficulty;
+  const candKey = lastResult.candidateKey || lastResult.candidate;   // match on the STABLE key (failed runs may carry only the short key)
   const myMint = lastResult.mint_ms?.p50 != null ? Math.round(lastResult.mint_ms.p50) : null;
-  // SLOWEST first. This is a capability test, not a race — the slowest devices
-  // that can still complete a test ARE the result (they set the difficulty floor).
-  const rows = (report.devices || []).filter((e) => e.c === cand && e.d === diff).sort((a, b) => b.mint - a.mint);
-  if (!rows.length) {
-    el.innerHTML = (myMint != null ? `your mint p50: <b>${myMint} ms</b> — waiting for others on this test…` : '(no comparison data yet)') + roster;
+  const myFailed = specFailed(lastResult);
+  // Capability test, not a race. Order: FAILED first (devices below the floor —
+  // the sharpest signal), then SLOWEST → FASTEST of the completers.
+  const all = (report.devices || []).filter((e) => (e.c === candKey || e.c === candName) && e.d === diff);
+  if (!all.length) {
+    el.innerHTML = (lastResult ? `your result: <b>${myFailed ? failNote(lastResult) : (myMint + ' ms')}</b> — waiting for others on this test…` : '(no comparison data yet)') + roster;
     return;
   }
-  const mints = rows.map((e) => e.mint);             // descending
-  const slowest = mints[0], fastest = mints[mints.length - 1];
-  const median = mints[Math.floor((mints.length - 1) / 2)];
-  const meIdx = rows.findIndex((e) => e.id === myId || e.id === 'ua:' + myUa);   // index in slowest-first order
-  const rankTxt = meIdx >= 0 ? `the <b>#${meIdx + 1} slowest</b> of ${rows.length}` : `not yet ranked (${rows.length} others)`;
+  const isFail = (e) => e.failed || e.mint == null;
+  const failed = all.filter(isFail);
+  const done   = all.filter((e) => !isFail(e)).sort((a, b) => b.mint - a.mint);   // slowest → fastest
+  const ordered = [...failed, ...done];
+  const dm = done.map((e) => e.mint);
+  const summary = done.length
+    ? `slowest ${dm[0]} ms · median ${dm[Math.floor((dm.length - 1) / 2)]} ms · fastest ${dm[dm.length - 1]} ms`
+    : 'none completed yet';
+  const meIdx = ordered.findIndex((e) => e.id === myId || e.id === 'ua:' + myUa);
+  const youTxt = myFailed
+    ? `your result: <b style="color:#b00">✗ ${failNote(lastResult)}</b>`
+    : `your mint p50: <b>${myMint ?? '?'} ms</b>`;
   const head =
-    `<div><b>${cand}</b> · difficulty ${diff} — slowest devices completing this test (the capability floor)</div>` +
-    `<div>your mint p50: <b>${myMint ?? '?'} ms</b> · you are ${rankTxt}</div>` +
-    `<div class="muted">slowest ${slowest} ms · median ${median} ms · fastest ${fastest} ms · ${rows.length} device(s)</div>`;
-  const SLOWEST_N = 25;
-  const rowHtml = (e, rank) => {
+    `<div><b>${candName}</b> · difficulty ${diff} — the capability floor (failed → slowest → fastest)</div>` +
+    `<div>${youTxt}${meIdx >= 0 ? ` · you are #${meIdx + 1} of ${ordered.length}` : ''}</div>` +
+    `<div class="muted"><b>${failed.length}</b> failed · ${done.length} completed · ${summary}</div>`;
+  const SHOW_N = 100;
+  const rowHtml = (e, pos) => {
     const me = (e.id === myId || e.id === 'ua:' + myUa);
     const name = e.label || (e.ua ? shortUa(e.ua) : String(e.id).slice(0, 10));
-    return `<tr style="${me ? 'font-weight:700;background:#eef' : ''}"><td>${rank}</td><td>${name}${me ? ' (you)' : ''}</td><td>${e.mint} ms</td><td>${e.mem ?? '?'}MB</td><td>${e.oom ? 'OOM' : ''}</td></tr>`;
+    const result = isFail(e) ? `<span style="color:#b00">✗ ${e.fail || 'failed'}</span>` : `${e.mint} ms`;
+    return `<tr style="${me ? 'font-weight:700;background:#eef' : ''}"><td>${pos}</td><td>${name}${me ? ' (you)' : ''}</td><td>${result}</td><td>${e.mem ? Math.round(e.mem) + 'MB' : '—'}</td></tr>`;
   };
-  const thead = '<thead><tr style="color:#888;font-size:.85em"><th>#slowest</th><th>device</th><th>mint p50</th><th>mem</th><th></th></tr></thead>';
-  let list = rows.slice(0, SLOWEST_N).map((e, i) => rowHtml(e, i + 1)).join('');
-  if (meIdx >= SLOWEST_N) list += `<tr><td colspan="5" style="text-align:center;color:#bbb">⋯</td></tr>` + rowHtml(rows[meIdx], meIdx + 1);   // always show YOUR row, even when you're one of the faster ones
+  const thead = '<thead><tr style="color:#888;font-size:.85em"><th>#</th><th>device</th><th>result</th><th>peak mem</th></tr></thead>';
+  let list = ordered.slice(0, SHOW_N).map((e, i) => rowHtml(e, i + 1)).join('');
+  if (meIdx >= SHOW_N) list += `<tr><td colspan="4" style="text-align:center;color:#bbb">⋯</td></tr>` + rowHtml(ordered[meIdx], meIdx + 1);   // always show YOUR row
   el.innerHTML = head + `<table style="margin-top:.4rem">${thead}<tbody>${list}</tbody></table>` + roster;
 }
 
@@ -353,7 +376,10 @@ async function startContinuous() {
       if (st.status === 'skipped') continue;             // a failed test stays skipped
       if (overBudget(spec)) {                            // gate BEFORE allocating → can't crash the tab
         st.status = 'skipped'; st.note = `capped: est ${Math.round(estMemFor(spec))}MB > ${MEM_BUDGET_MB}MB device limit`;
-        renderSuite(); continue;
+        renderSuite();
+        const skipR = skipResult(spec);                  // publish the cap as floor data (e.g. iOS can't do equihash d=20)
+        maybeSubmit(skipR); if (reporter) { try { await reporter.publish(skipR); } catch { /* */ } }
+        continue;
       }
       ranAny = true;
       iter++;
