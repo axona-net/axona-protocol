@@ -1,8 +1,9 @@
-// Bench orchestrator (main thread): device info → spawn worker → collect trials
-// → aggregate → render → export. See README.md.
-//
+// Bench orchestrator (main thread): rich device info → cycle a SUITE of tests in
+// a Worker (fault-tolerant: a test that fails is skipped with a note, the rest
+// keep going) → aggregate → render → report. See README.md.
+
 // Register memory-hard candidates here as they compile (drop the file in
-// candidates/ implementing the contract in candidates/template.js):
+// candidates/ implementing candidates/template.js):
 const CANDIDATES = {
   'sha256-baseline': './candidates/sha256-baseline.js',
   // 'equihash':       './candidates/equihash.js',
@@ -10,6 +11,7 @@ const CANDIDATES = {
 };
 
 const $ = (id) => document.getElementById(id);
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 function percentile(arr, p) {
   if (!arr.length) return null;
@@ -17,8 +19,7 @@ function percentile(arr, p) {
   return s[Math.min(s.length - 1, Math.floor((p / 100) * s.length))];
 }
 
-// Stable per-device id (persisted in localStorage) so testers are distinguishable
-// beyond the UA string — survives reloads; one id per browser profile.
+// ── device identity + rich info ─────────────────────────────────────
 function deviceId() {
   try {
     let id = localStorage.getItem('powbench-device-id');
@@ -32,173 +33,188 @@ function deviceId() {
 }
 function deviceLabel() { try { return localStorage.getItem('powbench-device-label') || ''; } catch { return ''; } }
 
-function deviceInfo() {
+function shortUa(ua) {
+  ua = ua || '';
+  if (/iPhone/.test(ua)) return 'iPhone'; if (/iPad/.test(ua)) return 'iPad';
+  if (/Android/.test(ua)) return 'Android'; if (/Macintosh/.test(ua)) return 'Mac';
+  if (/Windows/.test(ua)) return 'Windows'; if (/Linux/.test(ua)) return 'Linux';
+  return ua.slice(0, 16);
+}
+
+// WebGL unmasked renderer — the real GPU string where the browser allows it.
+function gpuInfo() {
+  try {
+    const c = document.createElement('canvas');
+    const gl = c.getContext('webgl') || c.getContext('experimental-webgl');
+    if (!gl) return null;
+    const ext = gl.getExtension('WEBGL_debug_renderer_info');
+    return ext ? String(gl.getParameter(ext.UNMASKED_RENDERER_WEBGL)) : null;
+  } catch { return null; }
+}
+
+let DEVICE = baseDevice();
+function baseDevice() {
   return {
-    deviceId: deviceId(),                              // stable per-device stamp
-    deviceLabel: deviceLabel(),                        // optional human name
+    deviceId: deviceId(),
+    deviceLabel: deviceLabel(),
     ua: navigator.userAgent,
+    platform: navigator.platform || null,
     deviceMemoryGB: navigator.deviceMemory ?? null,    // coarse (Chrome): 0.25..8
     cores: navigator.hardwareConcurrency ?? null,
     screen: `${screen.width}x${screen.height}@${window.devicePixelRatio}`,
     crossOriginIsolated: self.crossOriginIsolated === true,
+    gpu: gpuInfo(),
     ts: new Date().toISOString(),
   };
 }
+// Async enrichment where available: Client Hints (real model/arch on Chromium),
+// network type. iOS Safari lacks userAgentData → falls back to UA gracefully.
+async function enrichDevice() {
+  try {
+    const uad = navigator.userAgentData;
+    if (uad?.getHighEntropyValues) {
+      const h = await uad.getHighEntropyValues(['model', 'platformVersion', 'architecture', 'bitness']);
+      DEVICE.model = h.model || null;
+      DEVICE.uaPlatform = uad.platform || null;
+      DEVICE.platformVersion = h.platformVersion || null;
+      DEVICE.arch = h.architecture || null;
+      DEVICE.bitness = h.bitness || null;
+      DEVICE.mobile = uad.mobile ?? null;
+    }
+  } catch { /* */ }
+  try { DEVICE.connection = navigator.connection?.effectiveType || null; } catch { /* */ }
+  renderDevice();
+}
+function deviceInfo() {
+  DEVICE.deviceLabel = deviceLabel();
+  DEVICE.ts = new Date().toISOString();
+  return { ...DEVICE };
+}
+function renderDevice() {
+  const d = DEVICE;
+  const name = d.deviceLabel || d.model || shortUa(d.ua);
+  const bits = [
+    name,
+    d.gpu ? `GPU: ${d.gpu}` : null,
+    (d.uaPlatform || d.platform) && d.platformVersion ? `${d.uaPlatform || d.platform} ${d.platformVersion}` : (d.platform || null),
+    d.arch ? `${d.arch}${d.bitness ? '/' + d.bitness : ''}` : null,
+    d.deviceMemoryGB != null ? `~${d.deviceMemoryGB} GB RAM` : null,
+    d.cores != null ? `${d.cores} cores` : null,
+    d.connection ? `net ${d.connection}` : null,
+    `isolated=${d.crossOriginIsolated}`,
+  ].filter(Boolean);
+  if ($('devsummary')) $('devsummary').textContent = bits.join(' · ');
+  if ($('dev')) $('dev').textContent = JSON.stringify(d, null, 2);
+}
 
 async function uaMemoryBytes() {
-  // Accurate, cross-agent — but requires cross-origin isolation (COOP/COEP).
   try {
     if (self.crossOriginIsolated && performance.measureUserAgentSpecificMemory) {
       const m = await performance.measureUserAgentSpecificMemory();
       return m.bytes;
     }
-  } catch { /* not available */ }
+  } catch { /* */ }
   return null;
+}
+
+// ── the test suite ──────────────────────────────────────────────────
+function difficulties() {
+  return ($('difficulties').value || '12,16,18,20')
+    .split(',').map((s) => parseInt(s.trim(), 10)).filter((n) => Number.isInteger(n) && n >= 0);
+}
+function buildSuite() {
+  const specs = [];
+  for (const c of Object.keys(CANDIDATES)) for (const d of difficulties()) specs.push({ candidate: c, difficulty: d });
+  return specs;
+}
+const testKey = (s) => `${s.candidate}@${s.difficulty}`;
+const suiteState = new Map();   // testKey → { status, note, lastMint }
+function stateFor(s) {
+  let v = suiteState.get(testKey(s));
+  if (!v) { v = { status: 'pending', note: '', lastMint: null }; suiteState.set(testKey(s), v); }
+  return v;
+}
+function renderSuite() {
+  const el = $('suite'); if (!el) return;
+  el.innerHTML = '<table><tbody>' + buildSuite().map((s) => {
+    const v = stateFor(s);
+    const icon = v.status === 'ok' ? '✓' : v.status === 'skipped' ? '⏭' : '·';
+    const note = v.status === 'skipped' ? `<span style="color:#b00">skipped: ${v.note}</span>`
+               : (v.lastMint != null ? `${v.lastMint} ms` : '');
+    return `<tr><td>${icon}</td><td>${s.candidate} d=${s.difficulty}</td><td class="muted">${note}</td></tr>`;
+  }).join('') + '</tbody></table>';
 }
 
 let lastResult = null;
 
-// Run one full benchmark (load candidate → trials in a Worker → aggregate →
-// render → return the result). Pure; orchestration (single vs continuous,
-// reporting) is handled by the callers below.
-async function runOnce() {
-  const candidateKey = $('candidate').value;
-  const difficulty = parseInt($('difficulty').value, 10);
-  const trials = parseInt($('trials').value, 10);
-  const pubkeyHex = $('pubkey').value.trim() || 'aa'.repeat(32);
+// ── one benchmark run (spec optional; default = manual inputs) ───────
+// Fault-tolerant: a worker OOM (worker.onerror) or a run exceeding maxMs is
+// caught and returned as a result with oom/timedOut set — never throws.
+async function runOnce(spec) {
+  const candidateKey = spec ? spec.candidate : $('candidate').value;
+  const difficulty   = spec ? spec.difficulty : parseInt($('difficulty').value, 10);
+  const trials       = Math.max(1, parseInt($('trials').value, 10) || 5);
+  const maxMs        = Math.max(2000, parseInt($('maxms').value, 10) || 20000);
+  const pubkeyHex    = $('pubkey').value.trim() || 'aa'.repeat(32);
 
-  $('status').textContent = 'loading candidate…';
+  $('status').textContent = `loading ${candidateKey} d=${difficulty}…`;
   const trialsData = [];
-  let oom = false, error = null, candidateName = candidateKey;
-
+  let oom = false, error = null, timedOut = false, candidateName = candidateKey;
   const memBefore = await uaMemoryBytes();
   const worker = new Worker('./worker.js', { type: 'module' });
 
   await new Promise((resolve) => {
+    const finish = () => { clearTimeout(timer); resolve(); };
+    const timer = setTimeout(() => { timedOut = true; try { worker.terminate(); } catch { /* */ } finish(); }, maxMs);
     worker.onmessage = (e) => {
       const m = e.data;
       if (m.type === 'loaded') {
         candidateName = m.name;
-        $('status').textContent = `running ${trials} trials @ difficulty ${difficulty}…`;
+        $('status').textContent = `${candidateKey} d=${difficulty}: ${trials} trials…`;
         worker.postMessage({ type: 'run', pubkeyHex, difficulty, trials });
       } else if (m.type === 'trial') {
         trialsData.push(m);
-        $('status').textContent =
-          `trial ${m.i + 1}/${trials} · mint ${m.mintMs.toFixed(0)}ms · ` +
-          `mem ${(m.peakMemBytes / 1e6).toFixed(0)}MB`;
+        $('status').textContent = `${candidateKey} d=${difficulty} · trial ${m.i + 1}/${trials} · ${m.mintMs.toFixed(0)}ms · ${(m.peakMemBytes / 1e6).toFixed(0)}MB`;
       } else if (m.type === 'done') {
-        resolve();
+        finish();
       } else if (m.type === 'error') {
-        error = m.message; resolve();
+        error = m.message; finish();
       }
     };
-    // A worker that dies mid-run (the classic OOM signature on a phone).
-    worker.onerror = (ev) => { oom = true; error = ev.message || 'worker died (likely OOM)'; resolve(); };
+    worker.onerror = (ev) => { oom = true; error = ev.message || 'worker died (likely OOM)'; finish(); };
     worker.postMessage({ type: 'load', candidateUrl: CANDIDATES[candidateKey] });
   });
-  worker.terminate();
-
+  try { worker.terminate(); } catch { /* */ }
   const memAfter = await uaMemoryBytes();
+
   const mint = trialsData.map((t) => t.mintMs);
   const result = {
     device: deviceInfo(),
-    candidate: candidateName,
-    difficulty,
-    trials: trialsData.length,
+    candidate: candidateName, candidateKey, difficulty, trials: trialsData.length,
     mint_ms: {
       p50: percentile(mint, 50), p90: percentile(mint, 90), p99: percentile(mint, 99),
       min: mint.length ? Math.min(...mint) : null, max: mint.length ? Math.max(...mint) : null,
     },
-    verify_ms_avg: trialsData.length
-      ? trialsData.reduce((a, t) => a + t.verifyMs, 0) / trialsData.length : null,
+    verify_ms_avg: trialsData.length ? trialsData.reduce((a, t) => a + t.verifyMs, 0) / trialsData.length : null,
     peak_wasm_mem_mb: Math.max(0, ...trialsData.map((t) => t.peakMemBytes)) / 1e6,
     ua_mem_delta_mb: (memBefore != null && memAfter != null) ? (memAfter - memBefore) / 1e6 : null,
     witness_len: trialsData.length ? trialsData[trialsData.length - 1].witnessLen : null,
     all_verified: trialsData.length > 0 && trialsData.every((t) => t.ok),
-    oom, error,
+    oom, timedOut, error,
   };
   lastResult = result;
   render(result);
-  if (error) $('status').textContent = `done — ERROR: ${error}`;
   return result;
 }
 
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-
-// Single benchmark (the "Run" button): run once, then one-shot report if enabled.
-async function singleRun() {
-  if (continuous) return;
-  $('run').disabled = true;
-  try {
-    const r = await runOnce();
-    maybeSubmit(r);
-    if ($('autoReport').checked) await reportNow(r);
-    else $('status').textContent = 'done';
-  } catch (e) {
-    $('status').textContent = 'error: ' + (e.message || e);
-  } finally {
-    $('run').disabled = false;
-  }
-}
-
-// Continuous mode (user-initiated via "Run continuously"): loop run → publish →
-// wait, until Stop. With auto-publish on, connect to Axona ONCE and reuse it.
-let continuous = false, reporter = null, iter = 0;
-
-async function startContinuous() {
-  if (continuous) return;
-  continuous = true; iter = 0;
-  $('loop').textContent = 'Stop'; $('run').disabled = true;
-  const gap = Math.max(0, parseInt($('gap').value, 10) || 0);
-
-  if ($('autoReport').checked) {
-    try {
-      const { createReporter } = await import('./axona-report.js');
-      reporter = await createReporter((m) => { $('status').textContent = m; }, renderLeaderboard);
-    } catch (e) {
-      $('status').textContent = 'Axona connect failed — continuing local-only: ' + (e.message || e);
-      reporter = null;
-    }
-  }
-
-  while (continuous) {
-    iter++; $('iter').textContent = String(iter);
-    let r;
-    try { r = await runOnce(); }
-    catch (e) { $('status').textContent = 'run error: ' + (e.message || e); break; }
-    maybeSubmit(r);
-    if (reporter) {
-      try { const { msgId } = await reporter.publish(r); $('status').textContent = `iter ${iter} · published ✓ (${String(msgId).slice(0, 10)}…)`; }
-      catch (e) { $('status').textContent = `iter ${iter} · publish failed: ${e.message || e}`; }
-    } else {
-      $('status').textContent = `iter ${iter} · done (local)`;
-    }
-    if (!continuous) break;
-    await sleep(gap);
-  }
-  await stopContinuous();
-}
-
-async function stopContinuous() {
-  continuous = false;
-  $('loop').textContent = 'Run continuously';
-  $('run').disabled = false;
-  if (reporter) { try { await reporter.close(); } catch { /* */ } reporter = null; }
-}
-
-// Relay the result back over the live Axona network (pub/sub) so a local node
-// collects it — no HTTP collector needed, works across the internet. Lazy: the
-// heavy kernel + WebRTC connect only loads when reporting is actually used.
-async function reportNow(result) {
-  $('report').disabled = true;
-  try {
-    const { reportToAxona } = await import('./axona-report.js');
-    await reportToAxona(result, (m) => { $('status').textContent = m; }, renderLeaderboard);
-  } catch (e) {
-    $('status').textContent = 'Axona report failed: ' + (e.message || e);
-  } finally {
-    $('report').disabled = false;
-  }
+function specFailed(r)  { return !!r.oom || !!r.timedOut || !!r.error || r.trials === 0 || !r.all_verified; }
+function failNote(r)    {
+  if (r.oom) return 'OOM (out of memory)';
+  if (r.timedOut) return 'too slow (timeout)';
+  if (r.error) return String(r.error).slice(0, 40);
+  if (r.trials === 0) return 'no trials';
+  if (!r.all_verified) return 'verify failed';
+  return 'failed';
 }
 
 function render(r) {
@@ -207,40 +223,26 @@ function render(r) {
     ['difficulty', r.difficulty],
     ['trials', r.trials],
     ['mint p50 / p90 / p99 (ms)', r.mint_ms.p50 != null ? `${r.mint_ms.p50.toFixed(0)} / ${r.mint_ms.p90.toFixed(0)} / ${r.mint_ms.p99.toFixed(0)}` : '—'],
-    ['mint min / max (ms)', r.mint_ms.min != null ? `${r.mint_ms.min.toFixed(0)} / ${r.mint_ms.max.toFixed(0)}` : '—'],
     ['verify avg (ms)', r.verify_ms_avg != null ? r.verify_ms_avg.toFixed(3) : '—'],
     ['peak WASM mem (MB)', r.peak_wasm_mem_mb.toFixed(1)],
-    ['UA mem delta (MB)', r.ua_mem_delta_mb != null ? r.ua_mem_delta_mb.toFixed(1) : 'n/a (need cross-origin isolation)'],
     ['witness length (chars)', r.witness_len ?? '—'],
     ['all verified', r.all_verified ? 'yes' : 'NO'],
-    ['OOM / error', r.oom ? 'OOM' : (r.error ? r.error : 'none')],
-    ['device', `${r.device.cores ?? '?'} cores · ${r.device.deviceMemoryGB ?? '?'}GB · COI=${r.device.crossOriginIsolated}`],
+    ['status', r.oom ? 'OOM' : r.timedOut ? 'TIMEOUT' : r.error ? r.error : 'ok'],
   ];
   $('results').innerHTML = rows.map(([k, v]) => `<tr><td>${k}</td><td>${v}</td></tr>`).join('');
   $('json').value = JSON.stringify(r, null, 2);
 }
 
-function shortUa(ua) {
-  if (/iPhone/.test(ua)) return 'iPhone'; if (/iPad/.test(ua)) return 'iPad';
-  if (/Android/.test(ua)) return 'Android'; if (/Macintosh/.test(ua)) return 'Mac';
-  if (/Windows/.test(ua)) return 'Windows'; if (/Linux/.test(ua)) return 'Linux';
-  return ua.slice(0, 16);
-}
-
-// Render the comparison report the collector publishes back: where THIS device
-// stands among everyone running the same candidate + difficulty.
+// ── comparison report (collector → device) ──────────────────────────
 function renderLeaderboard(report) {
-  const el = $('compare');
-  if (!el) return;
-  if (!lastResult) { el.textContent = 'run a benchmark to see how you compare.'; return; }
+  const el = $('compare'); if (!el) return;
+  if (!lastResult) { el.textContent = 'run a benchmark to see where your device stands.'; return; }
   const myId = deviceId(), myUa = navigator.userAgent;
   const cand = lastResult.candidate, diff = lastResult.difficulty;
   const myMint = lastResult.mint_ms?.p50 != null ? Math.round(lastResult.mint_ms.p50) : null;
   const rows = (report.devices || []).filter((e) => e.c === cand && e.d === diff).sort((a, b) => a.mint - b.mint);
   if (!rows.length) {
-    el.innerHTML = myMint != null
-      ? `your mint p50: <b>${myMint} ms</b> — waiting for others on this candidate/difficulty…`
-      : '(no comparison data yet)';
+    el.innerHTML = myMint != null ? `your mint p50: <b>${myMint} ms</b> — waiting for others on this test…` : '(no comparison data yet)';
     return;
   }
   const mints = rows.map((e) => e.mint);
@@ -263,31 +265,113 @@ function maybeSubmit(result) {
   const url = $('collector').value.trim();
   if (!url) return;
   fetch(url.replace(/\/$/, '') + '/submit', {
-    method: 'POST', headers: { 'content-type': 'application/json' },
-    body: JSON.stringify(result),
-  }).then(() => { $('status').textContent += ' · submitted'; })
-    .catch((e) => { $('status').textContent += ` · submit failed: ${e.message}`; });
+    method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(result),
+  }).catch(() => { /* best-effort */ });
+}
+
+async function reportNow(result) {
+  $('report').disabled = true;
+  try {
+    const { reportToAxona } = await import('./axona-report.js');
+    await reportToAxona(result, (m) => { $('status').textContent = m; }, renderLeaderboard);
+  } catch (e) {
+    $('status').textContent = 'Axona report failed: ' + (e.message || e);
+  } finally { $('report').disabled = false; }
+}
+
+// ── orchestration ───────────────────────────────────────────────────
+async function singleRun() {
+  if (continuous) return;
+  $('run').disabled = true;
+  try {
+    const r = await runOnce();
+    maybeSubmit(r);
+    if ($('autoReport').checked) await reportNow(r); else $('status').textContent = 'done';
+  } catch (e) { $('status').textContent = 'error: ' + (e.message || e); }
+  finally { $('run').disabled = false; }
+}
+
+let continuous = false, reporter = null, iter = 0;
+
+// Continuous mode: cycle the whole suite, repeat. A test that fails on this
+// device is marked skipped (with a note) and not retried; the rest keep going.
+// Failed runs are still PUBLISHED (oom/timeout is useful Stage-4 data).
+async function startContinuous() {
+  if (continuous) return;
+  continuous = true; iter = 0;
+  $('loop').textContent = 'Stop'; $('run').disabled = true;
+  const gap = Math.max(0, parseInt($('gap').value, 10) || 0);
+  for (const s of buildSuite()) { const v = stateFor(s); v.status = 'pending'; v.note = ''; }   // reset on start
+  renderSuite();
+
+  if ($('autoReport').checked) {
+    try {
+      const { createReporter } = await import('./axona-report.js');
+      reporter = await createReporter((m) => { $('status').textContent = m; }, renderLeaderboard);
+    } catch (e) {
+      $('status').textContent = 'Axona connect failed — continuing local-only: ' + (e.message || e);
+      reporter = null;
+    }
+  }
+
+  while (continuous) {
+    let ranAny = false;
+    for (const spec of buildSuite()) {
+      if (!continuous) break;
+      const st = stateFor(spec);
+      if (st.status === 'skipped') continue;             // a failed test stays skipped
+      ranAny = true;
+      iter++; $('iter').textContent = String(iter);
+      let r;
+      try { r = await runOnce(spec); }
+      catch (e) { st.status = 'skipped'; st.note = 'threw: ' + (e.message || e); renderSuite(); continue; }
+
+      if (specFailed(r)) {
+        st.status = 'skipped'; st.note = failNote(r);
+        $('status').textContent = `${spec.candidate} d=${spec.difficulty} — skipped (${st.note})`;
+      } else {
+        st.status = 'ok'; st.note = '';
+        st.lastMint = r.mint_ms?.p50 != null ? Math.round(r.mint_ms.p50) : null;
+      }
+      renderSuite();
+
+      maybeSubmit(r);                                    // publish success AND failure (failures are data)
+      if (reporter) {
+        try { await reporter.publish(r); }
+        catch (e) { $('status').textContent = 'publish failed: ' + (e.message || e); }
+      }
+      if (!continuous) break;
+      await sleep(gap);
+    }
+    if (!ranAny) { $('status').textContent = 'all tests skipped on this device — stopping.'; break; }
+  }
+  await stopContinuous();
+}
+
+async function stopContinuous() {
+  continuous = false;
+  $('loop').textContent = 'Run suite continuously';
+  $('run').disabled = false;
+  if (reporter) { try { await reporter.close(); } catch { /* */ } reporter = null; }
 }
 
 // ── wiring ──────────────────────────────────────────────────────────
 window.addEventListener('DOMContentLoaded', () => {
   const sel = $('candidate');
-  for (const k of Object.keys(CANDIDATES)) {
-    const o = document.createElement('option'); o.value = k; o.textContent = k; sel.appendChild(o);
-  }
-  // Optional device label, persisted so it sticks across runs/reloads.
+  for (const k of Object.keys(CANDIDATES)) { const o = document.createElement('option'); o.value = k; o.textContent = k; sel.appendChild(o); }
+
   const lab = $('label');
   lab.value = deviceLabel();
   lab.addEventListener('input', () => {
     try { localStorage.setItem('powbench-device-label', lab.value.trim()); } catch { /* */ }
-    $('dev').textContent = JSON.stringify(deviceInfo(), null, 2);
+    renderDevice();
   });
 
-  $('dev').textContent = JSON.stringify(deviceInfo(), null, 2);
+  renderDevice();
+  enrichDevice();            // async: model / GPU / arch where available
+  renderSuite();
+  $('difficulties').addEventListener('input', renderSuite);
 
-  // QR + share link so a phone can join by scanning. The QR image is the only
-  // external call in the app (a public QR service) and only renders the PUBLIC
-  // page URL; the link below is the always-works fallback.
   const shareUrl = location.origin + location.pathname;
   const link = $('shareUrl'); link.textContent = shareUrl; link.href = shareUrl;
   const qr = $('qr');
@@ -303,7 +387,7 @@ window.addEventListener('DOMContentLoaded', () => {
     const blob = new Blob([JSON.stringify(lastResult, null, 2)], { type: 'application/json' });
     const a = document.createElement('a');
     a.href = URL.createObjectURL(blob);
-    a.download = `powbench-${lastResult.candidate.split(' ')[0]}-d${lastResult.difficulty}.json`;
+    a.download = `powbench-${lastResult.candidateKey}-d${lastResult.difficulty}.json`;
     a.click();
   });
 });

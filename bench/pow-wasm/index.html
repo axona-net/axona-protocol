@@ -43,21 +43,29 @@
     <legend>run</legend>
     <div><label for="label">device label</label><input id="label" value="" placeholder="(optional) e.g. work-mac / Pixel-7" size="30"></div>
     <div><label for="candidate">candidate</label><select id="candidate"></select></div>
-    <div><label for="difficulty">difficulty</label><input id="difficulty" type="number" value="16" min="0" max="64"> <span class="muted">leading-zero bits / search effort</span></div>
-    <div><label for="trials">trials</label><input id="trials" type="number" value="5" min="1" max="100"></div>
+    <div><label for="difficulty">difficulty</label><input id="difficulty" type="number" value="16" min="0" max="64"> <span class="muted">single-run leading-zero bits</span></div>
+    <div><label for="difficulties">suite difficulties</label><input id="difficulties" value="12,16,18,20" size="20"> <span class="muted">cycled in continuous mode (candidates × these)</span></div>
+    <div><label for="trials">trials</label><input id="trials" type="number" value="5" min="1" max="100"> <label style="margin-left:1rem">timeout <input id="maxms" type="number" value="20000" min="2000" style="width:6rem"> ms</label> <span class="muted">a test exceeding this is skipped</span></div>
     <div><label for="pubkey">pubkey (hex)</label><input id="pubkey" value="" placeholder="64-hex (default = aa…)" size="40"></div>
     <div><label for="collector">collector URL</label><input id="collector" value="" placeholder="(optional LAN) http://&lt;PC-LAN-IP&gt;:8099" size="40"></div>
     <div><label><input type="checkbox" id="autoReport" checked> auto-publish result to Axona (<code>pow-bench/results</code>)</label></div>
     <div>
       <button id="run">Run benchmark</button>
-      <button id="loop">Run continuously</button>
+      <button id="loop">Run suite continuously</button>
       <label>gap <input id="gap" type="number" value="3000" min="0" style="width:5rem"> ms</label>
       <span class="muted">iteration <b id="iter">0</b></span>
     </div>
     <div><span id="status"></span></div>
-    <p class="muted">Continuous mode keeps your device busy and (with auto-publish on)
-      streams a result to Axona after <em>every</em> run — that's the sustained /
-      thermal data. Press <b>Stop</b> to end.</p>
+    <p class="muted"><b>Run</b> = one test (the single candidate + difficulty above).
+      <b>Run suite continuously</b> = cycle every candidate × suite-difficulty, repeat,
+      publishing each. If your device can't do a test (out of memory / too slow), it's
+      <b>skipped with a note</b> and the rest keep going — nothing crashes. Press
+      <b>Stop</b> to end.</p>
+  </fieldset>
+
+  <fieldset>
+    <legend>test suite</legend>
+    <div id="suite" class="muted">—</div>
   </fieldset>
 
   <fieldset>
@@ -74,6 +82,7 @@
 
   <fieldset>
     <legend>this device</legend>
+    <div id="devsummary" style="font-weight:600; margin-bottom:.4rem">detecting…</div>
     <pre id="dev"></pre>
   </fieldset>
 
