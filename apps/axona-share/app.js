@@ -1,10 +1,10 @@
 // Axona-share — share images over Axona pub/sub. Proof of concept.
 // Channels are pub/sub topics; images are compressed to <1MB then sent as a set
 // of chunk-messages (file-transport.js) and reassembled on every subscriber.
-import { connectAxona } from './axona.js';
+import { connectAxona, KERNEL_VERSION } from './axona.js';
 import { chunkBytes, createReassembler, compressImage, VERSION as FT_VERSION } from '../lib/file-transport.js';
 
-const APP_VERSION = '0.5.0';
+const APP_VERSION = '0.6.0';
 const CHUNK_BYTES = 64 * 1024;    // conservative: large pub/sub messages are unreliable over WebRTC
 const DEFAULT_CHANNEL = { id: 'axona-share/public-images', name: 'Public Images' };
 const MAX_IMAGE_BYTES = 1_000_000;
@@ -173,7 +173,7 @@ const closeSidebarMobile = () => { if (window.matchMedia('(max-width:760px)').ma
 
 // ── wiring ──────────────────────────────────────────────────────────
 window.addEventListener('DOMContentLoaded', async () => {
-  $('ver').textContent = `app v${APP_VERSION} · lib v${FT_VERSION}`;
+  $('ver').textContent = `app v${APP_VERSION} · lib v${FT_VERSION} · kernel v${KERNEL_VERSION}`;
 
   // Joined via a scanned QR / shared link (?join=<id>&name=<name>): add the
   // channel and make it active. If the app was already open in another tab on

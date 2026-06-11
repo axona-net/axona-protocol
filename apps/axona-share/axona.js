@@ -2,8 +2,10 @@
 // string, all anchored at a fixed us-east synthetic publisher so every user
 // converges on the same roots regardless of their own location (mirrors the
 // proven bench reporter / minimal-pubsub-browser connect).
-import { AxonaPeer, AxonaDomain, NeuronNode, deriveIdentity, geoCellId } from '/src/index.js';
+import { AxonaPeer, AxonaDomain, NeuronNode, deriveIdentity, geoCellId, KERNEL_VERSION } from '/src/index.js';
 import { webTransport } from '/src/transport/web/index.js';
+
+export { KERNEL_VERSION };          // surfaced in the app header (kernel-version visibility)
 
 const BRIDGE_URL = new URLSearchParams(location.search).get('bridge')
   || (location.hostname.includes('testnet') ? 'wss://testnet.axona.net' : 'wss://bridge.axona.net');
