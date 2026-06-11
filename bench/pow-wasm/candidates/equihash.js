@@ -148,12 +148,13 @@ function solve(seedBytes, B) {
 function disjoint(a, b) { const s = new Set(a); for (const x of b) if (s.has(x)) return false; return true; }
 
 export const name = 'equihash (asymmetric, generalized-birthday, memory-capacity)';
-export const version = '0.4.0';   // limb BLAKE2b + ceiling raised to find the OOM floor
-export const suiteDifficulties = [16, 18, 20, 21];    // COLLISION-BITS B → N = 2^(B+1) entries
-// CEILING RAISED: real devices completed B=19 (in-browser GC keeps the working
-// set under the tab limit), so the OOM floor is higher. B=16/18 complete; B=20
-// (~2M entries) / B=21 (~4M) push past it to find where phones OOM. Safe: the
-// worker is isolated, so an OOM kills the worker (→ clean skip), not the tab.
+export const version = '0.5.0';   // ceiling pulled back to B=19 — B=20 crash-reloads iOS
+export const suiteDifficulties = [16, 18, 19];        // COLLISION-BITS B → N = 2^(B+1) entries
+// CEILING FOUND, then pulled back. iPhone COMPLETES B=19 (~650MB) but B=20
+// (~1.3GB) exceeds iOS Safari's per-tab memory limit → iOS kills & RELOADS the
+// whole page. On iOS a worker's memory counts against the tab and there is NO
+// catchable worker OOM, so the only safe ceiling is below the crash point. B=19
+// is that ceiling; the iPhone capacity floor sits at the B=19/20 boundary.
 export const difficultyLabel = 'collision-bits';
 export const trials = 2;
 
