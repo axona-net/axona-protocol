@@ -1755,6 +1755,7 @@ export class AxonaManager {
     if (missed.length === 0) return;
     await this.dht.sendDirect(subscriberId, 'pubsub:replay-batch', {
       topicId: toHex(topicId),
+      responderId: toHex(this.nodeId),     // diagnostic: which root served this replay (replica-divergence hunt)
       messages: missed,
     });
   }
@@ -1763,14 +1764,23 @@ export class AxonaManager {
     const topicId = _wire(payload.topicId);
     const { messages } = payload;
     if (!Array.isArray(messages) || messages.length === 0) return;
+    // Diagnostic (replica-divergence hunt): which root served this batch?
+    const from = payload.responderId || (meta?.fromId != null ? toHex(_wire(meta.fromId)) : '?');
     // D-1: cap the inbound replay batch (a legit batch is ≤ replay cache).
     const batch = messages.slice(0, MAX_REPLAY_BATCH);
+    this._emitLog?.('debug', 'replay-batch-recv', { from, topicId: toHex(topicId), n: batch.length });
     for (const msg of batch) {
       const { json, publishId, publishTs, postHash, publisher } = msg;
       // Phase A #2: never resurrect a killed message. A lagging replica may
       // still carry it in the batch it replays; without this guard a kill
       // could be undone the next time some relay replays its stale cache.
-      if (postHash && this._isTombstoned(postHash)) continue;
+      if (postHash && this._isTombstoned(postHash)) {
+        this._emitLog?.('debug', 'replay-skip-tombstoned', { from, msgId: postHash });
+        continue;
+      }
+      // The smoking gun: a root served us this message on (re)subscribe. If it
+      // was previously killed, `from` names the replica that missed the kill.
+      this._emitLog?.('debug', 'replay-serve', { from, msgId: postHash, publishId });
       // App delivery is gated by _appDelivered (inside _deliverToApp), NOT by
       // the network-level _seenPublishes set. A node that relayed this publish
       // as a K-closest ROOT marked it in _seenPublishes WITHOUT delivering to
