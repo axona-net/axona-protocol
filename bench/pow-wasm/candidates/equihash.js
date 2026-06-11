@@ -9,18 +9,14 @@
 // 8-index solution). Total hash width = (k+1)·B bits.
 //
 // NOTE: benchmark-faithful — exact memory+sort cost profile + cheap verify, with
-// a simplified solution-binding (XOR-to-zero + distinct strictly-increasing
-// indices) rather than Zcash's full personalization/tree-ordering rules. Correct
-// + measurable; an audited solver is a separate step before this is the kernel
-// PoW. Correctness-first (BigInt BLAKE2b) ⇒ modest sizes; a limb BLAKE2b is the
-// follow-up to reach the memory floor.
+// a simplified solution-binding (XOR-to-zero + distinct, not Zcash's full
+// personalization/tree-ordering rules). Correct + measurable; an audited solver
+// is a separate step before this is the kernel PoW. BLAKE2b is a no-alloc 32-bit
+// limb implementation (vector-verified), fast enough that the N-entry list
+// allocation — not the hashing — dominates, so the sweep reaches the OOM floor.
 
-// ── BLAKE2b (BigInt) ────────────────────────────────────────────────
-const MASK = (1n << 64n) - 1n;
-const IV = [
-  0x6a09e667f3bcc908n, 0xbb67ae8584caa73bn, 0x3c6ef372fe94f82bn, 0xa54ff53a5f1d36f1n,
-  0x510e527fade682d1n, 0x9b05688c2b3e6c1fn, 0x1f83d9abfb41bd6bn, 0x5be0cd19137e2179n,
-];
+// ── BLAKE2b (32-bit limbs, ZERO per-call allocation) ────────────────
+// 64-bit word w lives at index 2w (lo), 2w+1 (hi) in reused Uint32Arrays.
 const SIGMA = [
   [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15],
   [14, 10, 4, 8, 9, 15, 13, 6, 1, 12, 0, 2, 11, 7, 5, 3],
@@ -35,40 +31,59 @@ const SIGMA = [
   [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15],
   [14, 10, 4, 8, 9, 15, 13, 6, 1, 12, 0, 2, 11, 7, 5, 3],
 ];
-const rotr = (x, n) => ((x >> n) | (x << (64n - n))) & MASK;
-function mix(v, a, b, c, d, x, y) {
-  v[a] = (v[a] + v[b] + x) & MASK; v[d] = rotr(v[d] ^ v[a], 32n);
-  v[c] = (v[c] + v[d]) & MASK;     v[b] = rotr(v[b] ^ v[c], 24n);
-  v[a] = (v[a] + v[b] + y) & MASK; v[d] = rotr(v[d] ^ v[a], 16n);
-  v[c] = (v[c] + v[d]) & MASK;     v[b] = rotr(v[b] ^ v[c], 63n);
+const IVw = new Uint32Array([                       // 8 words as lo,hi pairs
+  0xf3bcc908, 0x6a09e667, 0x84caa73b, 0xbb67ae85, 0xfe94f82b, 0x3c6ef372, 0x5f1d36f1, 0xa54ff53a,
+  0xade682d1, 0x510e527f, 0x2b3e6c1f, 0x9b05688c, 0xfb41bd6b, 0x1f83d9ab, 0x137e2179, 0x5be0cd19,
+]);
+const H = new Uint32Array(16);                      // chaining value (8 words)
+const V = new Uint32Array(32);                      // working state (16 words)
+const M = new Uint32Array(32);                      // message block (16 words)
+
+function addInto(a, lo, hi) { const s = V[a] + lo; V[a] = s >>> 0; V[a + 1] = (V[a + 1] + hi + (s > 0xffffffff ? 1 : 0)) >>> 0; }
+function xorRotr(w, xlo, xhi, n) {                  // V[w] = rotr(V[w] ^ x, n)
+  const lo = (V[w] ^ xlo) >>> 0, hi = (V[w + 1] ^ xhi) >>> 0;
+  if (n === 32) { V[w] = hi; V[w + 1] = lo; return; }
+  if (n < 32) { V[w] = ((lo >>> n) | (hi << (32 - n))) >>> 0; V[w + 1] = ((hi >>> n) | (lo << (32 - n))) >>> 0; return; }
+  const k = n - 32, slo = hi, shi = lo;             // n>32: swap then rotr(n-32)
+  if (k === 0) { V[w] = slo; V[w + 1] = shi; return; }
+  V[w] = ((slo >>> k) | (shi << (32 - k))) >>> 0; V[w + 1] = ((shi >>> k) | (slo << (32 - k))) >>> 0;
 }
-function compress(h, block, t, last) {
-  const m = [];
-  for (let i = 0; i < 16; i++) { let w = 0n; for (let j = 7; j >= 0; j--) w = (w << 8n) | BigInt(block[i * 8 + j]); m.push(w); }
-  const v = [...h, ...IV];
-  v[12] ^= t & MASK;
-  if (last) v[14] ^= MASK;
+function G(a, b, c, d, mx, my) {
+  a *= 2; b *= 2; c *= 2; d *= 2; mx *= 2; my *= 2;
+  addInto(a, V[b], V[b + 1]); addInto(a, M[mx], M[mx + 1]); xorRotr(d, V[a], V[a + 1], 32);
+  addInto(c, V[d], V[d + 1]); xorRotr(b, V[c], V[c + 1], 24);
+  addInto(a, V[b], V[b + 1]); addInto(a, M[my], M[my + 1]); xorRotr(d, V[a], V[a + 1], 16);
+  addInto(c, V[d], V[d + 1]); xorRotr(b, V[c], V[c + 1], 63);
+}
+function compress(byteCount, last) {
+  V.set(H); V.set(IVw, 16);
+  V[24] ^= byteCount >>> 0; V[25] ^= Math.floor(byteCount / 4294967296) >>> 0;   // word 12 ^= t
+  if (last) { V[28] ^= 0xffffffff; V[29] ^= 0xffffffff; }                        // word 14 ^= ~0
   for (let r = 0; r < 12; r++) {
     const s = SIGMA[r];
-    mix(v, 0, 4, 8, 12, m[s[0]], m[s[1]]); mix(v, 1, 5, 9, 13, m[s[2]], m[s[3]]);
-    mix(v, 2, 6, 10, 14, m[s[4]], m[s[5]]); mix(v, 3, 7, 11, 15, m[s[6]], m[s[7]]);
-    mix(v, 0, 5, 10, 15, m[s[8]], m[s[9]]); mix(v, 1, 6, 11, 12, m[s[10]], m[s[11]]);
-    mix(v, 2, 7, 8, 13, m[s[12]], m[s[13]]); mix(v, 3, 4, 9, 14, m[s[14]], m[s[15]]);
+    G(0, 4, 8, 12, s[0], s[1]); G(1, 5, 9, 13, s[2], s[3]); G(2, 6, 10, 14, s[4], s[5]); G(3, 7, 11, 15, s[6], s[7]);
+    G(0, 5, 10, 15, s[8], s[9]); G(1, 6, 11, 12, s[10], s[11]); G(2, 7, 8, 13, s[12], s[13]); G(3, 4, 9, 14, s[14], s[15]);
   }
-  for (let i = 0; i < 8; i++) h[i] ^= v[i] ^ v[i + 8];
+  for (let i = 0; i < 16; i++) H[i] = (H[i] ^ V[i] ^ V[i + 16]) >>> 0;
 }
 export function blake2b(input, outlen = 64) {
-  const h = IV.slice();
-  h[0] ^= 0x01010000n | BigInt(outlen);            // param block (digest len, fanout=depth=1)
+  H.set(IVw);
+  H[0] = (H[0] ^ (0x01010000 | outlen)) >>> 0;      // param block (digest len, fanout=depth=1)
   const blocks = Math.max(1, Math.ceil(input.length / 128));
   for (let i = 0; i < blocks; i++) {
-    const block = new Uint8Array(128);
-    block.set(input.subarray(i * 128, i * 128 + 128));
+    M.fill(0);
+    const off = i * 128;
+    for (let w = 0; w < 16; w++) {
+      let lo = 0, hi = 0;
+      for (let b = 0; b < 4; b++) lo |= (input[off + w * 8 + b] || 0) << (8 * b);
+      for (let b = 0; b < 4; b++) hi |= (input[off + w * 8 + 4 + b] || 0) << (8 * b);
+      M[2 * w] = lo >>> 0; M[2 * w + 1] = hi >>> 0;
+    }
     const last = i === blocks - 1;
-    compress(h, block, BigInt(last ? input.length : (i + 1) * 128), last);
+    compress(last ? input.length : (i + 1) * 128, last);
   }
   const out = new Uint8Array(outlen);
-  for (let i = 0; i < outlen; i++) out[i] = Number((h[i >> 3] >> BigInt(8 * (i & 7))) & 0xffn);
+  for (let i = 0; i < outlen; i++) { const w = i >> 3, j = i & 7; out[i] = (j < 4 ? H[2 * w] >>> (8 * j) : H[2 * w + 1] >>> (8 * (j - 4))) & 0xff; }
   return out;
 }
 
@@ -97,7 +112,11 @@ function solve(seedBytes, B) {
   // round-0 list: {h, idx:[j]}
   let list = new Array(N);
   for (let j = 0; j < N; j++) list[j] = { h: entryHash(seedBytes, j, wbytes) & Wmask, idx: [j] };
-  _peak = N * (wbytes + 8);                            // rough working set
+  // Rough estimate: object + BigInt + index array + the transient merge lists
+  // run ≈ 0.5–1.5 KB/entry in practice (measured), so call it ~512 B/entry. This
+  // N-entry list is what OOMs a phone — but the number is only a label; the real
+  // floor is the OOM/worker-death signal, which doesn't depend on it being exact.
+  _peak = N * 512;
   // stages: collide on B bits per stage (last stage on 2B to fully zero)
   for (let r = 1; r <= K; r++) {
     const shift = BigInt((r - 1) * B);
@@ -129,7 +148,10 @@ function solve(seedBytes, B) {
 function disjoint(a, b) { const s = new Set(a); for (const x of b) if (s.has(x)) return false; return true; }
 
 export const name = 'equihash (asymmetric, generalized-birthday, memory-capacity)';
-export const suiteDifficulties = [8, 10, 12, 14];     // COLLISION-BITS B → N = 2^(B+1) entries
+export const suiteDifficulties = [14, 16, 18, 19];    // COLLISION-BITS B → N = 2^(B+1) entries
+// real working set ≈ 3MB / 260MB / 380MB / 650MB: B=14 confirms it runs + gives
+// speed, B=16-19 climb through the phone OOM floor (avoiding B=20's ~1.3GB that
+// could crash a tab rather than cleanly OOM the worker).
 export const difficultyLabel = 'collision-bits';
 export const trials = 2;
 

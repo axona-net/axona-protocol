@@ -110,10 +110,14 @@ function trace(adj, a, b) {
 }
 
 export const name = 'cuckoo-cycle (asymmetric, memory-bandwidth-hard)';
-export const suiteDifficulties = [18, 20, 22];        // EDGE-BITS. peakMemoryBytes
-// reports the typed arrays (edges + union-find); the cycle tracer adds more, so
-// the high end (eb 22 ≈ 50MB arrays + tracer) reaches real memory pressure and
-// OOM-skips phones (the true floor = worker death). Each mint is slow, so:
+export const suiteDifficulties = [18, 20, 22];        // EDGE-BITS.
+// KEPT at the range phones complete cleanly — this candidate's value is the
+// cross-device SPEED/BANDWIDTH signal (the egalitarian flatness). Its MEMORY is
+// NOT a clean capacity measure: the cycle tracer (a Map of accepted edges) is an
+// implementation artifact (real Cuckoo uses bounded edge-trimming, mem ∝ graph),
+// and it balloons RSS (~1GB at eb=22) — so peakMemoryBytes (typed arrays only)
+// under-reports and the real number isn't representative. The clean capacity
+// floor is equihash's job; cuckoo's needs a bounded-memory solver rewrite first.
 export const trials = 2;
 export const difficultyLabel = 'edge-bits';
 
