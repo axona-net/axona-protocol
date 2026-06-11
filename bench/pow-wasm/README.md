@@ -51,6 +51,12 @@ useast` anchor matches the page's reporter, so you receive them all. Pipe to a
 file and tabulate however you like. This *is* the automated data-gathering loop —
 Axona relaying its own benchmark telemetry.
 
+**Comparison feedback (closed loop).** The collector also **publishes a compact
+leaderboard back** to `pow-bench/leaderboard` every 15 s (per device × candidate ×
+difficulty, sorted by mint). The app subscribes and shows a **"how you compare"**
+panel — your mint p50, your rank N/M, and fastest/median/slowest — so each tester
+sees where their device stands, live.
+
 ## Run it now (SHA-256 baseline — works today)
 
 ```bash
