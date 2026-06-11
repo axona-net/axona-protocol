@@ -1,0 +1,88 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Axona-share</title>
+<style>
+  :root { font-family: system-ui, sans-serif; --bg:#fff; --line:#e2e2e2; --accent:#2563eb; }
+  * { box-sizing: border-box; }
+  body { margin: 0; height: 100vh; display: flex; flex-direction: column; color: #222; }
+  /* top bar */
+  header { display: flex; align-items: center; gap: .6rem; padding: .5rem .8rem; border-bottom: 1px solid var(--line); }
+  header h1 { font-size: 1.05rem; margin: 0; }
+  #menuBtn { display: none; font-size: 1.2rem; background: none; border: 1px solid var(--line); border-radius: 6px; padding: .2rem .55rem; cursor: pointer; }
+  #activeName { font-weight: 600; }
+  #status { margin-left: auto; color: #06c; font-size: .82rem; }
+  #ver { color: #aaa; font-size: .7rem; font-family: ui-monospace, monospace; }
+  /* body split */
+  .wrap { flex: 1; display: flex; min-height: 0; }
+  #sidebar { width: 250px; border-right: 1px solid var(--line); display: flex; flex-direction: column; background: #fafafa; }
+  .side-head { display: flex; align-items: center; justify-content: space-between; padding: .6rem .8rem; border-bottom: 1px solid var(--line); font-weight: 600; }
+  #addChannel { font-size: 1.2rem; line-height: 1; border: 1px solid var(--line); background: #fff; border-radius: 6px; padding: 0 .5rem; cursor: pointer; }
+  #channels { overflow-y: auto; flex: 1; }
+  .chan { display: flex; align-items: center; gap: .4rem; padding: .55rem .8rem; cursor: pointer; border-bottom: 1px solid #f0f0f0; }
+  .chan:hover { background: #f0f4ff; }
+  .chan.active { background: #e8efff; border-left: 3px solid var(--accent); }
+  .chan-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .copy { background: none; border: none; cursor: pointer; font-size: 1rem; color: #888; padding: .1rem .3rem; }
+  .copy:hover { color: var(--accent); }
+  /* main */
+  #main { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+  #main.drag { outline: 3px dashed var(--accent); outline-offset: -6px; }
+  #composer { padding: .7rem .9rem; border-bottom: 1px solid var(--line); display: flex; gap: .6rem; align-items: center; flex-wrap: wrap; }
+  #composer button { cursor: pointer; border: 1px solid var(--line); background: #fff; border-radius: 6px; padding: .45rem .8rem; font-size: .95rem; }
+  #shareBtn { background: var(--accent); color: #fff; border-color: var(--accent); font-weight: 600; }
+  #shareBtn:disabled { opacity: .4; cursor: default; }
+  #preview { display: none; height: 48px; width: 48px; object-fit: cover; border-radius: 6px; border: 1px solid var(--line); }
+  #caption { flex: 1; min-width: 140px; padding: .45rem; font-size: .95rem; border: 1px solid var(--line); border-radius: 6px; }
+  #composerHint { color: #999; font-size: .82rem; }
+  /* feed */
+  #feed { overflow-y: auto; flex: 1; padding: 1rem; display: flex; flex-direction: column; gap: 1rem; align-items: center; }
+  .card { width: 100%; max-width: 520px; border: 1px solid var(--line); border-radius: 10px; overflow: hidden; box-shadow: 0 1px 4px rgba(0,0,0,.06); }
+  .card img { width: 100%; display: block; }
+  .card .cap { padding: .6rem .8rem; font-size: .95rem; }
+  .empty { color: #999; margin-top: 2rem; text-align: center; max-width: 360px; }
+  #overlay { display: none; position: fixed; inset: 0; background: rgba(0,0,0,.35); z-index: 5; }
+  #overlay.show { display: block; }
+  @media (max-width: 760px) {
+    #menuBtn { display: inline-block; }
+    #sidebar { position: fixed; z-index: 6; top: 0; bottom: 0; left: 0; transform: translateX(-100%); transition: transform .2s; box-shadow: 2px 0 12px rgba(0,0,0,.15); }
+    #sidebar.open { transform: translateX(0); }
+  }
+</style>
+</head>
+<body>
+  <header>
+    <button id="menuBtn" aria-label="channels">☰</button>
+    <h1>Axona-share</h1>
+    <span>·</span><span id="activeName"></span>
+    <span id="status"></span>
+    <span id="ver"></span>
+  </header>
+
+  <div class="wrap">
+    <aside id="sidebar">
+      <div class="side-head"><span>Channels</span><button id="addChannel" title="Create or join a channel">+</button></div>
+      <div id="channels"></div>
+    </aside>
+
+    <section id="main">
+      <div id="composer">
+        <img id="preview" alt="preview">
+        <button id="pickBtn">Choose image</button>
+        <button id="camBtn">Take photo</button>
+        <input id="caption" placeholder="Add a caption…">
+        <button id="shareBtn" disabled>Share</button>
+        <span id="composerHint"></span>
+        <input id="fileInput" type="file" accept="image/*" hidden>
+        <input id="camInput" type="file" accept="image/*" capture="environment" hidden>
+      </div>
+      <div id="feed"></div>
+    </section>
+  </div>
+
+  <div id="overlay"></div>
+  <script type="module" src="./app.js"></script>
+</body>
+</html>
