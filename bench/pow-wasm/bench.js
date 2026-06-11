@@ -2,6 +2,9 @@
 // a Worker (fault-tolerant: a test that fails is skipped with a note, the rest
 // keep going) → aggregate → render → report. See README.md.
 
+// Bump on every bench change so a stale cached app is obvious in the UI.
+const BENCH_VERSION = '0.4.0';
+
 // Register memory-hard candidates here as they compile (drop the file in
 // candidates/ implementing candidates/template.js):
 const CANDIDATES = {
@@ -20,14 +23,24 @@ async function loadMeta() {
       const m = await import(url);
       CANDIDATE_META[k] = {
         name: m.name || k,
+        version: m.version || '?',
         suiteDifficulties: Array.isArray(m.suiteDifficulties) ? m.suiteDifficulties : [12, 16, 18, 20],
         difficultyLabel: m.difficultyLabel || 'difficulty',
         trials: Number.isInteger(m.trials) && m.trials > 0 ? m.trials : null,   // optional per-candidate override
       };
     } catch (e) {
-      CANDIDATE_META[k] = { name: k, suiteDifficulties: [12, 16, 18, 20], difficultyLabel: 'difficulty', loadError: String(e.message || e) };
+      CANDIDATE_META[k] = { name: k, version: 'load-error', suiteDifficulties: [12, 16, 18, 20], difficultyLabel: 'difficulty', loadError: String(e.message || e) };
     }
   }
+}
+
+// One line that proves which app + candidate files actually loaded (vs a stale
+// cached copy). Each version lives in its own file, so a cached file shows its
+// old number here.
+function renderBuildInfo() {
+  const el = $('buildinfo'); if (!el) return;
+  const parts = Object.keys(CANDIDATES).map((k) => `${k} v${CANDIDATE_META[k] ? CANDIDATE_META[k].version : '?'}`);
+  el.textContent = `app v${BENCH_VERSION} · ${parts.join(' · ')}`;
 }
 
 const $ = (id) => document.getElementById(id);
@@ -75,6 +88,7 @@ function gpuInfo() {
 let DEVICE = baseDevice();
 function baseDevice() {
   return {
+    benchVersion: BENCH_VERSION,                       // tag each result with the app build
     deviceId: deviceId(),
     deviceLabel: deviceLabel(),
     ua: navigator.userAgent,
@@ -389,7 +403,8 @@ window.addEventListener('DOMContentLoaded', () => {
 
   renderDevice();
   enrichDevice();            // async: model / GPU / arch where available
-  loadMeta().then(renderSuite);   // read each candidate's suite difficulties, then show the matrix
+  if ($('buildinfo')) $('buildinfo').textContent = `app v${BENCH_VERSION} · loading candidates…`;
+  loadMeta().then(() => { renderSuite(); renderBuildInfo(); });   // suite matrix + loaded-version line
 
   const shareUrl = location.origin + location.pathname;
   const link = $('shareUrl'); link.textContent = shareUrl; link.href = shareUrl;

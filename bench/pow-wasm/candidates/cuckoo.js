@@ -110,6 +110,7 @@ function trace(adj, a, b) {
 }
 
 export const name = 'cuckoo-cycle (asymmetric, memory-bandwidth-hard)';
+export const version = '0.3.0';   // no-alloc limb siphash + tracer
 export const suiteDifficulties = [18, 20, 22];        // EDGE-BITS.
 // KEPT at the range phones complete cleanly — this candidate's value is the
 // cross-device SPEED/BANDWIDTH signal (the egalitarian flatness). Its MEMORY is

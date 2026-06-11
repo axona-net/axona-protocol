@@ -148,6 +148,7 @@ function solve(seedBytes, B) {
 function disjoint(a, b) { const s = new Set(a); for (const x of b) if (s.has(x)) return false; return true; }
 
 export const name = 'equihash (asymmetric, generalized-birthday, memory-capacity)';
+export const version = '0.3.0';   // limb BLAKE2b + floor-sized sweep
 export const suiteDifficulties = [14, 16, 18, 19];    // COLLISION-BITS B → N = 2^(B+1) entries
 // real working set ≈ 3MB / 260MB / 380MB / 650MB: B=14 confirms it runs + gives
 // speed, B=16-19 climb through the phone OOM floor (avoiding B=20's ~1.3GB that

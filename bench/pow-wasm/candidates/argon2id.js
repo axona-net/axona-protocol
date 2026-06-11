@@ -26,6 +26,7 @@ const params = (pubkeyHex, memMB) => ({
 });
 
 export const name = 'argon2id (memory-hard, symmetric verify)';
+export const version = '0.1.0';
 // DEMOTED — the symmetric fallback, not the production pick. Empty suite ⇒ NOT
 // cycled in continuous mode (so the fleet doesn't grind a fn we won't ship);
 // still selectable for a manual single run to get fallback data if ever needed.
