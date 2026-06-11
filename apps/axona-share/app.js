@@ -4,11 +4,12 @@
 import { connectAxona } from './axona.js';
 import { chunkBytes, createReassembler, compressImage } from '../lib/file-transport.js';
 
-const APP_VERSION = '0.2.0';
+const APP_VERSION = '0.3.0';
 const CHUNK_BYTES = 64 * 1024;    // conservative: large pub/sub messages are unreliable over WebRTC
 const DEFAULT_CHANNEL = { id: 'axona-share/public-images', name: 'Public Images' };
 const MAX_IMAGE_BYTES = 1_000_000;
 const $ = (id) => document.getElementById(id);
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 // ── state ───────────────────────────────────────────────────────────
 let axona = null;
@@ -72,7 +73,10 @@ async function shareImage(file, caption) {
   const topic = activeId;
   setStatus(`sending ${(bytes.length / 1024).toFixed(0)} KB in ${msgs.length} piece(s)…`);
   try {
-    for (let i = 0; i < msgs.length; i++) { await axona.pub(topic, msgs[i]); setStatus(`sent ${i + 1}/${msgs.length}…`); }
+    for (let i = 0; i < msgs.length; i++) {
+      await axona.pub(topic, msgs[i]); setStatus(`sent ${i + 1}/${msgs.length}…`);
+      if (i < msgs.length - 1) await sleep(150);     // throttle: bursts of large messages get dropped
+    }
     console.log(`[axona-share] published all ${msgs.length} chunks for ${fileId}`);
     setStatus('shared ✓');
   } catch (e) { console.error('[axona-share] publish failed', e); setStatus('share failed: ' + (e.message || e)); }
@@ -108,8 +112,8 @@ function renderChannels() {
   $('channels').innerHTML = channels.map((c) => `
     <div class="chan ${c.id === activeId ? 'active' : ''}" data-id="${c.id}">
       <span class="chan-name" title="${esc(c.id)}">${esc(c.name)}</span>
-      <button class="icon" data-qr="${esc(c.id)}" title="Show QR — scan to join this channel">▦</button>
-      <button class="icon" data-copy="${esc(c.id)}" title="Copy channel ID to share">⧉</button>
+      <button class="icon" data-qr="${esc(c.id)}" title="Show QR — scan to join this channel">QR</button>
+      <button class="icon" data-copy="${esc(c.id)}" title="Copy channel ID to share">Copy</button>
     </div>`).join('');
 }
 function renderFeed() {
