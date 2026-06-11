@@ -3,7 +3,7 @@
 // keep going) → aggregate → render → report. See README.md.
 
 // Bump on every bench change so a stale cached app is obvious in the UI.
-const BENCH_VERSION = '0.8.0';
+const BENCH_VERSION = '0.9.0';
 
 // Register memory-hard candidates here as they compile (drop the file in
 // candidates/ implementing candidates/template.js):
@@ -41,16 +41,17 @@ async function loadMeta() {
 function renderBuildInfo() {
   const el = $('buildinfo'); if (!el) return;
   const parts = Object.keys(CANDIDATES).map((k) => `${k} v${CANDIDATE_META[k] ? CANDIDATE_META[k].version : '?'}`);
-  el.textContent = `app v${BENCH_VERSION} · ${parts.join(' · ')} · mem cap ${MEM_BUDGET_MB}MB${IS_MOBILE ? ' (mobile)' : ''}`;
+  el.textContent = `app v${BENCH_VERSION} · ${parts.join(' · ')} · mem cap ${MEM_BUDGET_MB}MB${IS_IOS ? ' (iOS)' : ''}`;
 }
 
-// Per-device memory budget (on the estimateMemMB scale). iOS Safari page-CRASHES
-// the whole tab under memory pressure with no catchable worker OOM (Android
-// phones can too), so cap MOBILE well below the crash point and gate over-budget
-// tests BEFORE they allocate. Desktops get a clean worker OOM → allow probing high.
-const IS_MOBILE = /iPhone|iPad|iPod|Android/i.test(navigator.userAgent)
+// Per-device memory budget (on the estimateMemMB scale). ONLY iOS Safari
+// page-CRASHES the whole tab on OOM (no catchable worker error), so it alone
+// gets a hard cap. Android Chrome gives a catchable worker OOM, or just completes
+// + times out — verified: a Galaxy A15 finished equihash B=20/21 before the
+// guard — so Android runs the full suite like desktop.
+const IS_IOS = /iPhone|iPad|iPod/i.test(navigator.userAgent)
   || (navigator.platform === 'MacIntel' && (navigator.maxTouchPoints || 0) > 1);   // iPadOS reports as Mac
-const MEM_BUDGET_MB = IS_MOBILE ? 700 : 6000;
+const MEM_BUDGET_MB = IS_IOS ? 700 : 6000;
 function estMemFor(spec) {
   const f = CANDIDATE_META[spec.candidate] && CANDIDATE_META[spec.candidate].estimateMemMB;
   return typeof f === 'function' ? (f(spec.difficulty) || 0) : 0;

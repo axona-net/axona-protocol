@@ -148,12 +148,12 @@ function solve(seedBytes, B) {
 function disjoint(a, b) { const s = new Set(a); for (const x of b) if (s.has(x)) return false; return true; }
 
 export const name = 'equihash (asymmetric, generalized-birthday, memory-capacity)';
-export const version = '0.6.0';   // high ceiling restored; harness gates per-device memory
+export const version = '0.7.0';   // high ceiling; harness gates iOS only (Android runs full)
 export const suiteDifficulties = [16, 18, 20, 21];    // COLLISION-BITS B → N = 2^(B+1) entries
-// Full sweep restored. The harness gates per-device via estimateMemMB() (below):
-// mobile (700MB budget) auto-skips B=20 (~1GB est) / B=21 (~2GB est) BEFORE
-// allocating — so iPhone/Android never reach the crash. Desktop (6GB budget)
-// runs them to find its higher floor. iPhone floor is the B=19/20 boundary.
+// Full sweep. The harness gates per-device via estimateMemMB() (below): iOS ONLY
+// (700MB budget) auto-skips B=20 (~1GB est) / B=21 (~2GB est) BEFORE allocating,
+// because iOS Safari page-crashes on OOM. Android + desktop (6GB) run them —
+// the Galaxy A15 completes B=20 (~40s) / B=21 (~76s). iPhone floor = B=19/20.
 export const difficultyLabel = 'collision-bits';
 export const trials = 2;
 
