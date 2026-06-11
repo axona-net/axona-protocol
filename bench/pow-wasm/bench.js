@@ -47,8 +47,8 @@ function renderBuildInfo() {
 // Per-device memory budget (on the estimateMemMB scale). ONLY iOS Safari
 // page-CRASHES the whole tab on OOM (no catchable worker error), so it alone
 // gets a hard cap. Android Chrome gives a catchable worker OOM, or just completes
-// + times out — verified: a Galaxy A15 finished equihash B=20/21 before the
-// guard — so Android runs the full suite like desktop.
+// + times out — verified: a Galaxy S24 Ultra finished equihash B=20/21 before
+// the guard — so Android runs the full suite like desktop.
 const IS_IOS = /iPhone|iPad|iPod/i.test(navigator.userAgent)
   || (navigator.platform === 'MacIntel' && (navigator.maxTouchPoints || 0) > 1);   // iPadOS reports as Mac
 const MEM_BUDGET_MB = IS_IOS ? 700 : 6000;

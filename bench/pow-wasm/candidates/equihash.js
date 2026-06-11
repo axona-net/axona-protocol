@@ -153,7 +153,7 @@ export const suiteDifficulties = [16, 18, 20, 21];    // COLLISION-BITS B → N 
 // Full sweep. The harness gates per-device via estimateMemMB() (below): iOS ONLY
 // (700MB budget) auto-skips B=20 (~1GB est) / B=21 (~2GB est) BEFORE allocating,
 // because iOS Safari page-crashes on OOM. Android + desktop (6GB) run them —
-// the Galaxy A15 completes B=20 (~40s) / B=21 (~76s). iPhone floor = B=19/20.
+// a Galaxy S24 Ultra completes B=20 (~34s) / B=21 (~86s). iPhone floor = B=19/20.
 export const difficultyLabel = 'collision-bits';
 export const trials = 2;
 
