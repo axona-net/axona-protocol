@@ -6,9 +6,28 @@
 // candidates/ implementing candidates/template.js):
 const CANDIDATES = {
   'sha256-baseline': './candidates/sha256-baseline.js',
+  'argon2id':        './candidates/argon2id.js',
   // 'equihash':       './candidates/equihash.js',
   // 'cuckoo':         './candidates/cuckoo.js',
 };
+
+// Per-candidate suite metadata (suiteDifficulties + label), read once on load by
+// importing each module (cheap — heavy deps inside candidates are lazy).
+const CANDIDATE_META = {};
+async function loadMeta() {
+  for (const [k, url] of Object.entries(CANDIDATES)) {
+    try {
+      const m = await import(url);
+      CANDIDATE_META[k] = {
+        name: m.name || k,
+        suiteDifficulties: Array.isArray(m.suiteDifficulties) && m.suiteDifficulties.length ? m.suiteDifficulties : [12, 16, 18, 20],
+        difficultyLabel: m.difficultyLabel || 'difficulty',
+      };
+    } catch (e) {
+      CANDIDATE_META[k] = { name: k, suiteDifficulties: [12, 16, 18, 20], difficultyLabel: 'difficulty', loadError: String(e.message || e) };
+    }
+  }
+}
 
 const $ = (id) => document.getElementById(id);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -118,13 +137,12 @@ async function uaMemoryBytes() {
 }
 
 // ── the test suite ──────────────────────────────────────────────────
-function difficulties() {
-  return ($('difficulties').value || '12,16,18,20')
-    .split(',').map((s) => parseInt(s.trim(), 10)).filter((n) => Number.isInteger(n) && n >= 0);
-}
+// Each candidate declares its own meaningful sweep (SHA: zero-bits; argon2id:
+// memory-MB; Cuckoo: edge-bits), so the suite is candidate × that candidate's
+// difficulties — apples-to-apples within a candidate.
 function buildSuite() {
   const specs = [];
-  for (const c of Object.keys(CANDIDATES)) for (const d of difficulties()) specs.push({ candidate: c, difficulty: d });
+  for (const c of Object.keys(CANDIDATES)) for (const d of (CANDIDATE_META[c]?.suiteDifficulties || [])) specs.push({ candidate: c, difficulty: d });
   return specs;
 }
 const testKey = (s) => `${s.candidate}@${s.difficulty}`;
@@ -138,10 +156,11 @@ function renderSuite() {
   const el = $('suite'); if (!el) return;
   el.innerHTML = '<table><tbody>' + buildSuite().map((s) => {
     const v = stateFor(s);
+    const label = CANDIDATE_META[s.candidate]?.difficultyLabel || 'd';
     const icon = v.status === 'ok' ? '✓' : v.status === 'skipped' ? '⏭' : '·';
     const note = v.status === 'skipped' ? `<span style="color:#b00">skipped: ${v.note}</span>`
                : (v.lastMint != null ? `${v.lastMint} ms` : '');
-    return `<tr><td>${icon}</td><td>${s.candidate} d=${s.difficulty}</td><td class="muted">${note}</td></tr>`;
+    return `<tr><td>${icon}</td><td>${s.candidate} · ${label}=${s.difficulty}</td><td class="muted">${note}</td></tr>`;
   }).join('') + '</tbody></table>';
 }
 
@@ -369,8 +388,7 @@ window.addEventListener('DOMContentLoaded', () => {
 
   renderDevice();
   enrichDevice();            // async: model / GPU / arch where available
-  renderSuite();
-  $('difficulties').addEventListener('input', renderSuite);
+  loadMeta().then(renderSuite);   // read each candidate's suite difficulties, then show the matrix
 
   const shareUrl = location.origin + location.pathname;
   const link = $('shareUrl'); link.textContent = shareUrl; link.href = shareUrl;

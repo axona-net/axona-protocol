@@ -10,6 +10,11 @@
 //   • Compile the reference solver to SINGLE-THREADED WASM first (most portable).
 //
 //   export const name: string
+//   export const suiteDifficulties: number[]   // values the suite cycles for THIS
+//        // candidate. The integer is candidate-interpreted: SHA = leading-zero
+//        // bits; a memory-hard fn = MEMORY in MB (the phone-floor axis); Cuckoo
+//        // = edge-bits (graph size). Pick a range that sweeps the device floor.
+//   export const difficultyLabel: string        // e.g. 'zero-bits' | 'mem MB' | 'edge-bits'
 //   export async function mint(pubkeyHex, difficulty): Promise<witness>
 //        // search until a witness meets `difficulty`. The witness is the small
 //        // proof (Equihash: indices; Cuckoo: cycle edges) — serialise to a

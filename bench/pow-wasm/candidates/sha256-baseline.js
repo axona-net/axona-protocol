@@ -5,6 +5,8 @@
 import { powMint, powVerify } from '../../../src/pow/pow.js';
 
 export const name = 'sha256-hashcash (baseline — NOT memory-hard)';
+export const suiteDifficulties = [12, 16, 18, 20];   // leading-zero bits (search effort)
+export const difficultyLabel = 'zero-bits';
 
 export async function mint(pubkeyHex, difficulty) {
   // returns the nonce string == the witness
