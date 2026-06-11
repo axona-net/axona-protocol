@@ -1,23 +1,22 @@
 // =====================================================================
-// smoke_kill_resurrection.js — DIAGNOSTIC repro for the user-reported
-// "kill, then reload, and the message comes back" bug.
+// smoke_kill_resurrection.js — regression guard for the user-reported
+// "kill, then reload, and the message comes back" bug, and its fix.
 //
-// Hypothesis (replica divergence): a topic is replicated across R root
+// Root cause (replica divergence): a topic is replicated across R root
 // axons, but a kill is best-effort-pushed to the K-closest set. If even
-// ONE root misses the kill (routed-fallback single target, a sendDirect
-// failure, or churn between publish-time and kill-time K-closest), that
-// root keeps the message AND has no tombstone. On a fresh reload the
-// subscriber's in-memory tombstone set is empty, so when the stale root
-// replays, nothing suppresses it → the message resurrects.
+// ONE root misses the kill (a dropped delivery, churn between publish- and
+// kill-time K-closest, or a root that joined the set late) that root keeps
+// the message AND has no tombstone. On a fresh reload the subscriber's
+// in-memory tombstone set is empty, so the stale root's replay resurrects it.
 //
-// This test reproduces it deterministically: 5 roots all hold the message,
-// the kill is DROPPED to exactly one root, then a freshly-reloaded
-// subscriber re-subscribes and receives the killed message again. It also
-// verifies the new replay-batch instrumentation names the culprit root.
+// Fix (Phase A #2 kill convergence): after a root applies a creator-authorized
+// kill it RE-GOSSIPS the signed kill to the current K-closest root set on every
+// refreshTick (bounded to KILL_REGOSSIP_MS). A replica that missed the original
+// kill re-runs the full verifier against the message it holds and removes +
+// tombstones it. Plus a send-side tombstone backstop in _maybeSendReplay.
 //
-// NOTE: this asserts the bug is PRESENT (resurrection observed). When the
-// fix lands (send-side tombstone filter + full-fanout kill + replica
-// reconciliation), check #3 flips to "no resurrection" — update then.
+// This test reproduces the divergence, then proves reconciliation heals the
+// stale root and a later reload no longer resurrects the message.
 //
 // Run: node test/smoke_kill_resurrection.js
 // =====================================================================
@@ -42,7 +41,7 @@ const tick      = () => new Promise(r => setTimeout(r, 0));
 
 // ── In-memory mesh of real AxonaManager instances, wired by sendDirect /
 //    routeMessage / findKClosest over XOR distance (mirrors smoke_metrics_
-//    kfanout). Adds `dropKillTo`: a root that never receives `pubsub:kill-k`. ──
+//    kfanout). `dropKillTo`: a root that never receives `pubsub:kill-k`. ──
 class MockNet {
   constructor() { this.mgrs = new Map(); this.dropKillTo = null; this.logs = []; }
 
@@ -67,7 +66,7 @@ class MockNet {
         if (h) await h(payload, { fromId: toHex(selfId) });
       },
       sendDirect:      async (target, type, payload) => {
-        if (type === 'pubsub:kill-k' && net.dropKillTo != null && target === net.dropKillTo) return false; // simulate missed delivery
+        if (type === 'pubsub:kill-k' && net.dropKillTo != null && target === net.dropKillTo) return false; // missed delivery
         const m = net.mgrs.get(target);
         if (!m) return false;
         const h = m._dht._direct.get(type);
@@ -92,19 +91,33 @@ class MockNet {
   }
 }
 
+const hasMsg = (r) => r.axonRoles.get(TOPIC_BIG).replayCache.length === 1;
+
+async function reloadSubscriberAndCount(net, roots, label) {
+  // A brand-new subscriber with an empty tombstone set re-subscribes to every
+  // root; each replays what it still holds (the reload path).
+  const B = net.spawn(TOPIC_BIG ^ (1n << 201n), label);
+  const got = [];
+  B.onPubsubDelivery((_t, j) => { try { got.push(JSON.parse(j)); } catch {} });
+  for (const r of roots) {
+    await r._maybeSendReplay(TOPIC_BIG, r.axonRoles.get(TOPIC_BIG), B.nodeId, 0);
+  }
+  await tick();
+  net.mgrs.delete(B.nodeId);
+  return got;
+}
+
 async function main() {
-  console.log('Axona kill-resurrection diagnostic (replica divergence)');
+  console.log('Axona kill-resurrection regression (replica divergence + convergence fix)');
 
   const alice = await deriveIdentity(LONDON);
   const env   = await buildEnvelope({ topic: 'cats', message: 'hi', identity: alice, ts: T, seq: T });
   const json  = JSON.stringify(env);
 
-  const net = new MockNet();
-  // 5 roots: nodeIds close to the topic (small XOR) so they are the K-closest.
-  const rootIds = [1n, 3n, 5n, 9n, 17n].map(x => TOPIC_BIG ^ x);
+  const net     = new MockNet();
+  const rootIds = [1n, 3n, 5n, 9n, 17n].map(x => TOPIC_BIG ^ x);    // close to topic ⇒ the K-closest
   const roots   = rootIds.map((id, i) => net.spawn(id, `root${i}`));
-  // A (killer) and B (subscriber): far from the topic → never roots themselves.
-  const A = net.spawn(TOPIC_BIG ^ (1n << 200n), 'A');
+  const A       = net.spawn(TOPIC_BIG ^ (1n << 200n), 'A');         // killer, far ⇒ never a root
 
   // ── Seed: a fully-replicated publish — every root holds the message. ──
   for (const r of roots) {
@@ -113,60 +126,50 @@ async function main() {
       replayCache: [{ json, publishId: 'p1', publishTs: T, postHash: env.msgId, publisher: null }],
     });
   }
-  check('1. all 5 roots initially hold the message',
-    roots.every(r => r.axonRoles.get(TOPIC_BIG).replayCache.length === 1));
+  check('1. all 5 roots initially hold the message', roots.every(hasMsg));
 
-  // ── Kill from A, but DROP the kill to root index 2. ──
+  // ── Kill from A, but DROP the kill to root index 2 (models a missed delivery). ──
   const STALE = 2;
   net.dropKillTo = rootIds[STALE];
   const kill = await buildKill({ topicId: TOPIC_HEX, msgId: env.msgId, ts: T, seq: T, identity: alice });
   await A._asyncKill(TOPIC_BIG, kill);
-  await tick(); await tick();                       // flush the fire-and-forget kill-k sends
+  await tick(); await tick();
 
-  const killedRoots  = roots.filter((_, i) => i !== STALE);
-  const staleRoot    = roots[STALE];
-  check('2a. roots that received the kill removed the message',
-    killedRoots.every(r => r.axonRoles.get(TOPIC_BIG).replayCache.length === 0));
-  check('2b. roots that received the kill tombstoned it',
-    killedRoots.every(r => r._isTombstoned(env.msgId) === true));
-  check('2c. the dropped root STILL holds the message (no tombstone)',
-    staleRoot.axonRoles.get(TOPIC_BIG).replayCache.length === 1 &&
-    staleRoot._isTombstoned(env.msgId) === false);
+  const others    = roots.filter((_, i) => i !== STALE);
+  const staleRoot = roots[STALE];
+  check('2a. roots that got the kill removed + tombstoned the message',
+    others.every(r => !hasMsg(r) && r._isTombstoned(env.msgId)));
+  check('2b. the dropped root is STALE: still holds it, no tombstone',
+    hasMsg(staleRoot) && staleRoot._isTombstoned(env.msgId) === false);
 
-  // ── B "reloads": a brand-new subscriber with an empty tombstone set. It
-  //    re-subscribes to the K-closest roots; each replays what it holds. ──
-  const B = net.spawn(TOPIC_BIG ^ (1n << 201n), 'B');
-  const bDeliveries = [];
-  B.onPubsubDelivery((_t, j) => { try { bDeliveries.push(JSON.parse(j)); } catch {} });
-  net.logs.length = 0;                              // capture only the reload's replay logs
-  for (const r of roots) {
-    const role = r.axonRoles.get(TOPIC_BIG);
-    await r._maybeSendReplay(TOPIC_BIG, role, B.nodeId, 0);   // lastSeenTs=0 → full backfill
-  }
-  await tick();
-
-  const resurrected = bDeliveries.filter(d => !d.deleted && d.msgId === env.msgId);
-  check('3. BUG REPRODUCED: reloaded B receives the killed message again',
-    resurrected.length === 1);
-
-  // ── The instrumentation must name the stale root as the source. ──
-  const serveLog = net.logs.find(l => l.node === 'B' && l.code === 'replay-serve' && l.msgId === env.msgId);
-  check('4a. instrumentation logged replay-serve for the resurrected msg',
-    !!serveLog);
-  check('4b. ...and `from` is exactly the stale root (culprit identified)',
+  // ── Without reconciliation, a reloaded subscriber resurrects it (the bug). ──
+  net.logs.length = 0;
+  const before = await reloadSubscriberAndCount(net, roots, 'B-before');
+  const serveLog = net.logs.find(l => l.node === 'B-before' && l.code === 'replay-serve' && l.msgId === env.msgId);
+  check('3. divergence is real: a reloaded subscriber resurrects the message',
+    before.filter(d => !d.deleted && d.msgId === env.msgId).length === 1);
+  check('3b. instrumentation names the stale root as the source',
     !!serveLog && serveLog.from === toHex(rootIds[STALE]));
 
-  // ── Control: a subscriber that did NOT reload (holds the tombstone) is
-  //    protected — proves the reload (empty tombstone set) is the trigger. ──
-  const noReload = roots[0];                        // a root that saw the kill ⇒ has the tombstone
-  net.logs.length = 0;
-  noReload._onReplayBatch(
-    { topicId: TOPIC_HEX, responderId: toHex(rootIds[STALE]),
-      messages: [{ json, publishId: 'p9', publishTs: T, postHash: env.msgId, publisher: null }] },
-    { fromId: toHex(rootIds[STALE]) });
-  const skipped = net.logs.some(l => l.code === 'replay-skip-tombstoned' && l.msgId === env.msgId);
-  check('5. a node holding the tombstone suppresses the same stale replay',
-    skipped === true);
+  // ── FIX: a root that applied the kill re-gossips it (the refreshTick path). ──
+  net.dropKillTo = null;                                   // the transient drop has cleared
+  await roots[0]._syncKillsForTopic(TOPIC_BIG, roots[0].axonRoles.get(TOPIC_BIG));
+  await tick(); await tick();
+  check('4. reconciliation healed the stale root (message removed + tombstoned)',
+    !hasMsg(staleRoot) && staleRoot._isTombstoned(env.msgId) === true);
+
+  // ── Now a fresh reload sees NO resurrection. ──
+  const after = await reloadSubscriberAndCount(net, roots, 'B-after');
+  check('5. FIX VERIFIED: a reloaded subscriber no longer resurrects the message',
+    after.filter(d => !d.deleted && d.msgId === env.msgId).length === 0);
+
+  // ── Send-side backstop: even if a tombstoned root kept a stale cache entry,
+  //    it must not replay it (defense in depth). ──
+  const guinea = roots[0];                                 // tombstoned + we re-inject a stale copy
+  guinea.axonRoles.get(TOPIC_BIG).replayCache.push({ json, publishId: 'zz', publishTs: T, postHash: env.msgId, publisher: null });
+  const leak = await reloadSubscriberAndCount(net, [guinea], 'B-backstop');
+  check('6. send-side backstop: a tombstoned root never replays the killed msg',
+    leak.filter(d => !d.deleted && d.msgId === env.msgId).length === 0);
 
   console.log(`\nResult: ${passed} passed, ${failed} failed`);
   process.exit(failed === 0 ? 0 : 1);

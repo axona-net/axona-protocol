@@ -90,6 +90,16 @@ const SEQ_REORDER_TOLERANCE_MS = 60_000;
 // hold.  Bounded by MAX_TOMBSTONES (LRU) so it can't grow without limit.
 const TOMBSTONE_TTL_MS = 24 * 60 * 60 * 1000;
 const MAX_TOMBSTONES   = 4096;
+// Phase A #2 (kill convergence): after a root applies a creator-authorized kill,
+// it re-gossips that SIGNED kill to the current K-closest root set for this long,
+// so a replica that missed the original kill (churn, a dropped delivery, a root
+// that joined the set late) still removes + tombstones the message — closing the
+// "kill, reload, it comes back" resurrection. Re-gossiping the signed kill (not a
+// bare msgId) keeps it self-authorizing: a receiver re-runs the full verifier, so
+// this can't be turned into a censorship primitive. Bounded so kill traffic is
+// proportional to recent retraction activity, never forever.
+const KILL_REGOSSIP_MS = 10 * 60 * 1000;
+const MAX_KILL_SYNC    = 64;            // kills per kill-sync message (ceiling)
 
 // Phase A #5: message hold time.  A message expires (is swept from replay
 // caches and no longer served/pulled) at its (signed, freshness-clamped)
@@ -200,8 +210,9 @@ export class AxonaManager {
     // Phase A #2 (kill): tombstones for retracted messages + a dedup set for
     // kill objects we've already processed (keyed by the kill's signature).
     this._tombstones  = new Map();       // msgId(hex) -> expiresAt (ms)
-    this._seenKills   = new Map();       // kill.signature -> insertedAt (ms)
+    this._seenKills   = new Map();       // kill.signature -> insertedAt (ms) | {at,kill,topicId} once authorized
     this._seenKillCap = 4096;
+    this._lastKillAt  = 0;               // newest authorized-kill ts → steady-state reconciliation skip
     // Phase A #7 (touch): dedup set for touch objects already processed
     // (keyed by the touch's signature), same bound as kills.
     this._seenTouches   = new Map();     // touch.signature -> insertedAt (ms)
@@ -268,6 +279,7 @@ export class AxonaManager {
     dht.onRoutedMessage('pubsub:publish',      (p, m) => this._onPublish(p, m));
     dht.onRoutedMessage('pubsub:kill',         (p, m) => this._onKill(p, m));
     dht.onDirectMessage('pubsub:kill-k',       (p, m) => this._onKillDirect(p, m));
+    dht.onDirectMessage('pubsub:kill-sync',    (p, m) => this._onKillSync(p, m));
     dht.onRoutedMessage('pubsub:touch',        (p, m) => this._onTouch(p, m));
     dht.onDirectMessage('pubsub:touch-k',      (p, m) => this._onTouchDirect(p, m));
     dht.onRoutedMessage('pubsub:unpub',        (p, m) => this._onUnpub(p, m));
@@ -875,6 +887,11 @@ export class AxonaManager {
     const topicName = (env && typeof env.topic === 'string') ? env.topic : null;
     role.replayCache = cache.filter(e => e.postHash !== kill.msgId);
     this._addTombstone(kill.msgId);
+    // Retain the SIGNED kill (now proven creator-authorized against the message
+    // we hold) so refreshTick can re-gossip it to the current root set, healing
+    // any replica that missed it. Upgrades the dedup entry set at step 3.
+    this._seenKills.set(kill.signature, { at: this._now(), kill, topicId });
+    this._lastKillAt = this._now();
     // 8. purge subscribers — delete-marked delivery on their sub() handler.
     const deleteJson = JSON.stringify({ deleted: true, msgId: kill.msgId, topic: topicName });
     const deliveryId = `kill:${kill.msgId}`;
@@ -891,6 +908,49 @@ export class AxonaManager {
     for (const d of dead) role.children.delete(d);
     this._emitLog?.('debug', 'kill-applied', { topicId: topicIdHex, msgId: kill.msgId });
     return 'consumed';
+  }
+
+  /**
+   * Sibling-root kill reconciliation ingress (Phase A #2). A peer root re-sends
+   * us the signed kills it has applied; we re-run each through the full verifier
+   * (signature + freshness + dedup + creator-authorization against the message
+   * we hold), so a replica that missed the original kill removes + tombstones
+   * the message. Self-authorizing — an unauthorized or bogus kill is rejected by
+   * _handleKill exactly as on the primary path, so this is not a censorship lever.
+   */
+  async _onKillSync(payload, meta) {
+    const topicId = _wire(payload.topicId);
+    const kills = Array.isArray(payload?.kills) ? payload.kills.slice(0, MAX_KILL_SYNC) : [];
+    for (const kill of kills) {
+      try { await this._handleKill(topicId, kill); } catch { /* per-kill best effort */ }
+    }
+  }
+
+  /**
+   * Push the kills we've recently applied for `topicId` to the CURRENT K-closest
+   * root set, healing any replica that missed the original kill (churn / dropped
+   * delivery / late-joining root) — this is what closes "kill, reload, it comes
+   * back". No-op when there are no in-window kills, so steady-state cost is zero.
+   * Called from refreshTick (itself gated on _lastKillAt).
+   */
+  async _syncKillsForTopic(topicId, role) {
+    if (!role || !(role.isRoot || role.isInRootSet)) return;
+    if (!this._useKClosestMode()) return;
+    const now = this._now();
+    const kills = [];
+    for (const v of this._seenKills.values()) {
+      if (v && typeof v === 'object' && v.kill && v.topicId === topicId && (now - v.at) < KILL_REGOSSIP_MS) {
+        kills.push(v.kill);
+        if (kills.length >= MAX_KILL_SYNC) break;
+      }
+    }
+    if (kills.length === 0) return;
+    const roots = await this._findKClosest(topicId, this.rootSetSize);
+    const payload = { topicId: toHex(topicId), kills };
+    for (const target of roots) {
+      if (target === this.nodeId) continue;
+      this.dht.sendDirect(target, 'pubsub:kill-sync', payload);
+    }
   }
 
   // ── Touch (creator-only keep-alive, Phase A #7) ────────────────────────
@@ -1744,14 +1804,19 @@ export class AxonaManager {
     // periodic self-resubscribe replays nothing already seen.
     if (subscriberId === this.nodeId) {
       for (const m of cache) {
+        if (m.postHash && this._isTombstoned(m.postHash)) continue;   // never replay a killed message
         this._deliverToApp(topicId, m.json, m.publishId, m.publishTs);
       }
       return;
     }
 
+    // Send-side tombstone backstop: a root must never replay a message it has
+    // tombstoned, even if a stale cache entry lingers (defense in depth — the
+    // receiver's own tombstone set is empty right after a reload).
+    const fresh = cache.filter(m => !(m.postHash && this._isTombstoned(m.postHash)));
     const missed = (lastSeenTs != null && lastSeenTs > 0)
-      ? cache.filter(m => m.publishTs > lastSeenTs)
-      : cache.slice();
+      ? fresh.filter(m => m.publishTs > lastSeenTs)
+      : fresh.slice();
     if (missed.length === 0) return;
     await this.dht.sendDirect(subscriberId, 'pubsub:replay-batch', {
       topicId: toHex(topicId),
@@ -1931,6 +1996,17 @@ export class AxonaManager {
     //    once per refresh interval (default 10 s), lets the re-subscribe
     //    in step 5 re-anchor each subscription on the converged set.
     this.invalidateKClosestCache();
+
+    // Phase A #2 (kill convergence): re-gossip recently-applied kills to the
+    // current root set so a replica that missed the original kill removes +
+    // tombstones the message. Gated on recent kill activity ⇒ zero steady-state
+    // cost; the K-closest cache was just invalidated above, so this re-derives
+    // the converged root set.
+    if (now - this._lastKillAt < KILL_REGOSSIP_MS) {
+      for (const [topicId, role] of this.axonRoles) {
+        await this._syncKillsForTopic(topicId, role);
+      }
+    }
 
     // 1. TTL sweep — drop stale children.
     for (const role of this.axonRoles.values()) {
