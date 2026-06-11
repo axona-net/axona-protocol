@@ -3,7 +3,7 @@
 // keep going) → aggregate → render → report. See README.md.
 
 // Bump on every bench change so a stale cached app is obvious in the UI.
-const BENCH_VERSION = '0.11.0';
+const BENCH_VERSION = '0.12.0';
 
 // Register memory-hard candidates here as they compile (drop the file in
 // candidates/ implementing candidates/template.js):
@@ -299,11 +299,14 @@ function renderLeaderboard(report) {
     `<div><b>${cand}</b> · difficulty ${diff} — ${rows.length} device(s)</div>` +
     `<div>your mint p50: <b>${myMint ?? '?'} ms</b> · ${rankTxt}</div>` +
     `<div class="muted">fastest ${mints[0]} ms · median ${median} ms · slowest ${mints[mints.length - 1]} ms</div>`;
-  const list = rows.slice(0, 12).map((e, i) => {
+  const TOP = 25;
+  const rowHtml = (e, rank) => {
     const me = (e.id === myId || e.id === 'ua:' + myUa);
     const name = e.label || (e.ua ? shortUa(e.ua) : String(e.id).slice(0, 10));
-    return `<tr style="${me ? 'font-weight:700;background:#eef' : ''}"><td>${i + 1}</td><td>${name}${me ? ' (you)' : ''}</td><td>${e.mint} ms</td><td>${e.mem ?? '?'}MB</td><td>${e.oom ? 'OOM' : ''}</td></tr>`;
-  }).join('');
+    return `<tr style="${me ? 'font-weight:700;background:#eef' : ''}"><td>${rank}</td><td>${name}${me ? ' (you)' : ''}</td><td>${e.mint} ms</td><td>${e.mem ?? '?'}MB</td><td>${e.oom ? 'OOM' : ''}</td></tr>`;
+  };
+  let list = rows.slice(0, TOP).map((e, i) => rowHtml(e, i + 1)).join('');
+  if (meIdx >= TOP) list += `<tr><td colspan="5" style="text-align:center;color:#bbb">⋯</td></tr>` + rowHtml(rows[meIdx], meIdx + 1);   // always show YOUR row, even a slow device ranked past the top
   el.innerHTML = head + `<table style="margin-top:.4rem"><tbody>${list}</tbody></table>` + roster;
 }
 
