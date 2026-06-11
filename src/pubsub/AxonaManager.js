@@ -53,7 +53,7 @@ const DEFAULT_MIN_DIRECT_SUBS        = 5;            // §5.8 hysteresis (unused
 const DEFAULT_REFRESH_INTERVAL_MS    = 10_000;       // §5.5
 const DEFAULT_MAX_SUBSCRIPTION_AGE_MS = 30_000;      // §5.7 — 3× refresh
 const DEFAULT_ROOT_GRACE_MS          = 60_000;       // §5.7 — 6× refresh
-const DEFAULT_ROOT_SET_SIZE          = 5;            // K in K-closest replication
+const DEFAULT_ROOT_SET_SIZE          = 5;            // R — root-set size (pub/sub replication factor)
 const DEFAULT_REPLAY_CACHE_SIZE      = 100;          // per-role bounded ring (§7.8 replay)
 
 // ── Inbound caps (D-1: bound attacker-controlled payloads) ─────────────────
@@ -65,13 +65,13 @@ export const MAX_PUBLISH_BYTES = 256 * 1024;         // per-publish `json` paylo
 // NOTE: this is the small/medium-message lane, not a blob channel. Large
 // binary content (images/documents) should ride a content-reference manifest
 // + out-of-band transfer (Tier 2: a DHT content store keyed by content hash),
-// NOT the broadcast path — every publish is replicated to K root axons,
+// NOT the broadcast path — every publish is replicated to R root axons,
 // cached in their replay rings, and fanned to all subscribers, so big blobs
 // here amplify badly. Measured against json.length (UTF-16 code units), so
 // heavily multi-byte payloads can exceed 256 KiB on the wire; a single
 // message must still fit the WebRTC data-channel max-message size downstream.
 const MAX_SUBSCRIBER_BATCH     = 512;                // adopt-subscribers subscriberIds[] ceiling
-const MAX_PEER_ROOTS           = 32;                 // peerRoots[] ceiling (K is ~5)
+const MAX_PEER_ROOTS           = 32;                 // peerRoots[] ceiling (R is ~5)
 const MAX_REPLAY_BATCH         = DEFAULT_REPLAY_CACHE_SIZE; // replay-batch messages[] ceiling
 
 // C-2: per-publisher seq reorder tolerance.  seq is wall-clock-seeded
@@ -133,7 +133,7 @@ export class AxonaManager {
     refreshIntervalMs    = DEFAULT_REFRESH_INTERVAL_MS,
     maxSubscriptionAgeMs = DEFAULT_MAX_SUBSCRIPTION_AGE_MS,
     rootGraceMs          = DEFAULT_ROOT_GRACE_MS,
-    rootSetSize          = DEFAULT_ROOT_SET_SIZE,    // K in K-closest replication
+    rootSetSize          = DEFAULT_ROOT_SET_SIZE,    // R — root-set size (pub/sub replication factor)
     crossFragmentRoots   = 4,                        // NX-17: number of alternate-root direct copies per publish/subscribe.
     replayCacheSize      = DEFAULT_REPLAY_CACHE_SIZE, // per-role bounded ring
     pickRecruitPeer      = null,   // protocol-specific override (§5.9)
@@ -402,7 +402,7 @@ export class AxonaManager {
 
   /**
    * Retract a message (Phase A #2).  Routes the signed `kill` object to the
-   * topic's K-closest root axons, which authorize it (signer must match the
+   * topic's R root axons, which authorize it (signer must match the
    * killed message's signer), drop it from their replay caches, tombstone
    * the msgId, and purge subscribers.  Fire-and-forget, same as publish.
    *
@@ -417,7 +417,7 @@ export class AxonaManager {
       .catch(err => console.error('AxonaManager: kill failed:', err));
   }
 
-  /** @private — route the kill to K-closest roots (mirrors _asyncPublish). */
+  /** @private — route the kill to R root axons (mirrors _asyncPublish). */
   async _asyncKill(topicId, kill) {
     const topicIdHex = toHex(topicId);
     const payload = { topicId: topicIdHex, kill };
@@ -437,7 +437,7 @@ export class AxonaManager {
 
   /**
    * Touch a message (Phase A #7) — creator-only keep-alive.  Routes the signed
-   * `touch` to the topic's K-closest roots (mirrors `_asyncKill`); each root
+   * `touch` to the topic's R root axons (mirrors `_asyncKill`); each root
    * that holds the message resets its hold-time expiry (bounded by the 48h
    * ceiling), moves it to the head of the replay queue, and bumps its eviction
    * recency.  Fire-and-forget.
@@ -453,7 +453,7 @@ export class AxonaManager {
       .catch(err => console.error('AxonaManager: touch failed:', err));
   }
 
-  /** @private — route the touch to K-closest roots (mirrors _asyncKill). */
+  /** @private — route the touch to R root axons (mirrors _asyncKill). */
   async _asyncTouch(topicId, touch) {
     const topicIdHex = toHex(topicId);
     const payload = { topicId: topicIdHex, touch };
@@ -473,7 +473,7 @@ export class AxonaManager {
 
   /**
    * Remove a topic's message queue (Phase A #3) — owner-only.  Routes the
-   * signed `unpub` to the topic's K-closest roots.  Fire-and-forget.
+   * signed `unpub` to the topic's R root axons.  Fire-and-forget.
    *
    * @param {bigint} topicId
    * @param {object} unpub   signed unpub object (see pubsub/unpub.js).
@@ -486,7 +486,7 @@ export class AxonaManager {
       .catch(err => console.error('AxonaManager: unpub failed:', err));
   }
 
-  /** @private — route the unpub to K-closest roots (mirrors _asyncKill). */
+  /** @private — route the unpub to R root axons (mirrors _asyncKill). */
   async _asyncUnpub(topicId, unpub) {
     const payload = { topicId: toHex(topicId), unpub };
     if (this._useKClosestMode()) {
