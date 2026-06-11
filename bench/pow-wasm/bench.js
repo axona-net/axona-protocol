@@ -3,7 +3,7 @@
 // keep going) → aggregate → render → report. See README.md.
 
 // Bump on every bench change so a stale cached app is obvious in the UI.
-const BENCH_VERSION = '0.12.0';
+const BENCH_VERSION = '0.13.0';
 
 // Register memory-hard candidates here as they compile (drop the file in
 // candidates/ implementing candidates/template.js):
@@ -286,28 +286,32 @@ function renderLeaderboard(report) {
   const myId = deviceId(), myUa = navigator.userAgent;
   const cand = lastResult.candidate, diff = lastResult.difficulty;
   const myMint = lastResult.mint_ms?.p50 != null ? Math.round(lastResult.mint_ms.p50) : null;
-  const rows = (report.devices || []).filter((e) => e.c === cand && e.d === diff).sort((a, b) => a.mint - b.mint);
+  // SLOWEST first. This is a capability test, not a race — the slowest devices
+  // that can still complete a test ARE the result (they set the difficulty floor).
+  const rows = (report.devices || []).filter((e) => e.c === cand && e.d === diff).sort((a, b) => b.mint - a.mint);
   if (!rows.length) {
     el.innerHTML = (myMint != null ? `your mint p50: <b>${myMint} ms</b> — waiting for others on this test…` : '(no comparison data yet)') + roster;
     return;
   }
-  const mints = rows.map((e) => e.mint);
+  const mints = rows.map((e) => e.mint);             // descending
+  const slowest = mints[0], fastest = mints[mints.length - 1];
   const median = mints[Math.floor((mints.length - 1) / 2)];
-  const meIdx = rows.findIndex((e) => e.id === myId || e.id === 'ua:' + myUa);
-  const rankTxt = meIdx >= 0 ? `rank <b>${meIdx + 1}</b> of ${rows.length}` : `not yet ranked (${rows.length} others)`;
+  const meIdx = rows.findIndex((e) => e.id === myId || e.id === 'ua:' + myUa);   // index in slowest-first order
+  const rankTxt = meIdx >= 0 ? `the <b>#${meIdx + 1} slowest</b> of ${rows.length}` : `not yet ranked (${rows.length} others)`;
   const head =
-    `<div><b>${cand}</b> · difficulty ${diff} — ${rows.length} device(s)</div>` +
-    `<div>your mint p50: <b>${myMint ?? '?'} ms</b> · ${rankTxt}</div>` +
-    `<div class="muted">fastest ${mints[0]} ms · median ${median} ms · slowest ${mints[mints.length - 1]} ms</div>`;
-  const TOP = 25;
+    `<div><b>${cand}</b> · difficulty ${diff} — slowest devices completing this test (the capability floor)</div>` +
+    `<div>your mint p50: <b>${myMint ?? '?'} ms</b> · you are ${rankTxt}</div>` +
+    `<div class="muted">slowest ${slowest} ms · median ${median} ms · fastest ${fastest} ms · ${rows.length} device(s)</div>`;
+  const SLOWEST_N = 25;
   const rowHtml = (e, rank) => {
     const me = (e.id === myId || e.id === 'ua:' + myUa);
     const name = e.label || (e.ua ? shortUa(e.ua) : String(e.id).slice(0, 10));
     return `<tr style="${me ? 'font-weight:700;background:#eef' : ''}"><td>${rank}</td><td>${name}${me ? ' (you)' : ''}</td><td>${e.mint} ms</td><td>${e.mem ?? '?'}MB</td><td>${e.oom ? 'OOM' : ''}</td></tr>`;
   };
-  let list = rows.slice(0, TOP).map((e, i) => rowHtml(e, i + 1)).join('');
-  if (meIdx >= TOP) list += `<tr><td colspan="5" style="text-align:center;color:#bbb">⋯</td></tr>` + rowHtml(rows[meIdx], meIdx + 1);   // always show YOUR row, even a slow device ranked past the top
-  el.innerHTML = head + `<table style="margin-top:.4rem"><tbody>${list}</tbody></table>` + roster;
+  const thead = '<thead><tr style="color:#888;font-size:.85em"><th>#slowest</th><th>device</th><th>mint p50</th><th>mem</th><th></th></tr></thead>';
+  let list = rows.slice(0, SLOWEST_N).map((e, i) => rowHtml(e, i + 1)).join('');
+  if (meIdx >= SLOWEST_N) list += `<tr><td colspan="5" style="text-align:center;color:#bbb">⋯</td></tr>` + rowHtml(rows[meIdx], meIdx + 1);   // always show YOUR row, even when you're one of the faster ones
+  el.innerHTML = head + `<table style="margin-top:.4rem">${thead}<tbody>${list}</tbody></table>` + roster;
 }
 
 function maybeSubmit(result) {
