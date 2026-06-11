@@ -21,4 +21,5 @@ export async function verify(pubkeyHex, witness, difficulty) {
 // SHA-256's working set is a few hundred bytes — report ~0 to make the contrast
 // with a real memory-hard candidate stark.
 export function peakMemoryBytes() { return 0; }
+export function estimateMemMB() { return 0; }     // not memory-hard — never gated
 export function reset() {}

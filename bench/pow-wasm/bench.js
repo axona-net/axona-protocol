@@ -3,7 +3,7 @@
 // keep going) → aggregate → render → report. See README.md.
 
 // Bump on every bench change so a stale cached app is obvious in the UI.
-const BENCH_VERSION = '0.7.0';
+const BENCH_VERSION = '0.8.0';
 
 // Register memory-hard candidates here as they compile (drop the file in
 // candidates/ implementing candidates/template.js):
@@ -27,6 +27,7 @@ async function loadMeta() {
         suiteDifficulties: Array.isArray(m.suiteDifficulties) ? m.suiteDifficulties : [12, 16, 18, 20],
         difficultyLabel: m.difficultyLabel || 'difficulty',
         trials: Number.isInteger(m.trials) && m.trials > 0 ? m.trials : null,   // optional per-candidate override
+        estimateMemMB: typeof m.estimateMemMB === 'function' ? m.estimateMemMB : null,   // pre-run memory estimate
       };
     } catch (e) {
       CANDIDATE_META[k] = { name: k, version: 'load-error', suiteDifficulties: [12, 16, 18, 20], difficultyLabel: 'difficulty', loadError: String(e.message || e) };
@@ -40,8 +41,21 @@ async function loadMeta() {
 function renderBuildInfo() {
   const el = $('buildinfo'); if (!el) return;
   const parts = Object.keys(CANDIDATES).map((k) => `${k} v${CANDIDATE_META[k] ? CANDIDATE_META[k].version : '?'}`);
-  el.textContent = `app v${BENCH_VERSION} · ${parts.join(' · ')}`;
+  el.textContent = `app v${BENCH_VERSION} · ${parts.join(' · ')} · mem cap ${MEM_BUDGET_MB}MB${IS_MOBILE ? ' (mobile)' : ''}`;
 }
+
+// Per-device memory budget (on the estimateMemMB scale). iOS Safari page-CRASHES
+// the whole tab under memory pressure with no catchable worker OOM (Android
+// phones can too), so cap MOBILE well below the crash point and gate over-budget
+// tests BEFORE they allocate. Desktops get a clean worker OOM → allow probing high.
+const IS_MOBILE = /iPhone|iPad|iPod|Android/i.test(navigator.userAgent)
+  || (navigator.platform === 'MacIntel' && (navigator.maxTouchPoints || 0) > 1);   // iPadOS reports as Mac
+const MEM_BUDGET_MB = IS_MOBILE ? 700 : 6000;
+function estMemFor(spec) {
+  const f = CANDIDATE_META[spec.candidate] && CANDIDATE_META[spec.candidate].estimateMemMB;
+  return typeof f === 'function' ? (f(spec.difficulty) || 0) : 0;
+}
+const overBudget = (spec) => estMemFor(spec) > MEM_BUDGET_MB;
 
 const $ = (id) => document.getElementById(id);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -172,9 +186,11 @@ function renderSuite() {
   el.innerHTML = '<table><tbody>' + buildSuite().map((s) => {
     const v = stateFor(s);
     const label = CANDIDATE_META[s.candidate]?.difficultyLabel || 'd';
-    const icon = v.status === 'ok' ? '✓' : v.status === 'skipped' ? '⏭' : '·';
+    const over = overBudget(s);
+    const icon = v.status === 'ok' ? '✓' : v.status === 'skipped' ? '⏭' : over ? '∅' : '·';
     const mem = v.lastMem != null ? ` · ${v.lastMem < 10 ? v.lastMem.toFixed(1) : Math.round(v.lastMem)} MB` : '';
     const note = v.status === 'skipped' ? `<span style="color:#b00">skipped: ${v.note}</span>`
+               : over ? `<span style="color:#a60">capped · est ${Math.round(estMemFor(s))}MB > ${MEM_BUDGET_MB}MB device limit</span>`
                : (v.lastMint != null ? `${v.lastMint} ms${mem}` : '');
     return `<tr><td>${icon}</td><td>${s.candidate} · ${label}=${s.difficulty}</td><td class="muted">${note}</td></tr>`;
   }).join('') + '</tbody></table>';
@@ -355,6 +371,10 @@ async function startContinuous() {
       if (!continuous) break;
       const st = stateFor(spec);
       if (st.status === 'skipped') continue;             // a failed test stays skipped
+      if (overBudget(spec)) {                            // gate BEFORE allocating → can't crash the tab
+        st.status = 'skipped'; st.note = `capped: est ${Math.round(estMemFor(spec))}MB > ${MEM_BUDGET_MB}MB device limit`;
+        renderSuite(); continue;
+      }
       ranAny = true;
       iter++; $('iter').textContent = String(iter);
       let r;

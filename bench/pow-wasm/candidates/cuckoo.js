@@ -165,5 +165,10 @@ export async function verify(pubkeyHex, witness, edgebits) {
   return steps === ep.length && node === start;
 }
 
+// Estimated peak (typed arrays: 2× edge arrays + union-find) for the harness's
+// pre-run memory budget check. In-browser GC keeps the tracer transient, so the
+// arrays are the predictable floor; this stays small enough to never be gated in
+// the current range (matches reality — phones complete eb=22).
+export function estimateMemMB(edgebits) { return (2 ** edgebits) * 12 / 1e6; }
 export function peakMemoryBytes() { return _peak; }
 export function reset() { _peak = 0; }

@@ -148,13 +148,12 @@ function solve(seedBytes, B) {
 function disjoint(a, b) { const s = new Set(a); for (const x of b) if (s.has(x)) return false; return true; }
 
 export const name = 'equihash (asymmetric, generalized-birthday, memory-capacity)';
-export const version = '0.5.0';   // ceiling pulled back to B=19 — B=20 crash-reloads iOS
-export const suiteDifficulties = [16, 18, 19];        // COLLISION-BITS B → N = 2^(B+1) entries
-// CEILING FOUND, then pulled back. iPhone COMPLETES B=19 (~650MB) but B=20
-// (~1.3GB) exceeds iOS Safari's per-tab memory limit → iOS kills & RELOADS the
-// whole page. On iOS a worker's memory counts against the tab and there is NO
-// catchable worker OOM, so the only safe ceiling is below the crash point. B=19
-// is that ceiling; the iPhone capacity floor sits at the B=19/20 boundary.
+export const version = '0.6.0';   // high ceiling restored; harness gates per-device memory
+export const suiteDifficulties = [16, 18, 20, 21];    // COLLISION-BITS B → N = 2^(B+1) entries
+// Full sweep restored. The harness gates per-device via estimateMemMB() (below):
+// mobile (700MB budget) auto-skips B=20 (~1GB est) / B=21 (~2GB est) BEFORE
+// allocating — so iPhone/Android never reach the crash. Desktop (6GB budget)
+// runs them to find its higher floor. iPhone floor is the B=19/20 boundary.
 export const difficultyLabel = 'collision-bits';
 export const trials = 2;
 
@@ -182,5 +181,9 @@ export async function verify(pubkeyHex, witness, B) {
   return acc === 0n;                                                  // the 2^K hashes XOR to zero
 }
 
+// Estimated peak working set for a difficulty WITHOUT running it — the harness
+// uses this to skip tests that would exceed a device's memory budget (iOS Safari
+// page-crashes; there is no catchable worker OOM). ~512 B/entry (measured).
+export function estimateMemMB(B) { return (2 ** (B + 1)) * 512 / 1e6; }
 export function peakMemoryBytes() { return _peak; }
 export function reset() { _peak = 0; }

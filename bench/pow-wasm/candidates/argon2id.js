@@ -43,4 +43,5 @@ export async function verify(pubkeyHex, witness, memMB) {
   return (await argon2id(params(pubkeyHex, memMB))) === witness;
 }
 export function peakMemoryBytes() { return _peak; }
+export function estimateMemMB(memMB) { return memMB; }   // difficulty IS the memory
 export function reset() {}
