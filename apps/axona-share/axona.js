@@ -1,22 +1,27 @@
 // axona.js — Axona connection for Axona-share. One peer; each channel is a topic
-// string, all anchored at a fixed us-east synthetic publisher so every user
-// converges on the same roots regardless of their own location (mirrors the
-// proven bench reporter / minimal-pubsub-browser connect).
-import { AxonaPeer, AxonaDomain, NeuronNode, deriveIdentity, geoCellId, KERNEL_VERSION } from '/src/index.js';
+// string. The peer's OWN identity AND the topic anchor both come from the
+// resolved region (?region=, default useast), so a regional deployment is a
+// self-contained keyspace — local nodes root local channels and the bridge is
+// only the rendezvous. (Was: both hardcoded us-east, which pinned every peer +
+// topic to one region and locked out anyone elsewhere.)
+import { AxonaPeer, AxonaDomain, NeuronNode, deriveIdentity, KERNEL_VERSION } from '/src/index.js';
 import { webTransport } from '/src/transport/web/index.js';
+import { resolveAnchor } from '../lib/region.js';
 
 export { KERNEL_VERSION };          // surfaced in the app header (kernel-version visibility)
 
 const BRIDGE_URL = new URLSearchParams(location.search).get('bridge')
   || (location.hostname.includes('testnet') ? 'wss://testnet.axona.net' : 'wss://bridge.axona.net');
-const ANCHOR = { lat: 38.0, lng: -78.0 };                              // us-east
-const PUBLISHER = geoCellId(ANCHOR.lat, ANCHOR.lng, 8).toString(16).padStart(2, '0') + '0'.repeat(64);
+const ANCHOR    = resolveAnchor();                       // { token, name, center:{lat,lng}, publisher }
+const PUBLISHER = ANCHOR.publisher;
+
+export const REGION = { token: ANCHOR.token, name: ANCHOR.name, code: ANCHOR.code };   // for the UI
 
 export async function connectAxona(onStatus = () => {}) {
-  onStatus(`connecting ${BRIDGE_URL}…`);
-  const identity  = await deriveIdentity({ lat: ANCHOR.lat, lng: ANCHOR.lng });
+  onStatus(`connecting ${BRIDGE_URL} · region ${ANCHOR.name}…`);
+  const identity  = await deriveIdentity({ lat: ANCHOR.center.lat, lng: ANCHOR.center.lng });
   const transport = webTransport({ bridgeUrl: BRIDGE_URL, identity });
-  const node      = new NeuronNode({ id: BigInt('0x' + identity.id), lat: ANCHOR.lat, lng: ANCHOR.lng });
+  const node      = new NeuronNode({ id: BigInt('0x' + identity.id), lat: ANCHOR.center.lat, lng: ANCHOR.center.lng });
   node.transport  = transport;
   const domain    = new AxonaDomain({ k: 20 });
   const peer      = new AxonaPeer({ domain, node, identity, transport });
