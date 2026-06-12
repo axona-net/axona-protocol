@@ -29,9 +29,11 @@ export const reportBridge = BRIDGE_URL;
 /**
  * Persistent reporter — connect ONCE, publish MANY. Use in continuous mode so
  * the (heavy) WebRTC connect isn't repeated every iteration.
- * Returns { nodeId, publish(result)→{msgId}, close() }.
+ * `onLog` (optional) receives kernel warning/error lines for the caller's
+ * diagnostic log — connection problems surface there, not in the console.
+ * Returns { nodeId, publish(result)→{msgId}, health(), close() }.
  */
-export async function createReporter(onStatus = () => {}, onLeaderboard = null) {
+export async function createReporter(onStatus = () => {}, onLeaderboard = null, onLog = null) {
   onStatus(`connecting ${BRIDGE_URL}…`);
   const identity  = await deriveIdentity({ lat: ANCHOR.lat, lng: ANCHOR.lng });
   const transport = webTransport({ bridgeUrl: BRIDGE_URL, identity });
@@ -39,6 +41,14 @@ export async function createReporter(onStatus = () => {}, onLeaderboard = null) 
   node.transport  = transport;
   const domain    = new AxonaDomain({ k: 20 });
   const peer      = new AxonaPeer({ domain, node, identity, transport });
+
+  // Forward kernel warnings/errors into the caller's diagnostic log; skip the
+  // chatty debug level. (Copy data exports these lines.)
+  if (onLog) {
+    const safe = (x) => { try { return typeof x === 'string' ? x : JSON.stringify(x, (k, v) => (typeof v === 'bigint' ? v.toString() : v)); } catch { return String(x); } };
+    try { peer.onLog?.((...a) => { const line = a.map(safe).join(' '); if (!/\bdebug\b/.test(a[0])) onLog('kernel: ' + line.slice(0, 200)); }); } catch { /* */ }
+    try { peer.onError?.((e) => onLog('kernel error: ' + (e?.message || e))); } catch { /* */ }
+  }
 
   await transport.start(identity.id);
   await peer.start();
@@ -66,6 +76,13 @@ export async function createReporter(onStatus = () => {}, onLeaderboard = null) 
     async publish(result) {
       const msgId = await peer.pub(TOPIC, JSON.stringify(result), { publisher: PUBLISHER });
       return { ok: true, msgId };
+    },
+    // Connection-health snapshot for the Copy data export: peer.health()
+    // (synaptome size, routing truth, …) + raw transport state if exposed.
+    health() {
+      let h = null; try { h = peer.health(); } catch (e) { h = { error: String(e?.message || e) }; }
+      let t = null; try { t = transport.state ?? transport.getState?.() ?? null; } catch { /* */ }
+      return { bridge: BRIDGE_URL, peer: h, transport: t };
     },
     async close() {
       try { await peer.leave?.(); } catch { /* */ }

@@ -3,12 +3,55 @@
 // keep going) → aggregate → render → report. See README.md.
 
 // Bump on every bench change so a stale cached app is obvious in the UI.
-const BENCH_VERSION = '0.15.0';
+const BENCH_VERSION = '0.16.0';
 // Kernel-version visibility: show which kernel this tab is actually running and
 // tag every published result with it — long-running bench tabs keep an OLD
 // kernel in memory across kernel deploys until reloaded, and this is how we
 // spot them in the fleet. handshake.js is tiny and side-effect-free.
 import { KERNEL_VERSION } from '/src/transport/handshake.js';
+
+// ── diagnostics: everything needed to answer "why didn't my results report?" ──
+// A timestamped ring buffer of status changes, connect/publish failures, kernel
+// log events, and page errors — persisted across reloads, exported (with the
+// device's full local results) by the Copy data button so a tester can email it.
+const DIAG_CAP = 400;
+let diagLog = [];
+try { diagLog = JSON.parse(localStorage.getItem('powbench-diag') || '[]'); } catch { /* */ }
+function diag(msg) {
+  diagLog.push(`${new Date().toISOString()} ${String(msg).slice(0, 300)}`);
+  if (diagLog.length > DIAG_CAP) diagLog = diagLog.slice(-DIAG_CAP);
+  try { localStorage.setItem('powbench-diag', JSON.stringify(diagLog)); } catch { /* */ }
+}
+window.addEventListener('error', (e) => diag(`window.onerror: ${e.message} @ ${e.filename || '?'}:${e.lineno || '?'}`));
+window.addEventListener('unhandledrejection', (e) => diag(`unhandledrejection: ${e.reason?.message || e.reason}`));
+const _consoleError = console.error.bind(console);
+console.error = (...a) => {
+  try { diag('console.error: ' + a.map((x) => (x?.stack ? String(x.stack).split('\n')[0] : String(x))).join(' ')); } catch { /* */ }
+  _consoleError(...a);
+};
+window.addEventListener('online',  () => diag('network: online'));
+window.addEventListener('offline', () => diag('network: OFFLINE'));
+document.addEventListener('visibilitychange', () => diag(`page: ${document.visibilityState}`));   // background throttling is a prime suspect on phones
+
+// Local journal of every result this device produced + what happened to it
+// (published ✓ / queued / failed). THE data the Copy data button exports —
+// even a device that never connected still accumulates everything here.
+let localResults = [];
+try { localResults = JSON.parse(localStorage.getItem('powbench-results') || '[]'); } catch { /* */ }
+function recordLocal(result, publishState) {
+  localResults.push({ at: new Date().toISOString(), publish: publishState, result });
+  if (localResults.length > 300) localResults = localResults.slice(-300);
+  try { localStorage.setItem('powbench-results', JSON.stringify(localResults)); }
+  catch (e) { diag('localStorage save failed: ' + (e.message || e)); }
+}
+
+// Results that could not be published (no connection / publish threw) wait here
+// — persisted, retried after every reconnect — instead of being dropped.
+let pendingPublishes = [];
+try { pendingPublishes = JSON.parse(localStorage.getItem('powbench-pending') || '[]'); } catch { /* */ }
+function savePending() {
+  try { localStorage.setItem('powbench-pending', JSON.stringify(pendingPublishes.slice(-100))); } catch { /* */ }
+}
 
 // Register memory-hard candidates here as they compile (drop the file in
 // candidates/ implementing candidates/template.js):
@@ -355,6 +398,62 @@ function maybeSubmit(result) {
 // ── orchestration ───────────────────────────────────────────────────
 let continuous = false, reporter = null, iter = 0;
 
+// Resilient publish: never DROP a result. The old path published only when the
+// initial connect had succeeded and silently lost the result if publish threw —
+// so a phone that slept, a network blip, or a bridge restart turned a device
+// into a ghost ("sometimes apps don't report"). Now every failure queues the
+// result (persisted) and triggers a reconnect; the queue flushes after.
+let reconnecting = false;
+async function reconnectReporter(why) {
+  if (reconnecting || reporter || !continuous) return;
+  reconnecting = true;
+  diag(`reporter (re)connect — ${why}; ${pendingPublishes.length} queued`);
+  try {
+    const { createReporter } = await import('./axona-report.js');
+    reporter = await createReporter((m) => { $('status').textContent = m; }, renderLeaderboard, diag);
+    diag(`reporter connected (node ${String(reporter.nodeId).slice(0, 10)}…)`);
+  } catch (e) {
+    diag('reporter connect FAILED: ' + (e.message || e));
+    $('status').textContent = 'Axona connect failed — results queue locally; retrying…';
+    setTimeout(() => { reconnecting = false; reconnectReporter('retry timer'); }, 30000);
+    return;
+  }
+  reconnecting = false;
+  await flushPending();
+}
+async function flushPending() {
+  while (pendingPublishes.length && reporter) {
+    const r = pendingPublishes[0];
+    try {
+      const { msgId } = await reporter.publish(r);
+      pendingPublishes.shift(); savePending();
+      recordLocal(r, 'published-after-retry ' + String(msgId).slice(0, 12));
+      diag(`flushed queued result ${r.candidateKey ?? r.candidate} d=${r.difficulty}`);
+    } catch (e) { diag('flush failed (will retry after next reconnect): ' + (e.message || e)); break; }
+  }
+}
+async function publishResult(r) {
+  maybeSubmit(r);
+  if (!reporter) {
+    pendingPublishes.push(r); savePending();
+    recordLocal(r, 'queued (not connected)');
+    reconnectReporter('result while disconnected');
+    return;
+  }
+  try {
+    const { msgId } = await reporter.publish(r);
+    recordLocal(r, 'published ' + String(msgId).slice(0, 12));
+  } catch (e) {
+    pendingPublishes.push(r); savePending();
+    recordLocal(r, 'queued (publish failed: ' + (e.message || e) + ')');
+    diag(`publish FAILED (${e.message || e}) — queued, reconnecting`);
+    $('status').textContent = 'publish failed — result queued; reconnecting…';
+    const dead = reporter; reporter = null;
+    try { await dead.close(); } catch { /* */ }
+    reconnectReporter('publish failure');
+  }
+}
+
 // Continuous mode: cycle the whole suite, repeat. A test that fails on this
 // device is marked skipped (with a note) and not retried; the rest keep going.
 // Failed runs are still PUBLISHED (oom/timeout is useful Stage-4 data).
@@ -366,13 +465,8 @@ async function startContinuous() {
   for (const s of buildSuite()) { const v = stateFor(s); v.status = 'pending'; v.note = ''; }   // reset on start
   renderSuite();
 
-  try {
-    const { createReporter } = await import('./axona-report.js');
-    reporter = await createReporter((m) => { $('status').textContent = m; }, renderLeaderboard);
-  } catch (e) {
-    $('status').textContent = 'Axona connect failed — continuing local-only: ' + (e.message || e);
-    reporter = null;
-  }
+  diag(`run started — app v${BENCH_VERSION} kernel v${KERNEL_VERSION} label "${deviceLabel() || '(unset)'}"`);
+  await reconnectReporter('run start');               // failure queues results + keeps retrying (was: local-only forever)
 
   while (continuous) {
     let ranAny = false;
@@ -384,7 +478,7 @@ async function startContinuous() {
         st.status = 'skipped'; st.note = `capped: est ${Math.round(estMemFor(spec))}MB > ${MEM_BUDGET_MB}MB device limit`;
         renderSuite();
         const skipR = skipResult(spec);                  // publish the cap as floor data (e.g. iOS can't do equihash d=20)
-        maybeSubmit(skipR); if (reporter) { try { await reporter.publish(skipR); } catch { /* */ } }
+        await publishResult(skipR);
         continue;
       }
       ranAny = true;
@@ -405,11 +499,7 @@ async function startContinuous() {
       }
       renderSuite();
 
-      maybeSubmit(r);                                    // publish success AND failure (failures are data)
-      if (reporter) {
-        try { await reporter.publish(r); }
-        catch (e) { $('status').textContent = 'publish failed: ' + (e.message || e); }
-      }
+      await publishResult(r);                            // publish success AND failure (failures are data); queues + reconnects on error
       if (!continuous) break;
       await sleep(gap);
     }
@@ -425,6 +515,55 @@ async function stopContinuous() {
   if (reporter) { try { await reporter.close(); } catch { /* */ } reporter = null; }
 }
 
+// ── Copy data: export EVERYTHING this device generated, for emailing to us ──
+// Works even when the device never connected — local results + the diagnostic
+// log (connect failures, publish errors, kernel events, page errors) + a live
+// connection-health snapshot are all assembled into one JSON blob.
+async function copyAllData() {
+  let bridge = null; try { bridge = (await import('./axona-report.js')).reportBridge; } catch (e) { diag('copy: reporter module unloadable: ' + (e.message || e)); }
+  let health = null;
+  if (reporter?.health) { try { health = reporter.health(); } catch (e) { health = { error: String(e.message || e) }; } }
+  const payload = {
+    exportedAt: new Date().toISOString(),
+    app: `pow-bench v${BENCH_VERSION}`, kernel: `v${KERNEL_VERSION}`,
+    page: location.href,
+    device: deviceInfo(),
+    bridge,
+    connection: reporter
+      ? { connected: true, nodeId: reporter.nodeId, health }
+      : { connected: false, note: continuous ? 'run active but no reporter (see diagnosticLog)' : 'no run active' },
+    queuedUnpublished: pendingPublishes.length,
+    suite: [...suiteState.entries()].map(([test, v]) => ({ test, status: v.status, note: v.note, lastMint: v.lastMint, lastMem: v.lastMem })),
+    results: localResults,                 // full journal: every result + its publish outcome
+    diagnosticLog: diagLog,                // status/connect/publish/error history (persisted across reloads)
+  };
+  const text = JSON.stringify(payload, (k, v) => (typeof v === 'bigint' ? v.toString() : v), 2);
+  let copied = false;
+  try { await navigator.clipboard.writeText(text); copied = true; } catch { /* fall through */ }
+  if (!copied) {                            // older browsers / non-secure contexts
+    try {
+      const ta = document.createElement('textarea');
+      ta.value = text; ta.style.position = 'fixed'; ta.style.opacity = '0';
+      document.body.appendChild(ta); ta.focus(); ta.select(); ta.setSelectionRange(0, text.length);
+      copied = document.execCommand('copy'); ta.remove();
+    } catch { /* */ }
+  }
+  if (copied) {
+    $('status').textContent = `✓ copied ${Math.round(text.length / 1024)} KB of bench data — paste into an email`;
+  } else {
+    // Last resort (very old WebViews): show the JSON for manual long-press copy.
+    let ta = $('copyFallback');
+    if (!ta) {
+      ta = document.createElement('textarea'); ta.id = 'copyFallback';
+      ta.style.cssText = 'width:100%;height:10rem;margin-top:.5rem;font-size:.7em';
+      $('status').after(ta);
+    }
+    ta.value = text;
+    $('status').textContent = 'clipboard unavailable — long-press the box below, Select All, Copy';
+  }
+  diag(`copy data exported (${Math.round(text.length / 1024)} KB, copied=${copied})`);
+}
+
 // ── wiring ──────────────────────────────────────────────────────────
 window.addEventListener('DOMContentLoaded', () => {
   const lab = $('label');
@@ -432,6 +571,16 @@ window.addEventListener('DOMContentLoaded', () => {
   lab.addEventListener('input', () => {
     try { localStorage.setItem('powbench-device-label', lab.value.trim()); } catch { /* */ }
   });
+
+  diag(`page loaded — app v${BENCH_VERSION} kernel v${KERNEL_VERSION} (${navigator.onLine ? 'online' : 'OFFLINE'})`);
+  // Capture every status-line change into the diagnostic log — the status line
+  // is where connect/publish outcomes surface, but it's transient on screen.
+  let lastStatus = '';
+  new MutationObserver(() => {
+    const t = $('status')?.textContent || '';
+    if (t && t !== lastStatus) { lastStatus = t; diag('status: ' + t); }
+  }).observe($('status'), { childList: true, characterData: true, subtree: true });
+  if ($('copyData')) $('copyData').addEventListener('click', () => { copyAllData().catch((e) => { $('status').textContent = 'copy failed: ' + (e.message || e); }); });
 
   enrichDevice();            // async: model / GPU / arch — captured into each result
   if ($('buildinfo')) $('buildinfo').textContent = `app v${BENCH_VERSION} · loading candidates…`;
