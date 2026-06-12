@@ -3,12 +3,17 @@
 // keep going) → aggregate → render → report. See README.md.
 
 // Bump on every bench change so a stale cached app is obvious in the UI.
-const BENCH_VERSION = '0.17.0';
+const BENCH_VERSION = '0.18.0';
 // Kernel-version visibility: show which kernel this tab is actually running and
 // tag every published result with it — long-running bench tabs keep an OLD
 // kernel in memory across kernel deploys until reloaded, and this is how we
 // spot them in the fleet. handshake.js is tiny and side-effect-free.
 import { KERNEL_VERSION } from '/src/transport/handshake.js';
+
+// Crash-safe WebAssembly memory-ceiling probe. On iOS Safari navigator.deviceMemory
+// is null and a per-tab WASM cap (not RAM) is the real floor; this measures it
+// without losing the answer to an uncatchable jetsam kill (localStorage watermark).
+import { probeWasmMemory, consumePriorCrash } from './wasm-mem-probe.js';
 
 // ── diagnostics: everything needed to answer "why didn't my results report?" ──
 // A timestamped ring buffer of status changes, connect/publish failures, kernel
@@ -99,12 +104,65 @@ function renderBuildInfo() {
 // the guard — so Android runs the full suite like desktop.
 const IS_IOS = /iPhone|iPad|iPod/i.test(navigator.userAgent)
   || (navigator.platform === 'MacIntel' && (navigator.maxTouchPoints || 0) > 1);   // iPadOS reports as Mac
-const MEM_BUDGET_MB = IS_IOS ? 700 : 6000;
+// Starts as a conservative hardcoded guess; the WASM memory probe (initMemProbe,
+// run on load) replaces it with a MEASURED per-device ceiling. Tighten-only: the
+// probe can lower this if it finds a real boundary below what the suite would
+// run, but never raises it above the safe default.
+let MEM_BUDGET_MB = IS_IOS ? 700 : 6000;
 function estMemFor(spec) {
   const f = CANDIDATE_META[spec.candidate] && CANDIDATE_META[spec.candidate].estimateMemMB;
   return typeof f === 'function' ? (f(spec.difficulty) || 0) : 0;
 }
 const overBudget = (spec) => estMemFor(spec) > MEM_BUDGET_MB;
+
+// Target sizes to probe = the memory-hard working sets the suite will actually
+// allocate (so we never probe past what the benchmark itself touches), plus a
+// light ladder, clamped to the current budget envelope.
+function memProbeTargets() {
+  const sizes = new Set([64, 128, 256, 384, 512]);
+  try { for (const spec of buildSuite()) { const m = estMemFor(spec); if (m > 0) sizes.add(Math.round(m)); } } catch { /* */ }
+  const cap = MEM_BUDGET_MB;                          // don't touch more than the suite would
+  return [...sizes].filter((m) => m <= cap).sort((a, b) => a - b);
+}
+
+// Measure the real WASM memory ceiling and fold it into MEM_BUDGET_MB. The
+// destructive (touch) part is crash-recoverable: consumePriorCrash() reports a
+// tab the OS killed on a previous attempt, and the probe never re-touches that
+// size. Tighten-only — see MEM_BUDGET_MB above.
+async function initMemProbe() {
+  try {
+    const crash = consumePriorCrash();
+    if (crash) {
+      DEVICE.wasmCrash = crash;
+      diag(`wasm-mem: recovered a prior tab kill at ${crash.crashedAtMB}MB (last safe ${crash.lastSafeMB}MB) — budget capped below it`);
+      MEM_BUDGET_MB = Math.min(MEM_BUDGET_MB, Math.max(32, crash.lastSafeMB));
+    }
+    // The destructive (touch) probe is only worth its cost where we can't learn
+    // the ceiling otherwise: iOS Safari (page-crashes on OOM, hides deviceMemory)
+    // or any device not exposing navigator.deviceMemory. Elsewhere (desktop /
+    // Android Chrome: deviceMemory known + catchable OOM) run the cheap,
+    // non-destructive grow-ceiling only.
+    const wantCommit = IS_IOS || DEVICE.deviceMemoryGB == null;
+    const targets = wantCommit ? memProbeTargets() : [];
+    diag(`wasm-mem: probing ${wantCommit ? `ceiling (grow + touch ${targets.join('/')}MB)` : 'grow ceiling only (deviceMemory known)'}…`);
+    const res = await probeWasmMemory({ targetsMB: targets, growCapMB: IS_IOS ? 1536 : 2048 });
+    DEVICE.wasmMem = res;
+    if (res.supported) {
+      diag(`wasm-mem: grow ceiling ${res.growCeilingMB}MB · commit-safe ${res.commitMaxMB}MB`);
+      const maxTarget = targets.length ? Math.max(...targets) : 0;
+      // Only tighten when we found a REAL boundary below what the suite runs.
+      if (res.commitMaxMB > 0 && res.commitMaxMB < maxTarget) {
+        const safe = Math.floor(res.commitMaxMB * (IS_IOS ? 0.9 : 0.95));
+        MEM_BUDGET_MB = Math.min(MEM_BUDGET_MB, safe);
+        diag(`wasm-mem: MEM_BUDGET_MB → ${MEM_BUDGET_MB} (measured ceiling, was a hardcoded guess)`);
+      }
+    } else {
+      diag('wasm-mem: WebAssembly.Memory unavailable — keeping default budget');
+    }
+    renderDevice();
+    try { renderSuite(); } catch { /* suite may not be built yet */ }
+  } catch (e) { diag('wasm-mem: probe error ' + (e && e.message || e)); }
+}
 
 const $ = (id) => document.getElementById(id);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -584,7 +642,7 @@ window.addEventListener('DOMContentLoaded', () => {
 
   enrichDevice();            // async: model / GPU / arch — captured into each result
   if ($('buildinfo')) $('buildinfo').textContent = `app v${BENCH_VERSION} · loading candidates…`;
-  loadMeta().then(() => { renderSuite(); renderBuildInfo(); });   // suite matrix + loaded-version line
+  loadMeta().then(() => { renderSuite(); renderBuildInfo(); initMemProbe(); });   // suite matrix + loaded-version line + measured memory ceiling
 
   const shareUrl = location.origin + location.pathname;
   const link = $('shareUrl'); link.textContent = 'open link'; link.href = shareUrl;
