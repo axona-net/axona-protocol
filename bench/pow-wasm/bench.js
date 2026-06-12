@@ -3,7 +3,12 @@
 // keep going) → aggregate → render → report. See README.md.
 
 // Bump on every bench change so a stale cached app is obvious in the UI.
-const BENCH_VERSION = '0.14.0';
+const BENCH_VERSION = '0.15.0';
+// Kernel-version visibility: show which kernel this tab is actually running and
+// tag every published result with it — long-running bench tabs keep an OLD
+// kernel in memory across kernel deploys until reloaded, and this is how we
+// spot them in the fleet. handshake.js is tiny and side-effect-free.
+import { KERNEL_VERSION } from '/src/transport/handshake.js';
 
 // Register memory-hard candidates here as they compile (drop the file in
 // candidates/ implementing candidates/template.js):
@@ -41,7 +46,7 @@ async function loadMeta() {
 function renderBuildInfo() {
   const el = $('buildinfo'); if (!el) return;
   const parts = Object.keys(CANDIDATES).map((k) => `${k} v${CANDIDATE_META[k] ? CANDIDATE_META[k].version : '?'}`);
-  el.textContent = `app v${BENCH_VERSION} · ${parts.join(' · ')} · mem cap ${MEM_BUDGET_MB}MB${IS_IOS ? ' (iOS)' : ''}`;
+  el.textContent = `app v${BENCH_VERSION} · kernel v${KERNEL_VERSION} · ${parts.join(' · ')} · mem cap ${MEM_BUDGET_MB}MB${IS_IOS ? ' (iOS)' : ''}`;
 }
 
 // Per-device memory budget (on the estimateMemMB scale). ONLY iOS Safari
@@ -104,6 +109,7 @@ let DEVICE = baseDevice();
 function baseDevice() {
   return {
     benchVersion: BENCH_VERSION,                       // tag each result with the app build
+    kernelVersion: KERNEL_VERSION,                     // …and the kernel this tab is actually running (stale-tab detection)
     deviceId: deviceId(),
     deviceLabel: deviceLabel(),
     ua: navigator.userAgent,
