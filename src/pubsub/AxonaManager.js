@@ -73,6 +73,13 @@ export const MAX_PUBLISH_BYTES = 256 * 1024;         // per-publish `json` paylo
 const MAX_SUBSCRIBER_BATCH     = 512;                // adopt-subscribers subscriberIds[] ceiling
 const MAX_PEER_ROOTS           = 32;                 // peerRoots[] ceiling (R is ~5)
 const MAX_REPLAY_BATCH         = DEFAULT_REPLAY_CACHE_SIZE; // replay-batch messages[] ceiling
+// Gap-safe replay: a subscriber reports the recent postHashes it HOLDS so a root
+// replays only what's actually missing. A single lastSeenTs high-water can't
+// represent a hole — once you receive anything newer than a gap, the gap is
+// masked forever (the "occasional missing message that never recovers" bug).
+// Sized a bit above the replay cache so steady-state subscribers report a
+// superset of any root's cache ⇒ nothing is re-sent.
+const MAX_HAVE                 = 256;
 
 // C-2: per-publisher seq reorder tolerance.  seq is wall-clock-seeded
 // (~ms units; see AxonaPeer._nextPubSeq), so this is effectively "reject a
@@ -179,6 +186,7 @@ export class AxonaManager {
     // BigInt topicId key.
     /** @type {Map<bigint, number>} */
     this._lastSeenTsByTopic = new Map();
+    this._haveByTopic = new Map();        // topicId → Set<postHash> recently received (gap-safe replay digest)
 
     // Set of publishIds this node has ever received, keyed by BigInt topicId.
     // publishId is a string (`${nodeId(decimal)}:counter` — not a DHT address).
@@ -592,6 +600,7 @@ export class AxonaManager {
   async _asyncSubscribe(topicId, lastSeenTs) {
     const topicIdHex   = toHex(topicId);
     const selfHex      = toHex(this.nodeId);
+    const have         = this._haveFor(topicId);     // gap-safe digest: what we already hold
     if (this._useKClosestMode()) {
       const roots = await this._findKClosest(topicId, this.rootSetSize);
       if (roots.length > 0) {
@@ -600,7 +609,7 @@ export class AxonaManager {
         for (const peerId of roots) {
           this.dht.sendDirect(peerId, 'pubsub:subscribe-k', {
             topicId: topicIdHex, subscriberId: selfHex,
-            peerRoots: rootsHex, lastSeenTs,
+            peerRoots: rootsHex, lastSeenTs, have,
           });
         }
         return;
@@ -615,14 +624,14 @@ export class AxonaManager {
           if (target === this.nodeId) continue;
           this.dht.sendDirect(target, 'pubsub:subscribe-k', {
             topicId: topicIdHex, subscriberId: selfHex,
-            peerRoots: targetsHex, lastSeenTs,
+            peerRoots: targetsHex, lastSeenTs, have,
           });
         }
         return;
       }
     }
     this.dht.routeMessage(topicId, 'pubsub:subscribe', {
-      topicId: topicIdHex, subscriberId: selfHex, lastSeenTs,
+      topicId: topicIdHex, subscriberId: selfHex, lastSeenTs, have,
     });
   }
 
@@ -1167,6 +1176,9 @@ export class AxonaManager {
     const topicId      = _wire(payload.topicId);
     const subscriberId = _wire(payload.subscriberId);
     const { lastSeenTs } = payload;
+    const have = Array.isArray(payload.have)
+      ? payload.have.slice(0, MAX_HAVE).filter(h => typeof h === 'string')
+      : null;
     // B-1 (routed reflection/amplification): enrolling `subscriberId` makes
     // this node relay the topic's full feed — plus a ≤100-message replay
     // blast — directly to that id by nodeId.  On the routed path `meta.fromId`
@@ -1188,7 +1200,7 @@ export class AxonaManager {
       if (subscriberId === this.nodeId) return 'forward';
       if (!vouchedFor) return 'forward';   // can't vouch for this id → keep routing, don't enroll
       await this._addOrRecruitChild(topicId, role, subscriberId, fromId);
-      await this._maybeSendReplay(topicId, role, subscriberId, lastSeenTs);
+      await this._maybeSendReplay(topicId, role, subscriberId, lastSeenTs, have);
       return 'consumed';
     }
 
@@ -1576,6 +1588,26 @@ export class AxonaManager {
     }
   }
 
+  // Note we HOLD this content (by postHash) so a future re-subscribe can tell a
+  // root exactly what to skip — gap-safe, unlike the lastSeenTs high-water.
+  _recordHave(topicId, postHash) {
+    if (!postHash) return;
+    let set = this._haveByTopic.get(topicId);
+    if (!set) { set = new Set(); this._haveByTopic.set(topicId, set); }
+    set.add(postHash);
+    if (set.size > MAX_HAVE) {                 // drop oldest (insertion-ordered Set)
+      const drop = set.size - MAX_HAVE;
+      let i = 0; for (const k of set) { if (i++ >= drop) break; set.delete(k); }
+    }
+  }
+
+  // The recent postHashes this node holds for `topicId` — sent on (re)subscribe
+  // so a root replays only the complement (what we're actually missing).
+  _haveFor(topicId) {
+    const set = this._haveByTopic.get(topicId);
+    return set ? [...set] : [];
+  }
+
   _alreadySeenPublish(publishId) {
     if (!publishId) return false;
     const now = this._now();
@@ -1613,6 +1645,7 @@ export class AxonaManager {
     if (this._alreadySeenPublish(publishId)) return;
 
     this._recordReceived(topicId, publishId, publishTs);
+    this._recordHave(topicId, postHash);
 
     const role = this.axonRoles.get(topicId);
     if (role) {
@@ -1753,6 +1786,10 @@ export class AxonaManager {
     const peerRoots = Array.isArray(peerRootsHex)
       ? peerRootsHex.slice(0, MAX_PEER_ROOTS).map(h => _wire(h)).filter(p => p !== this.nodeId)
       : [];
+    // D-1: cap the gap-safe digest (a legit `have` is ≤ the subscriber's cache).
+    const have = Array.isArray(payload.have)
+      ? payload.have.slice(0, MAX_HAVE).filter(h => typeof h === 'string')
+      : null;
     const now = this._now();
 
     let role = this.axonRoles.get(topicId);
@@ -1777,14 +1814,16 @@ export class AxonaManager {
     }
 
     await this._addOrRecruitChild(topicId, role, subscriberId, subscriberId);
-    await this._maybeSendReplay(topicId, role, subscriberId, lastSeenTs);
+    await this._maybeSendReplay(topicId, role, subscriberId, lastSeenTs, have);
   }
 
   /**
-   * Replay any cached publishes newer than lastSeenTs to a subscriber.
-   * subscriberId is BigInt; topicId is BigInt.
+   * Replay cached publishes a subscriber is missing. `have` (array of postHashes
+   * the subscriber holds) is gap-safe: we replay exactly the complement. Falls
+   * back to the lastSeenTs high-water only for pre-v2.37 subscribers that don't
+   * send `have` (back-compat). subscriberId/topicId are BigInt.
    */
-  async _maybeSendReplay(topicId, role, subscriberId, lastSeenTs) {
+  async _maybeSendReplay(topicId, role, subscriberId, lastSeenTs, have = null) {
     if (!subscriberId) return;
     // Phase A #5: never replay expired messages; sweep them first.
     this._sweepRole(role, this._now());
@@ -1814,9 +1853,17 @@ export class AxonaManager {
     // tombstoned, even if a stale cache entry lingers (defense in depth — the
     // receiver's own tombstone set is empty right after a reload).
     const fresh = cache.filter(m => !(m.postHash && this._isTombstoned(m.postHash)));
-    const missed = (lastSeenTs != null && lastSeenTs > 0)
-      ? fresh.filter(m => m.publishTs > lastSeenTs)
-      : fresh.slice();
+    let missed;
+    if (Array.isArray(have)) {
+      // Gap-safe: replay exactly what the subscriber doesn't already hold. An
+      // entry with no postHash can't be deduped by content, so always include it.
+      const haveSet = new Set(have);
+      missed = fresh.filter(m => !m.postHash || !haveSet.has(m.postHash));
+    } else if (lastSeenTs != null && lastSeenTs > 0) {
+      missed = fresh.filter(m => m.publishTs > lastSeenTs);   // legacy fallback (maskable; pre-v2.37 subscribers)
+    } else {
+      missed = fresh.slice();
+    }
     if (missed.length === 0) return;
     await this.dht.sendDirect(subscriberId, 'pubsub:replay-batch', {
       topicId: toHex(topicId),
@@ -1846,6 +1893,7 @@ export class AxonaManager {
       // The smoking gun: a root served us this message on (re)subscribe. If it
       // was previously killed, `from` names the replica that missed the kill.
       this._emitLog?.('debug', 'replay-serve', { from, msgId: postHash, publishId });
+      this._recordHave(topicId, postHash);     // now we hold it → won't re-request next time
       // App delivery is gated by _appDelivered (inside _deliverToApp), NOT by
       // the network-level _seenPublishes set. A node that relayed this publish
       // as a K-closest ROOT marked it in _seenPublishes WITHOUT delivering to
