@@ -22,8 +22,9 @@ let peer, identity, currentTopic = null, currentSub = null;
 const seen = new Set();                                  // msgIds we've already shown (dedup own echo)
 
 // "region:userID" read straight off a 264-bit publish ID (the node-id): the top
-// byte is the sender's S2 region cell, the rest is SHA-256(pubkey) — the signed,
-// verifiable identity. You can't publish anonymously, so this always travels.
+// byte is the sender's S2 region cell, the rest is SHA-256(pubkey). Every signed
+// publish carries it as env.publisherNodeId — the kernel puts it there, so we
+// never embed it ourselves. (Anonymous, sign:false posts have none → 'anon'.)
 const idLabel = (pubId) =>
   (typeof pubId === 'string' && pubId.length >= 10)
     ? `${regionName(parseInt(pubId.slice(0, 2), 16))}:${pubId.slice(2, 10)}`
@@ -74,26 +75,24 @@ async function ensureSubscribed(topic) {
   currentSub = await peer.sub(topic, (env) => {
     if (!env || env.deleted || seen.has(env.msgId)) return;   // skip our own already-shown echo
     seen.add(env.msgId);
-    const { text, pub } = unpack(env);
-    render(text, idLabel(pub), false, topic);
+    render(textOf(env), idLabel(env.publisherNodeId), false, topic);
   }, { publisher: ANCHOR.publisher, since: 'all' });
 }
 
-// A post carries { text, pub } — pub is the sender's publish ID (node-id).
-// Older posts were a bare string; handle both so replay still renders.
-function unpack(env) {
-  const m = env.message;
-  if (m && typeof m === 'object' && typeof m.text === 'string') return { text: m.text, pub: m.pub };
-  return { text: typeof m === 'string' ? m : JSON.stringify(m), pub: null };
-}
+// The message is the plain text we published. (Tolerate the odd object-shaped
+// legacy post so replayed history still renders.)
+const textOf = (env) =>
+  (env.message && typeof env.message === 'object') ? (env.message.text ?? JSON.stringify(env.message))
+                                                   : env.message;
 
-// Publish to the current topic, attaching our publish ID. Own publishes may not
-// echo back, so we render optimistically and let the seen-set dedup if they do.
+// Publish to the current topic. The kernel attaches our publish ID to the
+// signed envelope, so we send just the text. Own publishes may not echo back,
+// so we render optimistically and let the seen-set dedup if they do.
 async function send() {
   const topic = $('topic').value.trim(), text = $('message').value;
   if (!topic || !text) return;
   await ensureSubscribed(topic);
-  const msgId = await peer.pub(topic, { text, pub: identity.id }, { publisher: ANCHOR.publisher });
+  const msgId = await peer.pub(topic, text, { publisher: ANCHOR.publisher });
   seen.add(msgId);
   render(text, idLabel(identity.id), true, topic);
   $('message').value = '';

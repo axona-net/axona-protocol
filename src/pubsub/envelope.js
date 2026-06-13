@@ -147,6 +147,16 @@ export async function buildEnvelope({ topic, message, ts = Date.now(), seq = 0, 
   if (signature) {
     envelope.signature    = signature;
     envelope.signerPubkey = signerPubkey;
+    // The publisher's 264-bit node-id (S2 region prefix ‖ SHA-256(pubkey)) when
+    // the identity carries one. A SIBLING field, like signerPubkey: OUTSIDE the
+    // signed core and the msgId, so it is purely additive — old verifiers ignore
+    // it, and the signature + content-address are unchanged (no flag day). Its
+    // trustworthy half is checkable by the receiver (nodeId.slice(2) must equal
+    // SHA-256(signerPubkey)), so a relay can't forge the identity; only the
+    // 8-bit S2 prefix is a declared-location claim, as everywhere else in Axona.
+    // Lets a subscriber read the publisher's REGION off a received message
+    // without the node-id having to be re-derived or re-sent by the app.
+    if (typeof identity.id === 'string') envelope.publisherNodeId = identity.id;
     // Stage 2: publish-role PoW nonce — a SIBLING field (outside the signed
     // core, like signerPubkey/signature), self-binding to signerPubkey via the
     // PoW relation. Inert at difficulty 0 (''); a root verifies it at ingress
