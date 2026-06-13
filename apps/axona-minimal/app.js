@@ -21,10 +21,16 @@ const ANCHOR = resolveAnchor({ search: '', fallback: 'useast' });   // topic anc
 let peer, identity, currentTopic = null, currentSub = null;
 const seen = new Set();                                  // msgIds we've already shown (dedup own echo)
 
-// "region:userID" read straight off a 264-bit publish ID (the node-id): the top
-// byte is the sender's S2 region cell, the rest is SHA-256(pubkey). Every signed
-// publish carries it as env.publisherNodeId — the kernel puts it there, so we
-// never embed it ourselves. (Anonymous, sign:false posts have none → 'anon'.)
+// "region:userID" read off a 264-bit publish ID (the node-id): top byte = the
+// sender's S2 region cell, the rest = SHA-256(pubkey).
+//
+// NOTE: the protocol does NOT reveal a publisher's location — a signed envelope
+// carries only signerPubkey (who signed), never the node-id's S2 region (where
+// they are), and the region can't be derived from the key. That's a deliberate
+// publisher-privacy property. THIS APP opts in: it chooses to share the sender's
+// region by putting its own node-id in the message payload below. That's an
+// application-layer example of voluntary location disclosure, not a protocol
+// feature. (Anonymous / sign:false posts carry nothing → 'anon'.)
 const idLabel = (pubId) =>
   (typeof pubId === 'string' && pubId.length >= 10)
     ? `${regionName(parseInt(pubId.slice(0, 2), 16))}:${pubId.slice(2, 10)}`
@@ -75,24 +81,23 @@ async function ensureSubscribed(topic) {
   currentSub = await peer.sub(topic, (env) => {
     if (!env || env.deleted || seen.has(env.msgId)) return;   // skip our own already-shown echo
     seen.add(env.msgId);
-    render(textOf(env), idLabel(env.publisherNodeId), false, topic);
+    const m = env.message;
+    const text = (m && typeof m === 'object') ? (m.text ?? JSON.stringify(m)) : m;
+    const pub  = (m && typeof m === 'object') ? m.pub : null;   // the location WE chose to share
+    render(text, idLabel(pub), false, topic);
   }, { publisher: ANCHOR.publisher, since: 'all' });
 }
 
-// The message is the plain text we published. (Tolerate the odd object-shaped
-// legacy post so replayed history still renders.)
-const textOf = (env) =>
-  (env.message && typeof env.message === 'object') ? (env.message.text ?? JSON.stringify(env.message))
-                                                   : env.message;
-
-// Publish to the current topic. The kernel attaches our publish ID to the
-// signed envelope, so we send just the text. Own publishes may not echo back,
-// so we render optimistically and let the seen-set dedup if they do.
+// Publish to the current topic. The protocol signs the post with our key but
+// does NOT carry our location; THIS app voluntarily includes its publish ID
+// (node-id, which encodes our S2 region) in the payload so subscribers can show
+// where the message came from. Own publishes may not echo back, so we render
+// optimistically and let the seen-set dedup if they do.
 async function send() {
   const topic = $('topic').value.trim(), text = $('message').value;
   if (!topic || !text) return;
   await ensureSubscribed(topic);
-  const msgId = await peer.pub(topic, text, { publisher: ANCHOR.publisher });
+  const msgId = await peer.pub(topic, { text, pub: identity.id }, { publisher: ANCHOR.publisher });
   seen.add(msgId);
   render(text, idLabel(identity.id), true, topic);
   $('message').value = '';
