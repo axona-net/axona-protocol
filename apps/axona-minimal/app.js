@@ -48,7 +48,7 @@ async function ensureSubscribed(topic) {
   currentSub = await peer.sub(topic, (env) => {
     if (!env || env.deleted || seen.has(env.msgId)) return;   // skip our own already-shown echo
     seen.add(env.msgId);
-    render(env.message, env.signerPubkey, false);
+    render(env.message, env.signerPubkey, false, topic);
   }, { publisher: ANCHOR.publisher, since: 'all' });
 }
 
@@ -60,18 +60,19 @@ async function send() {
   await ensureSubscribed(topic);
   const msgId = await peer.pub(topic, text, { publisher: ANCHOR.publisher });
   seen.add(msgId);
-  render(text, null, true);
+  render(text, null, true, topic);
   $('message').value = '';
 }
 
-function render(text, signer, self) {
+function render(text, signer, self, topic) {
   const out = $('out');
   if (out.querySelector('.empty')) out.innerHTML = '';
   const el = document.createElement('div');
   el.className = 'msg' + (self ? ' self' : '');
   const who = self ? 'you' : (signer ? signer.slice(0, 8) + '…' : 'peer');
-  el.innerHTML = `<div class="text"></div><div class="meta"></div>`;
-  el.querySelector('.text').textContent = text;
+  el.innerHTML = `<div class="text"><span class="topic"></span><span class="body"></span></div><div class="meta"></div>`;
+  el.querySelector('.topic').textContent = topic ? `${topic}: ` : '';
+  el.querySelector('.body').textContent = text;
   el.querySelector('.meta').textContent = `${who} · ${new Date().toLocaleTimeString()}`;
   out.appendChild(el);
   out.scrollTop = out.scrollHeight;
