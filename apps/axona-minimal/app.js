@@ -1,30 +1,56 @@
 // Axona Minimal — the smallest useful Axona app: publish to a topic, subscribe
-// to a topic, show what arrives. ~60 lines, no framework. This is the artifact
+// to a topic, show what arrives. ~70 lines, no framework. This is the artifact
 // the programmer-intro talk builds.
 
-import { AxonaPeer, AxonaDomain, NeuronNode, deriveIdentity, KERNEL_VERSION } from '/src/index.js';
+import { AxonaPeer, AxonaDomain, NeuronNode, deriveIdentity, deriveTopicId, KERNEL_VERSION } from '/src/index.js';
 import { webTransport } from '/src/transport/web/index.js';
+import { regionName }   from '/src/utils/region-names.js';
 import { resolveAnchor } from '../lib/region.js';
 
 const $ = (id) => document.getElementById(id);
 const status = (t) => { $('status').textContent = t; };
 
-// 1. Pick the bridge + region. The region fixes both this peer's node-id and the
-//    topic anchor, so everyone on ?region=<r> shares one keyspace.
+// The TOPIC is rooted at a fixed region (us-east), so every participant derives
+// the SAME topic-id no matter where they are. The user's OWN identity, by
+// contrast, is rooted at their REAL location (see whereAmI below) — so a message
+// shows where its sender actually sits, while the topic stays one shared keyspace.
 const BRIDGE = new URLSearchParams(location.search).get('bridge')
   || (location.hostname.includes('testnet') ? 'wss://testnet.axona.net' : 'wss://bridge.axona.net');
-const ANCHOR = resolveAnchor();                          // { name, center:{lat,lng}, publisher }
+const ANCHOR = resolveAnchor({ search: '', fallback: 'useast' });   // topic anchor — pinned to us-east
 
-let peer, currentTopic = null, currentSub = null;
+let peer, identity, currentTopic = null, currentSub = null;
 const seen = new Set();                                  // msgIds we've already shown (dedup own echo)
 
-// 2. Connect: derive a keypair identity, open the web transport to the bridge,
-//    build the peer, wait briefly for the mesh to form.
+// "region:userID" read straight off a 264-bit publish ID (the node-id): the top
+// byte is the sender's S2 region cell, the rest is SHA-256(pubkey) — the signed,
+// verifiable identity. You can't publish anonymously, so this always travels.
+const idLabel = (pubId) =>
+  (typeof pubId === 'string' && pubId.length >= 10)
+    ? `${regionName(parseInt(pubId.slice(0, 2), 16))}:${pubId.slice(2, 10)}`
+    : 'anon';
+
+// Real geolocation → the user's actual S2 cell. Denied / unavailable → us-east.
+function whereAmI() {
+  const fallback = { lat: ANCHOR.center.lat, lng: ANCHOR.center.lng };
+  if (!navigator.geolocation) return Promise.resolve(fallback);
+  return new Promise((resolve) => {
+    navigator.geolocation.getCurrentPosition(
+      (p) => resolve({ lat: p.coords.latitude, lng: p.coords.longitude }),
+      ()  => resolve(fallback),                          // permission denied → default region
+      { timeout: 8000, maximumAge: 600000 },
+    );
+  });
+}
+
+// Connect: locate the user (real S2 cell → their node-id), open the web
+// transport, build the peer, wait briefly for the mesh to form.
 async function connect() {
-  status(`connecting · ${ANCHOR.name}…`);
-  const identity  = await deriveIdentity({ lat: ANCHOR.center.lat, lng: ANCHOR.center.lng });
+  status('locating…');
+  const here = await whereAmI();
+  status('connecting…');
+  identity        = await deriveIdentity({ lat: here.lat, lng: here.lng });
   const transport = webTransport({ bridgeUrl: BRIDGE, identity });
-  const node      = new NeuronNode({ id: BigInt('0x' + identity.id), lat: ANCHOR.center.lat, lng: ANCHOR.center.lng });
+  const node      = new NeuronNode({ id: BigInt('0x' + identity.id), lat: here.lat, lng: here.lng });
   node.transport  = transport;
   peer = new AxonaPeer({ domain: new AxonaDomain({ k: 20 }), node, identity, transport });
 
@@ -36,11 +62,11 @@ async function connect() {
     await new Promise((r) => setTimeout(r, 600));
   }
   status('connected');
-  $('ver').textContent = `kernel v${KERNEL_VERSION} · region ${ANCHOR.name} · ${identity.id.slice(0, 10)}…`;
+  $('ver').textContent = `kernel v${KERNEL_VERSION} · you ${idLabel(identity.id)}`;
   $('send').disabled = false;
 }
 
-// 3. Subscribe to a topic. Re-subscribing to a new topic drops the old one.
+// Subscribe to a topic. Re-subscribing to a new topic drops the old one.
 async function ensureSubscribed(topic) {
   if (topic === currentTopic) return;
   if (currentSub) { try { await currentSub.stop(); } catch {} }
@@ -48,28 +74,36 @@ async function ensureSubscribed(topic) {
   currentSub = await peer.sub(topic, (env) => {
     if (!env || env.deleted || seen.has(env.msgId)) return;   // skip our own already-shown echo
     seen.add(env.msgId);
-    render(env.message, env.signerPubkey, false, topic);
+    const { text, pub } = unpack(env);
+    render(text, idLabel(pub), false, topic);
   }, { publisher: ANCHOR.publisher, since: 'all' });
 }
 
-// 4. Publish to the current topic. Own publishes may not echo back, so we render
-//    optimistically and let the seen-set dedup if they do.
+// A post carries { text, pub } — pub is the sender's publish ID (node-id).
+// Older posts were a bare string; handle both so replay still renders.
+function unpack(env) {
+  const m = env.message;
+  if (m && typeof m === 'object' && typeof m.text === 'string') return { text: m.text, pub: m.pub };
+  return { text: typeof m === 'string' ? m : JSON.stringify(m), pub: null };
+}
+
+// Publish to the current topic, attaching our publish ID. Own publishes may not
+// echo back, so we render optimistically and let the seen-set dedup if they do.
 async function send() {
   const topic = $('topic').value.trim(), text = $('message').value;
   if (!topic || !text) return;
   await ensureSubscribed(topic);
-  const msgId = await peer.pub(topic, text, { publisher: ANCHOR.publisher });
+  const msgId = await peer.pub(topic, { text, pub: identity.id }, { publisher: ANCHOR.publisher });
   seen.add(msgId);
-  render(text, null, true, topic);
+  render(text, idLabel(identity.id), true, topic);
   $('message').value = '';
 }
 
-function render(text, signer, self, topic) {
+function render(text, who, self, topic) {
   const out = $('out');
   if (out.querySelector('.empty')) out.innerHTML = '';
   const el = document.createElement('div');
   el.className = 'msg' + (self ? ' self' : '');
-  const who = self ? 'you' : (signer ? signer.slice(0, 8) + '…' : 'peer');
   el.innerHTML = `<div class="text"><span class="topic"></span><span class="body"></span></div><div class="meta"></div>`;
   el.querySelector('.topic').textContent = topic ? `${topic}: ` : '';
   el.querySelector('.body').textContent = text;
@@ -78,10 +112,18 @@ function render(text, signer, self, topic) {
   out.scrollTop = out.scrollHeight;
 }
 
+// Show the topic-id beneath the field, prefixed with the topic's region (us-east,
+// hardcoded here). deriveTopicId is pure, so this works before we even connect.
+async function showTopicId(topic) {
+  $('topicId').textContent = topic ? `${ANCHOR.name} : ${await deriveTopicId(ANCHOR.publisher, topic)}` : '';
+}
+
 $('send').addEventListener('click', () => send().catch((e) => status('send failed: ' + (e.message || e))));
 $('message').addEventListener('keydown', (e) => { if (e.key === 'Enter') $('send').click(); });
+$('topic').addEventListener('input',  () => showTopicId($('topic').value.trim()).catch(() => {}));
 $('topic').addEventListener('change', () => ensureSubscribed($('topic').value.trim()).catch(() => {}));
 
+showTopicId($('topic').value.trim()).catch(() => {});
 connect()
   .then(() => ensureSubscribed($('topic').value.trim()))
   .catch((e) => status('connect failed: ' + (e.message || e)));

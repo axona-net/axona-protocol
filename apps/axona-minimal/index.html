@@ -25,6 +25,7 @@
   .msg:last-child { border-bottom: none; }
   .msg .text { font-size: .98rem; white-space: pre-wrap; word-break: break-word; }
   .msg .topic { font-family: ui-monospace, monospace; font-size: .82rem; color: var(--muted); }
+  .idline { margin: .3rem 0 0; font-size: .68rem; color: var(--muted); font-family: ui-monospace, monospace; word-break: break-all; line-height: 1.4; }
   .msg .meta { font-size: .68rem; color: var(--muted); font-family: ui-monospace, monospace; margin-top: .15rem; }
   .msg.self .text { color: var(--rust); }
   .empty { color: var(--muted); font-size: .85rem; padding: .6rem; }
@@ -39,6 +40,7 @@
 
     <label for="topic">topic</label>
     <input id="topic" value="minimal/chat" spellcheck="false" autocomplete="off">
+    <p class="idline" id="topicId">&nbsp;</p>
 
     <label for="message">message</label>
     <div class="row">
