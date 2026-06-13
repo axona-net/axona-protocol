@@ -36,18 +36,23 @@ const SELF      = BigInt('0x89' + '11'.repeat(32));
 const TOPIC_BIG = BigInt('0x89' + 'ab'.repeat(32));
 const T = 1_700_000_000_000;
 
-// Minimal dht mock: records sendDirect calls so we can assert "nothing emitted".
+// Minimal dht mock: records sendDirect calls so we can assert "nothing emitted",
+// and CAPTURES the (guarded) handlers AxonaManager registers so we can drive a
+// frame through the real registration-boundary guard.
 function mockMgr() {
   const sent = [];
+  const handlers = new Map();   // type → guarded handler
   const dht = {
     getSelfId: () => SELF,
-    onRoutedMessage: () => {}, onDirectMessage: () => {}, onEvent: () => () => {},
+    onRoutedMessage: (t, h) => handlers.set(t, h),
+    onDirectMessage: (t, h) => handlers.set(t, h),
+    onEvent: () => () => {},
     findKClosest: async () => [SELF],
     routeMessage: async () => {},
     sendDirect: async (t, type, p) => { sent.push({ t, type, p }); return true; },
   };
   const mgr = new AxonaManager({ dht, now: () => T });
-  return { mgr, sent };
+  return { mgr, sent, handlers };
 }
 const rootRole = () => ({ isRoot: true, isInRootSet: true, children: new Map(), replayCache: [], peerRoots: new Set(), roleCreatedAt: T, emptiedAt: 0 });
 
@@ -126,10 +131,49 @@ async function partB_dispatchBoundary() {
   try { await aliceT.stop(); await bobT.stop(); } catch { /* */ }
 }
 
+async function partC_registrationGuard() {
+  console.log('\nC. registration-boundary guard — a malformed id is dropped before ANY handler');
+  const TOPIC_HEX = toHex(TOPIC_BIG), SELF_HEX = toHex(SELF);
+
+  // 6. the EXACT reported case: a subscribe-k frame with a truncated fromId (3 chars)
+  {
+    const { mgr, sent, handlers } = mockMgr();
+    mgr.axonRoles.set(TOPIC_BIG, { isRoot: true, isInRootSet: true, children: new Map(), replayCache: [], peerRoots: new Set(), roleCreatedAt: T, emptiedAt: 0 });
+    const sub_k = handlers.get('pubsub:subscribe-k');
+    let threw = false, ret;
+    try { ret = await sub_k({ topicId: TOPIC_HEX, subscriberId: SELF_HEX }, { fromId: 'xyz' }); } catch { threw = true; }
+    check('6. guarded subscribe-k with fromId="xyz" does not throw', !threw);
+    check('6b. …and is dropped (handler not reached, nothing emitted)', sent.length === 0);
+  }
+
+  // 7. malformed topicId on a routed handler → dropped, and the routed dispatch
+  //    sees `undefined` ⇒ 'forward' (frame keeps routing, not consumed here)
+  {
+    const { handlers } = mockMgr();
+    const sub = handlers.get('pubsub:subscribe');
+    let threw = false, ret;
+    try { ret = await sub({ topicId: '3a', subscriberId: SELF_HEX }, { fromId: SELF_HEX }); } catch { threw = true; }
+    check('7. guarded routed subscribe with topicId="3a" does not throw', !threw);
+    check('7b. …returns undefined (⇒ forward) rather than consuming', ret === undefined);
+  }
+
+  // 8. a fully well-formed frame still passes the guard and reaches the handler
+  {
+    const sib = BigInt('0x89' + '22'.repeat(32));
+    const { mgr, sent, handlers } = mockMgr();
+    mgr.axonRoles.set(TOPIC_BIG, { isRoot: true, isInRootSet: true, children: new Map(), replayCache: [{ postHash: 'c'.repeat(64), json: '{}', publishId: 'p', publishTs: T }], peerRoots: new Set(), roleCreatedAt: T, emptiedAt: 0 });
+    const msgsync = handlers.get('pubsub:msgsync');
+    await msgsync({ topicId: TOPIC_HEX, have: [] }, { fromId: toHex(sib) });
+    await flush();
+    check('8. a well-formed frame passes the guard and reaches the handler', sent.some((s) => s.type === 'pubsub:msgsync-resp'));
+  }
+}
+
 async function main() {
   console.log('Axona msgsync / direct-dispatch robustness (malformed-frame DoS guard)');
   await partA_handlers();
   await partB_dispatchBoundary();
+  await partC_registrationGuard();
   console.log(`\nResult: ${passed} passed, ${failed} failed`);
   process.exit(failed === 0 ? 0 : 1);
 }
