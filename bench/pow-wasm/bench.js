@@ -3,7 +3,7 @@
 // keep going) → aggregate → render → report. See README.md.
 
 // Bump on every bench change so a stale cached app is obvious in the UI.
-const BENCH_VERSION = '0.18.1';
+const BENCH_VERSION = '0.18.2';
 // Kernel-version visibility: show which kernel this tab is actually running and
 // tag every published result with it — long-running bench tabs keep an OLD
 // kernel in memory across kernel deploys until reloaded, and this is how we
