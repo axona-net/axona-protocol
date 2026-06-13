@@ -131,49 +131,52 @@ async function partB_dispatchBoundary() {
   try { await aliceT.stop(); await bobT.stop(); } catch { /* */ }
 }
 
-async function partC_registrationGuard() {
-  console.log('\nC. registration-boundary guard — a malformed id is dropped before ANY handler');
-  const TOPIC_HEX = toHex(TOPIC_BIG), SELF_HEX = toHex(SELF);
+async function partC_dispatchGuard() {
+  console.log('\nC. AxonaPeer dispatch boundary — a corrupt fromId is dropped ONCE, for every handler');
+  // A fake transport lets us invoke the registered onNotification callback with an
+  // arbitrary fromId — exactly what a peer tearing down mid-shutdown delivers.
+  const captured = new Map();
+  const fakeTransport = {
+    onNotification: (wt, cb) => captured.set(wt, cb),
+    notify: async () => true, onRequest: () => {}, request: async () => null,
+    onEvent: () => () => {}, start: async () => {}, stop: async () => {},
+  };
+  const id = await deriveIdentity({ lat: 38, lng: -77 });
+  const peer = new AxonaPeer({
+    engine: { onEvent: () => () => {} },
+    node: { id: id.id, alive: true, transport: fakeTransport },
+    identity: id, transport: fakeTransport,
+  });
 
-  // 6. the EXACT reported case: a subscribe-k frame with a truncated fromId (3 chars)
-  {
-    const { mgr, sent, handlers } = mockMgr();
-    mgr.axonRoles.set(TOPIC_BIG, { isRoot: true, isInRootSet: true, children: new Map(), replayCache: [], peerRoots: new Set(), roleCreatedAt: T, emptiedAt: 0 });
-    const sub_k = handlers.get('pubsub:subscribe-k');
-    let threw = false, ret;
-    try { ret = await sub_k({ topicId: TOPIC_HEX, subscriberId: SELF_HEX }, { fromId: 'xyz' }); } catch { threw = true; }
-    check('6. guarded subscribe-k with fromId="xyz" does not throw', !threw);
-    check('6b. …and is dropped (handler not reached, nothing emitted)', sent.length === 0);
-  }
+  let calls = 0;
+  peer.onDirectMessage('robust:probe', () => { calls++; });
+  const cb = captured.get('direct_robust:probe');
 
-  // 7. malformed topicId on a routed handler → dropped, and the routed dispatch
-  //    sees `undefined` ⇒ 'forward' (frame keeps routing, not consumed here)
-  {
-    const { handlers } = mockMgr();
-    const sub = handlers.get('pubsub:subscribe');
-    let threw = false, ret;
-    try { ret = await sub({ topicId: '3a', subscriberId: SELF_HEX }, { fromId: SELF_HEX }); } catch { threw = true; }
-    check('7. guarded routed subscribe with topicId="3a" does not throw', !threw);
-    check('7b. …returns undefined (⇒ forward) rather than consuming', ret === undefined);
-  }
+  // 6. the reported case generalized: a 3-char sender id, dropped before the handler
+  cb('xyz', { x: 1 });
+  check('6. a corrupt 3-char fromId is dropped before the handler runs', calls === 0);
 
-  // 8. a fully well-formed frame still passes the guard and reaches the handler
-  {
-    const sib = BigInt('0x89' + '22'.repeat(32));
-    const { mgr, sent, handlers } = mockMgr();
-    mgr.axonRoles.set(TOPIC_BIG, { isRoot: true, isInRootSet: true, children: new Map(), replayCache: [{ postHash: 'c'.repeat(64), json: '{}', publishId: 'p', publishTs: T }], peerRoots: new Set(), roleCreatedAt: T, emptiedAt: 0 });
-    const msgsync = handlers.get('pubsub:msgsync');
-    await msgsync({ topicId: TOPIC_HEX, have: [] }, { fromId: toHex(sib) });
-    await flush();
-    check('8. a well-formed frame passes the guard and reaches the handler', sent.some((s) => s.type === 'pubsub:msgsync-resp'));
-  }
+  // 7. a well-formed (bigint) sender id passes through to the handler
+  cb(fromHex(id.id), { x: 1 });
+  await tick();
+  check('7. a well-formed fromId reaches the handler', calls === 1);
+
+  // 8. a handler that itself throws a malformed-id error (a payload field the
+  //    fromId check doesn't cover) is contained + classified — no crash.
+  let leaked = null; const onU = (e) => { leaked = e; };
+  process.on('unhandledRejection', onU);
+  peer.onDirectMessage('robust:throwid', async () => { fromHex('3a'); });   // throws AXONA_BAD_ID
+  captured.get('direct_robust:throwid')(fromHex(id.id), {});
+  for (let i = 0; i < 10; i++) await tick();
+  process.removeListener('unhandledRejection', onU);
+  check('8. a handler that throws on a malformed payload id does not crash the node', leaked === null);
 }
 
 async function main() {
   console.log('Axona msgsync / direct-dispatch robustness (malformed-frame DoS guard)');
   await partA_handlers();
   await partB_dispatchBoundary();
-  await partC_registrationGuard();
+  await partC_dispatchGuard();
   console.log(`\nResult: ${passed} passed, ${failed} failed`);
   process.exit(failed === 0 ? 0 : 1);
 }
