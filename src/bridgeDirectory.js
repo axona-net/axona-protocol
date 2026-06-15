@@ -2,6 +2,32 @@
 // bridgeDirectory.js — the bridge directory: how bridges advertise
 // themselves and how a client ranks them for failover.
 //
+// WHY THIS EXISTS — making the network hard to stop. The bridge is the
+// network's one semi-centralized touchpoint: browsers can't accept inbound
+// connections, so a new peer needs *some* rendezvous to reach the mesh. A
+// single hard-coded bridge is a single point of failure — block its
+// domain/IP or take down its host and new peers can't bootstrap. The
+// directory turns that single point into a MOVING TARGET: every bridge
+// advertises its access point here and every node collects the set on
+// launch, so there's no one address to block, a downed bridge is failed
+// over transparently, and a newly stood-up bridge is discovered without a
+// client update. Because every bridge also federates into the mesh as a
+// node, the directory lives IN the mesh — there's no central registry to
+// seize. The goal is resilience: the network stays reachable even at its
+// weakest point, the bridge.
+//
+// WHAT IT DOES NOT DO. The directory does NOT by itself prevent bridge
+// SYBIL attacks or FALSE ADVERTISING: anyone can sign + publish an entry
+// for a bridge that doesn't exist, or flood it with many identities. The
+// signature proves a stable pseudonymous publisher, not that the endpoint
+// is real or honest. What bounds the damage is the CLIENT-SIDE RANKING
+// below, not the directory: the configured primary is never auto-replaced,
+// first-party (personally-observed) bridges outrank unknown ones, and a
+// fake/dead endpoint just fails on connect and sinks to last resort — so a
+// false entry costs at most one wasted failover attempt, never a hijack.
+// Stronger admission (bridge-identity PoW, gossiped reputation, trusted-
+// root attestation) is deferred hardening, not provided here.
+//
 // A bridge is only a rendezvous / WebRTC-signaling broker — it cannot
 // impersonate a peer or read mesh content (mutual auth + channel binding
 // + E2E DTLS). So a client can safely *discover* alternate bridges from
