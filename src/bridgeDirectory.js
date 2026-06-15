@@ -46,11 +46,25 @@ export const BRIDGE_ENTRY_MAX_AGE_MS = 48 * 60 * 60 * 1000;
  * @param {number} o.lng
  * @param {string} [o.label]
  * @param {string} [o.ver]  bridge version string
+ * @param {string|string[]} [o.turn]  the bridge's TURN endpoint(s), e.g.
+ *        'turn:host:3478' / 'turns:host:5349' — advertised so a client that
+ *        discovers this bridge also learns its TURN relay. Credentials are NOT
+ *        carried here (they're short-lived; the bridge mints them in its welcome
+ *        on connect) — only the endpoint URL(s).
  * @param {number} [o.ts]   ms; defaults to now
- * @returns {{url,lat,lng,label,ver,ts}}
+ * @returns {{url,lat,lng,label,ver,ts,turn?}}
  */
-export function buildBridgeEntry({ url, lat, lng, label = '', ver = '', ts = Date.now() }) {
-  return { url, lat, lng, label, ver, ts };
+export function buildBridgeEntry({ url, lat, lng, label = '', ver = '', turn, ts = Date.now() }) {
+  const entry = { url, lat, lng, label, ver, ts };
+  const turns = normalizeTurn(turn);
+  if (turns.length) entry.turn = turns;
+  return entry;
+}
+
+/** Normalize a turn spec (string|array) to a clean array of turn(s):// URLs. */
+function normalizeTurn(turn) {
+  const arr = Array.isArray(turn) ? turn : (typeof turn === 'string' ? turn.split(',') : []);
+  return arr.map((s) => String(s).trim()).filter((s) => /^turns?:[^\s]+$/.test(s)).slice(0, 4);
 }
 
 /**
@@ -68,7 +82,7 @@ export function validateBridgeEntry(msg) {
   if (typeof lat !== 'number' || !Number.isFinite(lat) || lat < -90 || lat > 90) return null;
   if (typeof lng !== 'number' || !Number.isFinite(lng) || lng < -180 || lng > 180) return null;
   const ts = typeof msg.ts === 'number' && Number.isFinite(msg.ts) ? msg.ts : 0;
-  return {
+  const entry = {
     url,
     lat,
     lng,
@@ -76,6 +90,9 @@ export function validateBridgeEntry(msg) {
     ver:   typeof msg.ver === 'string' ? msg.ver.slice(0, 32) : '',
     ts,
   };
+  const turns = normalizeTurn(msg.turn);     // advertised TURN endpoint(s), if any
+  if (turns.length) entry.turn = turns;
+  return entry;
 }
 
 /**

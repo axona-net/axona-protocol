@@ -38,6 +38,15 @@ check('rejects non-number lng',       validateBridgeEntry({ url: 'wss://b', lat:
 check('rejects non-object',           validateBridgeEntry('nope') === null);
 check('clamps label length', validateBridgeEntry({ url: 'wss://b', lat: 0, lng: 0, label: 'x'.repeat(200) }).label.length === 64);
 
+console.log('\n── turn endpoint ──');
+const eTurn = buildBridgeEntry({ url: 'wss://b.net', lat: 0, lng: 0, turn: 'turn:b.net:3478,turns:b.net:5349' });
+check('buildBridgeEntry parses comma turn → array', Array.isArray(eTurn.turn) && eTurn.turn.length === 2);
+check('buildBridgeEntry accepts turn array', buildBridgeEntry({ url:'wss://b', lat:0, lng:0, turn:['turn:b:3478'] }).turn[0] === 'turn:b:3478');
+check('no turn → no turn field', buildBridgeEntry({ url:'wss://b', lat:0, lng:0 }).turn === undefined);
+check('validate passes turn through', validateBridgeEntry({ url:'wss://b', lat:0, lng:0, turn:['turns:b:5349'] }).turn[0] === 'turns:b:5349');
+check('validate drops non-turn scheme', validateBridgeEntry({ url:'wss://b', lat:0, lng:0, turn:['http://evil','turn:ok:3478'] }).turn.length === 1);
+check('validate omits turn when none valid', validateBridgeEntry({ url:'wss://b', lat:0, lng:0, turn:['nope'] }).turn === undefined);
+
 console.log('\n── haversine ──');
 check('zero distance to self', haversineKm(SF, SF) < 1);
 const nyc = { lat: 40.71, lng: -74.0 };
