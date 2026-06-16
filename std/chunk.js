@@ -99,49 +99,56 @@ export function bytesToString(u8) { return new TextDecoder().decode(u8); }
 
 /**
  * Collect chunk messages (any order, duplicates tolerated, garbage ignored).
- * Fires onComplete({ id, name, mime, size, bytes, meta }) ONCE when every
- * distinct index is present. Returns { accept(msg)->bool, missing(), have(), total() }.
+ * Fires onComplete({ id, name, mime, size, bytes, meta }) ONCE per file when
+ * every distinct index of that file is present.
+ *
+ * MULTI-FILE: a single topic commonly carries a STREAM of files over time — an
+ * image channel, a chat with attachments. So one reassembler tracks every file
+ * it sees, keyed by `fileId`, and fires onComplete once for EACH that completes.
+ * (Earlier this locked onto the first file's id and silently dropped every later
+ * file — a second image on a channel never reassembled for receivers.) Each
+ * file's chunks are kept apart by id, so a foreign/garbage file can't corrupt
+ * the one you want, and indices are matched per-file. Pass `fileId` to restrict
+ * to a single file (receiveChunkedBytes does this implicitly via its own scope).
+ *
+ * Returns { accept(msg)->bool, missing(id?), have(id?), total(id?) }; the
+ * introspectors default to the most-recently-touched file when no id is given.
  */
 export function createReassembler(onComplete, { onProgress = null, fileId = null } = {}) {
-  let n = null, meta = null, name = 'file', mime = 'application/octet-stream', size = null;
-  let id = fileId;                   // null until a manifest (authoritative) or first chunk (tentative) sets it
-  let idLocked = fileId != null;     // locked by caller, or once a manifest is seen
-  const slots = new Map();           // i -> Uint8Array (distinct indices only)
-  let firedFor = null;
-  const total = () => n;
-  const have = () => slots.size;
-  const missing = () => (n == null ? null : Array.from({ length: n }, (_, i) => i).filter(i => !slots.has(i)));
-  function maybeComplete() {
-    if (n == null || slots.size !== n || firedFor === id) return;
-    let totalLen = 0; for (let i = 0; i < n; i++) totalLen += slots.get(i).length;
-    const bytes = new Uint8Array(size != null ? size : totalLen);
-    let off = 0; for (let i = 0; i < n; i++) { const c = slots.get(i); bytes.set(c, off); off += c.length; }
-    firedFor = id;
-    onComplete({ id, name, mime, size: bytes.length, bytes, meta });
+  const only = fileId;                 // if set, accept ONLY this file id
+  const files = new Map();             // id -> { n, meta, name, mime, size, slots:Map, fired }
+  let last = null;                     // most-recently-touched id (for arg-less introspectors)
+  const mk = () => ({ n: null, meta: null, name: 'file', mime: 'application/octet-stream', size: null, slots: new Map(), fired: false });
+  function complete(id, f) {
+    if (f.fired || f.n == null || f.slots.size !== f.n) return;
+    let len = 0; for (let i = 0; i < f.n; i++) len += f.slots.get(i).length;
+    const bytes = new Uint8Array(f.size != null ? f.size : len);
+    let off = 0; for (let i = 0; i < f.n; i++) { const c = f.slots.get(i); bytes.set(c, off); off += c.length; }
+    f.fired = true; f.slots = new Map();    // delivered → free the chunk bytes; keep n+fired so dups/replays are ignored
+    onComplete({ id, name: f.name, mime: f.mime, size: bytes.length, bytes, meta: f.meta });
   }
   return {
     accept(msg) {
       if (!msg || msg.f !== CHUNK_FORMAT || typeof msg.id !== 'string') return false;
-      if (msg.k === 'm') {
-        // The manifest is authoritative for which file this topic carries. If it
-        // names a different file than chunks we tentatively adopted (garbage
-        // arrived first), purge them and re-lock onto the manifest's id.
-        if (idLocked && msg.id !== id) return false;   // not our file
-        if (id !== msg.id) { slots.clear(); n = null; id = msg.id; }
-        idLocked = true;
-        name = msg.name ?? name; mime = msg.mime ?? mime; size = msg.size ?? size; meta = msg.meta ?? meta;
-        if (typeof msg.n === 'number') n = msg.n;
+      if (only != null && msg.id !== only) return false;     // single-file scope
+      let f = files.get(msg.id);
+      if (!f) { f = mk(); files.set(msg.id, f); }
+      last = msg.id;
+      if (f.fired) return true;                              // already delivered this file → ignore further copies
+      if (msg.k === 'm') {                                    // manifest: authoritative metadata for THIS file
+        f.name = msg.name ?? f.name; f.mime = msg.mime ?? f.mime; f.size = msg.size ?? f.size; f.meta = msg.meta ?? f.meta;
+        if (typeof msg.n === 'number') f.n = msg.n;
       } else if (msg.k === 'c' && typeof msg.i === 'number' && typeof msg.d === 'string') {
-        if (id == null) id = msg.id;                   // tentative (pre-manifest)
-        if (msg.id !== id) return false;               // different file on this topic → ignore (garbage/CDC-5)
-        if (typeof msg.n === 'number') n ??= msg.n;     // learn count even if manifest never arrives
-        if (!slots.has(msg.i)) slots.set(msg.i, b64ToBytes(msg.d));
+        if (typeof msg.n === 'number') f.n ??= msg.n;          // learn count even if the manifest never arrives
+        if (!f.slots.has(msg.i)) f.slots.set(msg.i, b64ToBytes(msg.d));
       } else return false;
-      if (onProgress) onProgress({ id, have: slots.size, total: n });
-      maybeComplete();
+      if (onProgress) onProgress({ id: msg.id, have: f.slots.size, total: f.n });
+      complete(msg.id, f);
       return true;
     },
-    missing, have, total,
+    missing(id) { const f = files.get(id ?? last); return (!f || f.n == null) ? null : Array.from({ length: f.n }, (_, i) => i).filter(i => !f.slots.has(i)); },
+    have(id)    { const f = files.get(id ?? last); return f ? f.slots.size : 0; },
+    total(id)   { const f = files.get(id ?? last); return f ? f.n : null; },
   };
 }
 

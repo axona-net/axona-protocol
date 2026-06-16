@@ -127,6 +127,21 @@ async function main() {
     check('8. rejects (no hang) on missing chunk, names missing index', rejected && /missing/.test(msg) && /\b2\b/.test(msg));
   }
 
+  // ── 9. MULTI-FILE: one reassembler, a stream of files (image-channel bug) ──
+  {
+    const a = makeBytes(20_000), b = makeBytes(33_000);
+    const A = chunkBytes(a, { name: 'a.bin', maxMessageBytes: MAXMSG });
+    const B = chunkBytes(b, { name: 'b.bin', maxMessageBytes: MAXMSG });
+    const got = new Map();                                  // id -> bytes
+    const r = createReassembler((f) => { got.set(f.id, f); });
+    for (const m of A.messages) r.accept(m);                // first file (manifest + chunks)
+    for (const m of B.messages) r.accept(m);                // second file on the SAME reassembler
+    const fa = got.get(A.fileId), fb = got.get(B.fileId);
+    check('9. two sequential files both reassemble on one reassembler',
+      got.size === 2 && fa && fb && eqBytes(fa.bytes, a) && eqBytes(fb.bytes, b) &&
+      fa.name === 'a.bin' && fb.name === 'b.bin');
+  }
+
   console.log(`\nResult: ${passed} passed, ${failed} failed  (rawChunk@16KB=${rawChunkSize()}B)`);
   process.exit(failed === 0 ? 0 : 1);
 }
