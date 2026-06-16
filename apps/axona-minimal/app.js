@@ -14,8 +14,20 @@ const status = (t) => { $('status').textContent = t; };
 // the SAME topic-id no matter where they are. The user's OWN identity, by
 // contrast, is rooted at their REAL location (see whereAmI below) — so a message
 // shows where its sender actually sits, while the topic stays one shared keyspace.
-const BRIDGE = new URLSearchParams(location.search).get('bridge')
-  || (location.hostname.includes('testnet') ? 'wss://testnet.axona.net' : 'wss://bridge.axona.net');
+const APP_VERSION = '0.2.0';
+// Bridge selection (same as axona-share): ?bridge=<wss url> → ?net=testnet|prod
+// shortcut → default by hostname. Lets one build run against either network.
+const KNOWN_BRIDGES = { prod: 'wss://bridge.axona.net', testnet: 'wss://testnet.axona.net' };
+const _params = new URLSearchParams(location.search);
+function resolveBridge() {
+  const explicit = (_params.get('bridge') || '').trim();
+  if (/^wss?:\/\//.test(explicit)) return explicit;
+  const net = (_params.get('net') || '').trim().toLowerCase();
+  if (KNOWN_BRIDGES[net]) return KNOWN_BRIDGES[net];
+  return location.hostname.includes('testnet') ? KNOWN_BRIDGES.testnet : KNOWN_BRIDGES.prod;
+}
+const BRIDGE = resolveBridge();
+const NETWORK = BRIDGE === KNOWN_BRIDGES.testnet ? 'testnet' : BRIDGE === KNOWN_BRIDGES.prod ? 'prod' : 'custom';
 const ANCHOR = resolveAnchor({ search: '', fallback: 'useast' });   // topic anchor — pinned to us-east
 
 let peer, identity, currentTopic = null, currentSub = null;
@@ -69,7 +81,7 @@ async function connect() {
     await new Promise((r) => setTimeout(r, 600));
   }
   status('connected');
-  $('ver').textContent = `kernel v${KERNEL_VERSION} · you ${idLabel(identity.id)}`;
+  $('ver').textContent = `app v${APP_VERSION} · kernel v${KERNEL_VERSION} · ${NETWORK} · you ${idLabel(identity.id)}`;
   $('send').disabled = false;
 }
 
