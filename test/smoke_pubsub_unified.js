@@ -128,17 +128,25 @@ async function testPubValidation() {
     (err.code === ErrorCodes.PUBLISH_SIGN_FAILED ||
      err.code === ErrorCodes.PUBLISH_INVALID_MESSAGE));
 
-  // Oversize: peer.pub fails fast with PUBLISH_PAYLOAD_TOO_LARGE (client-side
-  // guard) rather than letting the message be silently dropped at ingress.
+  // Oversize: peer.pub fails LOUD with PUBLISH_PAYLOAD_TOO_LARGE rather than
+  // letting an unreceivable message be silently dropped mid-mesh (O-5).
   err = null;
   try { await peer.pub('cats', 'x'.repeat(256 * 1024 + 16), { sign: false }); }
   catch (e) { err = e; }
   check('oversize message → PUBLISH_PAYLOAD_TOO_LARGE',
     err instanceof PublishError && err.code === ErrorCodes.PUBLISH_PAYLOAD_TOO_LARGE);
 
-  // A message comfortably under the 256 KiB cap still publishes.
-  const okId = await peer.pub('cats', 'y'.repeat(100 * 1024), { sign: false });
-  check('under-cap (100 KiB) message publishes', typeof okId === 'string' && okId.length === 64);
+  // O-5: the reliable-delivery limit is the WebRTC-interop floor (~16 KiB), not
+  // 256 KiB — a 32 KiB message is not guaranteed receivable across browsers/hops.
+  err = null;
+  try { await peer.pub('cats', 'z'.repeat(32 * 1024), { sign: false }); }
+  catch (e) { err = e; }
+  check('32 KiB message → PUBLISH_PAYLOAD_TOO_LARGE (16 KiB reliable limit, O-5)',
+    err instanceof PublishError && err.code === ErrorCodes.PUBLISH_PAYLOAD_TOO_LARGE);
+
+  // A small message (well under the interop floor) still publishes.
+  const okId = await peer.pub('cats', 'y'.repeat(8 * 1024), { sign: false });
+  check('under-limit (8 KiB) message publishes', typeof okId === 'string' && okId.length === 64);
 }
 
 async function testPubNoManager() {

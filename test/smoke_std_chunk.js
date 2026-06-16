@@ -1,0 +1,133 @@
+// =====================================================================
+// smoke_std_chunk.js — @axona/protocol/std/chunk correctness.
+//
+//   1. byte-exact round-trip (shuffled order)
+//   2. every produced message stays under maxMessageBytes (O-5)
+//   3. duplicate deliveries tolerated, completes once (CDC-2: distinct index, not receipt count)
+//   4. manifest loss tolerated (count learned from any chunk)
+//   5. foreign-fileId / malformed garbage ignored (CDC-5)
+//   6. publishChunkedBytes refuses files over the replay-cache ceiling (O-1)
+//   7. high-level publish→receive round-trip via a mock peer
+//   8. receiveChunkedBytes REJECTS on a missing chunk instead of hanging (CDC-1)
+//
+//   node test/smoke_std_chunk.js
+// =====================================================================
+import { chunkBytes, createReassembler, stringToBytes, bytesToString,
+         publishChunkedBytes, receiveChunkedBytes, rawChunkSize } from '../std/chunk.js';
+
+let passed = 0, failed = 0;
+const check = (label, cond) => { if (cond) { console.log(`  ✓ ${label}`); passed++; } else { console.log(`  ✗ ${label}`); failed++; } };
+const eqBytes = (a, b) => a.length === b.length && a.every((x, i) => x === b[i]);
+function shuffle(a) { a = a.slice(); for (let i = a.length - 1; i > 0; i--) { const j = (i * 2654435761) % (i + 1); [a[i], a[j]] = [a[j], a[i]]; } return a; }
+function makeBytes(n) { const u = new Uint8Array(n); for (let i = 0; i < n; i++) u[i] = (i * 31 + 7) & 0xff; return u; }
+
+// In-memory peer: stores publishes per topic, replays on sub(since:'all').
+function mockPeer({ dropIndices = new Set() } = {}) {
+  const store = new Map();
+  return {
+    published: store,
+    async pub(topic, message, _opts) {
+      if (!store.has(topic)) store.set(topic, []);
+      const msgId = 'm' + (store.get(topic).length);
+      store.get(topic).push({ message, msgId });
+      return msgId;
+    },
+    async sub(topic, cb, _opts) {
+      for (const e of (store.get(topic) || [])) {
+        if (e.message?.k === 'c' && dropIndices.has(e.message.i)) continue;   // simulate a lost chunk
+        cb({ message: e.message, msgId: e.msgId });
+      }
+      return { topic };
+    },
+    async unsub() {},
+  };
+}
+
+async function main() {
+  console.log('@axona/protocol/std/chunk');
+  const MAXMSG = 4096;                            // small to force many chunks in tests
+
+  // ── 1. byte-exact round-trip, shuffled ──
+  {
+    const input = makeBytes(50_000);
+    const { messages, n } = chunkBytes(input, { name: 'x.bin', mime: 'application/octet-stream', maxMessageBytes: MAXMSG });
+    let out = null;
+    const r = createReassembler((f) => { out = f; });
+    for (const m of shuffle(messages)) r.accept(m);
+    check(`1. round-trip byte-exact (${n} chunks)`, out && eqBytes(out.bytes, input) && out.name === 'x.bin');
+  }
+
+  // ── 2. message size bound (O-5) ──
+  {
+    const { messages } = chunkBytes(makeBytes(40_000), { maxMessageBytes: MAXMSG });
+    const max = Math.max(...messages.map((m) => JSON.stringify(m).length));
+    check(`2. every message ≤ maxMessageBytes (max=${max} ≤ ${MAXMSG})`, max <= MAXMSG);
+  }
+
+  // ── 3. duplicate tolerance (CDC-2) ──
+  {
+    const input = makeBytes(20_000);
+    const { messages } = chunkBytes(input, { maxMessageBytes: MAXMSG });
+    let out = null, fires = 0;
+    const r = createReassembler((f) => { out = f; fires++; });
+    const dupd = [...messages, ...messages, ...messages.filter((m) => m.k === 'c').slice(0, 3)];  // many dups
+    for (const m of shuffle(dupd)) r.accept(m);
+    check('3. duplicates tolerated, byte-exact, completes exactly once', out && eqBytes(out.bytes, input) && fires === 1);
+  }
+
+  // ── 4. manifest loss tolerated ──
+  {
+    const input = makeBytes(15_000);
+    const { messages } = chunkBytes(input, { maxMessageBytes: MAXMSG });
+    let out = null;
+    const r = createReassembler((f) => { out = f; });
+    for (const m of messages.filter((m) => m.k !== 'm')) r.accept(m);   // drop the manifest
+    check('4. completes from chunks alone (manifest lost, n from chunk.n)', out && eqBytes(out.bytes, input));
+  }
+
+  // ── 5. garbage ignored (CDC-5) ──
+  {
+    const input = makeBytes(10_000);
+    const { messages, fileId } = chunkBytes(input, { maxMessageBytes: MAXMSG });
+    let out = null;
+    const r = createReassembler((f) => { out = f; });
+    r.accept({ f: 1, k: 'c', id: 'OTHER-FILE', i: 0, n: 1, d: 'AAAA' });   // foreign file
+    r.accept({ garbage: true });                                          // malformed
+    r.accept(null);
+    for (const m of messages) r.accept(m);
+    check('5. foreign-fileId + malformed ignored, real file intact', out && eqBytes(out.bytes, input) && out.id === fileId);
+  }
+
+  // ── 6. cache-cap refusal (O-1) ──
+  {
+    const peer = mockPeer();
+    let threw = false;
+    try { await publishChunkedBytes(peer, makeBytes(5_000_000), { maxMessageBytes: MAXMSG, cacheSize: 100 }); }
+    catch { threw = true; }
+    check('6. publishChunkedBytes throws when transfer exceeds cache ceiling', threw);
+  }
+
+  // ── 7. high-level publish → receive round-trip ──
+  {
+    const peer = mockPeer();
+    const input = stringToBytes('civil-defense sighting payload — '.repeat(2000));   // ~64KB string
+    const { topic, n } = await publishChunkedBytes(peer, input, { name: 'note.txt', maxMessageBytes: MAXMSG });
+    const file = await receiveChunkedBytes(peer, topic, { timeoutMs: 2000 });
+    check(`7. publish→receive round-trip (${n} chunks, string intact)`, eqBytes(file.bytes, input) && bytesToString(file.bytes).startsWith('civil-defense'));
+  }
+
+  // ── 8. no silent hang — rejects on a missing chunk (CDC-1) ──
+  {
+    const peer = mockPeer({ dropIndices: new Set([2]) });   // chunk index 2 never delivered
+    const input = makeBytes(30_000);
+    const { topic } = await publishChunkedBytes(peer, input, { maxMessageBytes: MAXMSG });
+    let rejected = false, msg = '';
+    try { await receiveChunkedBytes(peer, topic, { timeoutMs: 300 }); }
+    catch (e) { rejected = true; msg = e.message; }
+    check('8. rejects (no hang) on missing chunk, names missing index', rejected && /missing/.test(msg) && /\b2\b/.test(msg));
+  }
+
+  console.log(`\nResult: ${passed} passed, ${failed} failed  (rawChunk@16KB=${rawChunkSize()}B)`);
+  process.exit(failed === 0 ? 0 : 1);
+}
+main().catch((e) => { console.error('smoke threw:', e?.stack || e); process.exit(2); });
