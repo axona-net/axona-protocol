@@ -2,7 +2,7 @@
 // to a topic, show what arrives. ~70 lines, no framework. This is the artifact
 // the programmer-intro talk builds.
 
-import { AxonaPeer, AxonaDomain, NeuronNode, deriveIdentity, deriveTopicId, KERNEL_VERSION } from '/src/index.js';
+import { AxonaPeer, AxonaDomain, NeuronNode, deriveIdentity, dumpIdentity, loadIdentity, deriveTopicId, KERNEL_VERSION } from '/src/index.js';
 import { webTransport } from '/src/transport/web/index.js';
 import { regionName }   from '/src/utils/region-names.js';
 import { resolveAnchor } from '../lib/region.js';
@@ -14,7 +14,7 @@ const status = (t) => { $('status').textContent = t; };
 // the SAME topic-id no matter where they are. The user's OWN identity, by
 // contrast, is rooted at their REAL location (see whereAmI below) — so a message
 // shows where its sender actually sits, while the topic stays one shared keyspace.
-const APP_VERSION = '0.2.0';
+const APP_VERSION = '0.3.0';
 // Bridge selection (same as axona-share): ?bridge=<wss url> → ?net=testnet|prod
 // shortcut → default by hostname. Lets one build run against either network.
 const KNOWN_BRIDGES = { prod: 'wss://bridge.axona.net', testnet: 'wss://testnet.axona.net' };
@@ -30,7 +30,18 @@ const BRIDGE = resolveBridge();
 const NETWORK = BRIDGE === KNOWN_BRIDGES.testnet ? 'testnet' : BRIDGE === KNOWN_BRIDGES.prod ? 'prod' : 'custom';
 const ANCHOR = resolveAnchor({ search: '', fallback: 'useast' });   // topic anchor — pinned to us-east
 
-let peer, identity, currentTopic = null, currentSub = null;
+let peer, identity, publishIdentity, currentTopic = null, currentSub = null;
+
+// Persistent PUBLISH identity (key separation): the transport `identity` authenticates
+// the connection and is ephemeral; this signs your posts and is persisted so authorship
+// is stable across reloads. The kernel requires a publish identity to sign a publish.
+async function loadOrCreatePublishIdentity(lat, lng) {
+  const key = 'axona-minimal:publish';
+  try { const s = localStorage.getItem(key); if (s) return await loadIdentity(JSON.parse(s)); } catch {}
+  const id = await deriveIdentity({ lat, lng });
+  try { localStorage.setItem(key, JSON.stringify(await dumpIdentity(id))); } catch {}
+  return id;
+}
 const seen = new Set();                                  // msgIds we've already shown (dedup own echo)
 
 // "region:userID" read off a 264-bit publish ID (the node-id): top byte = the
@@ -67,11 +78,12 @@ async function connect() {
   status('locating…');
   const here = await whereAmI();
   status('connecting…');
-  identity        = await deriveIdentity({ lat: here.lat, lng: here.lng });
+  identity        = await deriveIdentity({ lat: here.lat, lng: here.lng });          // ephemeral transport
+  publishIdentity = await loadOrCreatePublishIdentity(here.lat, here.lng);            // persistent author
   const transport = webTransport({ bridgeUrl: BRIDGE, identity });
   const node      = new NeuronNode({ id: BigInt('0x' + identity.id), lat: here.lat, lng: here.lng });
   node.transport  = transport;
-  peer = new AxonaPeer({ domain: new AxonaDomain({ k: 20 }), node, identity, transport });
+  peer = new AxonaPeer({ domain: new AxonaDomain({ k: 20 }), node, identity, transport, publishIdentity });
 
   await transport.start(identity.id);
   await peer.start();
@@ -81,7 +93,7 @@ async function connect() {
     await new Promise((r) => setTimeout(r, 600));
   }
   status('connected');
-  $('ver').textContent = `app v${APP_VERSION} · kernel v${KERNEL_VERSION} · ${NETWORK} · you ${idLabel(identity.id)}`;
+  $('ver').textContent = `app v${APP_VERSION} · kernel v${KERNEL_VERSION} · ${NETWORK} · you ${idLabel(publishIdentity.id)}`;
   $('send').disabled = false;
 }
 
@@ -109,7 +121,9 @@ async function send() {
   const topic = $('topic').value.trim(), text = $('message').value;
   if (!topic || !text) return;
   await ensureSubscribed(topic);
-  const msgId = await peer.pub(topic, { text, pub: identity.id }, { publisher: ANCHOR.publisher });
+  // Signed by publishIdentity (the peer's default publish key). We voluntarily share
+  // the publish id so subscribers can show the author's region (idLabel) — app choice.
+  const msgId = await peer.pub(topic, { text, pub: publishIdentity.id }, { publisher: ANCHOR.publisher });
   seen.add(msgId);
   render(text, idLabel(identity.id), true, topic);
   $('message').value = '';
