@@ -71,12 +71,29 @@ async function main() {
     check('2. two distinct publish keys from one peer', e1.signerPubkey !== e2.signerPubkey);
   }
 
-  // ── 3. no publishIdentity, no signWith → transport identity signs (back-compat) ──
+  // ── 3. no publishIdentity + no signWith → REFUSED (transport key must not sign) ──
+  {
+    const { peer } = makePeer({ identity: transport });           // transport only, no publish identity
+    let err = null;
+    try { await peer.pub('topic/x', { c: 3 }); } catch (e) { err = e; }
+    check('3. signed publish without a publish identity → PublishError(PUBLISH_NO_PUBLISH_IDENTITY)',
+      err instanceof PublishError && err.code === ErrorCodes.PUBLISH_NO_PUBLISH_IDENTITY);
+  }
+
+  // ── 3b. transport-key signing is possible ONLY when explicitly requested ──
   {
     const { peer, am } = makePeer({ identity: transport });
-    await peer.pub('topic/x', { c: 3 });
-    const env = lastEnv(am);
-    check('3. back-compat: signerPubkey = transport key when no publish identity', env.signerPubkey === transport.pubkeyHex);
+    await peer.pub('topic/x', { c: 3 }, { signWith: transport });   // intentional, discouraged escape hatch
+    check('3b. explicit signWith: transport signs with the transport key (intentional override)',
+      lastEnv(am).signerPubkey === transport.pubkeyHex);
+  }
+
+  // ── 3c. anonymous publish needs no publish identity ──
+  {
+    const { peer, am } = makePeer({ identity: transport });
+    await peer.pub('topic/x', { c: 3 }, { sign: false });
+    check('3c. sign:false → unsigned publish (no signerPubkey), no publish identity needed',
+      lastEnv(am).signerPubkey == null);
   }
 
   // ── 4. the dual-key envelope verifies (signature + msgId) ──

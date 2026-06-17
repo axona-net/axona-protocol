@@ -42,6 +42,7 @@ async function makePeer({ synaptomeIds = [], subscriptions = [] } = {}) {
     engine: { onEvent: () => () => {} },
     node,
     identity,
+    publishIdentity: identity,   // test signs with the same key (explicit)
     axonaManager: new MockAxonaManager(),
   });
   // pre-register subscriptions via peer.sub so _subscriptions populates.
@@ -141,8 +142,9 @@ async function testFromSnapshotIdentityReusable() {
     axonaManager: new MockAxonaManager(),
   });
 
-  // Verify the restored identity is usable by signing through pub().
-  const msgId = await restored.pub('test', { hi: 1 });
+  // Verify the restored identity is usable by signing through pub() — sign with it
+  // EXPLICITLY (key separation: the transport key is never the implicit signer).
+  const msgId = await restored.pub('test', { hi: 1 }, { signWith: restored._identity });
   check('restored peer can sign + publish',
     typeof msgId === 'string' && msgId.length === 64);
 }

@@ -97,7 +97,7 @@ async function setupPeer() {
   const am       = new MockAxonaManager(identity.id);
   const peer = new AxonaPeer({
     engine: { onEvent: () => () => {} },
-    node, axonaManager: am, identity,
+    node, axonaManager: am, identity, publishIdentity: identity,   // test signs with the same key (explicit)
   });
   return { peer, am, identity };
 }

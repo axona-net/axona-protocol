@@ -191,8 +191,9 @@ async function testRoundTrip() {
     peer2.pendingSubscriptions.find(s => s.topic === 'news')?.since === 'latest');
 
   // Synaptome wasn't populated this round (no peer-joined events fired),
-  // so it stays empty.  Verify identity sign works on the rebuilt peer.
-  const msgId = await peer2.pub('test', { hi: 1 });
+  // so it stays empty.  Verify the rebuilt/loaded identity can sign — sign with it
+  // EXPLICITLY (key separation: peer.pub never signs with the transport key implicitly).
+  const msgId = await peer2.pub('test', { hi: 1 }, { signWith: peer2._identity });
   check('rebuilt peer can sign + publish',
     typeof msgId === 'string' && msgId.length === 64);
 

@@ -204,7 +204,7 @@ async function testPeerSignedRoundTrip() {
   const am = new MockAxonaManager(id.id);
   const peer = new AxonaPeer({
     engine: { onEvent: () => () => {} },
-    node, axonaManager: am, identity: id,
+    node, axonaManager: am, identity: id, publishIdentity: id,   // test signs with the same key (explicit)
   });
 
   const received = [];
@@ -242,7 +242,7 @@ async function testPeerUnsignedRoundTrip() {
   const am = new MockAxonaManager(id.id);
   const peer = new AxonaPeer({
     engine: { onEvent: () => () => {} },
-    node, axonaManager: am, identity: id,
+    node, axonaManager: am, identity: id, publishIdentity: id,   // test signs with the same key (explicit)
   });
 
   const received = [];
@@ -277,8 +277,8 @@ async function testPeerSignWithoutIdentity() {
   let err = null;
   try { await peer.pub('cats', null); }
   catch (e) { err = e; }
-  check('throws PublishError when identity missing',
-    err instanceof PublishError && err.code === ErrorCodes.PUBLISH_SIGN_FAILED);
+  check('throws PublishError when no publish identity (transport key never signs implicitly)',
+    err instanceof PublishError && err.code === ErrorCodes.PUBLISH_NO_PUBLISH_IDENTITY);
 
   // Unsigned still works without identity.
   const msgId = await peer.pub('cats', 'anon', { sign: false });
@@ -295,7 +295,7 @@ async function testPeerCrossSignerVerification() {
   const aliceAm   = new MockAxonaManager(alice.id);
   const alicePeer = new AxonaPeer({
     engine: { onEvent: () => () => {} },
-    node: aliceNode, axonaManager: aliceAm, identity: alice,
+    node: aliceNode, axonaManager: aliceAm, identity: alice, publishIdentity: alice,   // test signs with the same key
   });
 
   await alicePeer.pub('news', { headline: 'mesh launch' });
