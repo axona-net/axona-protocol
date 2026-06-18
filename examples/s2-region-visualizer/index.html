@@ -214,10 +214,11 @@
       <h2>What you are seeing</h2>
       <p style="font-size:0.9rem; margin: 0.2rem 0;">
         Every Axona nodeId starts with an 8-bit S2 prefix derived from
-        the peer's lat/lng via Google's S2 cube projection. The
-        prefix anchors pub/sub topics: K-closest routing for a
-        publisher-keyed topic naturally finds peers in the
-        publisher's region.
+        the peer's lat/lng via Google's S2 cube projection. The same
+        8-bit prefix anchors pub/sub topics: a topic descriptor's
+        `region` byte places the topic in the keyspace, so K-closest
+        routing for a region-keyed topic naturally finds peers in that
+        region.
       </p>
       <p style="font-size:0.9rem; margin: 0.6rem 0 0 0;">
         S2 projects the globe onto the six faces of a cube and

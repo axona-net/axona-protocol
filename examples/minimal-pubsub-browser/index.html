@@ -305,7 +305,8 @@
 <script type="module">
 import {
   AxonaPeer, AxonaDomain, NeuronNode,
-  deriveIdentity, deriveTopicId, geoCellId,
+  createNodeIdentity, createAuthorIdentity, deriveTopicId, geoCellId,
+  regionNameForLatLng,
 } from '/src/index.js';
 import { webTransport } from '/src/transport/web/index.js';
 
@@ -313,7 +314,7 @@ import { webTransport } from '/src/transport/web/index.js';
 // Bump the middle digit on every code change to this file so the
 // footer reflects what's actually running and stale browser tabs are
 // distinguishable.
-const DEMO_VERSION = '1.17.0';
+const DEMO_VERSION = '1.18.0';
 const BRIDGE_URL   = new URLSearchParams(window.location.search).get('bridge')
                   // Served from a testnet host (e.g. demo-testnet.axona.net) →
                   // default to the testnet bridge (2.28.0 / axona-5 / wire-2),
@@ -322,17 +323,17 @@ const BRIDGE_URL   = new URLSearchParams(window.location.search).get('bridge')
                   || (location.hostname.includes('testnet') ? 'wss://testnet.axona.net'
                                                              : 'wss://bridge.axona.net');
 const VIRGINIA     = { lat: 38.0, lng: -77.0 };
-// axona-peer composes topic names as `${regionId}/${eventName}` (see
-// axona-peer/src/client.js line 1230).  Use the same composition here
-// so the demo's hello-world topic at us-east is the EXACT topic that
-// axona-peer subscribers on us-east/hello-world see.  Without this,
-// the 0x89 anchor matches but the body hash differs and the two apps
-// never converge.  EVENT is what we show in the UI tile; TOPIC is
-// what crosses the wire.
-const REGION_ID  = 'us-east';
-const EVENT      = 'hello-world';
-const TOPIC      = `${REGION_ID}/${EVENT}`;
-const MAX_DOTS   = 100;
+// v0.3: a topic is a structured descriptor { region, name }. The region is
+// a first-class field (the kernel region NAME carrying the S2 cell) — no
+// synthetic publisher. axona-peer composes the same open topic for us-east
+// as { region: regionNameForLatLng(38,-77), name: 'hello-world' } (see
+// axona-peer/src/client.js openTopicDesc), so the demo and axona.net
+// subscribers converge on the EXACT same topic id. EVENT is shown in the UI
+// tile; TOPIC (the descriptor) is what crosses the wire.
+const REGION_NAME = regionNameForLatLng(VIRGINIA.lat, VIRGINIA.lng);   // e.g. 'useast'
+const EVENT       = 'hello-world';
+const TOPIC       = { region: REGION_NAME, name: EVENT };
+const MAX_DOTS    = 100;
 
 // ─── DOM ─────────────────────────────────────────────────────────────
 const $dots    = document.getElementById('dots');
@@ -362,12 +363,10 @@ try {
 const virginiaPrefix = geoCellId(VIRGINIA.lat, VIRGINIA.lng, 8);
 $prefix.textContent  = '0x' + virginiaPrefix.toString(16).padStart(2, '0').toUpperCase();
 
-// Synthetic publisher: nodeId-shaped hex whose top 8 bits = Virginia
-// S2 cell.  Anchors the topic at Virginia regardless of where the
-// subscribing peer lives — every demo user worldwide computes the
-// same topicId.
-const publisher = virginiaPrefix.toString(16).padStart(2, '0') + '0'.repeat(64);
-const topicId   = await deriveTopicId(publisher, TOPIC);
+// The topic id is derived from the descriptor { region, name }: the region
+// byte anchors it at Virginia (0x89) regardless of where the subscribing
+// peer lives, so every demo user worldwide computes the same topicId.
+const topicId   = await deriveTopicId(TOPIC);
 $topicId.textContent = topicId.slice(0, 12) + '…' + topicId.slice(-6);
 
 // ─── Geolocation (for our own identity only) ─────────────────────────
@@ -389,12 +388,15 @@ async function getLocation() {
 const geo = await getLocation();
 
 // ─── Identity + transport + peer ─────────────────────────────────────
-const identity = await deriveIdentity({ lat: geo.lat, lng: geo.lng });
+// Connection identity (ephemeral, location-anchored) + a separate, location-free
+// authorship key. The connection key never signs content; publishes use signWith.
+const identity = await createNodeIdentity({ lat: geo.lat, lng: geo.lng });
+const author   = await createAuthorIdentity();
 const transport = webTransport({ bridgeUrl: BRIDGE_URL, identity });
 const node     = new NeuronNode({ id: BigInt('0x' + identity.id), lat: geo.lat, lng: geo.lng });
 node.transport = transport;
 const domain   = new AxonaDomain({ k: 20 });
-const peer     = new AxonaPeer({ domain, node, identity, transport });
+const peer     = new AxonaPeer({ domain, node, nodeIdentity: identity, transport });
 
 // DEBUG (opt-in via ?debug) — surface a mesh-health readout so the
 // auth-bound set (boundPeers) can be compared against the raw WebRTC
@@ -576,7 +578,7 @@ const sub = await peer.sub(TOPIC, (envelope) => {
   const name = colonAt > 0 ? wire.slice(0, colonAt).trim() : '(unknown)';
   const body = colonAt > 0 ? wire.slice(colonAt + 1).trim() : wire;
   appendMessage(name, body, new Date());
-}, { publisher, since: 'all' });
+}, { since: 'all' });
 
 // Arm the kernel's AxonaManager periodic refresh timer.  By default
 // AxonaPeer._buildDefaultAxonaManager() does NOT call am.start() (the
@@ -599,17 +601,16 @@ peer._axonaManager?.start?.();
 // state-tracking map.
 setInterval(renderDots, 2000);
 
-// ─── Topic metrics (peer.metrics — kernel v2.12.0) ───────────────────
-// This topic is anchored at a SYNTHETIC regional publisher (prefix||0^256;
-// nobody holds that key), so it is UNOWNED — and as of kernel v2.12.0 an
-// unowned topic's metrics are readable by anyone.  We poll the axon tree:
+// ─── Topic metrics (peer.metrics) ────────────────────────────────────
+// This is an OPEN topic (write policy 'open', no owner), so its metrics are
+// readable by anyone.  We poll the axon tree:
 //   current_count — events retained in the tree right now (≤ queue cap / TTL)
 //   subscribers   — max direct subscribers at a responding relay
 //   publishes     — distinct messages the relays have seen
 // Best-effort: whatever relays answer within the timeout.
 async function pollMetrics() {
   try {
-    const m = await peer.metrics(TOPIC, { publisher });
+    const m = await peer.metrics(TOPIC);
     $mLive.textContent = String(m.current_count ?? 0);
     $mSubs.textContent = String(m.subscribers   ?? 0);
     $mPub.textContent  = String(m.publishes     ?? 0);
@@ -661,7 +662,7 @@ async function publish() {
   if (!msg) return;
   $pubBtn.disabled = true;
   try {
-    await peer.pub(TOPIC, name + ': ' + msg, { publisher });
+    await peer.pub(TOPIC, name + ': ' + msg, { signWith: author });
   } catch (err) {
     console.error('[demo] publish failed', err);
   } finally {

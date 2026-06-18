@@ -44,11 +44,12 @@ anything you build against it will port to real transports unchanged.
 
 ## What this demonstrates
 
-- `deriveIdentity({ lat, lng })` — 264-bit Ed25519 identity anchored to an S2 cell
+- `createNodeIdentity({ lat, lng })` — 264-bit Ed25519 connection identity anchored to an S2 cell
+- `createAuthorIdentity()` — a separate, location-free authorship key (Author ID)
 - Two `simTransport()`s on a shared `SimNetwork` — the kernel's in-process router
 - Composing `AxonaPeer` + `AxonaManager` from the kernel primitives
-- Region-keyed topics via a synthetic publisher
-- `peer.pub()` / `peer.sub()` roundtrip across two distinct peers
+- Region-keyed topics via a structured topic descriptor `{ region, name }`
+- `peer.pub(topic, msg, { signWith })` / `peer.sub()` roundtrip across two distinct peers
 
 ## What this does NOT demonstrate
 
