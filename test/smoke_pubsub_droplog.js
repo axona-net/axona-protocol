@@ -21,7 +21,11 @@
 import { AxonaManager } from '../src/pubsub/AxonaManager.js';
 import { AxonaPeer } from '../src/dht/AxonaPeer.js';
 import { buildEnvelope } from '../src/pubsub/envelope.js';
-import { deriveIdentity } from '../src/identity/index.js';
+import { deriveTopicId } from '../src/pubsub/post.js';
+import { createAuthorIdentity } from '../src/identity/index.js';
+
+// v0.3: an envelope's topic is the structured DESCRIPTOR object, not a string.
+const TOPIC_DESC = (name) => ({ region: 0x89, owner: null, name, write: 'open' });
 
 let passed = 0, failed = 0;
 function check(label, cond) {
@@ -30,7 +34,6 @@ function check(label, cond) {
 }
 const hex = (b) => 'a' + b.toString(16).padStart(2, '0') + '0'.repeat(63);
 const big = (h) => BigInt('0x' + h);
-const TOPIC = hex(0x05);
 
 function makeManager() {
   const dht = {
@@ -44,11 +47,14 @@ function makeManager() {
 async function main() {
   console.log('pub/sub security drop-path logs surface through the sink\n');
 
-  const id        = await deriveIdentity({ lat: 1, lng: 2 });
-  const signed    = await buildEnvelope({ topic: 'news', message: 'hello', identity: id, sign: true });
+  const id        = await createAuthorIdentity();
+  const signed    = await buildEnvelope({ topic: TOPIC_DESC('news'), message: 'hello', identity: id, sign: true });
   const realSigned = signed.msgId;
   const FAKE      = 'dead'.repeat(16);                    // 64-hex, not the real hash
   const publisher = big('a' + id.pubkeyHex);
+  // v0.3: the root recomputes the topic id from the SIGNED descriptor and drops
+  // a routed-vs-descriptor mismatch — route every publish to the descriptor's id.
+  const TID       = await deriveTopicId(TOPIC_DESC('news'));
 
   // ── a sink set via setLogSink captures drop events ────────────────
   console.log('── setLogSink captures drops ──');
@@ -59,18 +65,18 @@ async function main() {
 
     // posthash-mismatch drop (honest signature, tampered postHash)
     await m._onPublishDirect(
-      { topicId: TOPIC, publisher, json: JSON.stringify(signed),
+      { topicId: TID, publisher, json: JSON.stringify(signed),
         publishId: 'ph:1', publishTs: 1, postHash: FAKE });
     const ph = logs.find(l => l.msg === 'publish-posthash-mismatch-dropped');
     check('posthash-mismatch drop emitted a log', !!ph);
     check('  log carries level "debug"', ph?.level === 'debug');
     check('  log context names the topic', ph?.context?.topicId != null);
-    check('  drop took effect (no role created)', m.axonRoles.get(big(TOPIC)) == null);
+    check('  drop took effect (no role created)', m.axonRoles.get(big(TID)) == null);
 
     // bad-signature drop (corrupt the signature, same topic)
     const forged = { ...signed, signature: '0'.repeat(signed.signature.length) };
     await m._onPublishDirect(
-      { topicId: TOPIC, publisher, json: JSON.stringify(forged),
+      { topicId: TID, publisher, json: JSON.stringify(forged),
         publishId: 'sig:1', publishTs: 1, postHash: realSigned });
     check('bad-signature drop emitted a log',
       logs.some(l => l.msg === 'publish-bad-signature-dropped'));
@@ -85,11 +91,11 @@ async function main() {
     let threw = false;
     try {
       await m._onPublishDirect(
-        { topicId: TOPIC, publisher, json: JSON.stringify(signed),
+        { topicId: TID, publisher, json: JSON.stringify(signed),
           publishId: 'ph:2', publishTs: 1, postHash: FAKE });
     } catch { threw = true; }
     check('drop path with no sink does not throw', threw === false);
-    check('drop still took effect (no role)', m.axonRoles.get(big(TOPIC)) == null);
+    check('drop still took effect (no role)', m.axonRoles.get(big(TID)) == null);
   }
 
   // ── detaching the sink restores the no-op ─────────────────────────
@@ -101,7 +107,7 @@ async function main() {
     m.setLogSink(null);
     check('setLogSink(null) clears the sink', m._emitLog === null);
     await m._onPublishDirect(
-      { topicId: TOPIC, publisher, json: JSON.stringify(signed),
+      { topicId: TID, publisher, json: JSON.stringify(signed),
         publishId: 'ph:3', publishTs: 1, postHash: FAKE });
     check('no logs captured after detach', logs.length === 0);
   }
@@ -123,7 +129,7 @@ async function main() {
     check('peer resolves the same manager', resolved === manager);
     check('choke point attached a sink', typeof manager._emitLog === 'function');
     await manager._onPublishDirect(
-      { topicId: TOPIC, publisher, json: JSON.stringify(signed),
+      { topicId: TID, publisher, json: JSON.stringify(signed),
         publishId: 'peer:1', publishTs: 1, postHash: FAKE });
     const hit = seen.find(e => e.msg === 'publish-posthash-mismatch-dropped');
     check('a manager drop surfaced through peer.onLog', !!hit);

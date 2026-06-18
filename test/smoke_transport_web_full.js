@@ -21,7 +21,7 @@ import {
 } from '../src/transport/web/index.js';
 import { TransportError, ErrorCodes } from '../src/errors.js';
 import { fromHex } from '../src/utils/hexid.js';
-import { deriveIdentity } from '../src/identity/index.js';
+import { createNodeIdentity } from '../src/identity/index.js';
 import { buildAuthHello, cbvFromNonces } from '../src/transport/handshake-auth.js';
 
 let passed = 0, failed = 0;
@@ -377,8 +377,8 @@ async function testWebTransportAutoHandshake() {
 
   // axona/4 — the handshake is now authenticated: real identities, a
   // serverNonce-bound CBV, and Ed25519 proof-of-possession both ways.
-  const alice    = await deriveIdentity({ lat: 40.71, lng: -74.0 });
-  const bridgeId = await deriveIdentity({ lat: 51.5,  lng: -0.12 });
+  const alice    = await createNodeIdentity({ lat: 40.71, lng: -74.0 });
+  const bridgeId = await createNodeIdentity({ lat: 51.5,  lng: -0.12 });
 
   const t = webTransport({
     bridgeUrl: 'wss://test.example',
@@ -450,7 +450,7 @@ async function testWebTransportAutoHandshake() {
 async function testWebTransportAutoHandshakeTimeout() {
   console.log('\n── webTransport factory: autoHandshake timeout ──');
 
-  const alice = await deriveIdentity({ lat: 1, lng: 1 });
+  const alice = await createNodeIdentity({ lat: 1, lng: 1 });
   const t = webTransport({
     bridgeUrl: 'wss://test.example',
     identity:  alice,

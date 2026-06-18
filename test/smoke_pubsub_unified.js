@@ -1,26 +1,32 @@
 // =====================================================================
 // smoke_pubsub_unified.js — verify AxonaPeer.pub() / sub() / stop()
-//                            against a mock AxonaManager.
+//                            against a mock AxonaManager — v0.3 API.
 // Run: node test/smoke_pubsub_unified.js
 //
-// Covers the unified-API contract (A1 surface):
-//   - string topic input
-//   - hex topic-id derivation via deriveTopicId
-//   - msgId returned from pub()
+// Covers the unified-API contract (A1 surface), v0.3:
+//   - STRUCTURED topic descriptors ({ region, name } open; { owner, name,
+//     write:'owner' } owned) — strings are rejected
+//   - BigInt topic-id derivation via deriveTopicIdBig (matches publisher)
+//   - msgId (64-hex content hash) returned from pub()
+//   - { signWith: author } required; { signWith: ANONYMOUS } = unsigned;
+//     omitting signWith → PUBLISH_NO_PUBLISH_IDENTITY
+//   - envelope descriptor in the wire ({region,owner,name,write}); meta
+//     carries postHash (=msgId), NOT publishId
 //   - Subscription handle with .stop()
-//   - envelope shape on delivery: { msgId, ts, topic, message, publisher }
+//   - delivery dispatch shape: { msgId, ts, topic, message }
 //   - `since` modes seed lastSeenTs correctly
 //   - input validation
 //
 // Full pub/sub end-to-end against the production AxonaManager + Engine
-// is exercised by axona-peer/src/smoke_pubsub*.js and (post-T-I2) the
-// dht-sim regression suite — those validate the wiring layer.
+// is exercised by the dht-sim regression suite — those validate the
+// wiring layer. The SIGNED-envelope semantics (region-required, owner-only
+// pre-check, descriptor in envelope) live in smoke_pubsub_v3.mjs.
 // =====================================================================
 
-import { AxonaPeer }       from '../src/dht/AxonaPeer.js';
+import { AxonaPeer, ANONYMOUS } from '../src/dht/AxonaPeer.js';
 import { Subscription }    from '../src/dht/Subscription.js';
-import { deriveTopicId }   from '../src/pubsub/post.js';
-import { isHexId, fromHex, toHex } from '../src/utils/hexid.js';
+import { deriveTopicIdBig } from '../src/pubsub/post.js';
+import { createNodeIdentity, createAuthorIdentity } from '../src/identity/index.js';
 import { PublishError, SubscribeError, ErrorCodes } from '../src/errors.js';
 
 let passed = 0, failed = 0;
@@ -29,22 +35,22 @@ function check(label, condition) {
   else           { console.log(`  ✗ ${label}`); failed++; }
 }
 
-const NODE_ID = 'aa' + 'a1'.repeat(32);   // 66-char hex
+// Structured open-topic descriptors (region required for an open topic).
+const CATS = { region: 'useast', name: 'cats' };
 
 // ── MockAxonaManager: implements just the surface AxonaPeer needs ─────
 
 class MockAxonaManager {
   constructor() {
-    this.nodeId = NODE_ID;
     this.published = [];            // [{ topicId, json, meta }]
-    this.subscribed = [];           // topicIds
-    this.unsubscribed = [];         // topicIds
+    this.subscribed = [];           // topicIds (BigInt)
+    this.unsubscribed = [];         // topicIds (BigInt)
     this._publishCounter = 0;
     this._lastSeenTsByTopic = new Map();
     this._deliveryCallback = null;
   }
   pubsubPublish(topicId, json, meta) {
-    const publishId = `${NODE_ID}:${++this._publishCounter}`;
+    const publishId = `internal:${++this._publishCounter}`;
     this.published.push({ topicId, json, meta, publishId });
     return publishId;
   }
@@ -53,158 +59,162 @@ class MockAxonaManager {
   onPubsubDelivery(cb) { this._deliveryCallback = cb; }
 
   // Test helper: simulate a delivery.
-  triggerDelivery(topicId, json, publishId = `${NODE_ID}:1`, publishTs = Date.now()) {
+  triggerDelivery(topicId, json, publishId = 'internal:1', publishTs = Date.now()) {
     if (this._deliveryCallback) this._deliveryCallback(topicId, json, publishId, publishTs);
   }
 }
 
 // ── MockNode + mockEngine just enough for AxonaPeer constructor ──────
 
-function makePeer({ withAxonaManager = true } = {}) {
-  const node    = { id: NODE_ID, alive: true };
-  const engine  = {
-    onEvent: (_cb) => () => {},
-    simEpoch: 0,
-  };
+async function makePeer({ withAxonaManager = true } = {}) {
+  const id      = await createNodeIdentity({ lat: 38, lng: -78 });
+  const node    = { id: BigInt('0x' + id.id), alive: true };
+  const engine  = { onEvent: (_cb) => () => {}, simEpoch: 0 };
   const am = withAxonaManager ? new MockAxonaManager() : null;
-  const peer = new AxonaPeer({ engine, node, axonaManager: am });
+  const peer = new AxonaPeer({ engine, node, axonaManager: am, nodeIdentity: id });
   return { peer, am };
 }
+
+let AUTHOR;   // shared author identity for signed publishes
 
 // ── Tests ────────────────────────────────────────────────────────────
 
 async function testPubBasics() {
   console.log('\n── peer.pub() basics ──');
-  const { peer, am } = makePeer();
-  // Anonymous publish keeps this smoke test independent of identity
-  // wiring (the signed-publish flow is exercised by smoke_envelope.js).
-  const msgId = await peer.pub('cats', { meow: 1 }, { sign: false });
+  const { peer, am } = await makePeer();
+  const msgId = await peer.pub(CATS, { meow: 1 }, { signWith: AUTHOR });
 
-  check('pub resolves with msgId string',
+  check('pub resolves with msgId string (64-hex content hash)',
     typeof msgId === 'string' && msgId.length === 64);
-  check('AxonaManager.pubsubPublish called once',
-    am.published.length === 1);
-  // Kernel passes BigInt topicId to AxonaManager (post-v1.5 refactor).
-  check('topicId is bigint',
-    typeof am.published[0].topicId === 'bigint');
+  check('AxonaManager.pubsubPublish called once', am.published.length === 1);
+  // Kernel passes BigInt topicId to AxonaManager.
+  check('topicId is bigint', typeof am.published[0].topicId === 'bigint');
 
-  const expectedTopicIdHex = await deriveTopicId(NODE_ID, 'cats');
-  check('topicId = deriveTopicId(nodeId, topic)',
-    toHex(am.published[0].topicId) === expectedTopicIdHex);
+  const expected = await deriveTopicIdBig({ region: 'useast', name: 'cats', write: 'open' });
+  check('topicId = deriveTopicIdBig({region,name})',
+    am.published[0].topicId === expected);
 
-  // Envelope is JSON-serialized: { msgId, ts, topic, message }
+  // Envelope is JSON-serialized: { msgId, seq, ts, topic, message, signerPubkey }
   const env = JSON.parse(am.published[0].json);
-  check('json envelope has msgId',     env.msgId === msgId);
-  check('json envelope has topic',     env.topic === 'cats');
-  check('json envelope has message',   env.message.meow === 1);
-  check('meta carries publisher',      am.published[0].meta.publisher === NODE_ID);
+  check('json envelope has msgId',   env.msgId === msgId);
+  check('json envelope carries the topic DESCRIPTOR',
+    env.topic && env.topic.name === 'cats' && env.topic.write === 'open' && env.topic.owner === null);
+  check('json envelope has message', env.message.meow === 1);
+  check('json envelope signed by the author', env.signerPubkey === AUTHOR.authorId);
+  // v0.3: meta carries postHash (=msgId), NOT publishId / publisher.
+  check('meta.postHash === msgId',   am.published[0].meta.postHash === msgId);
+  check('meta carries no publishId', am.published[0].meta.publishId === undefined);
+  check('meta carries no publisher', am.published[0].meta.publisher === undefined);
+}
+
+async function testAnonymousPub() {
+  console.log('\n── peer.pub() anonymous (signWith: ANONYMOUS) ──');
+  const { peer, am } = await makePeer();
+  const msgId = await peer.pub(CATS, { meow: 1 }, { signWith: ANONYMOUS });
+  check('anonymous pub resolves with msgId', typeof msgId === 'string' && msgId.length === 64);
+  const env = JSON.parse(am.published[0].json);
+  check('anonymous → no signerPubkey', env.signerPubkey === undefined);
 }
 
 async function testPubValidation() {
   console.log('\n── peer.pub() validation ──');
-  const { peer } = makePeer();
+  const { peer } = await makePeer();
 
+  // Omitting signWith is an error — no default author, no node-key fallback.
   let err = null;
-  try { await peer.pub('', { x: 1 }); }
-  catch (e) { err = e; }
-  check('empty topic → PublishError',
+  try { await peer.pub(CATS, { x: 1 }); } catch (e) { err = e; }
+  check('no signer → PUBLISH_NO_PUBLISH_IDENTITY',
+    err instanceof PublishError && err.code === ErrorCodes.PUBLISH_NO_PUBLISH_IDENTITY);
+
+  // String topic (legacy) is rejected — topics are structured descriptors now.
+  err = null;
+  try { await peer.pub('cats', { x: 1 }, { signWith: AUTHOR }); } catch (e) { err = e; }
+  check('string topic → PUBLISH_INVALID_TOPIC',
     err instanceof PublishError && err.code === ErrorCodes.PUBLISH_INVALID_TOPIC);
 
+  // Empty name → invalid topic.
   err = null;
-  try { await peer.pub(null, { x: 1 }); }
-  catch (e) { err = e; }
-  check('null topic → PublishError', err instanceof PublishError);
+  try { await peer.pub({ region: 'useast', name: '' }, { x: 1 }, { signWith: AUTHOR }); } catch (e) { err = e; }
+  check('empty topic name → PUBLISH_INVALID_TOPIC',
+    err instanceof PublishError && err.code === ErrorCodes.PUBLISH_INVALID_TOPIC);
 
+  // Open topic with no region → region required (no global region).
   err = null;
-  const cyclic = {};
-  cyclic.self = cyclic;
-  try { await peer.pub('cats', cyclic, { sign: false }); }
-  catch (e) { err = e; }
-  // Cyclic payloads explode inside canonical() during envelope build
-  // (msgId hashing), caught as PUBLISH_SIGN_FAILED; a payload that
-  // survives canonical but not JSON.stringify(envelope) → PUBLISH_INVALID_MESSAGE.
+  try { await peer.pub({ name: 'cats' }, { x: 1 }, { signWith: AUTHOR }); } catch (e) { err = e; }
+  check('open topic without region → TOPIC_REGION_REQUIRED',
+    err instanceof PublishError && err.code === ErrorCodes.TOPIC_REGION_REQUIRED);
+
+  // Cyclic payload explodes during envelope build (msgId hashing).
+  err = null;
+  const cyclic = {}; cyclic.self = cyclic;
+  try { await peer.pub(CATS, cyclic, { signWith: ANONYMOUS }); } catch (e) { err = e; }
   check('un-stringifiable payload → PublishError',
     err instanceof PublishError &&
     (err.code === ErrorCodes.PUBLISH_SIGN_FAILED ||
      err.code === ErrorCodes.PUBLISH_INVALID_MESSAGE));
 
-  // Oversize: peer.pub fails LOUD with PUBLISH_PAYLOAD_TOO_LARGE rather than
-  // letting an unreceivable message be silently dropped mid-mesh (O-5).
+  // Oversize: fails LOUD with PUBLISH_PAYLOAD_TOO_LARGE (O-5).
   err = null;
-  try { await peer.pub('cats', 'x'.repeat(256 * 1024 + 16), { sign: false }); }
-  catch (e) { err = e; }
+  try { await peer.pub(CATS, 'x'.repeat(256 * 1024 + 16), { signWith: ANONYMOUS }); } catch (e) { err = e; }
   check('oversize message → PUBLISH_PAYLOAD_TOO_LARGE',
     err instanceof PublishError && err.code === ErrorCodes.PUBLISH_PAYLOAD_TOO_LARGE);
 
-  // O-5: the reliable-delivery limit is the WebRTC-interop floor (~16 KiB), not
-  // 256 KiB — a 32 KiB message is not guaranteed receivable across browsers/hops.
+  // 32 KiB still over the WebRTC-interop floor (~16 KiB reliable limit, O-5).
   err = null;
-  try { await peer.pub('cats', 'z'.repeat(32 * 1024), { sign: false }); }
-  catch (e) { err = e; }
+  try { await peer.pub(CATS, 'z'.repeat(32 * 1024), { signWith: ANONYMOUS }); } catch (e) { err = e; }
   check('32 KiB message → PUBLISH_PAYLOAD_TOO_LARGE (16 KiB reliable limit, O-5)',
     err instanceof PublishError && err.code === ErrorCodes.PUBLISH_PAYLOAD_TOO_LARGE);
 
   // A small message (well under the interop floor) still publishes.
-  const okId = await peer.pub('cats', 'y'.repeat(8 * 1024), { sign: false });
+  const okId = await peer.pub(CATS, 'y'.repeat(8 * 1024), { signWith: ANONYMOUS });
   check('under-limit (8 KiB) message publishes', typeof okId === 'string' && okId.length === 64);
 }
 
 async function testPubNoManager() {
   console.log('\n── peer.pub() without AxonaManager ──');
-  const { peer } = makePeer({ withAxonaManager: false });
+  const { peer } = await makePeer({ withAxonaManager: false });
   let err = null;
-  try { await peer.pub('cats', null, { sign: false }); }
-  catch (e) { err = e; }
+  try { await peer.pub(CATS, null, { signWith: ANONYMOUS }); } catch (e) { err = e; }
   check('no AxonaManager → PublishError', err instanceof PublishError);
 }
 
 async function testSubReceives() {
   console.log('\n── peer.sub() receives delivery as envelope ──');
-  const { peer, am } = makePeer();
+  const { peer, am } = await makePeer();
   const received = [];
-  const sub = await peer.sub('cats', env => received.push(env));
+  const sub = await peer.sub(CATS, env => received.push(env));
 
   check('sub returns Subscription', sub instanceof Subscription);
   check('sub.topicName preserved',  sub.topicName === 'cats');
-  // Public sub.topicId is hex (display form); kernel uses BigInt internally.
-  check('sub.topicId is hex',       isHexId(sub.topicId));
-  // AxonaManager.pubsubSubscribe is called with BigInt topicId.
+  // AxonaManager.pubsubSubscribe is called with the BigInt topicId.
   check('AxonaManager.pubsubSubscribe called',
-    am.subscribed.length === 1 && am.subscribed[0] === sub._topicId);
+    am.subscribed.length === 1 && am.subscribed[0] === sub.topicIdBig);
 
-  // Synthesize a JSON envelope.  triggerDelivery must use the BigInt
-  // topicId (kernel-internal key); sub._topicId exposes it.
-  const env = {
-    msgId: '0'.repeat(64),
-    ts: 1234567,
-    topic: 'cats',
-    message: { hi: 1 },
-  };
-  am.triggerDelivery(sub._topicId, JSON.stringify(env), 'internal-7', 999);
+  // Synthesize a well-formed v0.3 envelope (topic is the signed descriptor
+  // object { region, owner, name, write } → clean-parse path).
+  const env = { msgId: '0'.repeat(64), ts: 1234567,
+    topic: { region: 'useast', owner: null, name: 'cats', write: 'open' }, message: { hi: 1 } };
+  am.triggerDelivery(sub.topicIdBig, JSON.stringify(env), 'internal:7', 999);
 
   check('handler invoked once', received.length === 1);
-  check('envelope.msgId is content-derived, not publishId',
+  check('envelope.msgId is content-derived (from envelope, not publishId)',
     received[0].msgId === env.msgId);
-  check('envelope.ts (from envelope, not delivery ts)',
-    received[0].ts === 1234567);
-  check('envelope.topic',       received[0].topic === 'cats');
-  check('envelope.message',     received[0].message.hi === 1);
+  check('envelope.ts (from envelope, not delivery ts)', received[0].ts === 1234567);
+  check('envelope.topic', received[0].topic?.name === 'cats');
+  check('envelope.message', received[0].message.hi === 1);
 }
 
 async function testMultipleSubsSameTopic() {
   console.log('\n── multiple subs to same topic both receive ──');
-  const { peer, am } = makePeer();
+  const { peer, am } = await makePeer();
   const a = [], b = [];
-  const subA = await peer.sub('cats', e => a.push(e));
-  const subB = await peer.sub('cats', e => b.push(e));
+  const subA = await peer.sub(CATS, e => a.push(e));
+  const subB = await peer.sub(CATS, e => b.push(e));
 
-  check('AxonaManager.pubsubSubscribe called twice',
-    am.subscribed.length === 2);
+  check('AxonaManager.pubsubSubscribe called twice', am.subscribed.length === 2);
 
-  const payload = JSON.stringify({
-    msgId: '1'.repeat(64), ts: 1, topic: 'cats', message: 'meow',
-  });
-  am.triggerDelivery(subA._topicId, payload, 'm-1', 1);
+  const payload = JSON.stringify({ msgId: '1'.repeat(64), ts: 1, topic: 'cats', message: 'meow' });
+  am.triggerDelivery(subA.topicIdBig, payload, 'internal:1', 1);
 
   check('handler A received', a.length === 1);
   check('handler B received', b.length === 1);
@@ -212,23 +222,20 @@ async function testMultipleSubsSameTopic() {
 
 async function testSubStopUnsubscribes() {
   console.log('\n── sub.stop() unsubscribes only when last handler gone ──');
-  const { peer, am } = makePeer();
+  const { peer, am } = await makePeer();
   const a = [], b = [];
-  const subA = await peer.sub('cats', e => a.push(e));
-  const subB = await peer.sub('cats', e => b.push(e));
+  const subA = await peer.sub(CATS, e => a.push(e));
+  const subB = await peer.sub(CATS, e => b.push(e));
 
   await subA.stop();
-  check('unsubscribe not called yet (subB still active)',
-    am.unsubscribed.length === 0);
+  check('unsubscribe not called yet (subB still active)', am.unsubscribed.length === 0);
   check('subA.stopped', subA.stopped);
 
   // Stopped sub no longer receives.
-  const payload = JSON.stringify({
-    msgId: '2'.repeat(64), ts: 2, topic: 'cats', message: 'x',
-  });
-  am.triggerDelivery(subA._topicId, payload);
+  const payload = JSON.stringify({ msgId: '2'.repeat(64), ts: 2, topic: 'cats', message: 'x' });
+  am.triggerDelivery(subA.topicIdBig, payload);
   check('subA handler no longer fires after stop', a.length === 0);
-  check('subB handler still fires',                b.length === 1);
+  check('subB handler still fires', b.length === 1);
 
   // stop is idempotent.
   await subA.stop();
@@ -236,88 +243,82 @@ async function testSubStopUnsubscribes() {
 
   await subB.stop();
   check('after last handler stops: unsubscribe called',
-    am.unsubscribed.length === 1 && am.unsubscribed[0] === subB._topicId);
+    am.unsubscribed.length === 1 && am.unsubscribed[0] === subB.topicIdBig);
 }
 
 async function testSubValidation() {
   console.log('\n── peer.sub() validation ──');
-  const { peer } = makePeer();
+  const { peer } = await makePeer();
 
   let err = null;
-  try { await peer.sub('', () => {}); }
-  catch (e) { err = e; }
-  check('empty topic → SubscribeError',
-    err instanceof SubscribeError && err.code === ErrorCodes.SUBSCRIBE_INVALID_TOPIC);
+  try { await peer.sub({ region: 'useast', name: '' }, () => {}); } catch (e) { err = e; }
+  check('empty topic name → PublishError(PUBLISH_INVALID_TOPIC)',
+    err instanceof PublishError && err.code === ErrorCodes.PUBLISH_INVALID_TOPIC);
 
   err = null;
-  try { await peer.sub('cats', 'not-a-fn'); }
-  catch (e) { err = e; }
-  check('non-fn handler → SubscribeError',
+  try { await peer.sub(CATS, 'not-a-fn'); } catch (e) { err = e; }
+  check('non-fn handler → SubscribeError(HANDLER_MISSING)',
     err instanceof SubscribeError && err.code === ErrorCodes.SUBSCRIBE_HANDLER_MISSING);
 }
 
 async function testSinceModes() {
   console.log('\n── peer.sub({since}) modes ──');
-  const { peer, am } = makePeer();
+  const { peer, am } = await makePeer();
 
   // _lastSeenTsByTopic is keyed by BigInt topicId (kernel-internal form).
-  const sub1 = await peer.sub('a', () => {});
-  const ts1 = am._lastSeenTsByTopic.get(sub1._topicId);
+  const sub1 = await peer.sub({ region: 'useast', name: 'a' }, () => {});
+  const ts1 = am._lastSeenTsByTopic.get(sub1.topicIdBig);
   check('default since: lastSeenTs ≈ now (live tail)',
     typeof ts1 === 'number' && ts1 > 0 && ts1 <= Date.now());
 
-  const sub2 = await peer.sub('b', () => {}, { since: 'all' });
+  const sub2 = await peer.sub({ region: 'useast', name: 'b' }, () => {}, { since: 'all' });
   check("since:'all' → lastSeenTs = 0",
-    am._lastSeenTsByTopic.get(sub2._topicId) === 0);
+    am._lastSeenTsByTopic.get(sub2.topicIdBig) === 0);
 
-  const sub3 = await peer.sub('c', () => {}, { since: 'latest' });
-  const ts3 = am._lastSeenTsByTopic.get(sub3._topicId);
+  const sub3 = await peer.sub({ region: 'useast', name: 'c' }, () => {}, { since: 'latest' });
+  const ts3 = am._lastSeenTsByTopic.get(sub3.topicIdBig);
   check("since:'latest' → lastSeenTs ≈ now-1s",
     typeof ts3 === 'number' && Math.abs(ts3 - (Date.now() - 1000)) < 100);
 
-  const sub4 = await peer.sub('d', () => {}, { since: 42 });
+  const sub4 = await peer.sub({ region: 'useast', name: 'd' }, () => {}, { since: 42 });
   check('since:<number> → lastSeenTs set exactly',
-    am._lastSeenTsByTopic.get(sub4._topicId) === 42);
+    am._lastSeenTsByTopic.get(sub4.topicIdBig) === 42);
 
   let err = null;
-  try { await peer.sub('e', () => {}, { since: 'invalid' }); }
-  catch (e) { err = e; }
+  try { await peer.sub({ region: 'useast', name: 'e' }, () => {}, { since: 'invalid' }); } catch (e) { err = e; }
   check('since: invalid string → SubscribeError', err instanceof SubscribeError);
 }
 
 async function testEngineFallback() {
   console.log('\n── AxonaManager fallback via engine.axonaManagerFor() ──');
-  const node = { id: NODE_ID, alive: true };
+  const id   = await createNodeIdentity({ lat: 38, lng: -78 });
+  const node = { id: BigInt('0x' + id.id), alive: true };
   const am   = new MockAxonaManager();
-  const engine = {
-    onEvent: () => () => {},
-    axonaManagerFor: (n) => (n === node ? am : null),
-  };
-  const peer = new AxonaPeer({ engine, node });
+  const engine = { onEvent: () => () => {}, axonaManagerFor: (n) => (n === node ? am : null) };
+  const peer = new AxonaPeer({ engine, node, nodeIdentity: id });
 
-  const msgId = await peer.pub('topic', { hi: 1 }, { sign: false });
+  const msgId = await peer.pub({ region: 'useast', name: 'topic' }, { hi: 1 }, { signWith: AUTHOR });
   check('engine.axonaManagerFor wired through',
     typeof msgId === 'string' && am.published.length === 1);
 }
 
 async function testEngineFallbackMapShape() {
   console.log('\n── AxonaManager fallback via engine._axonaManagers Map ──');
-  const node = { id: NODE_ID, alive: true };
+  const id   = await createNodeIdentity({ lat: 38, lng: -78 });
+  const node = { id: BigInt('0x' + id.id), alive: true };
   const am   = new MockAxonaManager();
-  const engine = {
-    onEvent: () => () => {},
-    _axonaManagers: new Map([[NODE_ID, am]]),
-  };
-  const peer = new AxonaPeer({ engine, node });
+  const engine = { onEvent: () => () => {}, _axonaManagers: new Map([[node.id, am]]) };
+  const peer = new AxonaPeer({ engine, node, nodeIdentity: id });
 
-  await peer.pub('topic', { hi: 1 }, { sign: false });
-  check('engine._axonaManagers Map wired through',
-    am.published.length === 1);
+  await peer.pub({ region: 'useast', name: 'topic' }, { hi: 1 }, { signWith: AUTHOR });
+  check('engine._axonaManagers Map wired through', am.published.length === 1);
 }
 
 async function main() {
-  console.log('Axona AxonaPeer.pub() / sub() smoke');
+  console.log('Axona AxonaPeer.pub() / sub() smoke — v0.3 structured topics');
+  AUTHOR = await createAuthorIdentity();
   await testPubBasics();
+  await testAnonymousPub();
   await testPubValidation();
   await testPubNoManager();
   await testSubReceives();

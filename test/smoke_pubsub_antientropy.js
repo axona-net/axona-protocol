@@ -16,10 +16,16 @@
 // =====================================================================
 
 import { AxonaManager }   from '../src/pubsub/AxonaManager.js';
-import { deriveIdentity } from '../src/identity/index.js';
+import { createAuthorIdentity } from '../src/identity/index.js';
 import { buildEnvelope }  from '../src/pubsub/envelope.js';
+import { deriveTopicId }  from '../src/pubsub/post.js';
 import { buildKill }      from '../src/pubsub/kill.js';
 import { toHex }          from '../src/utils/hexid.js';
+
+// v0.3: an envelope's topic is the structured DESCRIPTOR object. The root binds
+// the SIGNED descriptor to the routed topic id, so the topic id under test must
+// be the one this descriptor resolves to.
+const TOPIC_DESC = { region: 0x89, owner: null, name: 'cats', write: 'open' };
 
 let passed = 0, failed = 0;
 function check(label, cond) {
@@ -28,8 +34,9 @@ function check(label, cond) {
 }
 
 const LONDON    = { lat: 51.5074, lng: -0.1278 };
-const TOPIC_HEX = '89' + 'ab'.repeat(32);
-const TOPIC_BIG = BigInt('0x' + TOPIC_HEX);
+// Derived from TOPIC_DESC at the top of main() (resolveTopic is async).
+let TOPIC_HEX;
+let TOPIC_BIG;
 const T         = 1_700_000_000_000;
 const tick      = () => new Promise((r) => setTimeout(r, 0));
 const flush     = async () => { for (let i = 0; i < 6; i++) await tick(); };
@@ -71,8 +78,10 @@ const cacheHas = (mgr, postHash) => (mgr.axonRoles.get(TOPIC_BIG)?.replayCache |
 
 async function main() {
   console.log('Axona pub/sub anti-entropy (Fix 2)');
-  const alice = await deriveIdentity(LONDON);
-  const env   = await buildEnvelope({ topic: 'cats', message: 'hi-anti-entropy', identity: alice, ts: T, seq: T });
+  TOPIC_HEX = await deriveTopicId(TOPIC_DESC);
+  TOPIC_BIG = BigInt('0x' + TOPIC_HEX);
+  const alice = await createAuthorIdentity();
+  const env   = await buildEnvelope({ topic: TOPIC_DESC, message: 'hi-anti-entropy', identity: alice, ts: T, seq: T });
   const json  = JSON.stringify(env);
   const msg   = { json, publishId: 'p1', publishTs: T, postHash: env.msgId, publisher: null };
 

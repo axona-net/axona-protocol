@@ -7,11 +7,17 @@
 // =====================================================================
 
 import { AxonaPeer }       from '../src/dht/AxonaPeer.js';
-import { deriveIdentity }  from '../src/identity/index.js';
+import { createNodeIdentity, createAuthorIdentity } from '../src/identity/index.js';
 import { buildEnvelope }   from '../src/pubsub/envelope.js';
 import { deriveTopicId, deriveTopicIdBig } from '../src/pubsub/post.js';
 import { fromHex }         from '../src/utils/hexid.js';
 import { PullError, MetricsError, ErrorCodes } from '../src/errors.js';
+
+// v0.3: topics are structured descriptors. Use a stable open topic for the
+// happy-path / metrics tests (no per-publisher anchoring anymore — dedup is the
+// content-addressed msgId).
+const CATS = { region: 'useast', name: 'cats' };
+const NEWS = { region: 'useast', name: 'news' };
 
 let passed = 0, failed = 0;
 function check(label, condition) {
@@ -92,29 +98,29 @@ class MockAxonaManager {
 // ── Setup helper ─────────────────────────────────────────────────────
 
 async function setupPeer() {
-  const identity = await deriveIdentity(LONDON);
-  const node     = { id: identity.id, alive: true };
-  const am       = new MockAxonaManager(identity.id);
+  const node     = await createNodeIdentity(LONDON);
+  const author   = await createAuthorIdentity();
+  const am       = new MockAxonaManager(node.id);
   const peer = new AxonaPeer({
     engine: { onEvent: () => () => {} },
-    node, axonaManager: am, identity, publishIdentity: identity,   // test signs with the same key (explicit)
+    node: { id: BigInt('0x' + node.id), alive: true }, axonaManager: am, nodeIdentity: node,
   });
-  return { peer, am, identity };
+  return { peer, am, author };
 }
 
 // ── Tests ────────────────────────────────────────────────────────────
 
 async function testPullHappy() {
   console.log('\n── peer.pull() happy path ──');
-  const { peer, am, identity } = await setupPeer();
+  const { peer, am, author } = await setupPeer();
 
-  const msgId = await peer.pub('cats', { meow: 1 });
+  const msgId = await peer.pub(CATS, { meow: 1 }, { signWith: author });
   check('pub succeeded', typeof msgId === 'string');
   // Kernel passes BigInt topicId to AxonaManager now.
   check('replay cache populated with postHash',
-    am._replay.get(await deriveTopicIdBig(fromHex(identity.id), 'cats'))?.[0]?.postHash === msgId);
+    am._replay.get(await deriveTopicIdBig(CATS))?.[0]?.postHash === msgId);
 
-  const pulled = await peer.pull(msgId, { topic: 'cats', publisher: identity.id });
+  const pulled = await peer.pull(msgId, { topic: CATS });
   check('pull returned envelope',
     pulled !== null && pulled.msgId === msgId);
   check('pulled envelope.message matches',
@@ -125,73 +131,72 @@ async function testPullHappy() {
 
 async function testPullMiss() {
   console.log('\n── peer.pull() miss returns null ──');
-  const { peer, identity } = await setupPeer();
+  const { peer } = await setupPeer();
 
   // Unknown msgId — not in cache.
-  const result = await peer.pull('0'.repeat(64), {
-    topic: 'cats', publisher: identity.id,
-  });
+  const result = await peer.pull('0'.repeat(64), { topic: CATS });
   check('miss returns null', result === null);
 }
 
 async function testPullValidation() {
   console.log('\n── peer.pull() validation ──');
-  const { peer, identity } = await setupPeer();
+  const { peer } = await setupPeer();
 
   let err = null;
-  try { await peer.pull('short', { topic: 'cats', publisher: identity.id }); }
+  try { await peer.pull('short', { topic: CATS }); }
   catch (e) { err = e; }
   check('short msgId → PullError',
     err instanceof PullError && err.code === ErrorCodes.PULL_INVALID_MSGID);
 
+  // v0.3: a malformed/absent topic descriptor is rejected at resolution.
   err = null;
-  try { await peer.pull('0'.repeat(64), { publisher: identity.id }); }
+  try { await peer.pull('0'.repeat(64), {}); }   // no topic descriptor
   catch (e) { err = e; }
-  check('missing topic → PullError', err instanceof PullError);
+  check('missing topic → throws', err !== null);
 
   err = null;
-  try { await peer.pull('0'.repeat(64), { topic: 'cats', publisher: 'not-hex' }); }
+  try { await peer.pull('0'.repeat(64), { topic: { name: 'cats' } }); }   // open topic w/o region
   catch (e) { err = e; }
-  check('non-hex publisher → PullError', err instanceof PullError);
+  check('open topic without region → throws', err !== null);
 }
 
 async function testPullBumpsCounter() {
   console.log('\n── peer.pull() bumps pull_count ──');
-  const { peer, am, identity } = await setupPeer();
+  const { peer, am, author } = await setupPeer();
 
-  const msgId = await peer.pub('cats', 'hi');
-  await peer.pull(msgId, { topic: 'cats', publisher: identity.id });
+  const msgId = await peer.pub(CATS, 'hi', { signWith: author });
+  await peer.pull(msgId, { topic: CATS });
 
   // BigInt topicId is the kernel-internal key.
-  const topicIdBig = await deriveTopicIdBig(fromHex(identity.id), 'cats');
+  const topicIdBig = await deriveTopicIdBig(CATS);
   const ctr = am._counters.get(topicIdBig).get(msgId);
   check('pull_count incremented', ctr.pull_count === 1);
 
   // Pull again.
-  await peer.pull(msgId, { topic: 'cats', publisher: identity.id });
+  await peer.pull(msgId, { topic: CATS });
   check('pull_count = 2 after second pull', ctr.pull_count === 2);
 }
 
 async function testMetricsAggregation() {
   console.log('\n── peer.metrics() aggregates relay counters ──');
-  const { peer, am, identity } = await setupPeer();
+  const { peer, am, author } = await setupPeer();
 
   // Publish three messages on the same topic.
-  const m1 = await peer.pub('cats', 1);
-  const m2 = await peer.pub('cats', 2);
-  const m3 = await peer.pub('cats', 3);
+  const m1 = await peer.pub(CATS, 1, { signWith: author });
+  const m2 = await peer.pub(CATS, 2, { signWith: author });
+  const m3 = await peer.pub(CATS, 3, { signWith: author });
 
   // Simulate deliveries (each post delivered to 5 subscribers).
-  const topicId = await deriveTopicIdBig(fromHex(identity.id), 'cats');
+  const topicId = await deriveTopicIdBig(CATS);
   am._bumpDelivery(topicId, m1, 5);
   am._bumpDelivery(topicId, m2, 5);
   am._bumpDelivery(topicId, m3, 5);
 
   // Simulate two pulls of m1.
-  await peer.pull(m1, { topic: 'cats', publisher: identity.id });
-  await peer.pull(m1, { topic: 'cats', publisher: identity.id });
+  await peer.pull(m1, { topic: CATS });
+  await peer.pull(m1, { topic: CATS });
 
-  const m = await peer.metrics('cats', { publisher: identity.id });
+  const m = await peer.metrics(CATS);
   check('publishes count = 3',     m.publishes === 3);
   check('current_count = 3',       m.current_count === 3);
   check('deliveries = 15',         m.deliveries === 15);
@@ -203,9 +208,9 @@ async function testMetricsAggregation() {
 
 async function testMetricsEmpty() {
   console.log('\n── peer.metrics() on unknown topic ──');
-  const { peer, identity } = await setupPeer();
+  const { peer } = await setupPeer();
 
-  const m = await peer.metrics('never-published', { publisher: identity.id });
+  const m = await peer.metrics({ region: 'useast', name: 'never-published' });
   check('publishes = 0',  m.publishes === 0);
   check('current_count = 0', m.current_count === 0);
   check('deliveries = 0', m.deliveries === 0);
@@ -215,41 +220,39 @@ async function testMetricsEmpty() {
 
 async function testMetricsValidation() {
   console.log('\n── peer.metrics() validation ──');
-  const { peer, identity } = await setupPeer();
+  const { peer } = await setupPeer();
 
+  // v0.3: a malformed topic descriptor is rejected at resolution.
   let err = null;
-  try { await peer.metrics('', { publisher: identity.id }); }
+  try { await peer.metrics({ region: 'useast', name: '' }); }   // empty name
   catch (e) { err = e; }
-  check('empty topic → MetricsError', err instanceof MetricsError);
+  check('empty topic name → throws', err !== null);
 
   err = null;
-  try { await peer.metrics('cats', { publisher: 'not-hex' }); }
+  try { await peer.metrics({ name: 'cats' }); }   // open topic without region
   catch (e) { err = e; }
-  check('non-hex publisher → MetricsError', err instanceof MetricsError);
+  check('open topic without region → throws', err !== null);
 }
 
 async function testCrossPublisherIsolation() {
-  console.log('\n── alice can pull from her own topic ──');
+  console.log('\n── owner-topic isolation: distinct owners → distinct topic ids ──');
   const alice = await setupPeer();
-  const bob   = await setupPeer();
 
-  // Alice publishes; pull from her own AxonaManager (which is what
-  // the production routing eventually resolves to via K-closest).
-  const m = await alice.peer.pub('news', { headline: 'launch' });
-  const pulled = await alice.peer.pull(m, {
-    topic: 'news',
-    publisher: alice.identity.id,
-  });
-  check('alice pulls her own message',
+  // v0.3: open topics are no longer publisher-scoped, but OWNER topics are —
+  // alice's owned feed and bob's owned feed derive distinct topic ids, so a
+  // pull against the wrong owner's topic misses (different replay cache entry).
+  const aliceFeed = { owner: alice.author.authorId, name: 'feed', write: 'owner' };
+  const bobAuthor = await createAuthorIdentity();
+  const bobFeed   = { owner: bobAuthor.authorId, name: 'feed', write: 'owner' };
+
+  const m = await alice.peer.pub(aliceFeed, { headline: 'launch' }, { signWith: alice.author });
+  const pulled = await alice.peer.pull(m, { topic: aliceFeed });
+  check('alice pulls from her own owned feed',
     pulled !== null && pulled.message.headline === 'launch');
 
-  // Same msgId addressed to BOB's topicId space → null (different
-  // topicId derivation = different replay cache entry).
-  const bobView = await alice.peer.pull(m, {
-    topic: 'news',
-    publisher: bob.identity.id,    // wrong publisher
-  });
-  check('pull with wrong publisher returns null',
+  // Same msgId addressed to BOB's owner-topic space → null (different topic id).
+  const bobView = await alice.peer.pull(m, { topic: bobFeed });
+  check('pull against a different owner-topic returns null',
     bobView === null);
 }
 

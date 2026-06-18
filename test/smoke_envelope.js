@@ -5,8 +5,8 @@
 // Run: node test/smoke_envelope.js
 // =====================================================================
 
-import { AxonaPeer }     from '../src/dht/AxonaPeer.js';
-import { deriveIdentity } from '../src/identity/index.js';
+import { AxonaPeer, ANONYMOUS } from '../src/dht/AxonaPeer.js';
+import { createNodeIdentity, createAuthorIdentity } from '../src/identity/index.js';
 import {
   buildEnvelope,
   verifyEnvelope,
@@ -26,6 +26,9 @@ function check(label, condition) {
 }
 
 const LONDON = { lat: 51.5074, lng: -0.1278 };
+
+// v0.3: a topic in an envelope is the structured DESCRIPTOR object, not a string.
+const TOPIC = (name) => ({ region: 0x89, owner: null, name, write: 'open' });
 
 // ── Mock AxonaManager (same shape as A1 smoke) ────────────────────────
 
@@ -54,9 +57,9 @@ class MockAxonaManager {
 
 async function testBuildSigned() {
   console.log('\n── buildEnvelope: signed ──');
-  const id = await deriveIdentity(LONDON);
+  const id = await createAuthorIdentity();
   const env = await buildEnvelope({
-    topic: 'cats',
+    topic: TOPIC('cats'),
     message: { meow: 1 },
     identity: id,
     ts: 1700000000000,
@@ -65,7 +68,7 @@ async function testBuildSigned() {
   check('has msgId',            typeof env.msgId === 'string' && env.msgId.length === 64);
   check('has seq (C-2)',        env.seq === 1700000000123);
   check('has ts',               env.ts === 1700000000000);
-  check('has topic',            env.topic === 'cats');
+  check('has topic descriptor', env.topic && env.topic.name === 'cats' && env.topic.write === 'open');
   check('has message',          env.message.meow === 1);
   check('signature ed25519:',   env.signature.startsWith('ed25519:'));
   check('signature is 128 hex', env.signature.length === 'ed25519:'.length + 128);
@@ -77,7 +80,7 @@ async function testBuildSigned() {
 async function testBuildUnsigned() {
   console.log('\n── buildEnvelope: unsigned (opt-out) ──');
   const env = await buildEnvelope({
-    topic: 'public',
+    topic: TOPIC('public'),
     message: 'broadcast',
     sign: false,
     ts: 1700000000000,
@@ -93,16 +96,16 @@ async function testSignWithoutIdentity() {
   console.log('\n── buildEnvelope: sign:true without identity throws ──');
   let threw = false;
   try {
-    await buildEnvelope({ topic: 'x', message: null, sign: true });
+    await buildEnvelope({ topic: TOPIC('x'), message: null, sign: true });
   } catch { threw = true; }
   check('throws TypeError when sign:true and no identity', threw);
 }
 
 async function testVerifyHappy() {
   console.log('\n── verifyEnvelope: signed envelope verifies ──');
-  const id = await deriveIdentity(LONDON);
+  const id = await createAuthorIdentity();
   const env = await buildEnvelope({
-    topic: 'cats', message: { meow: 1 }, identity: id,
+    topic: TOPIC('cats'), message: { meow: 1 }, identity: id,
   });
   const r = await verifyEnvelope(env);
   check('verify(intact, signed) → ok',  r.ok === true);
@@ -112,7 +115,7 @@ async function testVerifyHappy() {
 async function testVerifyUnsignedHappy() {
   console.log('\n── verifyEnvelope: unsigned envelope verifies ──');
   const env = await buildEnvelope({
-    topic: 'announce', message: 'hi', sign: false,
+    topic: TOPIC('announce'), message: 'hi', sign: false,
   });
   const r = await verifyEnvelope(env);
   check('verify(intact, unsigned) → ok', r.ok === true);
@@ -121,8 +124,8 @@ async function testVerifyUnsignedHappy() {
 
 async function testTamperMessage() {
   console.log('\n── verifyEnvelope: tampered message ──');
-  const id = await deriveIdentity(LONDON);
-  const env = await buildEnvelope({ topic: 'cats', message: 'real', identity: id });
+  const id = await createAuthorIdentity();
+  const env = await buildEnvelope({ topic: TOPIC('cats'), message: 'real', identity: id });
   const tampered = { ...env, message: 'forged' };
   const r = await verifyEnvelope(tampered);
   check('tampered message → ok:false', r.ok === false);
@@ -132,8 +135,8 @@ async function testTamperMessage() {
 
 async function testTamperMsgId() {
   console.log('\n── verifyEnvelope: tampered msgId ──');
-  const id = await deriveIdentity(LONDON);
-  const env = await buildEnvelope({ topic: 'cats', message: 'real', identity: id });
+  const id = await createAuthorIdentity();
+  const env = await buildEnvelope({ topic: TOPIC('cats'), message: 'real', identity: id });
   const tampered = { ...env, msgId: '0'.repeat(64) };
   const r = await verifyEnvelope(tampered);
   check('tampered msgId → ok:false',  r.ok === false);
@@ -142,8 +145,8 @@ async function testTamperMsgId() {
 
 async function testTamperSignature() {
   console.log('\n── verifyEnvelope: tampered signature ──');
-  const id = await deriveIdentity(LONDON);
-  const env = await buildEnvelope({ topic: 'cats', message: 'real', identity: id });
+  const id = await createAuthorIdentity();
+  const env = await buildEnvelope({ topic: TOPIC('cats'), message: 'real', identity: id });
   // Flip one hex char in the signature.
   const sig = env.signature;
   const flippedHex = sig.slice(0, 10) + (sig[10] === 'a' ? 'b' : 'a') + sig.slice(11);
@@ -161,13 +164,13 @@ async function testRejectMissingFields() {
   check('null → not_an_object',
     (await verifyEnvelope(null)).reason === 'not_an_object');
   check('no msgId',
-    (await verifyEnvelope({ ts: 1, topic: 'x', message: 1 })).reason === 'missing_msgId');
+    (await verifyEnvelope({ ts: 1, topic: TOPIC('x'), message: 1 })).reason === 'missing_msgId');
   check('no ts',
-    (await verifyEnvelope({ msgId: 'x', topic: 'x', message: 1 })).reason === 'missing_ts');
+    (await verifyEnvelope({ msgId: 'x', topic: TOPIC('x'), message: 1 })).reason === 'missing_ts');
   check('no topic',
     (await verifyEnvelope({ msgId: 'x', ts: 1, message: 1 })).reason === 'missing_topic');
   check('no message',
-    (await verifyEnvelope({ msgId: 'x', ts: 1, topic: 'x' })).reason === 'missing_message');
+    (await verifyEnvelope({ msgId: 'x', ts: 1, topic: TOPIC('x') })).reason === 'missing_message');
 }
 
 async function testMsgIdDeterminism() {
@@ -199,18 +202,18 @@ async function testMsgIdDeterminism() {
 
 async function testPeerSignedRoundTrip() {
   console.log('\n── peer.pub signed → peer.sub envelope (e2e) ──');
-  const id = await deriveIdentity(LONDON);
-  const node = { id: id.id, alive: true };
-  const am = new MockAxonaManager(id.id);
+  const node = await createNodeIdentity(LONDON);
+  const author = await createAuthorIdentity();
+  const am = new MockAxonaManager(node.id);
   const peer = new AxonaPeer({
     engine: { onEvent: () => () => {} },
-    node, axonaManager: am, identity: id, publishIdentity: id,   // test signs with the same key (explicit)
+    node: { id: BigInt('0x' + node.id), alive: true }, axonaManager: am, nodeIdentity: node,
   });
 
   const received = [];
-  const sub = await peer.sub('cats', e => received.push(e));
+  const sub = await peer.sub(TOPIC('cats'), e => received.push(e));
 
-  const msgId = await peer.pub('cats', { meow: 1 });
+  const msgId = await peer.pub(TOPIC('cats'), { meow: 1 }, { signWith: author });
   check('pub returns content-derived msgId (64-char hex)',
     typeof msgId === 'string' && msgId.length === 64 && /^[0-9a-f]+$/.test(msgId));
   check('AxonaManager.pubsubPublish called',
@@ -218,47 +221,51 @@ async function testPeerSignedRoundTrip() {
 
   // Trigger delivery with the same JSON the publisher wrote.
   am.triggerDelivery(sub._topicId, am.published[0].json, 'internal-1', 1700000000000);
+  check('handler received a delivery', received.length === 1);
 
-  check('handler received envelope', received.length === 1);
-  check('envelope.msgId matches pub return value',
-    received[0].msgId === msgId);
+  // The signed envelope the publisher actually wrote (what a relay caches and
+  // a subscriber re-verifies). v0.3: topic is the structured descriptor.
+  const env = JSON.parse(am.published[0].json);
+  check('published envelope.msgId matches pub return value',
+    env.msgId === msgId);
   check('envelope.signature present (signed by default)',
-    received[0].signature?.startsWith('ed25519:'));
-  check('envelope.signerPubkey matches identity',
-    received[0].signerPubkey === id.pubkeyHex);
+    env.signature?.startsWith('ed25519:'));
+  check('envelope.signerPubkey matches author',
+    env.signerPubkey === author.pubkeyHex);
+  check('envelope carries the topic descriptor',
+    env.topic && env.topic.name === 'cats' && env.topic.write === 'open');
 
-  // Verify the delivered envelope.
-  const r = await verifyEnvelope(received[0]);
-  check('delivered envelope verifies signed',
-    r.ok === true && r.signed === true);
+  // Verify the signed envelope.
+  const r = await verifyEnvelope(env);
+  check('signed envelope verifies', r.ok === true && r.signed === true);
 
   await sub.stop();
 }
 
 async function testPeerUnsignedRoundTrip() {
   console.log('\n── peer.pub({ sign: false }) → unsigned envelope ──');
-  const id = await deriveIdentity(LONDON);
-  const node = { id: id.id, alive: true };
-  const am = new MockAxonaManager(id.id);
+  const node = await createNodeIdentity(LONDON);
+  const am = new MockAxonaManager(node.id);
   const peer = new AxonaPeer({
     engine: { onEvent: () => () => {} },
-    node, axonaManager: am, identity: id, publishIdentity: id,   // test signs with the same key (explicit)
+    node: { id: BigInt('0x' + node.id), alive: true }, axonaManager: am, nodeIdentity: node,
   });
 
   const received = [];
-  const sub = await peer.sub('announce', e => received.push(e));
+  const sub = await peer.sub(TOPIC('announce'), e => received.push(e));
 
-  const msgId = await peer.pub('announce', 'public broadcast', { sign: false });
+  const msgId = await peer.pub(TOPIC('announce'), 'public broadcast', { signWith: ANONYMOUS });
   am.triggerDelivery(sub._topicId, am.published[0].json, 'internal-1', 1700000000000);
+  check('handler received a delivery', received.length === 1);
 
-  check('unsigned envelope delivered',
-    received.length === 1 && received[0].msgId === msgId);
+  const env = JSON.parse(am.published[0].json);
+  check('published msgId matches pub return value', env.msgId === msgId);
   check('no signature on unsigned envelope',
-    received[0].signature === undefined);
+    env.signature === undefined);
   check('no signerPubkey on unsigned envelope',
-    received[0].signerPubkey === undefined);
+    env.signerPubkey === undefined);
 
-  const r = await verifyEnvelope(received[0]);
+  const r = await verifyEnvelope(env);
   check('unsigned envelope still verifies (msgId check)',
     r.ok === true && r.signed === false);
 
@@ -267,38 +274,38 @@ async function testPeerUnsignedRoundTrip() {
 
 async function testPeerSignWithoutIdentity() {
   console.log('\n── peer.pub(sign:true) without identity throws ──');
-  const node = { id: 'aa' + 'a1'.repeat(32), alive: true };
+  const node = await createNodeIdentity(LONDON);
   const am = new MockAxonaManager(node.id);
   const peer = new AxonaPeer({
     engine: { onEvent: () => () => {} },
-    node, axonaManager: am, /* no identity */
+    node: { id: BigInt('0x' + node.id), alive: true }, axonaManager: am, nodeIdentity: node,
   });
 
   let err = null;
-  try { await peer.pub('cats', null); }
+  try { await peer.pub(TOPIC('cats'), null); }   // no { signWith } — no default author
   catch (e) { err = e; }
-  check('throws PublishError when no publish identity (transport key never signs implicitly)',
+  check('throws PublishError when no signer named (node key never signs implicitly)',
     err instanceof PublishError && err.code === ErrorCodes.PUBLISH_NO_PUBLISH_IDENTITY);
 
-  // Unsigned still works without identity.
-  const msgId = await peer.pub('cats', 'anon', { sign: false });
-  check('unsigned publish works without identity',
+  // Explicit anonymous still works without naming an author.
+  const msgId = await peer.pub(TOPIC('cats'), 'anon', { signWith: ANONYMOUS });
+  check('anonymous publish works (signWith: ANONYMOUS)',
     typeof msgId === 'string' && msgId.length === 64);
 }
 
 async function testPeerCrossSignerVerification() {
   console.log('\n── cross-peer verification: bob receives, verifies alice ──');
-  const alice = await deriveIdentity(LONDON);
-  const bob   = await deriveIdentity({ lat: 35.6762, lng: 139.6503 });
+  const alice = await createAuthorIdentity();
+  const bob   = await createAuthorIdentity();
 
-  const aliceNode = { id: alice.id, alive: true };
-  const aliceAm   = new MockAxonaManager(alice.id);
+  const aliceNode = await createNodeIdentity(LONDON);
+  const aliceAm   = new MockAxonaManager(aliceNode.id);
   const alicePeer = new AxonaPeer({
     engine: { onEvent: () => () => {} },
-    node: aliceNode, axonaManager: aliceAm, identity: alice, publishIdentity: alice,   // test signs with the same key
+    node: { id: BigInt('0x' + aliceNode.id), alive: true }, axonaManager: aliceAm, nodeIdentity: aliceNode,
   });
 
-  await alicePeer.pub('news', { headline: 'mesh launch' });
+  await alicePeer.pub(TOPIC('news'), { headline: 'mesh launch' }, { signWith: alice });
   const json = aliceAm.published[0].json;
 
   // bob's side: parse the JSON and verify.
@@ -317,8 +324,8 @@ async function testPeerCrossSignerVerification() {
 
 async function testMissingSeqRejected() {
   console.log('\n── verifyEnvelope: v1 envelope (no seq) rejected ──');
-  const id  = await deriveIdentity(LONDON);
-  const env = await buildEnvelope({ topic: 'cats', message: 'real', identity: id });
+  const id  = await createAuthorIdentity();
+  const env = await buildEnvelope({ topic: TOPIC('cats'), message: 'real', identity: id });
   const v1  = { ...env };
   delete v1.seq;                                   // simulate a pre-C-2 envelope
   const r = await verifyEnvelope(v1);
@@ -328,8 +335,8 @@ async function testMissingSeqRejected() {
 
 async function testSeqBoundIntoSignature() {
   console.log('\n── verifyEnvelope: tampered seq breaks auth ──');
-  const id  = await deriveIdentity(LONDON);
-  const env = await buildEnvelope({ topic: 'cats', message: 'real', identity: id, seq: 1000 });
+  const id  = await createAuthorIdentity();
+  const env = await buildEnvelope({ topic: TOPIC('cats'), message: 'real', identity: id, seq: 1000 });
   const tampered = { ...env, seq: 9999 };
   const r = await verifyEnvelope(tampered);
   check('tampered seq → ok:false', r.ok === false);
@@ -339,8 +346,8 @@ async function testSeqBoundIntoSignature() {
 
 async function testDomainSeparation() {
   console.log('\n── envelope signature is domain-separated (E-4) ──');
-  const id   = await deriveIdentity(LONDON);
-  const seq  = 5, ts = 1700000000000, topic = 'cats', message = 'x';
+  const id   = await createAuthorIdentity();
+  const seq  = 5, ts = 1700000000000, topic = TOPIC('cats'), message = 'x';
   const env  = await buildEnvelope({ topic, message, identity: id, ts, seq });
   // The signed bytes are over the domain-tagged core; a verifier using the
   // bare (un-tagged) core would compute different bytes and reject.  Confirm
@@ -385,12 +392,12 @@ function mkManager() {
 
 async function testIngressFreshnessAndSeq() {
   console.log('\n── ingress gate: _publishFreshAndOrdered (C-2) ──');
-  const id  = await deriveIdentity(LONDON);
+  const id  = await createAuthorIdentity();
   const am  = mkManager();
   const now = 1_700_000_000_000;
 
   // Fresh, signed, in-order → accepted; advances high-water.
-  const e1   = await buildEnvelope({ topic: 't', message: 1, identity: id, ts: now, seq: now });
+  const e1   = await buildEnvelope({ topic: TOPIC('t'), message: 1, identity: id, ts: now, seq: now });
   const j1   = JSON.stringify(e1);
   check('fresh signed publish accepted', am._publishFreshAndOrdered(j1, now).ok === true);
   check('high-water recorded for publisher',
@@ -404,18 +411,18 @@ async function testIngressFreshnessAndSeq() {
 
   // A captured OLD-seq envelope re-injected while still time-fresh, but seq
   // far behind the publisher's high-water → dropped as replay_seq.
-  const e3 = await buildEnvelope({ topic: 't', message: 2, identity: id, ts: now, seq: now - 5 * 60_000 });
+  const e3 = await buildEnvelope({ topic: TOPIC('t'), message: 2, identity: id, ts: now, seq: now - 5 * 60_000 });
   const r3 = am._publishFreshAndOrdered(JSON.stringify(e3), now);
   check('old-seq replay dropped', r3.ok === false);
   check('drop reason is replay_seq', r3.reason === 'replay_seq');
 
   // A legitimately reordered message (seq slightly behind, within tolerance) → accepted.
-  const e4 = await buildEnvelope({ topic: 't', message: 3, identity: id, ts: now, seq: now - 5_000 });
+  const e4 = await buildEnvelope({ topic: TOPIC('t'), message: 3, identity: id, ts: now, seq: now - 5_000 });
   check('mild-reorder publish accepted (within tolerance)',
     am._publishFreshAndOrdered(JSON.stringify(e4), now).ok === true);
 
   // Unsigned envelope is not gated (no attacker-immutable ts/seq).
-  const eu = await buildEnvelope({ topic: 't', message: 4, sign: false, ts: now - 60 * 60_000, seq: 1 });
+  const eu = await buildEnvelope({ topic: TOPIC('t'), message: 4, sign: false, ts: now - 60 * 60_000, seq: 1 });
   check('unsigned envelope not gated (passes even if old)',
     am._publishFreshAndOrdered(JSON.stringify(eu), now).ok === true);
 }

@@ -10,7 +10,7 @@
 // =====================================================================
 
 import { webTransport } from '../src/transport/web/index.js';
-import { deriveIdentity } from '../src/index.js';
+import { createNodeIdentity } from '../src/index.js';
 import { toHex, fromHex } from '../src/utils/hexid.js';
 
 let passed = 0, failed = 0;
@@ -41,8 +41,8 @@ function makeTransport(identity, { meshRelay }) {
 
 async function main() {
   console.log('webTransport peer-relayed-signaling glue (sink / hooks / gating)\n');
-  const me    = await deriveIdentity({ lat: 40.71, lng: -74.0 });
-  const other = await deriveIdentity({ lat: 35.68, lng: 139.69 });
+  const me    = await createNodeIdentity({ lat: 40.71, lng: -74.0 });
+  const other = await createNodeIdentity({ lat: 35.68, lng: 139.69 });
   const otherHex = other.id;            // 66-char hex nodeId
   const CONN_ID  = 'abc';               // a bridge connId (not hex)
 

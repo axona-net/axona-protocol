@@ -23,7 +23,7 @@
 // =====================================================================
 
 import { AxonaManager }   from '../src/pubsub/AxonaManager.js';
-import { deriveIdentity } from '../src/identity/index.js';
+import { createAuthorIdentity } from '../src/identity/index.js';
 import { buildEnvelope }  from '../src/pubsub/envelope.js';
 import { toHex }          from '../src/utils/hexid.js';
 
@@ -82,8 +82,8 @@ const cacheHas  = (mgr, postHash) => (mgr.axonRoles.get(TOPIC_BIG)?.replayCache 
 
 async function main() {
   console.log('Axona decoupled host() primitive');
-  const alice = await deriveIdentity(LONDON);
-  const env   = await buildEnvelope({ topic: 'cats', message: 'served-by-a-host', identity: alice, ts: T, seq: T });
+  const alice = await createAuthorIdentity();
+  const env   = await buildEnvelope({ topic: { region: 'useast', name: 'cats' }, message: 'served-by-a-host', identity: alice, ts: T, seq: T });
   const json  = JSON.stringify(env);
 
   // host H sits near the topic so it's a plausible K-closest root; a couple of

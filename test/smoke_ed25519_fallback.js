@@ -19,7 +19,7 @@ import {
   generateKeyPair, exportPublicKey, sign, verify,
   nativeEd25519Available, __setForceSoftware, isSoftwareKey,
 } from '../src/pubsub/ed25519.js';
-import { deriveIdentity, dumpIdentity, loadIdentity } from '../src/identity/index.js';
+import { createNodeIdentity, dumpIdentity, loadIdentity } from '../src/identity/index.js';
 const hexToBytes = (h) => new Uint8Array(h.match(/../g).map((b) => parseInt(b, 16)));
 
 let passed = 0, failed = 0;
@@ -76,7 +76,7 @@ async function main() {
   let swId;
   await check('4. deriveIdentity works in software-only mode (was: throws, never connects)', async () => {
     __setForceSoftware(true);
-    swId = await deriveIdentity({ lat: LON.lat, lng: LON.lng });
+    swId = await createNodeIdentity({ lat: LON.lat, lng: LON.lng });
     const sig = await swId.sign(MSG);
     const ok  = await verify(hexToBytes(swId.pubkeyHex), MSG, sig);
     return ok && typeof swId.id === 'string' && swId.id.length === 66;

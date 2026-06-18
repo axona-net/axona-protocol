@@ -13,7 +13,7 @@
 
 import { webTransport } from '../src/transport/web/index.js';
 import { fromHex }      from '../src/utils/hexid.js';
-import { deriveIdentity } from '../src/identity/index.js';
+import { createNodeIdentity } from '../src/identity/index.js';
 import { buildAuthHello, cbvFromNonces } from '../src/transport/handshake-auth.js';
 
 let passed = 0, failed = 0;
@@ -73,8 +73,8 @@ async function feedBridgeHello(sock) {
 async function main() {
   console.log('webTransport — reconnect + welcome/RTT/state (axona/4 auth)\n');
 
-  const alice = await deriveIdentity({ lat: 40.71, lng: -74.0 });
-  bridgeIdent = await deriveIdentity({ lat: 51.5,  lng: -0.12 });
+  const alice = await createNodeIdentity({ lat: 40.71, lng: -74.0 });
+  bridgeIdent = await createNodeIdentity({ lat: 51.5,  lng: -0.12 });
   const BRIDGE_BIG = fromHex(bridgeIdent.id);
 
   liveSockets = [];

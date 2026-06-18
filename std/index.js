@@ -16,4 +16,3 @@
 //   (image downsampling and other helpers will land here as sibling modules.)
 // =====================================================================
 export * from './chunk.js';
-export * from './publisher.js';

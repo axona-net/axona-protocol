@@ -162,7 +162,7 @@ const delay = (ms) => new Promise(r => setTimeout(r, ms));
  * @returns {Promise<{ topic, fileId, n, msgIds: string[] }>}
  */
 export async function publishChunkedBytes(peer, bytes, {
-  topic = randomFileId(), publisher = null, name, mime, meta,
+  topic, signWith, name, mime, meta,
   maxMessageBytes = DEFAULT_MAX_MESSAGE_BYTES, throttleMs = 0,
   cacheSize = DEFAULT_REPLAY_CACHE,
 } = {}) {
@@ -174,7 +174,7 @@ export async function publishChunkedBytes(peer, bytes, {
   }
   const msgIds = [];
   for (const m of messages) {                          // manifest first, then chunks
-    const id = await peer.pub(topic, m, { publisher });
+    const id = await peer.pub(topic, m, { signWith });
     msgIds.push(id);
     if (throttleMs) await delay(throttleMs);
   }
@@ -188,7 +188,7 @@ export async function publishChunkedBytes(peer, bytes, {
  * @returns {Promise<{ bytes, name, mime, size, meta, id }>}
  */
 export async function receiveChunkedBytes(peer, topic, {
-  publisher = null, timeoutMs = 30000, onProgress = null,
+  timeoutMs = 30000, onProgress = null,
 } = {}) {
   return new Promise((resolve, reject) => {
     let settled = false, timer = null;
@@ -196,7 +196,7 @@ export async function receiveChunkedBytes(peer, topic, {
     const finish = async (err, file) => {
       if (settled) return; settled = true;
       if (timer) clearTimeout(timer);
-      try { await peer.unsub?.(topic, { publisher }); } catch { /* */ }
+      try { await peer.unsub?.(topic); } catch { /* */ }
       err ? reject(err) : resolve(file);
     };
     timer = setTimeout(() => {
@@ -207,7 +207,7 @@ export async function receiveChunkedBytes(peer, topic, {
     peer.sub(topic, (envelope) => {
       if (!envelope || envelope.deleted) return;
       reassembler.accept(envelope.message);
-    }, { publisher, since: 'all' }).catch((e) => finish(e));
+    }, { since: 'all' }).catch((e) => finish(e));
   });
 }
 

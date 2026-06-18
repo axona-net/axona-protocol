@@ -2,7 +2,7 @@
 // to a topic, show what arrives. ~70 lines, no framework. This is the artifact
 // the programmer-intro talk builds.
 
-import { AxonaPeer, AxonaDomain, NeuronNode, deriveIdentity, dumpIdentity, loadIdentity, deriveTopicId, KERNEL_VERSION } from '/src/index.js';
+import { AxonaPeer, AxonaDomain, NeuronNode, createNodeIdentity, createAuthorIdentity, deriveTopicId, KERNEL_VERSION } from '/src/index.js';
 import { webTransport } from '/src/transport/web/index.js';
 import { regionName }   from '/src/utils/region-names.js';
 import { resolveAnchor } from '../lib/region.js';
@@ -14,7 +14,7 @@ const status = (t) => { $('status').textContent = t; };
 // the SAME topic-id no matter where they are. The user's OWN identity, by
 // contrast, is rooted at their REAL location (see whereAmI below) — so a message
 // shows where its sender actually sits, while the topic stays one shared keyspace.
-const APP_VERSION = '0.3.0';
+const APP_VERSION = '0.4.0';
 // Bridge selection (same as axona-share): ?bridge=<wss url> → ?net=testnet|prod
 // shortcut → default by hostname. Lets one build run against either network.
 const KNOWN_BRIDGES = { prod: 'wss://bridge.axona.net', testnet: 'wss://testnet.axona.net' };
@@ -28,35 +28,33 @@ function resolveBridge() {
 }
 const BRIDGE = resolveBridge();
 const NETWORK = BRIDGE === KNOWN_BRIDGES.testnet ? 'testnet' : BRIDGE === KNOWN_BRIDGES.prod ? 'prod' : 'custom';
-const ANCHOR = resolveAnchor({ search: '', fallback: 'useast' });   // topic anchor — pinned to us-east
+const ANCHOR = resolveAnchor({ search: '', fallback: 'useast' });   // topic region — pinned to us-east
+const TOPIC_REGION = ANCHOR.token;                                   // the `region` field of every { region, name }
 
-let peer, identity, publishIdentity, currentTopic = null, currentSub = null;
+let peer, node$identity, author, currentTopic = null, currentSub = null;
 
-// Persistent PUBLISH identity (key separation): the transport `identity` authenticates
-// the connection and is ephemeral; this signs your posts and is persisted so authorship
-// is stable across reloads. The kernel requires a publish identity to sign a publish.
-async function loadOrCreatePublishIdentity(lat, lng) {
-  const key = 'axona-minimal:publish';
-  try { const s = localStorage.getItem(key); if (s) return await loadIdentity(JSON.parse(s)); } catch {}
-  const id = await deriveIdentity({ lat, lng });
-  try { localStorage.setItem(key, JSON.stringify(await dumpIdentity(id))); } catch {}
-  return id;
+// Durable AUTHOR identity (v0.3 key separation): the node identity authenticates the
+// connection and is ephemeral; this AUTHOR key signs your posts and is persisted
+// (persistAs) so authorship is stable across reloads. Every publish names it via
+// { signWith: author }. It has NO location/node-id — authorship is not a place.
+async function loadOrCreateAuthor() {
+  return createAuthorIdentity({ persistAs: 'axona-minimal:author' });   // load-or-create against localStorage
 }
 const seen = new Set();                                  // msgIds we've already shown (dedup own echo)
 
-// "region:userID" read off a 264-bit publish ID (the node-id): top byte = the
-// sender's S2 region cell, the rest = SHA-256(pubkey).
+// "region:userID" read off a 264-bit NODE id: top byte = the sender's S2 region
+// cell, the rest = SHA-256(pubkey).
 //
 // NOTE: the protocol does NOT reveal a publisher's location — a signed envelope
-// carries only signerPubkey (who signed), never the node-id's S2 region (where
-// they are), and the region can't be derived from the key. That's a deliberate
-// publisher-privacy property. THIS APP opts in: it chooses to share the sender's
-// region by putting its own node-id in the message payload below. That's an
-// application-layer example of voluntary location disclosure, not a protocol
-// feature. (Anonymous / sign:false posts carry nothing → 'anon'.)
-const idLabel = (pubId) =>
-  (typeof pubId === 'string' && pubId.length >= 10)
-    ? `${regionName(parseInt(pubId.slice(0, 2), 16))}:${pubId.slice(2, 10)}`
+// carries only signerPubkey/the Author ID (who signed), never the node-id's S2
+// region (where they are), and the region can't be derived from the author key.
+// That's a deliberate publisher-privacy property. THIS APP opts in: it chooses to
+// share the sender's region by putting its own NODE id in the message payload
+// below. That's an application-layer example of voluntary location disclosure,
+// not a protocol feature. (Anonymous posts carry nothing → 'anon'.)
+const idLabel = (nodeId) =>
+  (typeof nodeId === 'string' && nodeId.length >= 10)
+    ? `${regionName(parseInt(nodeId.slice(0, 2), 16))}:${nodeId.slice(2, 10)}`
     : 'anon';
 
 // Real geolocation → the user's actual S2 cell. Denied / unavailable → us-east.
@@ -78,14 +76,14 @@ async function connect() {
   status('locating…');
   const here = await whereAmI();
   status('connecting…');
-  identity        = await deriveIdentity({ lat: here.lat, lng: here.lng });          // ephemeral transport
-  publishIdentity = await loadOrCreatePublishIdentity(here.lat, here.lng);            // persistent author
-  const transport = webTransport({ bridgeUrl: BRIDGE, identity });
-  const node      = new NeuronNode({ id: BigInt('0x' + identity.id), lat: here.lat, lng: here.lng });
+  node$identity   = await createNodeIdentity({ lat: here.lat, lng: here.lng });       // ephemeral connection key
+  author          = await loadOrCreateAuthor();                                       // durable author key
+  const transport = webTransport({ bridgeUrl: BRIDGE, identity: node$identity });     // transport factory keeps `identity:`
+  const node      = new NeuronNode({ id: BigInt('0x' + node$identity.id), lat: here.lat, lng: here.lng });
   node.transport  = transport;
-  peer = new AxonaPeer({ domain: new AxonaDomain({ k: 20 }), node, identity, transport, publishIdentity });
+  peer = new AxonaPeer({ domain: new AxonaDomain({ k: 20 }), node, nodeIdentity: node$identity, transport });
 
-  await transport.start(identity.id);
+  await transport.start(node$identity.id);
   await peer.start();
   const until = Date.now() + 30000;
   while (Date.now() < until && (node.synaptome?.size ?? 0) < 3) {
@@ -93,23 +91,24 @@ async function connect() {
     await new Promise((r) => setTimeout(r, 600));
   }
   status('connected');
-  $('ver').textContent = `app v${APP_VERSION} · kernel v${KERNEL_VERSION} · ${NETWORK} · you ${idLabel(publishIdentity.id)}`;
+  $('ver').textContent = `app v${APP_VERSION} · kernel v${KERNEL_VERSION} · ${NETWORK} · you ${idLabel(node$identity.id)}`;
   $('send').disabled = false;
 }
 
-// Subscribe to a topic. Re-subscribing to a new topic drops the old one.
+// Subscribe to a topic (the user types its NAME; region is the pinned anchor).
+// Re-subscribing to a new topic drops the old one.
 async function ensureSubscribed(topic) {
   if (topic === currentTopic) return;
   if (currentSub) { try { await currentSub.stop(); } catch {} }
   currentTopic = topic;
-  currentSub = await peer.sub(topic, (env) => {
+  currentSub = await peer.sub({ region: TOPIC_REGION, name: topic }, (env) => {
     if (!env || env.deleted || seen.has(env.msgId)) return;   // skip our own already-shown echo
     seen.add(env.msgId);
     const m = env.message;
     const text = (m && typeof m === 'object') ? (m.text ?? JSON.stringify(m)) : m;
-    const pub  = (m && typeof m === 'object') ? m.pub : null;   // the location WE chose to share
-    render(text, idLabel(pub), false, topic);
-  }, { publisher: ANCHOR.publisher, since: 'all' });
+    const node = (m && typeof m === 'object') ? m.node : null;   // the location WE chose to share
+    render(text, idLabel(node), false, topic);
+  }, { since: 'all' });
 }
 
 // Publish to the current topic. The protocol signs the post with our key but
@@ -121,11 +120,12 @@ async function send() {
   const topic = $('topic').value.trim(), text = $('message').value;
   if (!topic || !text) return;
   await ensureSubscribed(topic);
-  // Signed by publishIdentity (the peer's default publish key). We voluntarily share
-  // the publish id so subscribers can show the author's region (idLabel) — app choice.
-  const msgId = await peer.pub(topic, { text, pub: publishIdentity.id }, { publisher: ANCHOR.publisher });
+  // Every publish names its signer: { signWith: author } (v0.3). We voluntarily share
+  // our NODE id so subscribers can show the sender's region (idLabel) — an app choice,
+  // not a protocol disclosure (the signed envelope never carries location).
+  const msgId = await peer.pub({ region: TOPIC_REGION, name: topic }, { text, node: node$identity.id }, { signWith: author });
   seen.add(msgId);
-  render(text, idLabel(identity.id), true, topic);
+  render(text, idLabel(node$identity.id), true, topic);
   $('message').value = '';
 }
 
@@ -143,9 +143,11 @@ function render(text, who, self, topic) {
 }
 
 // Show the topic-id beneath the field, prefixed with the topic's region (us-east,
-// hardcoded here). deriveTopicId is pure, so this works before we even connect.
+// pinned here). deriveTopicId is pure, so this works before we even connect.
 async function showTopicId(topic) {
-  $('topicId').textContent = topic ? `${ANCHOR.name} : ${await deriveTopicId(ANCHOR.publisher, topic)}` : '';
+  $('topicId').textContent = topic
+    ? `${ANCHOR.name} : ${await deriveTopicId({ region: TOPIC_REGION, name: topic })}`
+    : '';
 }
 
 $('send').addEventListener('click', () => send().catch((e) => status('send failed: ' + (e.message || e))));

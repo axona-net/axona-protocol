@@ -26,6 +26,7 @@ import {
 } from '../src/utils/hexid.js';
 
 import { deriveTopicId } from '../src/pubsub/post.js';
+import { resolveRegion, keyDerivedRegion } from '../src/utils/region-names.js';
 
 let passed = 0, failed = 0;
 function check(label, condition) {
@@ -141,35 +142,40 @@ function testClz264() {
 }
 
 async function testDeriveTopicId() {
-  console.log('\n── deriveTopicId ──');
-  const alice = '2a' + '0'.repeat(64);   // 66-char hex with S2 prefix = 0x2a
-  const bob   = 'ff' + '1'.repeat(64);   // 66-char hex with S2 prefix = 0xff
+  console.log('\n── deriveTopicId (v0.3 structured descriptor) ──');
+  const OWNER = 'a'.repeat(64);   // 64-hex Author ID
 
-  const tid1 = await deriveTopicId(alice, 'cats');
+  // Open topic: region byte + name-scoped hash → 66-char hex.
+  const tid1 = await deriveTopicId({ region: 'useast', name: 'cats' });
   check('returns 66-char hex',
     typeof tid1 === 'string' && tid1.length === 66 && /^[0-9a-f]+$/.test(tid1));
-  check('top 2 hex chars = publisher S2 prefix',
-    tid1.slice(0, 2) === '2a');
+  check('top 2 hex chars = region byte (useast)',
+    tid1.slice(0, 2) === resolveRegion('useast').toString(16).padStart(2, '0'));
 
-  const tid2 = await deriveTopicId(alice, 'cats');
-  check('deterministic (same input → same id)', tid1 === tid2);
+  const tid2 = await deriveTopicId({ region: 'useast', name: 'cats' });
+  check('deterministic (same descriptor → same id)', tid1 === tid2);
 
-  const tid3 = await deriveTopicId(alice, 'dogs');
-  check('different topic → different id', tid1 !== tid3);
+  const tid3 = await deriveTopicId({ region: 'useast', name: 'dogs' });
+  check('different topic name → different id', tid1 !== tid3);
 
-  const tid4 = await deriveTopicId(bob, 'cats');
-  check('different publisher → different id', tid1 !== tid4);
-  check("bob's topic carries bob's S2 prefix",
-    tid4.slice(0, 2) === 'ff');
+  // Owner-only vs open are distinct topics (write policy folded into the id).
+  const owned = await deriveTopicId({ region: 'useast', owner: OWNER, name: 'feed', write: 'owner' });
+  const open  = await deriveTopicId({ region: 'useast', owner: OWNER, name: 'feed', write: 'open' });
+  check('write policy changes the topic id', owned !== open);
+
+  // Key-derived placement: region omitted + owner → owner's key-derived region byte.
+  const kd = await deriveTopicId({ owner: OWNER, name: 'profile', write: 'owner' });
+  check('key-derived prefix (region omitted + owner)',
+    kd.slice(0, 2) === (await keyDerivedRegion(OWNER)).toString(16).padStart(2, '0'));
 
   // Reject bad inputs
   let threw = false;
-  try { await deriveTopicId('alice', 'cats'); } catch { threw = true; }
-  check('rejects short publisher string', threw);
+  try { await deriveTopicId({ name: 'cats' }); } catch { threw = true; }
+  check('rejects open topic without a region', threw);
 
   threw = false;
-  try { await deriveTopicId('z'.repeat(66), 'cats'); } catch { threw = true; }
-  check('rejects non-hex publisher', threw);
+  try { await deriveTopicId({ region: 'useast', name: 'x', write: 'owner' }); } catch { threw = true; }
+  check("rejects write:'owner' without an owner", threw);
 }
 
 async function main() {

@@ -21,7 +21,7 @@
 import { AxonaManager }              from '../src/pubsub/AxonaManager.js';
 import { AxonaPeer }                 from '../src/dht/AxonaPeer.js';
 import { SimNetwork, simTransport }  from '../src/transport/sim/index.js';
-import { deriveIdentity }            from '../src/identity/index.js';
+import { createNodeIdentity }        from '../src/identity/index.js';
 import { toHex, fromHex }            from '../src/utils/hexid.js';
 
 let passed = 0, failed = 0;
@@ -103,13 +103,13 @@ async function partA_handlers() {
 async function partB_dispatchBoundary() {
   console.log('\nB. dispatch boundary — an async handler rejection cannot leak as unhandledRejection');
   const network = new SimNetwork();
-  const aliceId = await deriveIdentity({ lat: 38, lng: -77 });
-  const bobId   = await deriveIdentity({ lat: 38, lng: -77.1 });
+  const aliceId = await createNodeIdentity({ lat: 38, lng: -77 });
+  const bobId   = await createNodeIdentity({ lat: 38, lng: -77.1 });
   const aliceT = simTransport({ network, identity: aliceId, heartbeatMs: 0 });
   const bobT   = simTransport({ network, identity: bobId, heartbeatMs: 0 });
   await aliceT.start(aliceId.id); await bobT.start(bobId.id);
   await aliceT.openConnection(bobId.id);
-  const mk = (id, t) => new AxonaPeer({ engine: { onEvent: () => () => {} }, node: { id: id.id, alive: true, transport: t }, identity: id, transport: t });
+  const mk = (id, t) => new AxonaPeer({ engine: { onEvent: () => () => {} }, node: { id: id.id, alive: true, transport: t }, nodeIdentity: id, transport: t });
   const alice = mk(aliceId, aliceT), bob = mk(bobId, bobT);
 
   // Watch for ANY unhandled rejection during the test window.
@@ -141,11 +141,11 @@ async function partC_dispatchGuard() {
     notify: async () => true, onRequest: () => {}, request: async () => null,
     onEvent: () => () => {}, start: async () => {}, stop: async () => {},
   };
-  const id = await deriveIdentity({ lat: 38, lng: -77 });
+  const id = await createNodeIdentity({ lat: 38, lng: -77 });
   const peer = new AxonaPeer({
     engine: { onEvent: () => () => {} },
     node: { id: id.id, alive: true, transport: fakeTransport },
-    identity: id, transport: fakeTransport,
+    nodeIdentity: id, transport: fakeTransport,
   });
 
   let calls = 0;

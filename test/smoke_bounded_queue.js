@@ -13,7 +13,7 @@
 
 import { AxonaManager }   from '../src/pubsub/AxonaManager.js';
 import { deriveTopicId }  from '../src/pubsub/post.js';
-import { deriveIdentity } from '../src/identity/index.js';
+import { createNodeIdentity, createAuthorIdentity } from '../src/identity/index.js';
 import { buildEnvelope }  from '../src/pubsub/envelope.js';
 import { fromHex }        from '../src/utils/hexid.js';
 
@@ -79,19 +79,21 @@ function testOwnedTopicNoQuota() {
 }
 
 async function testOpenTopicDetection() {
-  console.log('\n── _openTopicQuota fires only for public-derived topic ids ──');
-  const alice = await deriveIdentity({ lat: 51.5, lng: -0.1 });
+  console.log('\n── _openTopicQuota fires only for OPEN (write:open) signed descriptors ──');
+  const alice = await createAuthorIdentity();
   const role = { replayCache: [] };
 
-  // Public topic: id === deriveTopicId(null, name).
-  const pubHex = await deriveTopicId(null, 'room');
-  const pubEnv = await buildEnvelope({ topic: 'room', message: 'x', sign: false, ts: 1, seq: 1 });
+  // Open topic: the SIGNED descriptor's write policy is 'open' (anyone publishes).
+  const openDesc = { region: 'useast', name: 'room', write: 'open' };
+  const pubHex = await deriveTopicId(openDesc);
+  const pubEnv = await buildEnvelope({ topic: openDesc, message: 'x', sign: false, ts: 1, seq: 1 });
   const qOpen  = await am._openTopicQuota(role, JSON.stringify(pubEnv), BigInt('0x' + pubHex));
-  check('public topic → quota number', typeof qOpen === 'number' && qOpen === Math.ceil(am.replayCacheSize / 4));
+  check('open topic → quota number', typeof qOpen === 'number' && qOpen === Math.ceil(am.replayCacheSize / 4));
 
-  // Owned topic: id derived from alice, not public.
-  const ownHex = await deriveTopicId(alice.id, 'room');
-  const ownEnv = await buildEnvelope({ topic: 'room', message: 'x', identity: alice, ts: 1, seq: 1 });
+  // Owned topic: descriptor names an owner + write:'owner' → no quota.
+  const ownDesc = { owner: alice.authorId, name: 'room', write: 'owner' };
+  const ownHex = await deriveTopicId(ownDesc);
+  const ownEnv = await buildEnvelope({ topic: ownDesc, message: 'x', identity: alice, ts: 1, seq: 1 });
   const qOwned = await am._openTopicQuota(role, JSON.stringify(ownEnv), BigInt('0x' + ownHex));
   check('owned topic → no quota (null)', qOwned === null);
 }
@@ -110,7 +112,7 @@ function testLiveCacheCount() {
 
 async function testMetricsResponseShape() {
   console.log('\n── metricsResp carries current_count + subscribers ──');
-  const requester = (await deriveIdentity({ lat: 0, lng: 0 })).id;  // 66-char hex
+  const requester = (await createNodeIdentity({ lat: 0, lng: 0 })).id;  // 66-char hex node id
   let sent = null;
   const dht = {
     getSelfId: () => 1n, onRoutedMessage: () => {}, onDirectMessage: () => {},
@@ -139,9 +141,9 @@ async function testMetricsResponseShape() {
 async function testMetricsOwnership() {
   console.log('\n── metrics gate: owned = owner-only, public/synthetic = anyone ──');
   const now = 1_700_000_000_000;
-  const ownerId    = (await deriveIdentity({ lat: 38, lng: -77 })).id;   // real anchor
+  const ownerId    = (await createNodeIdentity({ lat: 38, lng: -77 })).id;   // real anchor
   const ownerBig   = fromHex(ownerId);
-  const strangerId = (await deriveIdentity({ lat: 0,  lng: 0   })).id;
+  const strangerId = (await createNodeIdentity({ lat: 0,  lng: 0   })).id;
   const synthBig   = fromHex('89' + '0'.repeat(64));   // synthetic regional anchor (low 256 = 0)
 
   function respond(anchorBig, requesterId) {

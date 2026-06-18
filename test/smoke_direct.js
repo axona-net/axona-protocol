@@ -6,7 +6,7 @@
 
 import { AxonaPeer }                from '../src/dht/AxonaPeer.js';
 import { SimNetwork, simTransport } from '../src/transport/sim/index.js';
-import { deriveIdentity }           from '../src/identity/index.js';
+import { createNodeIdentity }       from '../src/identity/index.js';
 
 let passed = 0, failed = 0;
 function check(label, condition) {
@@ -20,8 +20,8 @@ const TOKYO  = { lat: 35.6762, lng: 139.6503 };
 // ── Setup helper: two peers wired through SimNetwork ─────────────────
 
 async function makePair() {
-  const aliceId = await deriveIdentity(LONDON);
-  const bobId   = await deriveIdentity(TOKYO);
+  const aliceId = await createNodeIdentity(LONDON);
+  const bobId   = await createNodeIdentity(TOKYO);
 
   const network = new SimNetwork();
   const aliceTransport = simTransport({
@@ -37,13 +37,13 @@ async function makePair() {
   const alice = new AxonaPeer({
     engine: { onEvent: () => () => {} },
     node:   { id: aliceId.id, alive: true },
-    identity: aliceId,
+    nodeIdentity: aliceId,
     transport: aliceTransport,
   });
   const bob = new AxonaPeer({
     engine: { onEvent: () => () => {} },
     node:   { id: bobId.id, alive: true },
-    identity: bobId,
+    nodeIdentity: bobId,
     transport: bobTransport,
   });
   return { alice, bob, aliceId, bobId, aliceTransport, bobTransport };
@@ -117,11 +117,11 @@ async function testHandlerErrorPropagates() {
 
 async function testNoTransport() {
   console.log('\n── send: no transport configured ──');
-  const id = await deriveIdentity(LONDON);
+  const id = await createNodeIdentity(LONDON);
   const peer = new AxonaPeer({
     engine: { onEvent: () => () => {} },
     node:   { id: id.id, alive: true },
-    identity: id,
+    nodeIdentity: id,
     /* no transport */
   });
   let err = null;

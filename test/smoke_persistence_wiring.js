@@ -13,7 +13,8 @@
 
 import { AxonaPeer }            from '../src/dht/AxonaPeer.js';
 import { InMemoryPersistence }  from '../src/persistence/interface.js';
-import { deriveIdentity,
+import { createNodeIdentity,
+         createAuthorIdentity,
          dumpIdentity }         from '../src/identity/index.js';
 
 let passed = 0, failed = 0;
@@ -42,7 +43,7 @@ class MockAxonaManager {
 async function testIdentityLoadOnStart() {
   console.log('\n── start() loads identity from persist ──');
   const persist = new InMemoryPersistence();
-  const id = await deriveIdentity(LONDON);
+  const id = await createNodeIdentity(LONDON);
   await persist.save('identity', await dumpIdentity(id));
 
   // Construct WITHOUT identity — should be loaded from persist.
@@ -67,14 +68,14 @@ async function testIdentityLoadOnStart() {
 async function testIdentityFromConstructorWins() {
   console.log('\n── constructor identity takes precedence over persist ──');
   const persist = new InMemoryPersistence();
-  const stored = await deriveIdentity(LONDON);
+  const stored = await createNodeIdentity(LONDON);
   await persist.save('identity', await dumpIdentity(stored));
 
-  const ctor = await deriveIdentity({ lat: 35.6762, lng: 139.6503 });
+  const ctor = await createNodeIdentity({ lat: 35.6762, lng: 139.6503 });
   const node = { id: ctor.id, alive: true, synaptome: new Map() };
   const peer = new AxonaPeer({
     engine: { onEvent: () => () => {} },
-    node, identity: ctor, persist,
+    node, nodeIdentity: ctor, persist,
     axonaManager: new MockAxonaManager(),
   });
   await peer.start();
@@ -87,20 +88,20 @@ async function testIdentityFromConstructorWins() {
 async function testSubscriptionsPersisted() {
   console.log('\n── subscriptions persisted on sub() + leave() flushes ──');
   const persist = new InMemoryPersistence();
-  const id = await deriveIdentity(LONDON);
+  const id = await createNodeIdentity(LONDON);
   const am = new MockAxonaManager();
 
   const peer = new AxonaPeer({
     engine: { onEvent: () => () => {} },
     node: { id: id.id, alive: true, synaptome: new Map() },
-    identity: id, persist, axonaManager: am,
+    nodeIdentity: id, persist, axonaManager: am,
   });
   // Tighten the debounce so the test doesn't wait forever.
   peer._persistFlushMs = 50;
 
   await peer.start();
-  await peer.sub('cats', () => {});
-  await peer.sub('dogs', () => {}, { since: 'all' });
+  await peer.sub({ region: 'useast', name: 'cats' }, () => {});
+  await peer.sub({ region: 'useast', name: 'dogs' }, () => {}, { since: 'all' });
 
   // Force the debounce to fire.
   await new Promise(r => setTimeout(r, 100));
@@ -127,19 +128,19 @@ async function testSubscriptionsPersisted() {
 async function testSubscriptionStopPersisted() {
   console.log('\n── sub.stop() flushes subscriptions ──');
   const persist = new InMemoryPersistence();
-  const id = await deriveIdentity(LONDON);
+  const id = await createNodeIdentity(LONDON);
   const am = new MockAxonaManager();
 
   const peer = new AxonaPeer({
     engine: { onEvent: () => () => {} },
     node: { id: id.id, alive: true, synaptome: new Map() },
-    identity: id, persist, axonaManager: am,
+    nodeIdentity: id, persist, axonaManager: am,
   });
   peer._persistFlushMs = 50;
 
   await peer.start();
-  const subA = await peer.sub('cats', () => {});
-  const subB = await peer.sub('dogs', () => {});
+  const subA = await peer.sub({ region: 'useast', name: 'cats' }, () => {});
+  const subB = await peer.sub({ region: 'useast', name: 'dogs' }, () => {});
   await new Promise(r => setTimeout(r, 100));
 
   await subA.stop();
@@ -156,19 +157,19 @@ async function testSubscriptionStopPersisted() {
 async function testRoundTrip() {
   console.log('\n── kill peer + rebuild against same persist ──');
   const persist = new InMemoryPersistence();
-  const id1 = await deriveIdentity(LONDON);
+  const id1 = await createNodeIdentity(LONDON);
   const am1 = new MockAxonaManager();
 
   const peer1 = new AxonaPeer({
     engine: { onEvent: () => () => {} },
     node: { id: id1.id, alive: true, synaptome: new Map() },
-    identity: id1, persist, axonaManager: am1,
+    nodeIdentity: id1, persist, axonaManager: am1,
   });
   peer1._persistFlushMs = 50;
 
   await peer1.start();
-  await peer1.sub('cats', () => {});
-  await peer1.sub('news', () => {}, { since: 'latest' });
+  await peer1.sub({ region: 'useast', name: 'cats' }, () => {});
+  await peer1.sub({ region: 'useast', name: 'news' }, () => {}, { since: 'latest' });
   await new Promise(r => setTimeout(r, 100));
   await peer1.leave({ drain: false, notify: false });
 
@@ -191,9 +192,10 @@ async function testRoundTrip() {
     peer2.pendingSubscriptions.find(s => s.topic === 'news')?.since === 'latest');
 
   // Synaptome wasn't populated this round (no peer-joined events fired),
-  // so it stays empty.  Verify the rebuilt/loaded identity can sign — sign with it
-  // EXPLICITLY (key separation: peer.pub never signs with the transport key implicitly).
-  const msgId = await peer2.pub('test', { hi: 1 }, { signWith: peer2._identity });
+  // so it stays empty.  Verify the rebuilt peer can publish — sign with an explicit
+  // author identity (key separation: peer.pub never signs with the transport key).
+  const author = await createAuthorIdentity();
+  const msgId = await peer2.pub({ region: 'useast', name: 'test' }, { hi: 1 }, { signWith: author });
   check('rebuilt peer can sign + publish',
     typeof msgId === 'string' && msgId.length === 64);
 
@@ -203,15 +205,15 @@ async function testRoundTrip() {
 
 async function testNoPersistNoLoad() {
   console.log('\n── peer without persist still works ──');
-  const id = await deriveIdentity(LONDON);
+  const id = await createNodeIdentity(LONDON);
   const peer = new AxonaPeer({
     engine: { onEvent: () => () => {} },
     node: { id: id.id, alive: true, synaptome: new Map() },
-    identity: id, axonaManager: new MockAxonaManager(),
+    nodeIdentity: id, axonaManager: new MockAxonaManager(),
     /* no persist */
   });
   await peer.start();
-  await peer.sub('cats', () => {});
+  await peer.sub({ region: 'useast', name: 'cats' }, () => {});
   check('peer started without persist', peer._started === true);
   await peer.leave({ drain: false, notify: false });
 }
@@ -221,7 +223,7 @@ async function testCorruptedIdentityIgnored() {
   const persist = new InMemoryPersistence();
   await persist.save('identity', { id: 'corrupted' });   // missing fields
 
-  const id = await deriveIdentity(LONDON);
+  const id = await createNodeIdentity(LONDON);
   const peer = new AxonaPeer({
     engine: { onEvent: () => () => {} },
     node: { id: id.id, alive: true, synaptome: new Map() },

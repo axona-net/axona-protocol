@@ -20,7 +20,11 @@
 
 import { AxonaManager } from '../src/pubsub/AxonaManager.js';
 import { buildEnvelope, computeMsgId } from '../src/pubsub/envelope.js';
-import { deriveIdentity } from '../src/identity/index.js';
+import { deriveTopicId } from '../src/pubsub/post.js';
+import { createAuthorIdentity } from '../src/identity/index.js';
+
+// v0.3: an envelope's topic is the structured DESCRIPTOR object, not a string.
+const TOPIC_DESC = (name) => ({ region: 0x89, owner: null, name, write: 'open' });
 
 let passed = 0, failed = 0;
 function check(label, cond) {
@@ -43,9 +47,9 @@ function makeManager() {
 async function main() {
   console.log('pub/sub postHash ↔ verified content-hash reconciliation\n');
 
-  const id = await deriveIdentity({ lat: 1, lng: 2 });
-  const signed   = await buildEnvelope({ topic: 'news', message: 'hello', identity: id, sign: true });
-  const anon      = await buildEnvelope({ topic: 'news', message: 'hi', sign: false });
+  const id = await createAuthorIdentity();
+  const signed   = await buildEnvelope({ topic: TOPIC_DESC('news'), message: 'hello', identity: id, sign: true });
+  const anon      = await buildEnvelope({ topic: TOPIC_DESC('news'), message: 'hi', sign: false });
   const realSigned = signed.msgId;                       // = computeMsgId({publisher:pub, message})
   const realAnon   = anon.msgId;                         // = computeMsgId({publisher:null, message})
   const FAKE       = 'dead'.repeat(16);                  // 64-hex, not the real hash
@@ -74,20 +78,23 @@ async function main() {
     (await computeMsgId({ publisher: signed.signerPubkey, message: signed.message })) === realSigned);
 
   // ── integration: ingress drops a tampered postHash, accepts honest ─
+  // v0.3: the routed topicId must equal resolveTopic(env.topic).topicId — the
+  // root recomputes it from the SIGNED descriptor and rejects a mismatch.
   console.log('\n── ingress (_onPublishDirect) ──');
+  const NEWS_TID = await deriveTopicId(TOPIC_DESC('news'));   // matches `signed`'s descriptor
   {
     const m = makeManager();
     await m._onPublishDirect(
-      { topicId: TOPIC, publisher: big('a' + id.pubkeyHex), json: JSON.stringify(signed),
+      { topicId: NEWS_TID, publisher: big('a' + id.pubkeyHex), json: JSON.stringify(signed),
         publishId: 'bad:1', publishTs: 1, postHash: FAKE });
-    check('tampered-postHash publish NOT cached/promoted', m.axonRoles.get(big(TOPIC)) == null);
+    check('tampered-postHash publish NOT cached/promoted', m.axonRoles.get(big(NEWS_TID)) == null);
   }
   {
     const m = makeManager();
     await m._onPublishDirect(
-      { topicId: TOPIC, publisher: big('a' + id.pubkeyHex), json: JSON.stringify(signed),
+      { topicId: NEWS_TID, publisher: big('a' + id.pubkeyHex), json: JSON.stringify(signed),
         publishId: 'ok:1', publishTs: 1, postHash: realSigned });
-    check('honest-postHash publish accepted (role created)', m.axonRoles.get(big(TOPIC)) != null);
+    check('honest-postHash publish accepted (role created)', m.axonRoles.get(big(NEWS_TID)) != null);
   }
 
   console.log(`\nResult: ${passed} passed, ${failed} failed`);

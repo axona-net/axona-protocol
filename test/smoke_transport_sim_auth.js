@@ -11,7 +11,7 @@
 // =====================================================================
 
 import { SimNetwork, simTransport } from '../src/transport/sim/index.js';
-import { deriveIdentity }           from '../src/identity/index.js';
+import { createNodeIdentity }           from '../src/identity/index.js';
 
 let passed = 0, failed = 0;
 function check(label, cond) {
@@ -28,9 +28,9 @@ const net = () => new SimNetwork({ latencyFn: () => 0 });
 async function main() {
   console.log('authenticated-identity gate in the simulator\n');
 
-  const aliceId = await deriveIdentity(NYC);
-  const bobId   = await deriveIdentity(LON);
-  const evilId  = await deriveIdentity(TOK);
+  const aliceId = await createNodeIdentity(NYC);
+  const bobId   = await createNodeIdentity(LON);
+  const evilId  = await createNodeIdentity(TOK);
 
   // ── honest authenticated connect ───────────────────────────────────
   {

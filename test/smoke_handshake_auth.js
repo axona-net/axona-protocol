@@ -15,7 +15,7 @@ import {
   buildAuthHello, verifyAuthHello, pubkeyMatchesNodeId,
   makeNonce, cbvFromNonces, cbvFromFingerprints, AUTH_PROTO,
 } from '../src/transport/handshake-auth.js';
-import { deriveIdentity } from '../src/identity/index.js';
+import { createNodeIdentity } from '../src/identity/index.js';
 
 let passed = 0, failed = 0;
 function check(label, cond) {
@@ -29,8 +29,8 @@ const LON = { lat: 51.5,  lng: -0.12 };
 async function main() {
   console.log('authenticated handshake (axona/4)\n');
 
-  const alice = await deriveIdentity(NYC);
-  const bob   = await deriveIdentity(LON);
+  const alice = await createNodeIdentity(NYC);
+  const bob   = await createNodeIdentity(LON);
 
   // ── happy path ─────────────────────────────────────────────────────
   {

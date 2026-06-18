@@ -22,7 +22,7 @@
 // =====================================================================
 
 import { AxonaManager }   from '../src/pubsub/AxonaManager.js';
-import { deriveIdentity } from '../src/identity/index.js';
+import { createAuthorIdentity } from '../src/identity/index.js';
 import { buildEnvelope }  from '../src/pubsub/envelope.js';
 import { buildKill }      from '../src/pubsub/kill.js';
 import { toHex }          from '../src/utils/hexid.js';
@@ -110,8 +110,8 @@ async function reloadSubscriberAndCount(net, roots, label) {
 async function main() {
   console.log('Axona kill-resurrection regression (replica divergence + convergence fix)');
 
-  const alice = await deriveIdentity(LONDON);
-  const env   = await buildEnvelope({ topic: 'cats', message: 'hi', identity: alice, ts: T, seq: T });
+  const alice = await createAuthorIdentity();
+  const env   = await buildEnvelope({ topic: { region: 'useast', name: 'cats' }, message: 'hi', identity: alice, ts: T, seq: T });
   const json  = JSON.stringify(env);
 
   const net     = new MockNet();

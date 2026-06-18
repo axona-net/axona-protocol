@@ -15,7 +15,7 @@
 // =====================================================================
 
 import { MeshAuth } from '../src/transport/web/mesh-auth.js';
-import { deriveIdentity } from '../src/identity/index.js';
+import { createNodeIdentity } from '../src/identity/index.js';
 
 let passed = 0, failed = 0;
 function check(label, cond) {
@@ -43,8 +43,8 @@ function wire2(alice, bob, connA, connB) {
 
 async function testTwoPeerBindAcrossAsymmetricConnIds() {
   console.log('\n── two peers bind across asymmetric connIds ──');
-  const aliceId = await deriveIdentity({ lat: 40.7, lng: -74.0 });
-  const bobId   = await deriveIdentity({ lat: 51.5, lng: -0.1 });
+  const aliceId = await createNodeIdentity({ lat: 40.7, lng: -74.0 });
+  const bobId   = await createNodeIdentity({ lat: 51.5, lng: -0.1 });
   const connA = 'cA1', connB = 'cB2';   // each side's view of the other
 
   const aliceBound = [], bobBound = [];
@@ -79,8 +79,8 @@ async function testTwoPeerBindAcrossAsymmetricConnIds() {
 
 async function testForgedPeerNotBound() {
   console.log('\n── a peer that signs the wrong CBV is not bound ──');
-  const aliceId = await deriveIdentity({ lat: 40.7, lng: -74.0 });
-  const bobId   = await deriveIdentity({ lat: 51.5, lng: -0.1 });
+  const aliceId = await createNodeIdentity({ lat: 40.7, lng: -74.0 });
+  const bobId   = await createNodeIdentity({ lat: 51.5, lng: -0.1 });
 
   // Asymmetric, BROKEN routing: deliver each side's frames tagged with a
   // DIFFERENT meshId than the constant tag would share — simulate a peer
@@ -114,8 +114,8 @@ async function testForgedPeerNotBound() {
 
 async function testHonestFingerprintsBind() {
   console.log('\n── honest DTLS fingerprints → both bind ──');
-  const aliceId = await deriveIdentity({ lat: 40.7, lng: -74.0 });
-  const bobId   = await deriveIdentity({ lat: 51.5, lng: -0.1 });
+  const aliceId = await createNodeIdentity({ lat: 40.7, lng: -74.0 });
+  const bobId   = await createNodeIdentity({ lat: 51.5, lng: -0.1 });
   const connA = 'cA', connB = 'cB';
   const fpA = 'sha-256 aaaa', fpB = 'sha-256 bbbb';
 
@@ -141,8 +141,8 @@ async function testHonestFingerprintsBind() {
 
 async function testMitmFingerprintsRejected() {
   console.log('\n── bridge MITM rewrites fingerprints → neither binds ──');
-  const aliceId = await deriveIdentity({ lat: 40.7, lng: -74.0 });
-  const bobId   = await deriveIdentity({ lat: 51.5, lng: -0.1 });
+  const aliceId = await createNodeIdentity({ lat: 40.7, lng: -74.0 });
+  const bobId   = await createNodeIdentity({ lat: 51.5, lng: -0.1 });
   const connA = 'cA', connB = 'cB';
   // A negotiated DTLS with the bridge (thinking it's B); B negotiated
   // with the bridge (thinking it's A).  Each side's "remote" is the
@@ -178,8 +178,8 @@ async function testMitmFingerprintsRejected() {
 // once and asserts the channel RECOVERS on a re-driven hello-sig.
 async function testTransientBindThrowRecovers() {
   console.log('\n── a transient bindPeer throw recovers (no verifying-wedge) ──');
-  const aliceId = await deriveIdentity({ lat: 12.3, lng: 45.6 });
-  const bobId   = await deriveIdentity({ lat: 65.4, lng: -32.1 });
+  const aliceId = await createNodeIdentity({ lat: 12.3, lng: 45.6 });
+  const bobId   = await createNodeIdentity({ lat: 65.4, lng: -32.1 });
   const connA = 'cA', connB = 'cB';
 
   let throwArmed = true;

@@ -14,7 +14,7 @@
 
 import { AxonaManager }   from '../src/pubsub/AxonaManager.js';
 import { AxonaPeer }      from '../src/dht/AxonaPeer.js';
-import { deriveIdentity } from '../src/identity/index.js';
+import { createNodeIdentity, createAuthorIdentity, computeNodeIdBigInt } from '../src/identity/index.js';
 import { buildEnvelope }  from '../src/pubsub/envelope.js';
 import { buildTouch, verifyTouch } from '../src/pubsub/touch.js';
 import { fromHex }        from '../src/utils/hexid.js';
@@ -28,6 +28,7 @@ function check(label, cond) {
 
 const LONDON = { lat: 51.5074, lng: -0.1278 };
 const TOKYO  = { lat: 35.6762, lng: 139.6503 };
+const TOPIC_DESC = { region: 'useast', name: 'cats' };   // structured topic for envelopes/peer
 const TOPIC_HEX = '89' + 'ab'.repeat(32);
 const TOPIC_BIG = BigInt('0x' + TOPIC_HEX);
 const T = 1_700_000_000_000;
@@ -43,13 +44,19 @@ function stubDht() {
 function mkManager() { return new AxonaManager({ dht: stubDht(), now: () => T }); }
 
 async function aliceMsg(identity) {
-  const env  = await buildEnvelope({ topic: 'cats', message: 'hi', identity, ts: T, seq: T });
+  const env  = await buildEnvelope({ topic: TOPIC_DESC, message: 'hi', identity, ts: T, seq: T });
   return { env, json: JSON.stringify(env) };
 }
 
+// v0.3 owner anchor for an AUTHOR: the topic anchor's low-256 bits are
+// sha256(pubkey) — exactly what computeNodeIdBigInt(pubkey, lat, lng) yields —
+// so the owner-gate (sha256(signerPubkey) === anchor suffix) recognizes this
+// author as the owner. Replaces the old `fromHex(identity.id)`.
+const ownerAnchor = (author, { lat, lng }) => computeNodeIdBigInt(author.pubkey, lat, lng);
+
 async function testTouchObject() {
   console.log('\n── touch.js build / verify / tamper ──');
-  const alice = await deriveIdentity(LONDON);
+  const alice = await createAuthorIdentity();
   const touch = await buildTouch({ topicId: TOPIC_HEX, msgId: 'a'.repeat(64), ts: T, seq: T, identity: alice });
   check('touch carries its domain kind', touch.kind === 'axona:pubsub-touch:v1');
   check('touch signerPubkey is alice', touch.signerPubkey === alice.pubkeyHex);
@@ -62,10 +69,10 @@ async function testTouchObject() {
 
 async function testOwnerTouchResetsAndHeads() {
   console.log('\n── OWNED topic: the owner touch resets hold, moves to head, bumps recency ──');
-  const alice = await deriveIdentity(LONDON);
+  const alice = await createAuthorIdentity();
   const am = mkManager();
   const { env, json } = await aliceMsg(alice);
-  const aliceAnchor = fromHex(alice.id);          // owned: anchor low-256 = sha256(alice pubkey) ≠ 0
+  const aliceAnchor = await ownerAnchor(alice, LONDON);          // owned: anchor low-256 = sha256(alice pubkey) ≠ 0
   // Entry near expiry; another (untouched) entry sits ahead of it.
   am.axonRoles.set(TOPIC_BIG, {
     isRoot: true, children: new Map(),
@@ -89,7 +96,7 @@ async function testOwnerTouchResetsAndHeads() {
 
 async function testTouchBoundedByCeiling() {
   console.log('\n── touch cannot extend past the absolute ceiling ──');
-  const alice = await deriveIdentity(LONDON);
+  const alice = await createAuthorIdentity();
   const am = mkManager();
   const { env, json } = await aliceMsg(alice);
   // Ceiling is only 1s away — a 24h hold must clamp to it.
@@ -106,7 +113,7 @@ async function testTouchBoundedByCeiling() {
 
 async function testTouchedSurvivesEviction() {
   console.log('\n── a touched message is evicted LAST (head of queue) ──');
-  const alice = await deriveIdentity(LONDON);
+  const alice = await createAuthorIdentity();
   const am = mkManager();
   const { env, json } = await aliceMsg(alice);
   const role = { isRoot: true, children: new Map(), replayCache: [], maxMessages: 2 };
@@ -128,7 +135,7 @@ async function testTouchedSurvivesEviction() {
 
 async function testTouchAfterReplayAcquisition() {
   console.log('\n── a message acquired via replay is touchable (postHash preserved) ──');
-  const alice = await deriveIdentity(LONDON);
+  const alice = await createAuthorIdentity();
   const am = mkManager();
   const { env, json } = await aliceMsg(alice);
   am.axonRoles.set(TOPIC_BIG, { isRoot: true, children: new Map(), replayCache: [] });
@@ -142,11 +149,11 @@ async function testTouchAfterReplayAcquisition() {
 
 async function testOwnedTopicNonOwnerRejected() {
   console.log('\n── OWNED topic: a non-owner cannot touch ──');
-  const alice = await deriveIdentity(LONDON);   // owner (anchor)
-  const bob   = await deriveIdentity(TOKYO);    // stranger
+  const alice = await createAuthorIdentity();   // owner (anchor)
+  const bob   = await createAuthorIdentity();    // stranger
   const am = mkManager();
   const { env, json } = await aliceMsg(alice);
-  const aliceAnchor = fromHex(alice.id);
+  const aliceAnchor = await ownerAnchor(alice, LONDON);
   am.axonRoles.set(TOPIC_BIG, {
     isRoot: true, children: new Map(),
     replayCache: [{ json, publishId: 'p1', publishTs: T, postHash: env.msgId, seq: 1,
@@ -161,8 +168,8 @@ async function testOwnedTopicNonOwnerRejected() {
 
 async function testOpenTopicAnyoneCanTouch() {
   console.log('\n── UNOWNED (open) topic: anyone may touch ──');
-  const alice = await deriveIdentity(LONDON);   // published the message
-  const carol = await deriveIdentity(TOKYO);    // a stranger, not the author
+  const alice = await createAuthorIdentity();   // published the message
+  const carol = await createAuthorIdentity();    // a stranger, not the author
   const am = mkManager();
   const { env, json } = await aliceMsg(alice);
   const synthAnchor = fromHex('89' + '0'.repeat(64));   // synthetic regional anchor → low-256 = 0 → UNOWNED
@@ -181,17 +188,20 @@ async function testOpenTopicAnyoneCanTouch() {
 
 async function testPeerValidation() {
   console.log('\n── peer.touch input validation ──');
-  const id = await deriveIdentity(LONDON);
+  const node   = await createNodeIdentity(LONDON);
+  const author = await createAuthorIdentity();
   const am = mkManager();
-  const peer = new AxonaPeer({ engine: { onEvent: () => () => {} }, node: { id: id.id, alive: true }, axonaManager: am, identity: id });
+  const peer = new AxonaPeer({ engine: { onEvent: () => () => {} }, node: { id: BigInt('0x' + node.id), alive: true }, axonaManager: am, nodeIdentity: node });
 
-  let e1 = null; try { await peer.touch('cats', 'not-hex'); } catch (e) { e1 = e; }
+  // Bad msgId is rejected before any signer check (msgId validated first).
+  let e1 = null; try { await peer.touch(TOPIC_DESC, 'not-hex', { signWith: author }); } catch (e) { e1 = e; }
   check('bad msgId → TouchError(TOUCH_INVALID_MSGID)',
     e1 instanceof TouchError && e1.code === ErrorCodes.TOUCH_INVALID_MSGID);
 
-  const noId = new AxonaPeer({ engine: { onEvent: () => () => {} }, node: { id: id.id, alive: true }, axonaManager: am });
-  let e2 = null; try { await noId.touch('cats', 'a'.repeat(64)); } catch (e) { e2 = e; }
-  check('no identity → TouchError(TOUCH_SIGN_FAILED)',
+  // v0.3: a touch must be signed (no node-key fallback) — omitting signWith is
+  // the analogue of the old "no identity" case.
+  let e2 = null; try { await peer.touch(TOPIC_DESC, 'a'.repeat(64)); } catch (e) { e2 = e; }
+  check('no signWith → TouchError(TOUCH_SIGN_FAILED)',
     e2 instanceof TouchError && e2.code === ErrorCodes.TOUCH_SIGN_FAILED);
 }
 

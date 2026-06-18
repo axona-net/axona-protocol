@@ -1,23 +1,30 @@
 // =====================================================================
-// smoke_dual_key.mjs — publish identity decoupled from transport identity.
+// smoke_dual_key.mjs — authorship is signWith-only; the node/transport
+// key NEVER signs a publish (the LEAK-transport-signed guard), v0.3.
 //
-// Verifies the dual-key model (kernel v2.50.0): a peer may sign publishes with
-// a PUBLISH identity distinct from its (ephemeral) transport identity, and may
-// run MANY publish identities through one peer via a per-call { signWith }.
+// v0.3 removed the dual-key default-signer model entirely: there is NO
+// publishIdentity constructor arg and NO default signer. A peer holds a
+// NODE identity (its connection/transport keypair, whose pubkey forms the
+// nodeId) that signs the handshake/routing — but it must never sign a
+// publish. Authorship is supplied per-publish via { signWith: <author> }
+// (an AUTHOR identity). This test pins the key-separation invariant:
 //
-//   1. default publishIdentity → envelope.signerPubkey = publish key (NOT transport)
-//   2. per-call signWith overrides the default (multiple publish keys, one peer)
-//   3. no publishIdentity + no signWith → signs with transport identity (back-compat)
-//   4. dual-key envelope verifies (signature ok + msgId recomputes)
-//   5. unlinkability: the envelope carries the publish key only — never the transport key
-//   6. durable authorship across a transport-id rotation: a fresh transport identity,
-//      the SAME publish identity → same signerPubkey (recognizable author)
-//   7. a bad signWith (no private key) → PublishError, never an unsigned publish
+//   1. an author-signed publish ⇒ env.signerPubkey === author.authorId
+//   2. the node/transport key is NEVER the signer, and no node-key
+//      material (pubkey or nodeId) ever appears in the envelope (unlinkability)
+//   3. omitting signWith ⇒ PublishError(PUBLISH_NO_PUBLISH_IDENTITY)
+//      (no silent fallback to the node key, no silent anonymity)
+//   4. many authors through one peer (per-call { signWith })
+//   5. the signed envelope verifies (signature ok + msgId recomputes)
+//   6. durable authorship across a node-id rotation: a fresh node identity,
+//      the SAME author ⇒ same signerPubkey (recognizable author)
+//   7. an explicit anonymous publish ({ signWith: ANONYMOUS }) is unsigned
+//   8. a bad signWith (no private key) ⇒ PublishError, never an unsigned publish
 //
 //   node test/smoke_dual_key.mjs
 // =====================================================================
-import { AxonaPeer }       from '../src/dht/AxonaPeer.js';
-import { deriveIdentity }  from '../src/identity/index.js';
+import { AxonaPeer, ANONYMOUS } from '../src/dht/AxonaPeer.js';
+import { createNodeIdentity, createAuthorIdentity } from '../src/identity/index.js';
 import { verifyEnvelope, computeMsgId } from '../src/pubsub/envelope.js';
 import { PublishError, ErrorCodes } from '../src/errors.js';
 
@@ -29,110 +36,103 @@ function mockManager(nodeId) {
   let n = 0;
   return {
     nodeId, published: [],
-    pubsubPublish(topicId, json, meta) { const id = `${nodeId}:${++n}`; this.published.push({ topicId, json, meta, publishId: id }); return id; },
+    pubsubPublish(topicId, json, meta) { const id = `${nodeId}:${++n}`; this.published.push({ topicId, json, meta }); return id; },
     pubsubSubscribe() {}, pubsubUnsubscribe() {}, onPubsubDelivery() {},
+    _lastSeenTsByTopic: new Map(),
   };
 }
-function makePeer({ identity, publishIdentity = null }) {
-  const node   = { id: identity.id, alive: true };
+function makePeer({ node }) {
   const engine = { onEvent: () => () => {}, simEpoch: 0 };
-  const am     = mockManager(identity.id);
-  const peer   = new AxonaPeer({ engine, node, axonaManager: am, identity, publishIdentity });
+  const am     = mockManager(node.id);
+  const peer   = new AxonaPeer({ engine, node: { id: BigInt('0x' + node.id), alive: true }, axonaManager: am, nodeIdentity: node });
   return { peer, am };
 }
 const lastEnv = (am) => JSON.parse(am.published[am.published.length - 1].json);
 
-const SF = { lat: 37.77, lng: -122.42 };
+const SF    = { lat: 37.77, lng: -122.42 };
+const TOPIC = { region: 'useast', name: 'feed' };
 
 async function main() {
-  console.log('dual-key identity (publish vs transport)');
+  console.log('authorship via signWith — node/transport key never signs (v0.3)');
 
-  const transport = await deriveIdentity(SF);
-  const pubA      = await deriveIdentity(SF);     // a persistent publish identity
-  const pubB      = await deriveIdentity(SF);     // a second publish identity, same peer
+  const node    = await createNodeIdentity(SF);    // the connection/transport identity
+  const authorA = await createAuthorIdentity();    // a persistent author persona
+  const authorB = await createAuthorIdentity();    // a second author, same peer
 
-  // ── 1. default publishIdentity signs (not the transport key) ──
+  // ── 1. author-signed publish ⇒ signerPubkey = the Author ID ──
   {
-    const { peer, am } = makePeer({ identity: transport, publishIdentity: pubA });
-    await peer.pub('topic/x', { hello: 1 });
+    const { peer, am } = makePeer({ node });
+    await peer.pub(TOPIC, { hello: 1 }, { signWith: authorA });
     const env = lastEnv(am);
-    check('1. signerPubkey = publish key (default publishIdentity)', env.signerPubkey === pubA.pubkeyHex);
-    check('1. signerPubkey ≠ transport key', env.signerPubkey !== transport.pubkeyHex);
+    check('1. signerPubkey = author A’s Author ID', env.signerPubkey === authorA.authorId);
+    check('1. signerPubkey ≠ node/transport pubkey', env.signerPubkey !== node.pubkeyHex);
   }
 
-  // ── 2. per-call signWith overrides → multiple publish keys from one peer ──
+  // ── 2. node-key material never appears in the envelope (unlinkability) ──
   {
-    const { peer, am } = makePeer({ identity: transport, publishIdentity: pubA });
-    await peer.pub('topic/x', { a: 1 });                       // → pubA
-    await peer.pub('topic/x', { b: 2 }, { signWith: pubB });   // → pubB
-    const e1 = JSON.parse(am.published[0].json), e2 = JSON.parse(am.published[1].json);
-    check('2. first publish signed by pubA', e1.signerPubkey === pubA.pubkeyHex);
-    check('2. signWith publish signed by pubB', e2.signerPubkey === pubB.pubkeyHex);
-    check('2. two distinct publish keys from one peer', e1.signerPubkey !== e2.signerPubkey);
+    const { peer, am } = makePeer({ node });
+    await peer.pub(TOPIC, { e: 5 }, { signWith: authorA });
+    const json = am.published[0].json;
+    check('2. envelope carries the author pubkey', json.includes(authorA.authorId));
+    check('2. envelope contains NO node-key material (pubkey or nodeId)',
+      !json.includes(node.pubkeyHex) && !json.includes(node.id));
   }
 
-  // ── 3. no publishIdentity + no signWith → REFUSED (transport key must not sign) ──
+  // ── 3. omitting signWith ⇒ refused (the transport key must not sign) ──
   {
-    const { peer } = makePeer({ identity: transport });           // transport only, no publish identity
+    const { peer } = makePeer({ node });
     let err = null;
-    try { await peer.pub('topic/x', { c: 3 }); } catch (e) { err = e; }
-    check('3. signed publish without a publish identity → PublishError(PUBLISH_NO_PUBLISH_IDENTITY)',
+    try { await peer.pub(TOPIC, { c: 3 }); } catch (e) { err = e; }
+    check('3. no signer ⇒ PublishError(PUBLISH_NO_PUBLISH_IDENTITY)',
       err instanceof PublishError && err.code === ErrorCodes.PUBLISH_NO_PUBLISH_IDENTITY);
   }
 
-  // ── 3b. transport-key signing is possible ONLY when explicitly requested ──
+  // ── 4. many authors through one peer (per-call signWith) ──
   {
-    const { peer, am } = makePeer({ identity: transport });
-    await peer.pub('topic/x', { c: 3 }, { signWith: transport });   // intentional, discouraged escape hatch
-    check('3b. explicit signWith: transport signs with the transport key (intentional override)',
-      lastEnv(am).signerPubkey === transport.pubkeyHex);
+    const { peer, am } = makePeer({ node });
+    await peer.pub(TOPIC, { a: 1 }, { signWith: authorA });
+    await peer.pub(TOPIC, { b: 2 }, { signWith: authorB });
+    const e1 = JSON.parse(am.published[0].json), e2 = JSON.parse(am.published[1].json);
+    check('4. first publish signed by author A', e1.signerPubkey === authorA.authorId);
+    check('4. second publish signed by author B', e2.signerPubkey === authorB.authorId);
+    check('4. two distinct authors from one peer', e1.signerPubkey !== e2.signerPubkey);
   }
 
-  // ── 3c. anonymous publish needs no publish identity ──
+  // ── 5. the signed envelope verifies (signature + msgId) ──
   {
-    const { peer, am } = makePeer({ identity: transport });
-    await peer.pub('topic/x', { c: 3 }, { sign: false });
-    check('3c. sign:false → unsigned publish (no signerPubkey), no publish identity needed',
-      lastEnv(am).signerPubkey == null);
-  }
-
-  // ── 4. the dual-key envelope verifies (signature + msgId) ──
-  {
-    const { peer, am } = makePeer({ identity: transport, publishIdentity: pubA });
-    await peer.pub('topic/x', { d: 4 });
+    const { peer, am } = makePeer({ node });
+    await peer.pub(TOPIC, { d: 4 }, { signWith: authorA });
     const env = lastEnv(am);
     const res = await verifyEnvelope(env);
-    check('4. verifyEnvelope ok for dual-key envelope', res?.ok === true);
+    check('5. verifyEnvelope ok for the author-signed envelope', res?.ok === true);
     const recomputed = await computeMsgId({ publisher: env.signerPubkey, message: env.message });
-    check('4. msgId recomputes from (signerPubkey, message)', recomputed === env.msgId);
+    check('5. msgId recomputes from (signerPubkey, message)', recomputed === env.msgId);
   }
 
-  // ── 5. unlinkability: the envelope contains the publish key only, never the transport key ──
+  // ── 6. durable authorship across a node-id rotation ──
   {
-    const { peer, am } = makePeer({ identity: transport, publishIdentity: pubA });
-    await peer.pub('topic/x', { e: 5 });
-    const json = am.published[0].json;
-    check('5. envelope carries the publish pubkey', json.includes(pubA.pubkeyHex));
-    check('5. envelope contains NO transport-key material', !json.includes(transport.pubkeyHex) && !json.includes(transport.id));
-  }
-
-  // ── 6. durable authorship across a transport-id rotation ──
-  {
-    const newTransport = await deriveIdentity(SF);            // simulate a restart: fresh transport id
-    check('6. transport id rotated', newTransport.id !== transport.id);
-    const { peer, am } = makePeer({ identity: newTransport, publishIdentity: pubA });
-    await peer.pub('topic/x', { f: 6 });
+    const newNode = await createNodeIdentity(SF);    // simulate a restart: fresh node id
+    check('6. node id rotated', newNode.id !== node.id);
+    const { peer, am } = makePeer({ node: newNode });
+    await peer.pub(TOPIC, { f: 6 }, { signWith: authorA });
     const env = lastEnv(am);
-    check('6. same publish identity ⇒ same signerPubkey after rotation', env.signerPubkey === pubA.pubkeyHex);
+    check('6. same author ⇒ same signerPubkey after node rotation', env.signerPubkey === authorA.authorId);
   }
 
-  // ── 7. a bad signWith never silently downgrades to unsigned ──
+  // ── 7. explicit anonymous publish is unsigned ──
   {
-    const { peer } = makePeer({ identity: transport, publishIdentity: pubA });
+    const { peer, am } = makePeer({ node });
+    await peer.pub(TOPIC, { c: 3 }, { signWith: ANONYMOUS });
+    check('7. signWith: ANONYMOUS ⇒ unsigned (no signerPubkey)', lastEnv(am).signerPubkey == null);
+  }
+
+  // ── 8. a bad signWith never silently downgrades to unsigned ──
+  {
+    const { peer } = makePeer({ node });
     let err = null;
-    try { await peer.pub('topic/x', { g: 7 }, { signWith: { pubkeyHex: 'deadbeef' } }); }  // no privateKey
+    try { await peer.pub(TOPIC, { g: 7 }, { signWith: { pubkeyHex: 'deadbeef' } }); }  // no privateKey
     catch (e) { err = e; }
-    check('7. invalid signWith → PublishError(PUBLISH_SIGN_FAILED)',
+    check('8. invalid signWith ⇒ PublishError(PUBLISH_SIGN_FAILED)',
       err instanceof PublishError && err.code === ErrorCodes.PUBLISH_SIGN_FAILED);
   }
 

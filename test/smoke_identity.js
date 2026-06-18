@@ -5,7 +5,7 @@
 // =====================================================================
 
 import {
-  deriveIdentity,
+  createNodeIdentity,
   dumpIdentity,
   loadIdentity,
   computeNodeId,
@@ -31,8 +31,8 @@ const LONDON = { lat: 51.5074, lng: -0.1278 };
 const TOKYO  = { lat: 35.6762, lng: 139.6503 };
 
 async function testDerive() {
-  console.log('\n── deriveIdentity ──');
-  const id = await deriveIdentity(LONDON);
+  console.log('\n── createNodeIdentity ──');
+  const id = await createNodeIdentity(LONDON);
   check('returns 66-char hex id',     isHexId(id.id));
   check('pubkey is 32 bytes',          id.pubkey instanceof Uint8Array && id.pubkey.length === 32);
   check('pubkeyHex is 64 chars',       id.pubkeyHex.length === 64);
@@ -46,18 +46,18 @@ async function testDerive() {
     extractS2Prefix(fromHex(id.id)) === expectedS2);
 
   // Two identities in different regions should have different S2 prefixes.
-  const id2 = await deriveIdentity(TOKYO);
+  const id2 = await createNodeIdentity(TOKYO);
   check("Tokyo identity has different S2 prefix than London identity",
     extractS2Prefix(fromHex(id.id)) !== extractS2Prefix(fromHex(id2.id)));
 
   // Two fresh identities in the SAME region differ (random pubkey).
-  const id3 = await deriveIdentity(LONDON);
+  const id3 = await createNodeIdentity(LONDON);
   check("two London identities differ (random pubkey)", id.id !== id3.id);
 }
 
 async function testNodeIdDeterminism() {
   console.log('\n── computeNodeId determinism ──');
-  const id = await deriveIdentity(LONDON);
+  const id = await createNodeIdentity(LONDON);
   const recomputed = await computeNodeId(id.pubkey, LONDON.lat, LONDON.lng);
   check('recomputed nodeId === stored id', recomputed === id.id);
 
@@ -69,7 +69,7 @@ async function testNodeIdDeterminism() {
 
 async function testSignVerify() {
   console.log('\n── sign / verify round-trip ──');
-  const id = await deriveIdentity(LONDON);
+  const id = await createNodeIdentity(LONDON);
   const message = new TextEncoder().encode('hello mesh');
   const sig = await id.sign(message);
   check('sign returns 64-byte signature',
@@ -84,7 +84,7 @@ async function testSignVerify() {
 
 async function testDumpLoadRoundtrip() {
   console.log('\n── dump / load round-trip ──');
-  const orig = await deriveIdentity(LONDON);
+  const orig = await createNodeIdentity(LONDON);
   const env  = await dumpIdentity(orig);
 
   // Envelope shape.
@@ -117,9 +117,9 @@ async function testDumpLoadRoundtrip() {
 async function testRejection() {
   console.log('\n── input validation ──');
   let threw = false;
-  try { await deriveIdentity({ lat: 'not-a-number', lng: 0 }); }
+  try { await createNodeIdentity({ lat: 'not-a-number', lng: 0 }); }
   catch (e) { threw = e instanceof IdentityError && e.code === ErrorCodes.IDENTITY_INVALID_FORMAT; }
-  check('deriveIdentity rejects non-numeric region', threw);
+  check('createNodeIdentity rejects non-numeric region', threw);
 
   threw = false;
   try { await loadIdentity(null); }
@@ -132,7 +132,7 @@ async function testRejection() {
   check('loadIdentity rejects malformed envelope', threw);
 
   // Tampered envelope: change id but keep pubkey/region.
-  const orig = await deriveIdentity(LONDON);
+  const orig = await createNodeIdentity(LONDON);
   const env  = await dumpIdentity(orig);
   threw = false;
   try {
@@ -145,7 +145,7 @@ async function testRejection() {
 
 async function testNonExtractableKey() {
   console.log('\n── H4: non-extractable signing key ──');
-  const id = await deriveIdentity({ ...LONDON, extractable: false });
+  const id = await createNodeIdentity({ ...LONDON, extractable: false });
   check('derives a usable identity', isHexId(id.id) && id.pubkeyHex.length === 64);
   // The private key still signs…
   const msg = new TextEncoder().encode('hello');
@@ -163,15 +163,15 @@ async function testNonExtractableKey() {
   catch (e) { dumpThrew = e instanceof IdentityError; }
   check('dumpIdentity refuses a non-extractable identity', dumpThrew);
   // The default (extractable) identity still dumps fine.
-  const persistable = await deriveIdentity(LONDON);
+  const persistable = await createNodeIdentity(LONDON);
   const env = await dumpIdentity(persistable);
   check('default identity remains persistable', typeof env.privkey === 'string');
 }
 
 async function testLoadIdentityKeyMismatch() {
   console.log('\n── M5: loadIdentity verifies privkey ↔ pubkey ──');
-  const a = await dumpIdentity(await deriveIdentity(LONDON));
-  const b = await dumpIdentity(await deriveIdentity(LONDON));
+  const a = await dumpIdentity(await createNodeIdentity(LONDON));
+  const b = await dumpIdentity(await createNodeIdentity(LONDON));
   // Graft b's private key onto a's id/pubkey/region — internally the
   // nodeId still matches a's pubkey, but the private key is the wrong one.
   const frankenstein = { ...a, privkey: b.privkey };

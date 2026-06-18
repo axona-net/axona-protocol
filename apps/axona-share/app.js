@@ -4,7 +4,7 @@
 import { connectAxona, KERNEL_VERSION, REGION } from './axona.js';
 import { chunkBytes, createReassembler, compressImage, VERSION as FT_VERSION } from '../lib/file-transport.js';
 
-const APP_VERSION = '0.8.2';
+const APP_VERSION = '0.9.0';
 const CHUNK_BYTES = 64 * 1024;    // conservative: large pub/sub messages are unreliable over WebRTC
 const DEFAULT_CHANNEL = { id: 'axona-share/public-images', name: 'Public Images' };
 const MAX_IMAGE_BYTES = 1_000_000;

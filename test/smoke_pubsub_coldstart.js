@@ -17,9 +17,15 @@
 // =====================================================================
 
 import { AxonaManager }   from '../src/pubsub/AxonaManager.js';
-import { deriveIdentity } from '../src/identity/index.js';
+import { createAuthorIdentity } from '../src/identity/index.js';
 import { buildEnvelope }  from '../src/pubsub/envelope.js';
+import { deriveTopicId }  from '../src/pubsub/post.js';
 import { toHex }          from '../src/utils/hexid.js';
+
+// v0.3: an envelope's topic is the structured DESCRIPTOR object. The root binds
+// the SIGNED descriptor to the routed topic id during anti-entropy, so each
+// topic's routed id must be the one its descriptor resolves to.
+const TOPIC_DESC = (i) => ({ region: 0x89, owner: null, name: `chan-${i}`, write: 'open' });
 
 let passed = 0, failed = 0;
 function check(label, cond) {
@@ -70,7 +76,7 @@ const cacheHas = (mgr, topicBig, postHash) => (mgr.axonRoles.get(topicBig)?.repl
 
 async function main() {
   console.log('Axona pub/sub cold-start anti-entropy drain');
-  const alice = await deriveIdentity(LONDON);
+  const alice = await createAuthorIdentity();
   const N = 20;   // > MSGSYNC_TOPICS_PER_TICK (8): steady round-robin alone could not do these in one tick
 
   // ── 1+2. holder r1 has N topics cached; cold host r2 drains them all in ONE tick ──
@@ -80,8 +86,9 @@ async function main() {
     const r2 = net.spawn(BASE ^ 3n);   // freshly restarted host — N cold empty roles
     const msgs = [];
     for (let i = 0; i < N; i++) {
-      const topicBig = BASE ^ BigInt(i);
-      const env  = await buildEnvelope({ topic: `chan-${i}`, message: `m${i}`, identity: alice, ts: T, seq: T + i });
+      // v0.3: the routed topic id is the one the SIGNED descriptor resolves to.
+      const topicBig = BigInt('0x' + await deriveTopicId(TOPIC_DESC(i)));
+      const env  = await buildEnvelope({ topic: TOPIC_DESC(i), message: `m${i}`, identity: alice, ts: T, seq: T + i });
       const json = JSON.stringify(env);
       msgs.push({ topicBig, postHash: env.msgId });
       r1.axonRoles.set(topicBig, role({ replayCache: [{ json, publishId: `p${i}`, publishTs: T, postHash: env.msgId, publisher: null }], synced: true }));

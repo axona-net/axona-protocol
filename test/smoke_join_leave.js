@@ -6,7 +6,7 @@
 
 import { AxonaPeer }                  from '../src/dht/AxonaPeer.js';
 import { SimNetwork, simTransport }   from '../src/transport/sim/index.js';
-import { deriveIdentity }             from '../src/identity/index.js';
+import { createNodeIdentity }         from '../src/identity/index.js';
 import { TransportError }             from '../src/errors.js';
 import { fromHex }                    from '../src/utils/hexid.js';
 
@@ -22,7 +22,7 @@ const TOKYO  = { lat: 35.6762, lng: 139.6503 };
 // ── Helpers ──────────────────────────────────────────────────────────
 
 async function makePeer(network, region) {
-  const id = await deriveIdentity(region);
+  const id = await createNodeIdentity(region);
   const transport = simTransport({ network, identity: id, heartbeatMs: 0 });
   const node = { id: id.id, alive: true, synaptome: new Map() };
   // listeners + emit helper so peer.onPeerJoin/Leave actually fire
@@ -42,7 +42,7 @@ async function makePeer(network, region) {
   // so the kernel installs its routing/notification handlers — including
   // the graceful-departure `peer-leaving` fast path — at construction.
   node.transport = transport;
-  const peer = new AxonaPeer({ engine, node, identity: id, transport });
+  const peer = new AxonaPeer({ engine, node, nodeIdentity: id, transport });
   return { peer, id, transport, engine };
 }
 
@@ -145,7 +145,7 @@ async function testPeerLeavingEviction() {
   // BigInt; peers() renders hex).  Seed bob with alice + an unrelated
   // third party (carol) bob also holds.
   const aliceBig = fromHex(alice.id.id);
-  const carolId  = await deriveIdentity(LONDON);
+  const carolId  = await createNodeIdentity(LONDON);
   const carolBig = fromHex(carolId.id);
   bob.engine.addSynapse(bob.peer._node, aliceBig, { addedBy: 'test' });
   bob.engine.addSynapse(bob.peer._node, carolBig, { addedBy: 'test' });

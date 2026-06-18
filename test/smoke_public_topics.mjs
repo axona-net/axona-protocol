@@ -1,28 +1,32 @@
 // =====================================================================
-// smoke_public_topics.mjs — verify public-topic mode (issue #47).
+// smoke_public_topics.mjs — v0.3 OPEN topics (the public-topic analogue).
 //
-// Application choice between two topic-naming schemes:
+// In v0.3 there is no synthetic-publisher "public" mode and no global
+// (0x00) bucket: an anyone-can-publish / anyone-can-subscribe topic is an
+// OPEN topic placed in a real region —
 //
-//   · Publisher-keyed (default).  Topic ID = [publisher S2][SHA-256(publisher:topicName)].
-//     Two publishers with the same topicName produce DIFFERENT topic IDs.
-//     Verifiable provenance via signed envelopes; routing locality follows
-//     the publisher's geographic prefix.
+//     { region, name, write: 'open' }
+//     topic_id = [region byte (2 hex)] || SHA-256(canonical({ owner:null, name, write:'open' }))
 //
-//   · Public.  Topic ID = '00' || SHA-256(topicName).
-//     Anyone-can-publish, anyone-can-subscribe.  S2 prefix is 0x00 (global
-//     bucket, no geographic anchor).  Signed envelopes still carry
-//     signerPubkey — subscribers can still verify per-message provenance,
-//     they just can't tie the TOPIC to a single publisher.
+// Anyone who knows the region + name recomputes the SAME topic id (no
+// publisher scoping). Region is REQUIRED (no global region exists);
+// changing region or name changes the topic id. Owner-only topics
+// ({ owner, write:'owner' }) are a DIFFERENT topic id for the same name,
+// so an open topic can never collide with an owned one.
 //
-// Public mode is opt-in: pass `{ publisher: null }` to peer.pub/sub/pull/metrics.
+// Per-message provenance is still verifiable when a publisher signs (the
+// envelope carries signerPubkey); the TOPIC just isn't tied to a single
+// publisher. That signed-envelope path is covered by smoke_pubsub_v3.mjs.
 //
 // Run:  node test/smoke_public_topics.mjs
 // =====================================================================
 
 import {
   deriveTopicId,
+  resolveRegion,
   sha256Hex,
 } from '../src/index.js';
+import { canonical } from '../src/pubsub/post.js';
 
 let passed = 0, failed = 0;
 function check(label, condition) {
@@ -30,73 +34,73 @@ function check(label, condition) {
   else           { console.log(`  ✗ ${label}`); failed++; }
 }
 
-const ALICE = '2e' + '0a'.repeat(32);   // 66-char hex, S2 prefix 2e
-const BOB   = '7f' + 'cd'.repeat(32);   // 66-char hex, S2 prefix 7f
+const OWNER = 'a'.repeat(64);   // a 64-hex Author ID
 const TOPIC = 'news';
 
-async function testPublisherKeyedSeparate() {
-  console.log('\n── publisher-keyed: same topicName, different publishers → different IDs ──');
-  const aliceTopic = await deriveTopicId(ALICE, TOPIC);
-  const bobTopic   = await deriveTopicId(BOB,   TOPIC);
+async function testOpenTopicRegionPlaced() {
+  console.log('\n── open topic: region-placed, anyone recomputes the same id ──');
+  const t1 = await deriveTopicId({ region: 'useast', name: TOPIC });
+  const t2 = await deriveTopicId({ region: 'useast', name: TOPIC });
 
-  check('alice topic is 66 hex chars',   aliceTopic.length === 66);
-  check('bob topic is 66 hex chars',     bobTopic.length === 66);
-  check('alice topic carries her S2 prefix (2e)', aliceTopic.slice(0, 2) === '2e');
-  check('bob topic carries his S2 prefix (7f)',   bobTopic.slice(0, 2) === '7f');
-  check('different publishers → different topic IDs',
-    aliceTopic !== bobTopic);
+  check('open topic is 66 hex chars', t1.length === 66);
+  check('two callers compute the SAME open topic id', t1 === t2);
+  const regionByte = resolveRegion('useast').toString(16).padStart(2, '0');
+  check('top byte == the region byte (region-placed, not 0x00)',
+    t1.slice(0, 2) === regionByte);
+
+  // The hash half is sha256(canonical({ owner:null, name, write:'open' })).
+  const expected = regionByte + (await sha256Hex(canonical({ owner: null, name: TOPIC, write: 'open' })));
+  check('open id == [region] || sha256(canonical({owner:null,name,write:open}))',
+    t1 === expected);
 }
 
-async function testPublicMode() {
-  console.log('\n── public mode: publisher=null → simple sha256(topicName) ──');
-  const aliceAsPublic = await deriveTopicId(null, TOPIC);
-  const bobAsPublic   = await deriveTopicId(null, TOPIC);
+async function testRegionAndNameScope() {
+  console.log('\n── region + name both scope the topic id ──');
+  const useast = await deriveTopicId({ region: 'useast', name: TOPIC });
+  const iberia = await deriveTopicId({ region: 'iberia', name: TOPIC });
+  check('same name, different region → different topic id', useast !== iberia);
 
-  check('public topic is 66 hex chars',          aliceAsPublic.length === 66);
-  check('public topic S2 prefix is 00',          aliceAsPublic.slice(0, 2) === '00');
-  check('two callers compute the SAME public ID', aliceAsPublic === bobAsPublic);
+  const other = await deriveTopicId({ region: 'useast', name: 'weather' });
+  check('same region, different name → different topic id', useast !== other);
 
-  // Cross-check the hash: '00' || sha256(topicName)
-  const expected = '00' + (await sha256Hex(TOPIC));
-  check('public ID is "00" + sha256(topicName)', aliceAsPublic === expected);
+  // region code == region name.
+  const byCode = await deriveTopicId({ region: resolveRegion('useast'), name: TOPIC });
+  check('region code == region name', useast === byCode);
 }
 
-async function testPublicVsKeyed() {
-  console.log('\n── public ≠ keyed (so they cannot collide accidentally) ──');
-  const aliceKeyed = await deriveTopicId(ALICE, TOPIC);
-  const publik     = await deriveTopicId(null,  TOPIC);
-  check('public topic ID differs from keyed topic ID',
-    aliceKeyed !== publik);
+async function testOpenVsOwner() {
+  console.log('\n── open ≠ owner (same name can never collide across policies) ──');
+  const open  = await deriveTopicId({ region: 'useast', name: TOPIC, write: 'open' });
+  const owned = await deriveTopicId({ region: 'useast', owner: OWNER, name: TOPIC, write: 'owner' });
+  check('open topic id differs from owner-only topic id', open !== owned);
 }
 
 async function testEdgeCases() {
   console.log('\n── input validation ──');
   let threw = false;
-  try { await deriveTopicId(null, ''); } catch { threw = true; }
-  check('empty topicName throws (with public mode)', threw);
+  try { await deriveTopicId({ region: 'useast', name: '' }); } catch { threw = true; }
+  check('empty name throws', threw);
 
   threw = false;
-  try { await deriveTopicId(null, undefined); } catch { threw = true; }
-  check('undefined topicName throws (with public mode)', threw);
+  try { await deriveTopicId({ region: 'useast', name: undefined }); } catch { threw = true; }
+  check('undefined name throws', threw);
+
+  // Region is REQUIRED for an open topic (no global region).
+  threw = false;
+  try { await deriveTopicId({ name: TOPIC }); } catch { threw = true; }
+  check('open topic without a region throws (no global region)', threw);
 
   threw = false;
-  try { await deriveTopicId('not-66-chars', TOPIC); } catch { threw = true; }
-  check('publisher not 66 chars throws',           threw);
-
-  // null and undefined and '' all collapse to public mode
-  const a = await deriveTopicId(null,      TOPIC);
-  const b = await deriveTopicId(undefined, TOPIC);
-  const c = await deriveTopicId('',        TOPIC);
-  check('null/undefined/empty publisher all produce the same public ID',
-    a === b && b === c);
+  try { await deriveTopicId({ region: 'no-such-region', name: TOPIC }); } catch { threw = true; }
+  check('unknown region throws', threw);
 }
 
 async function main() {
-  console.log('Public-topic mode (#47): deriveTopicId with optional publisher\n');
+  console.log('v0.3 open topics (the public-topic analogue): structured { region, name }\n');
 
-  await testPublisherKeyedSeparate();
-  await testPublicMode();
-  await testPublicVsKeyed();
+  await testOpenTopicRegionPlaced();
+  await testRegionAndNameScope();
+  await testOpenVsOwner();
   await testEdgeCases();
 
   console.log(`\nResult: ${passed} passed, ${failed} failed`);

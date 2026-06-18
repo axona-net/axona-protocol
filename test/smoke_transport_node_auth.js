@@ -13,7 +13,7 @@
 // =====================================================================
 
 import { WebSocketTransport, serverTransport } from '../src/transport/node/index.js';
-import { deriveIdentity }                       from '../src/identity/index.js';
+import { createNodeIdentity }                       from '../src/identity/index.js';
 
 let passed = 0, failed = 0;
 function check(label, cond) {
@@ -53,8 +53,8 @@ function wireLoopback(aConn, bConn) {
 
 async function testMutualAuthHappyPath() {
   console.log('\n── mutual auth: two honest peers bind to proven ids ──');
-  const alice = await deriveIdentity({ lat: 38, lng: -77 });
-  const bob   = await deriveIdentity({ lat: 51.5, lng: -0.1 });
+  const alice = await createNodeIdentity({ lat: 38, lng: -77 });
+  const bob   = await createNodeIdentity({ lat: 51.5, lng: -0.1 });
 
   const A_CONN = 'a->b', B_CONN = 'b->a';
   const link = wireLoopback(A_CONN, B_CONN);
@@ -95,8 +95,8 @@ async function testMutualAuthHappyPath() {
 
 async function testForgedIdentityRejected() {
   console.log('\n── forged identity: pubkey ≠ nodeId is rejected (4426) ──');
-  const real = await deriveIdentity({ lat: 38, lng: -77 });
-  const bob  = await deriveIdentity({ lat: 51.5, lng: -0.1 });
+  const real = await createNodeIdentity({ lat: 38, lng: -77 });
+  const bob  = await createNodeIdentity({ lat: 51.5, lng: -0.1 });
   // Forge: claim a different nodeId while signing with real's key. The
   // BIND check (SHA-256(pubkey) == nodeId suffix) must fail at the verifier.
   const forged = { ...real, id: bob.id };
@@ -133,7 +133,7 @@ async function testForgedIdentityRejected() {
 
 async function testLegacyHelloRejected() {
   console.log('\n── legacy/garbled hello is rejected (4426) ──');
-  const bob = await deriveIdentity({ lat: 51.5, lng: -0.1 });
+  const bob = await createNodeIdentity({ lat: 51.5, lng: -0.1 });
   let rejected = null;
   const tb = new WebSocketTransport({
     localNodeId: bob.id, identity: bob, authenticate: true,
@@ -154,7 +154,7 @@ async function testLegacyHelloRejected() {
 
 async function testServerFactoryBeginsAuth() {
   console.log('\n── serverTransport(authenticate) opens the handshake on connect ──');
-  const id = await deriveIdentity({ lat: 38, lng: -77 });
+  const id = await createNodeIdentity({ lat: 38, lng: -77 });
   const sent = [];
   const { transport, attach } = serverTransport({
     identity: id, authenticate: true,

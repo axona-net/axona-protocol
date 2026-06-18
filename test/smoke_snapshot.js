@@ -5,7 +5,7 @@
 // =====================================================================
 
 import { AxonaPeer }       from '../src/dht/AxonaPeer.js';
-import { deriveIdentity }  from '../src/identity/index.js';
+import { createNodeIdentity, createAuthorIdentity } from '../src/identity/index.js';
 import { isHexId }         from '../src/utils/hexid.js';
 
 let passed = 0, failed = 0;
@@ -32,7 +32,7 @@ class MockAxonaManager {
 }
 
 async function makePeer({ synaptomeIds = [], subscriptions = [] } = {}) {
-  const identity = await deriveIdentity(LONDON);
+  const identity = await createNodeIdentity(LONDON);
   const synaptome = new Map();
   for (const peerId of synaptomeIds) {
     synaptome.set(peerId, { peerId, weight: 0.7, latency: 42, stratum: 5, addedBy: 'ltp' });
@@ -41,14 +41,13 @@ async function makePeer({ synaptomeIds = [], subscriptions = [] } = {}) {
   const peer = new AxonaPeer({
     engine: { onEvent: () => () => {} },
     node,
-    identity,
-    publishIdentity: identity,   // test signs with the same key (explicit)
+    nodeIdentity: identity,
     axonaManager: new MockAxonaManager(),
   });
   // pre-register subscriptions via peer.sub so _subscriptions populates.
   const subs = [];
   for (const s of subscriptions) {
-    const sub = await peer.sub(s.topic, () => {}, s.opts ?? {});
+    const sub = await peer.sub({ region: 'useast', name: s.topic }, () => {}, s.opts ?? {});
     subs.push(sub);
   }
   return { peer, identity, subs };
@@ -142,9 +141,10 @@ async function testFromSnapshotIdentityReusable() {
     axonaManager: new MockAxonaManager(),
   });
 
-  // Verify the restored identity is usable by signing through pub() — sign with it
-  // EXPLICITLY (key separation: the transport key is never the implicit signer).
-  const msgId = await restored.pub('test', { hi: 1 }, { signWith: restored._identity });
+  // Verify the restored peer can publish — sign with an explicit author identity
+  // (key separation: the transport/node key is never the implicit signer).
+  const author = await createAuthorIdentity();
+  const msgId = await restored.pub({ region: 'useast', name: 'test' }, { hi: 1 }, { signWith: author });
   check('restored peer can sign + publish',
     typeof msgId === 'string' && msgId.length === 64);
 }
@@ -163,11 +163,11 @@ async function testFromSnapshotValidation() {
 
 async function testEmptyPeerSnapshot() {
   console.log('\n── snapshot() on bare peer ──');
-  const id = await deriveIdentity(LONDON);
+  const id = await createNodeIdentity(LONDON);
   const node = { id: id.id, alive: true, synaptome: new Map() };
   const peer = new AxonaPeer({
     engine: { onEvent: () => () => {} },
-    node, identity: id,
+    node, nodeIdentity: id,
   });
   const snap = await peer.snapshot();
   check('empty synaptome → empty array',

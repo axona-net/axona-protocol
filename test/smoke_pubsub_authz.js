@@ -15,7 +15,8 @@
 
 import { AxonaManager } from '../src/pubsub/AxonaManager.js';
 import { buildEnvelope } from '../src/pubsub/envelope.js';
-import { deriveIdentity } from '../src/identity/index.js';
+import { resolveTopic } from '../src/pubsub/post.js';
+import { createAuthorIdentity } from '../src/identity/index.js';
 
 let passed = 0, failed = 0;
 function check(label, cond) {
@@ -212,28 +213,38 @@ async function testLazyAxonGateFailsOpenWithoutView() {
 // The axon now verifies the envelope at ingress: a claimed-but-invalid
 // signature is dropped; unsigned/anonymous and non-envelope payloads pass.
 
+// v0.3: a root binds the SIGNED topic descriptor to the routed topic id
+// (_topicPolicyOk), so an envelope must be routed to the topic id its descriptor
+// resolves to — otherwise it's dropped for descriptor/topic mismatch, not for
+// the signature reason these tests target. Route to the real resolved id.
+const NEWS = { region: 'useast', name: 'news' };
+
 async function testIngressDropsForgedSignature() {
   console.log('\n── B-4: forged-signature publish dropped at ingress ──');
-  const id  = await deriveIdentity({ lat: 1, lng: 2 });
-  const env = await buildEnvelope({ topic: 'news', message: 'hello', identity: id, sign: true });
+  const id  = await createAuthorIdentity();
+  const env = await buildEnvelope({ topic: NEWS, message: 'hello', identity: id, sign: true });
   const forged = { ...env, message: 'evil-rewritten-after-signing' };  // sig no longer matches
+  const topicBig = BigInt('0x' + (await resolveTopic(NEWS)).topicId);
 
   const { am } = makeManager();
-  await am._onPublishDirect({ topicId: TOPIC, publisher: id.id, json: JSON.stringify(forged), publishId: 'f:1', publishTs: 1 });
-  check('forged-signature publish NOT cached/promoted', am.axonRoles.get(big(TOPIC)) == null);
+  await am._onPublishDirect({ topicId: topicBig, publisher: null, json: JSON.stringify(forged), publishId: 'f:1', publishTs: 1 });
+  check('forged-signature publish NOT cached/promoted', am.axonRoles.get(topicBig) == null);
 
   const { am: am2 } = makeManager();
-  await am2._onPublishDirect({ topicId: TOPIC, publisher: id.id, json: JSON.stringify(env), publishId: 'v:1', publishTs: 1 });
-  check('validly-signed publish accepted (role created)', am2.axonRoles.get(big(TOPIC)) != null);
+  await am2._onPublishDirect({ topicId: topicBig, publisher: null, json: JSON.stringify(env), publishId: 'v:1', publishTs: 1 });
+  check('validly-signed publish accepted (role created)', am2.axonRoles.get(topicBig) != null);
 }
 
 async function testIngressAllowsUnsignedAndRaw() {
   console.log('\n── B-4: unsigned + non-envelope publishes pass (no sig to forge) ──');
-  const unsigned = await buildEnvelope({ topic: 'news', message: 'hi', sign: false });
+  const unsigned = await buildEnvelope({ topic: NEWS, message: 'hi', sign: false });
+  const topicBig = BigInt('0x' + (await resolveTopic(NEWS)).topicId);
   const { am } = makeManager();
-  await am._onPublishDirect({ topicId: TOPIC, publisher: null, json: JSON.stringify(unsigned), publishId: 'u:1', publishTs: 1 });
-  check('unsigned (anonymous) publish accepted', am.axonRoles.get(big(TOPIC)) != null);
+  await am._onPublishDirect({ topicId: topicBig, publisher: null, json: JSON.stringify(unsigned), publishId: 'u:1', publishTs: 1 });
+  check('unsigned (anonymous) publish accepted', am.axonRoles.get(topicBig) != null);
 
+  // A raw, non-envelope payload has no descriptor to bind — it still passes
+  // ingress (the policy gate is a no-op for non-envelopes); route to TOPIC.
   const { am: am2 } = makeManager();
   await am2._onPublishDirect({ topicId: TOPIC, publisher: null, json: 'raw-non-envelope-string', publishId: 'r:1', publishTs: 1 });
   check('non-envelope raw payload accepted', am2.axonRoles.get(big(TOPIC)) != null);

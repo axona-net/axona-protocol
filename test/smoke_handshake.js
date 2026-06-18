@@ -30,7 +30,7 @@ function check(label, condition) {
 
 function testConstants() {
   console.log('\n── constants ──');
-  check('WIRE_VERSION = "2.0"',         WIRE_VERSION === '2.0');   // 2026-06 wire flag-day partition
+  check('WIRE_VERSION = "3.0"',         WIRE_VERSION === '3.0');   // 2026-06 v0.3 identity/authorship wire flag-day
   check('KERNEL_VERSION is semver-shaped', /^\d+\.\d+\.\d+/.test(KERNEL_VERSION));
   check('UPGRADE_CLOSE_CODE = 4426',     UPGRADE_CLOSE_CODE === 4426);
 }
@@ -84,7 +84,7 @@ function testBuilders() {
   const ch = buildClientHello({ version: '1.0.0', capabilities: ['pubsub'] });
   check('client-hello type', ch.type === 'client-hello');
   check('client-hello version', ch.version === '1.0.0');
-  check('client-hello default wireVersion', ch.wireVersion === '2.0');
+  check('client-hello default wireVersion', ch.wireVersion === '3.0');
   check('client-hello capabilities copied',
     Array.isArray(ch.capabilities) && ch.capabilities[0] === 'pubsub');
 

@@ -1,11 +1,16 @@
 // region.js — resolve the anchor region for an Axona app instance.
 //
-// THE FIX for the hidden us-east dependency: an app must derive BOTH the peer's
-// own identity AND its topic anchor from the SAME region, so a co-located
-// deployment is a self-contained keyspace — local nodes root local topics and
-// the bridge is only the WebSocket rendezvous, never a data root. Hardcoding
-// us-east for both (the old behavior) put every participant + every topic in one
-// region's keyspace, so anyone elsewhere could never be K-closest to anything.
+// In the v0.3 topic model, REGION IS A FIRST-CLASS PART OF THE TOPIC DESCRIPTOR
+// ({ region, name }), not something an app keys in by hand. So this helper no
+// longer builds a synthetic publisher (the old "prefix + 64 zeros" anchor that
+// faked region into a publisher-keyed topic-id); it simply resolves a ?region=
+// token to the canonical kernel region (name/code/center) and hands the app a
+// region token to drop straight into its topic descriptors.
+//
+// THE ORIGINAL FIX still holds: an app derives BOTH the peer's own NODE identity
+// AND its topic region from the SAME resolved region, so a co-located deployment
+// is a self-contained keyspace — local nodes root local topics and the bridge is
+// only the WebSocket rendezvous, never a data root.
 //
 // Precedence:  ?region=<name|hex>  ›  `fallback`  ›  DEFAULT_REGION
 // The token is a region name ("uswest") or an 8-bit hex code ("0x80").
@@ -15,8 +20,7 @@
 // deployment everyone shares the same URL (so the same ?region=); for a shared
 // channel, put the region in the link so a joiner adopts it (see buildShareUrl).
 
-import { geoCellId, geoCellCenter }        from '/src/utils/s2.js';
-import { resolveRegion, regionName }       from '/src/utils/region-names.js';
+import { resolveRegion, regionName, regionCenter } from '/src/utils/region-names.js';
 
 // Backward-compatible default: the existing live network + the bench collector
 // live in us-east, so an app with no ?region= keeps converging with them.
@@ -26,8 +30,10 @@ export const DEFAULT_REGION = 'useast';
  * @param {object} [opts]
  * @param {string} [opts.search]    location.search to read ?region= from.
  * @param {string} [opts.fallback]  region used when no ?region= is present.
- * @returns {{ token, code, name, center:{lat,lng}, publisher }}
- *          `center` → deriveIdentity({lat,lng}); `publisher` → the topic anchor.
+ * @returns {{ token:string, code:number, name:string, center:{lat,lng} }}
+ *          `token` → the `region` field of a `{ region, name }` topic descriptor
+ *          AND the placement for this peer's own node identity;
+ *          `center` → createNodeIdentity({lat,lng}) when no real geolocation.
  */
 export function resolveAnchor({ search = (typeof location !== 'undefined' ? location.search : ''),
                                 fallback = DEFAULT_REGION } = {}) {
@@ -35,12 +41,12 @@ export function resolveAnchor({ search = (typeof location !== 'undefined' ? loca
   const token = (param || fallback || DEFAULT_REGION);
   let code = resolveRegion(token);
   if (code == null) code = resolveRegion(DEFAULT_REGION);   // unknown token → safe default
-  const center    = geoCellCenter(code);
-  const prefixHex = code.toString(16).padStart(2, '0');
-  return {
-    token, code, name: regionName(code), center,
-    publisher: prefixHex + '0'.repeat(64),                 // synthetic-publisher anchor (prefix + 64 zeros)
-  };
+  const name   = regionName(code);
+  const center = regionCenter(code);
+  // `token` is normalized to the canonical region name so it round-trips through
+  // resolveRegion identically for every participant (a topic's region field must
+  // resolve to the same code everywhere or topic-ids diverge).
+  return { token: name, code, name, center };
 }
 
 /**

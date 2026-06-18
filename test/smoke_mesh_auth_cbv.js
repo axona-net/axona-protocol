@@ -17,7 +17,7 @@
 // Run: node test/smoke_mesh_auth_cbv.js
 // =====================================================================
 
-import { deriveIdentity } from '../src/identity/index.js';
+import { createNodeIdentity } from '../src/identity/index.js';
 import { buildAuthHello, verifyAuthHello, makeNonce, cbvFromNonces } from '../src/transport/handshake-auth.js';
 
 let passed = 0, failed = 0;
@@ -37,8 +37,8 @@ async function proveAndVerify(signerIdentity, signerCbv, verifierCbv) {
 async function main() {
   console.log('WebRTC-mesh axona/4 CBV symmetry (regression)');
 
-  const alice = await deriveIdentity({ lat: 40.7, lng: -74.0 });
-  const bob   = await deriveIdentity({ lat: 51.5, lng: -0.1 });
+  const alice = await createNodeIdentity({ lat: 40.7, lng: -74.0 });
+  const bob   = await createNodeIdentity({ lat: 51.5, lng: -0.1 });
   const nA = makeNonce(), nB = makeNonce();
   // Asymmetric per-side connIds, as the bridge assigns them.
   const connA = 'cA7', connB = 'cB9';

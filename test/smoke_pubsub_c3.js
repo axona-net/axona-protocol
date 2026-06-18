@@ -15,7 +15,7 @@
 // =====================================================================
 
 import { AxonaManager } from '../src/pubsub/AxonaManager.js';
-import { deriveIdentity } from '../src/identity/index.js';
+import { createAuthorIdentity } from '../src/identity/index.js';
 import { buildEnvelope } from '../src/pubsub/envelope.js';
 import { setPowDifficulty, resetPowDifficulty } from '../src/pow/pow.js';
 
@@ -116,8 +116,8 @@ async function run() {
   {
     const { am } = makeManager();
     setPowDifficulty('publish', 10);
-    const id  = await deriveIdentity({ lat: 51.5, lng: -0.12 });
-    const env = await buildEnvelope({ topic: 'cats', message: 'hi', identity: id });   // mints signerPow at 10
+    const id  = await createAuthorIdentity();
+    const env = await buildEnvelope({ topic: { region: 'useast', name: 'cats' }, message: 'hi', identity: id });   // mints signerPow at 10
     check('ingress ACCEPTS a publish with a valid signerPow', (await am._publishSignatureOk(JSON.stringify(env))) === true);
     check('ingress DROPS a publish with the signerPow stripped',
       (await am._publishSignatureOk(JSON.stringify({ ...env, signerPow: '' }))) === false);
