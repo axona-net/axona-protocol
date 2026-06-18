@@ -91,7 +91,7 @@ async function testOpenTopicDetection() {
   check('open topic → quota number', typeof qOpen === 'number' && qOpen === Math.ceil(am.replayCacheSize / 4));
 
   // Owned topic: descriptor names an owner + write:'owner' → no quota.
-  const ownDesc = { owner: alice.authorId, name: 'room', write: 'owner' };
+  const ownDesc = { region: 'useast', owner: alice.authorId, name: 'room', write: 'owner' };
   const ownHex = await deriveTopicId(ownDesc);
   const ownEnv = await buildEnvelope({ topic: ownDesc, message: 'x', identity: alice, ts: 1, seq: 1 });
   const qOwned = await am._openTopicQuota(role, JSON.stringify(ownEnv), BigInt('0x' + ownHex));

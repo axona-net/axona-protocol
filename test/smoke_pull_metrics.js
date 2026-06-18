@@ -155,9 +155,10 @@ async function testPullValidation() {
   check('missing topic → throws', err !== null);
 
   err = null;
-  try { await peer.pull('0'.repeat(64), { topic: { name: 'cats' } }); }   // open topic w/o region
+  try { await peer.pull('0'.repeat(64), { topic: { name: 'cats' } }); }   // region omitted
   catch (e) { err = e; }
-  check('open topic without region → throws', err !== null);
+  check('open topic without region → node-region default (no region error)',
+    err === null || !/region/i.test(String(err && err.message)));
 }
 
 async function testPullBumpsCounter() {
@@ -229,9 +230,10 @@ async function testMetricsValidation() {
   check('empty topic name → throws', err !== null);
 
   err = null;
-  try { await peer.metrics({ name: 'cats' }); }   // open topic without region
+  try { await peer.metrics({ name: 'cats' }); }   // region omitted → node-region default
   catch (e) { err = e; }
-  check('open topic without region → throws', err !== null);
+  check('open topic without region → node-region default (no region error)',
+    err === null || !/region/i.test(String(err && err.message)));
 }
 
 async function testCrossPublisherIsolation() {

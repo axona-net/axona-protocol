@@ -43,9 +43,10 @@ function stubDht() {
 function mkManager() { return new AxonaManager({ dht: stubDht(), now: () => T }); }
 
 // Resolve an owner-only topic for `owner` (an author) and `name`. Region is
-// key-derived from the owner (region omitted), matching what peer.unpub does.
+// explicit ('useast') — a topic's region is always a real cell, never derived
+// from the author key.
 async function ownedTopic(owner, name) {
-  return resolveTopic({ owner: owner.authorId, name, write: 'owner' });
+  return resolveTopic({ region: 'useast', owner: owner.authorId, name, write: 'owner' });
 }
 
 // Seed a root role for `owner`'s owned topic `name` with one cached message.

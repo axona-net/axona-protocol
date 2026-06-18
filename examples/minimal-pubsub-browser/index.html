@@ -317,7 +317,7 @@ import { webTransport } from '/src/transport/web/index.js';
 const DEMO_VERSION = '1.18.0';
 const BRIDGE_URL   = new URLSearchParams(window.location.search).get('bridge')
                   // Served from a testnet host (e.g. demo-testnet.axona.net) →
-                  // default to the testnet bridge (2.28.0 / axona-5 / wire-2),
+                  // default to the testnet bridge (3.0.0 / axona/5 / wire-3),
                   // which also hands back the testnet TURN. Production hosts →
                   // the prod introducer. ?bridge= still overrides either way.
                   || (location.hostname.includes('testnet') ? 'wss://testnet.axona.net'

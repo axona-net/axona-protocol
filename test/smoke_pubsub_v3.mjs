@@ -5,6 +5,7 @@ import assert from 'node:assert';
 import { AxonaPeer, ANONYMOUS } from '../src/dht/AxonaPeer.js';
 import { createNodeIdentity, createAuthorIdentity } from '../src/identity/index.js';
 import { resolveTopic } from '../src/pubsub/post.js';
+import { resolveRegion } from '../src/utils/region-names.js';
 import { PublishError, ErrorCodes } from '../src/errors.js';
 
 let n = 0; const ok = (m) => console.log(`  ok ${++n} - ${m}`);
@@ -60,12 +61,18 @@ const alice = await createAuthorIdentity();
   ok('signWith: ANONYMOUS → unsigned');
 }
 
-// ── open topic with NO region → error (no global region) ──
+// ── open topic with NO region → defaults to the publisher's node region ──
+// (never a global region, never author-derived; the peer supplies its own
+//  node-ID region byte as the fallback).
 {
-  const { peer } = await mkPeer();
-  await assert.rejects(() => peer.pub({ name: 'lobby' }, { x: 1 }, { signWith: me }),
-    (e) => e instanceof PublishError && e.code === ErrorCodes.TOPIC_REGION_REQUIRED);
-  ok('open topic without region → TOPIC_REGION_REQUIRED');
+  const { peer, am } = await mkPeer();
+  const msgId = await peer.pub({ name: 'lobby' }, { x: 1 }, { signWith: me });
+  assert.equal(typeof msgId, 'string', 'region-omitted publish succeeds (node-region default)');
+  const env = JSON.parse(am.published[0].json);
+  // mkPeer's node is at lat 38/lng -78 → useast; the topic lands there, not global.
+  // (the descriptor carries the resolved region CODE, e.g. useast = 0x89 = 137.)
+  assert.equal(env.topic.region, resolveRegion('useast'), 'region defaults to the publisher node region');
+  ok('open topic without region → publisher node region (useast), not global/author-derived');
 }
 
 // ── owner-only topic: non-owner signer rejected; owner accepted ──
@@ -77,11 +84,11 @@ const alice = await createAuthorIdentity();
 }
 {
   const { peer, am } = await mkPeer();
-  await peer.pub({ owner: me.authorId, name: 'feed', write: 'owner' }, { x: 1 }, { signWith: me });   // region key-derived
+  await peer.pub({ region: 'useast', owner: me.authorId, name: 'feed', write: 'owner' }, { x: 1 }, { signWith: me });
   const env = JSON.parse(am.published[0].json);
-  assert.equal(env.topic.write, 'owner'); assert.equal(env.topic.owner, me.authorId);
+  assert.equal(env.topic.region, resolveRegion('useast')); assert.equal(env.topic.write, 'owner'); assert.equal(env.topic.owner, me.authorId);
   assert.equal(env.signerPubkey, me.authorId);
-  ok('owner-only feed by owner: key-derived placement, owner descriptor');
+  ok('owner-only feed by owner: explicit region, owner descriptor');
 }
 
 // ── sub resolves + subscribes to the SAME topic id a publisher computes ──
@@ -91,11 +98,12 @@ const alice = await createAuthorIdentity();
   assert.equal(am.subscribed.length, 1, 'subscribed once');
   const want = await resolveTopic({ region: 'useast', name: 'lobby', write: 'open' });
   assert.equal(am.subscribed[0], BigInt('0x' + want.topicId), 'sub targets the resolved topic id (matches a publisher)');
-  // owner feed: subscriber finds it from the Author ID alone (key-derived region)
-  await peer.sub({ owner: me.authorId, name: 'feed', write: 'owner' }, () => {});
-  const feed = await resolveTopic({ owner: me.authorId, name: 'feed', write: 'owner' });
-  assert.equal(am.subscribed[1], BigInt('0x' + feed.topicId), 'owner-feed discoverable from Author ID (key-derived)');
-  ok('sub({region,name}) and sub({owner,name}) resolve to publisher-matching topic ids');
+  // owner feed: subscriber and publisher converge on the same id from
+  // { region, owner, name, write } — region is explicit, never author-derived.
+  await peer.sub({ region: 'useast', owner: me.authorId, name: 'feed', write: 'owner' }, () => {});
+  const feed = await resolveTopic({ region: 'useast', owner: me.authorId, name: 'feed', write: 'owner' });
+  assert.equal(am.subscribed[1], BigInt('0x' + feed.topicId), 'owner-feed id matches the publisher (explicit region)');
+  ok('sub({region,name}) and sub({region,owner,name}) resolve to publisher-matching topic ids');
 }
 
 console.log(`\nsmoke_pubsub_v3: ${n} checks passed`);

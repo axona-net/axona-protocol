@@ -138,11 +138,14 @@ async function testPubValidation() {
   check('empty topic name → PUBLISH_INVALID_TOPIC',
     err instanceof PublishError && err.code === ErrorCodes.PUBLISH_INVALID_TOPIC);
 
-  // Open topic with no region → region required (no global region).
+  // Open topic with no region → defaults to the publisher's own node region
+  // (never global, never author-derived). The peer supplies its node-ID region
+  // byte as the fallback, so the publish succeeds.
   err = null;
-  try { await peer.pub({ name: 'cats' }, { x: 1 }, { signWith: AUTHOR }); } catch (e) { err = e; }
-  check('open topic without region → TOPIC_REGION_REQUIRED',
-    err instanceof PublishError && err.code === ErrorCodes.TOPIC_REGION_REQUIRED);
+  let defMsgId = null;
+  try { defMsgId = await peer.pub({ name: 'cats' }, { x: 1 }, { signWith: AUTHOR }); } catch (e) { err = e; }
+  check('open topic without region → defaults to node region (no throw)',
+    !err && typeof defMsgId === 'string');
 
   // Cyclic payload explodes during envelope build (msgId hashing).
   err = null;

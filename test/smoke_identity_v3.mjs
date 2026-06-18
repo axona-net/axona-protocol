@@ -1,11 +1,11 @@
 // smoke_identity_v3.mjs — Identity & Authorship v0.3, Phase 1:
 //   • createNodeIdentity  → connection key + nodeId + region
 //   • createAuthorIdentity → keypair-only (Author ID), NO id/region; persistAs
-//   • region module       → regionCenter, POPULATED_REGIONS, keyDerivedRegion
+//   • region module       → regionCenter, POPULATED_REGIONS, resolveRegion
 import assert from 'node:assert';
 import {
   createNodeIdentity, createAuthorIdentity,
-  regionCenter, POPULATED_REGIONS, keyDerivedRegion, regionName, resolveRegion,
+  regionCenter, POPULATED_REGIONS, regionName, resolveRegion,
 } from '../src/index.js';
 
 let n = 0; const ok = (m) => { console.log(`  ok ${++n} - ${m}`); };
@@ -58,12 +58,11 @@ assert.ok(!POPULATED_REGIONS.some((r) => /^(pac|atl|ind|sou|arc)_[0-9a-f]{2}$/.t
   'no open-ocean cells in populated set');
 ok(`POPULATED_REGIONS (${POPULATED_REGIONS.length}/192, ocean excluded)`);
 
-// key-derived region: deterministic + always a populated region
-const r1 = await keyDerivedRegion(author.authorId);
-const r2 = await keyDerivedRegion(author.authorId);
-assert.equal(r1, r2, 'keyDerivedRegion is deterministic');
-assert.ok(POPULATED_REGIONS.some((p) => p.code === r1), 'key-derived region is populated');
-const rOther = await keyDerivedRegion(author2.authorId);
-ok(`keyDerivedRegion deterministic → ${regionName(r1)} (author2 → ${regionName(rOther)})`);
+// POPULATED_REGIONS is a list of real, inhabited cells (e.g. for a UI picker);
+// a topic's region is never derived from the author key.
+assert.ok(POPULATED_REGIONS.every((p) => typeof p.code === 'number' && typeof p.name === 'string'),
+  'POPULATED_REGIONS entries are { code, name }');
+assert.ok(POPULATED_REGIONS.some((p) => regionName(p.code) === 'useast'), 'includes a known land region');
+ok('POPULATED_REGIONS is a usable {code,name} land list (no author-derived regions)');
 
 console.log(`\nsmoke_identity_v3: ${n} checks passed`);

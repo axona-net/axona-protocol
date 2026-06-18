@@ -1,6 +1,6 @@
 import assert from 'node:assert';
 import { deriveTopicId } from '../src/pubsub/post.js';
-import { resolveRegion, keyDerivedRegion } from '../src/utils/region-names.js';
+import { resolveRegion } from '../src/utils/region-names.js';
 const OWNER = 'a'.repeat(64);
 let n=0; const ok=(m)=>console.log(`  ok ${++n} - ${m}`);
 
@@ -18,9 +18,15 @@ const open  = await deriveTopicId({ region:'useast', owner:OWNER, name:'feed', w
 assert.notEqual(owned, open, 'write policy changes the topic id');
 ok('owner-only vs open are distinct topics');
 
-const kd = await deriveTopicId({ owner:OWNER, name:'profile', write:'owner' });
-assert.equal(kd.slice(0,2), (await keyDerivedRegion(OWNER)).toString(16).padStart(2,'0'), 'key-derived prefix');
-ok('key-derived placement (region omitted + owner)');
+// region omitted + owner → NO longer key-derived; resolveTopic has no node
+// context, so it throws. (A peer.pub/sub supplies its node region as the
+// fallback; bare deriveTopicId does not.)
+let kdThrew=false; try { await deriveTopicId({ owner:OWNER, name:'profile', write:'owner' }); } catch { kdThrew=true; }
+assert.ok(kdThrew, 'region omitted (even with owner) throws — region is never author-derived');
+// supplying a selfRegion fallback resolves to that explicit region
+const withSelf = await deriveTopicId({ owner:OWNER, name:'profile', write:'owner' }, 0x89);
+assert.equal(withSelf.slice(0,2), '89', 'selfRegion fallback sets the region byte');
+ok('region never derived from author; selfRegion fallback works');
 
 let threw=false; try { await deriveTopicId({ name:'lobby' }); } catch { threw=true; }
 assert.ok(threw, 'open topic without region throws'); ok('no global region: open topic requires a region');

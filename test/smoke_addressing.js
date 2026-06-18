@@ -26,7 +26,7 @@ import {
 } from '../src/utils/hexid.js';
 
 import { deriveTopicId } from '../src/pubsub/post.js';
-import { resolveRegion, keyDerivedRegion } from '../src/utils/region-names.js';
+import { resolveRegion } from '../src/utils/region-names.js';
 
 let passed = 0, failed = 0;
 function check(label, condition) {
@@ -163,10 +163,13 @@ async function testDeriveTopicId() {
   const open  = await deriveTopicId({ region: 'useast', owner: OWNER, name: 'feed', write: 'open' });
   check('write policy changes the topic id', owned !== open);
 
-  // Key-derived placement: region omitted + owner → owner's key-derived region byte.
-  const kd = await deriveTopicId({ owner: OWNER, name: 'profile', write: 'owner' });
-  check('key-derived prefix (region omitted + owner)',
-    kd.slice(0, 2) === (await keyDerivedRegion(OWNER)).toString(16).padStart(2, '0'));
+  // Region is never derived from the author: region omitted (even with an owner)
+  // throws unless the caller supplies a selfRegion (the publisher's node region).
+  let kdThrew = false;
+  try { await deriveTopicId({ owner: OWNER, name: 'profile', write: 'owner' }); } catch { kdThrew = true; }
+  check('region omitted throws — never author-derived', kdThrew);
+  const withSelf = await deriveTopicId({ owner: OWNER, name: 'profile', write: 'owner' }, 0x89);
+  check('selfRegion fallback sets the region byte', withSelf.slice(0, 2) === '89');
 
   // Reject bad inputs
   let threw = false;
