@@ -176,9 +176,19 @@ async function testDeriveTopicId() {
   try { await deriveTopicId({ name: 'cats' }); } catch { threw = true; }
   check('rejects open topic without a region', threw);
 
-  threw = false;
-  try { await deriveTopicId({ region: 'useast', name: 'x', write: 'owner' }); } catch { threw = true; }
-  check("rejects write:'owner' without an owner", threw);
+  // write is keyed on owner presence (kernel ≥3.2.0):
+  const OWN = 'a'.repeat(64);
+  // no owner → write ignored → open (does not throw)
+  const noOwnerOwnerWrite = await deriveTopicId({ region: 'useast', name: 'x', write: 'owner' });
+  const plainOpen         = await deriveTopicId({ region: 'useast', name: 'x' });
+  check('no owner: write:\'owner\' ignored → open', noOwnerOwnerWrite === plainOpen);
+  // owner + omitted write defaults to owner-only
+  const ownerDefault  = await deriveTopicId({ region: 'useast', owner: OWN, name: 'feed' });
+  const ownerExplicit = await deriveTopicId({ region: 'useast', owner: OWN, name: 'feed', write: 'owner' });
+  check('owner + no write === owner + write:\'owner\'', ownerDefault === ownerExplicit);
+  // owner + write:'open' is a distinct topic
+  const ownerOpen = await deriveTopicId({ region: 'useast', owner: OWN, name: 'feed', write: 'open' });
+  check('owner + write:\'open\' is a distinct id', ownerOpen !== ownerDefault);
 }
 
 async function main() {

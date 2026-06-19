@@ -31,7 +31,21 @@ ok('region never derived from author; selfRegion fallback works');
 let threw=false; try { await deriveTopicId({ name:'lobby' }); } catch { threw=true; }
 assert.ok(threw, 'open topic without region throws'); ok('no global region: open topic requires a region');
 
-threw=false; try { await deriveTopicId({ region:'useast', name:'x', write:'owner' }); } catch { threw=true; }
-assert.ok(threw); ok("write:'owner' requires an owner");
+// write is keyed on owner presence:
+const OWN = 'a'.repeat(64);   // a fake 64-hex Author ID
+// no owner → write is ignored → open (does NOT throw)
+const noOwnerOwnerWrite = await deriveTopicId({ region:'useast', name:'x', write:'owner' });
+const plainOpen         = await deriveTopicId({ region:'useast', name:'x' });
+assert.equal(noOwnerOwnerWrite, plainOpen, "no owner ⇒ write ignored ⇒ open");
+ok("no owner: write:'owner' is ignored, resolves open");
+// owner + omitted write defaults to owner-only, identical to explicit write:'owner'
+const ownerDefault = await deriveTopicId({ region:'useast', owner:OWN, name:'feed' });
+const ownerExplicit = await deriveTopicId({ region:'useast', owner:OWN, name:'feed', write:'owner' });
+assert.equal(ownerDefault, ownerExplicit, "owner + no write === owner + write:'owner'");
+ok("owner present: write defaults to 'owner' (same id as explicit)");
+// owner + write:'open' is a DIFFERENT (owner-namespaced open) topic
+const ownerOpen = await deriveTopicId({ region:'useast', owner:OWN, name:'feed', write:'open' });
+assert.notEqual(ownerOpen, ownerDefault, "owner+open differs from owner+owner");
+ok("owner + write:'open' is a distinct (inbox) topic id");
 
 console.log(`\nsmoke_addressing v3: ${n} checks passed`);

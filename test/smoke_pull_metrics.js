@@ -258,6 +258,33 @@ async function testCrossPublisherIsolation() {
     bobView === null);
 }
 
+async function testReadByTopicId() {
+  console.log('\n── read by topic ID (shareable handle) ──');
+  const { peer, author } = await setupPeer();
+
+  const msgId = await peer.pub(CATS, { meow: 9 }, { signWith: author });
+  const idHex = await deriveTopicId(CATS);                       // 66-hex read handle
+  check('topic id is 66 hex', /^[0-9a-f]{66}$/.test(idHex));
+
+  // pull by the raw id (no descriptor) returns the same message
+  const pulled = await peer.pull(msgId, { topic: idHex });
+  check('pull by topic id returns the message', pulled?.message?.meow === 9);
+
+  // metrics by the raw id works
+  const m = await peer.metrics(idHex);
+  check('metrics by topic id works', m.publishes === 1);
+
+  // publishing with a bare id is rejected — the id is a read handle, not a write credential
+  let err = null;
+  try { await peer.pub(idHex, 'x', { signWith: author }); } catch (e) { err = e; }
+  check('pub by bare topic id is rejected', err !== null && /read-only handle/.test(err.message));
+
+  // a non-hex string is rejected with a helpful message
+  err = null;
+  try { await peer.sub('not-an-id', () => {}); } catch (e) { err = e; }
+  check('sub with a non-id string is rejected', err !== null && /hex topic ID/.test(err.message));
+}
+
 async function main() {
   console.log('Axona pull/metrics (A3) smoke');
   await testPullHappy();
@@ -268,6 +295,7 @@ async function main() {
   await testMetricsEmpty();
   await testMetricsValidation();
   await testCrossPublisherIsolation();
+  await testReadByTopicId();
   console.log(`\nResult: ${passed} passed, ${failed} failed`);
   process.exit(failed === 0 ? 0 : 1);
 }
