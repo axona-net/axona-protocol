@@ -16,10 +16,14 @@
 // it runs in the app BEFORE chunking, so the transport itself stays byte-exact
 // and format-agnostic. Documents skip it and arrive bit-for-bit.
 
-// Raw bytes per chunk. base64 inflates 4/3 and JSON adds a little; 150 KB raw →
-// ~205 KB message, safely under the 256 KB publish cap.
-export const VERSION = '1.0.0';                 // file-transport library version
-const DEFAULT_MAX_CHUNK = 150 * 1024;
+// Raw bytes per chunk. base64 inflates 4/3 and JSON + the signed envelope add a
+// little, so a chunk must fit the kernel's RELIABLE-publish floor, NOT the 256 KB
+// absolute cap: peer.pub rejects an enveloped message over MAX_RELIABLE_PUBLISH_BYTES
+// (15 KB — the WebRTC-interoperable floor). 10 KB raw → ~13.7 KB base64 → ~14.5 KB
+// enveloped, safely under 15 KB. (The old 150 KB default targeted the 256 KB cap and
+// silently broke every send once the kernel adopted the 15 KB reliable guard.)
+export const VERSION = '1.1.0';                 // file-transport library version
+const DEFAULT_MAX_CHUNK = 10 * 1024;
 const FT = 1;                                   // message marker + format version
 
 // ── base64 (works in browser AND node, for tests) ───────────────────

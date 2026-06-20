@@ -4,8 +4,10 @@
 import { connectAxona, KERNEL_VERSION, REGION } from './axona.js';
 import { chunkBytes, createReassembler, compressImage, VERSION as FT_VERSION } from '../lib/file-transport.js';
 
-const APP_VERSION = '0.9.0';
-const CHUNK_BYTES = 64 * 1024;    // conservative: large pub/sub messages are unreliable over WebRTC
+const APP_VERSION = '0.9.1';
+const CHUNK_BYTES = 10 * 1024;    // raw bytes/chunk — base64+envelope must fit the kernel's
+                                  // 15 KB reliable-publish floor (MAX_RELIABLE_PUBLISH_BYTES).
+                                  // 64 KB here base64-inflated to ~88 KB and was rejected by peer.pub.
 const DEFAULT_CHANNEL = { id: 'axona-share/public-images', name: 'Public Images' };
 const MAX_IMAGE_BYTES = 1_000_000;
 const $ = (id) => document.getElementById(id);
