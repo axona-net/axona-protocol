@@ -70,23 +70,26 @@ async function run() {
     check('no metricsResp at all when requesterId ≠ fromId',  !sent.some(s => s.type === 'pubsub:metricsResp'));
   }
 
-  console.log('\n── C-3: vouched sender gets the reply ──');
+  console.log('\n── v3.5.0: open / unowned topics are REFUSED (read them via metricTopic) ──');
   {
+    // metrics() is now an OWNER-ONLY reader. An unowned (open / synthetic
+    // regional) topic exposes its live state through the published metric topic
+    // instead, so the scatter-gather refuses it even for a proven sender —
+    // shrinking the fan-out read surface to owner-authenticated requests only.
     const { am, sent } = makeManager();
-    setRole(am, { publisher: big(REGION_PUB) });
-    am._onMetricsReqDirect(...req({ requesterId: SUB, fromId: SUB }));
-    const r = sent.find(s => s.type === 'pubsub:metricsResp');
-    check('response delivered to the proven sender', !!r && r.to === big(SUB));
-    check('unowned topic reveals subscriber count',  !!r && r.body.subscribers === 1);
+    setRole(am, { publisher: big(REGION_PUB) });                 // unowned
+    am._onMetricsReqDirect(...req({ requesterId: SUB, fromId: SUB }));  // proven, but not an owner
+    check('open/unowned topic gets NO metricsResp (owner-only)',
+      !sent.some(s => s.type === 'pubsub:metricsResp'));
   }
 
-  console.log('\n── C-3: ownership fails CLOSED on empty cache ──');
+  console.log('\n── v3.5.0: empty cache → owner indeterminate → REFUSED ──');
   {
     const { am, sent } = makeManager();
     setRole(am, { publisher: null, cacheLen: 0, children: [SUB] });   // subscriber present, cache empty
     am._onMetricsReqDirect(...req({ requesterId: SUB, fromId: SUB }));
-    const r = sent.find(s => s.type === 'pubsub:metricsResp');
-    check('empty cache withholds the subscriber count (null)', !!r && r.body.subscribers === null);
+    check('empty cache yields NO response (cannot establish the owner)',
+      !sent.some(s => s.type === 'pubsub:metricsResp'));
   }
 
   console.log('\n── C-3: owned-topic gate (keyed on proven requester) ──');

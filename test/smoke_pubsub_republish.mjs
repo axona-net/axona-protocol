@@ -76,16 +76,19 @@ async function main() {
   check('delivered exactly once (no double-delivery)', got.length === 1);
   check('delivered msgId matches', got[0] === id1);
 
-  const m = await A.peer.metrics(topic);
-  check('replay cache holds ONE entry (older replaced, not duplicated)', m.current_count === 1);
+  // Inspect A's local replay cache directly. (peer.metrics() is now owner-only;
+  // this is an OPEN topic, so we read the rooting peer's own state via the
+  // local, network-free rootedTopics() inspector instead.)
+  const liveCount = () =>
+    (A.peer.rootedTopics().find(t => t.descriptor?.name === 'republish-smoke')?.current_count ?? 0);
+  check('replay cache holds ONE entry (older replaced, not duplicated)', liveCount() === 1);
 
   // Sanity: a genuinely different message is still a distinct, delivered entry.
   const id3 = await A.peer.pub(topic, 'a different message', { signWith: author });
   await wait(200);
   check('distinct content → distinct msgId', id3 !== id1);
   check('distinct content delivered', got.includes(id3));
-  const m2 = await A.peer.metrics(topic);
-  check('cache now holds two distinct messages', m2.current_count === 2);
+  check('cache now holds two distinct messages', liveCount() === 2);
 
   // Direct upsert regression: _addToReplayCache must hold ONE entry per
   // postHash no matter which ingress path adds it. The single-root sim above

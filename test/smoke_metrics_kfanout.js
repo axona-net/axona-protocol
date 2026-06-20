@@ -76,11 +76,12 @@ class MockNet {
   }
 }
 
-// Give a manager a hosted role: `n` live cache entries (unowned anchor →
-// readable by anyone) and `subs` direct subscriber-children.
-function hostRole(mgr, topicId, n, subs) {
+// Give a manager a hosted role: `n` live cache entries anchored at `owner`
+// (kernel v3.5.0 makes metrics() OWNER-ONLY, so the cached posts must carry the
+// owning anchor and the requester must BE that owner) and `subs` children.
+function hostRole(mgr, topicId, n, subs, owner) {
   const replayCache = [];
-  for (let i = 0; i < n; i++) replayCache.push({ json: '{}', postHash: `h${i}`, publisher: undefined });
+  for (let i = 0; i < n; i++) replayCache.push({ json: '{}', postHash: `h${i}`, publisher: owner });
   const children = new Map();
   for (let i = 0; i < subs; i++) children.set(BigInt(1000 + i), {});
   mgr.axonRoles.set(topicId, { isRoot: true, replayCache, children });
@@ -104,12 +105,13 @@ async function testFanOutFindsSiblingRoot() {
   const A = net.spawn(0x01n);   // closest to topicId → routeMessage target
   const B = net.spawn(0x02n);
   const C = net.spawn(0x04n);
-  const R = net.spawn(0xA0n);   // requester (not a root holder)
+  const R = net.spawn(0xA0n);   // requester — and the topic OWNER
   const topicId = 0x01n;
+  const OWNER   = 0xA0n;        // == R's id, so R may read its own topic's metrics
 
-  hostRole(A, topicId, 0, 0);          // routed root: EMPTY cache, no subs
-  hostRole(B, topicId, 0, 0);
-  hostRole(C, topicId, 3, 2);          // sibling root: 3 live events, 2 subs
+  hostRole(A, topicId, 0, 0, OWNER);   // routed root: EMPTY cache (silent — can't prove owner)
+  hostRole(B, topicId, 1, 0, OWNER);   // a second non-empty root, so the sweep hears ≥2
+  hostRole(C, topicId, 3, 2, OWNER);   // sibling root: 3 live events, 2 subs
   // R hosts no role for this topic.
 
   const responses = await R.requestMetrics(topicId, null, { timeoutMs: 50 });
@@ -127,11 +129,12 @@ async function testRequesterIsARoot() {
   console.log('\n── requester is itself a root: own cache folded in without a self-send ──');
   const net = new MockNet();
   const A = net.spawn(0x01n);
-  const R = net.spawn(0x02n);   // requester AND a root holding the queue
+  const R = net.spawn(0x02n);   // requester AND a root holding the queue (and the owner)
   const topicId = 0x01n;        // A is closest; R is a sibling root
+  const OWNER   = 0x02n;        // == R's id
 
-  hostRole(A, topicId, 0, 0);
-  hostRole(R, topicId, 5, 4);   // requester's own cache
+  hostRole(A, topicId, 0, 0, OWNER);
+  hostRole(R, topicId, 5, 4, OWNER);   // requester's own cache
 
   const responses = await R.requestMetrics(topicId, null, { timeoutMs: 50 });
   await new Promise(r => setTimeout(r, 60));

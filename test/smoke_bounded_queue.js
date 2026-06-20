@@ -122,12 +122,15 @@ async function testMetricsResponseShape() {
   const now = 1_700_000_000_000;
   const am2 = new AxonaManager({ dht, now: () => now });
   const topicId = 42n;
+  // metrics() is owner-only (v3.5.0): the cached posts must be anchored at the
+  // requester for the gate to pass, so this verifies the OWNER's response shape.
+  const requesterBig = fromHex(requester);
   const role = {
     isRoot: true,
     children: new Map([[10n, {}], [11n, {}], [12n, {}]]),   // 3 direct subscribers
     replayCache: [
-      { ...entry(1, 'A') },                       // live (no expiresAt)
-      { ...entry(2, 'A'), expiresAt: now - 1 },   // expired
+      { ...entry(1, 'A'), publisher: requesterBig },                       // live (no expiresAt)
+      { ...entry(2, 'A'), publisher: requesterBig, expiresAt: now - 1 },   // expired
     ],
   };
   am2.axonRoles.set(topicId, role);
@@ -139,7 +142,7 @@ async function testMetricsResponseShape() {
 }
 
 async function testMetricsOwnership() {
-  console.log('\n── metrics gate: owned = owner-only, public/synthetic = anyone ──');
+  console.log('\n── metrics gate (v3.5.0): owner-only — open/synthetic/public refused ──');
   const now = 1_700_000_000_000;
   const ownerId    = (await createNodeIdentity({ lat: 38, lng: -77 })).id;   // real anchor
   const ownerBig   = fromHex(ownerId);
@@ -161,7 +164,9 @@ async function testMetricsOwnership() {
 
   check('owned topic: non-owner is blocked', respond(ownerBig, strangerId).ok === false);
   check('owned topic: owner is allowed',     respond(ownerBig, ownerId).ok === true);
-  check('synthetic anchor: stranger allowed (unowned)', respond(synthBig, strangerId).ok === true);
+  // v3.5.0: open/synthetic/public topics no longer answer the scatter-gather at
+  // all — their live state is read by subscribing to metricTopic(T) instead.
+  check('synthetic/unowned anchor: refused (read via metricTopic)', respond(synthBig, strangerId).ok === false);
 }
 
 async function main() {
