@@ -87,6 +87,20 @@ async function main() {
   const m2 = await A.peer.metrics(topic);
   check('cache now holds two distinct messages', m2.current_count === 2);
 
+  // Direct upsert regression: _addToReplayCache must hold ONE entry per
+  // postHash no matter which ingress path adds it. The single-root sim above
+  // can't reach the multi-path case (a node that is BOTH a root and a child
+  // re-caches the re-publish via _onDeliver), so assert the centralized upsert
+  // directly — this is the invariant that keeps current_count at 1 on the live
+  // multi-root mesh.
+  const mgr  = A.peer._axonaManager;
+  const role = { replayCache: [] };
+  mgr._addToReplayCache(role, { json: '{"seq":1,"ts":1}', publishId: 'p1', publishTs: 1, postHash: 'HASH_X' });
+  mgr._addToReplayCache(role, { json: '{"seq":2,"ts":2}', publishId: 'p2', publishTs: 2, postHash: 'HASH_X' }); // re-cache via another path
+  check('_addToReplayCache upserts by postHash (one entry, any path)', role.replayCache.length === 1);
+  mgr._addToReplayCache(role, { json: '{"seq":3,"ts":3}', publishId: 'p3', publishTs: 3, postHash: 'HASH_Y' });
+  check('distinct postHash still adds a second entry', role.replayCache.length === 2);
+
   console.log(`\nResult: ${passed} passed, ${failed} failed`);
   process.exit(failed === 0 ? 0 : 1);
 }
