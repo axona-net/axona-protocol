@@ -1,13 +1,12 @@
 // Axona-share — share images over Axona pub/sub. Proof of concept.
 // Channels are pub/sub topics; images are compressed to <1MB then sent as a set
-// of chunk-messages (file-transport.js) and reassembled on every subscriber.
+// of chunk-messages (@axona/protocol/std/chunk) and reassembled on every subscriber.
 import { connectAxona, KERNEL_VERSION, REGION } from './axona.js';
-import { chunkBytes, createReassembler, compressImage, VERSION as FT_VERSION } from '../lib/file-transport.js';
+import { chunkBytes, createReassembler } from '/std/chunk.js';
+import { compressImage } from '../lib/image.js';
 
-const APP_VERSION = '0.9.1';
-const CHUNK_BYTES = 10 * 1024;    // raw bytes/chunk — base64+envelope must fit the kernel's
-                                  // 15 KB reliable-publish floor (MAX_RELIABLE_PUBLISH_BYTES).
-                                  // 64 KB here base64-inflated to ~88 KB and was rejected by peer.pub.
+const APP_VERSION = '0.10.0';     // now chunks via the kernel std/chunk (15 KB reliable-floor aware) —
+                                  // the old apps/lib/file-transport.js (256 KB-cap sized) is retired.
 const DEFAULT_CHANNEL = { id: 'axona-share/public-images', name: 'Public Images' };
 const MAX_IMAGE_BYTES = 1_000_000;
 const $ = (id) => document.getElementById(id);
@@ -73,8 +72,8 @@ async function shareImage(file, caption) {
   catch (e) { console.error('[axona-share] compress failed', e); setStatus('image error: ' + (e.message || e)); return; }
   const bytes = new Uint8Array(await blob.arrayBuffer());
   const meta = { caption: caption || '', ts: Date.now() };
-  const msgs = chunkBytes(bytes, { name: file.name || 'image.jpg', mime: 'image/jpeg', meta, maxChunk: CHUNK_BYTES });
-  const fileId = msgs[0].id;
+  // std/chunk auto-sizes each message to the kernel's 15 KB reliable-publish floor.
+  const { messages: msgs, fileId } = chunkBytes(bytes, { name: file.name || 'image.jpg', mime: 'image/jpeg', meta });
   console.log(`[axona-share] sharing ${fileId} · ${bytes.length} bytes · ${msgs.length} chunk(s) → ${activeId}`);
   // optimistic local card (own publishes may not echo back; seen-set dedups if they do)
   onImage(activeId, { id: fileId, mime: 'image/jpeg', bytes, meta });
@@ -180,7 +179,7 @@ const closeSidebarMobile = () => { if (window.matchMedia('(max-width:760px)').ma
 
 // ── wiring ──────────────────────────────────────────────────────────
 window.addEventListener('DOMContentLoaded', async () => {
-  $('ver').textContent = `app v${APP_VERSION} · lib v${FT_VERSION} · kernel v${KERNEL_VERSION} · region ${REGION.name}`;
+  $('ver').textContent = `app v${APP_VERSION} · kernel v${KERNEL_VERSION} · region ${REGION.name}`;
 
   // Joined via a scanned QR / shared link (?join=<id>&name=<name>): add the
   // channel and make it active. If the app was already open in another tab on
