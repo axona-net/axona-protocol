@@ -11,8 +11,11 @@
 //
 // Modules:
 //   chunk     — reliable large-payload chunking + reassembly over pub/sub.
-//   publisher — manage/persist publish IDs (the dedup token), decoupled from
-//               the ephemeral transport id.
 //   (image downsampling and other helpers will land here as sibling modules.)
+//
+// Note: the derived metric-topic helpers (metricTopic/isMetricTopic) live in
+// CORE (`@axona/protocol`, src/pubsub/metrics.js), not here — they are a protocol
+// convention that infrastructure roots must compute identically, and infra
+// vendors src/ only. Import them from '@axona/protocol'.
 // =====================================================================
 export * from './chunk.js';
