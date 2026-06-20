@@ -101,6 +101,16 @@ async function main() {
   mgr._addToReplayCache(role, { json: '{"seq":3,"ts":3}', publishId: 'p3', publishTs: 3, postHash: 'HASH_Y' });
   check('distinct postHash still adds a second entry', role.replayCache.length === 2);
 
+  // postHash-absent path (e.g. a deliver frame that omits it): the content id
+  // must be backfilled from the envelope's msgId so the upsert still collapses
+  // a re-cache — the bug that left keyspace-hosting roots holding two copies.
+  const role2 = { replayCache: [] };
+  const envJson = JSON.stringify({ msgId: 'MID_Z', seq: 5, ts: 5, message: 'hi' });
+  mgr._addToReplayCache(role2, { json: envJson, publishId: 'q1', publishTs: 5 });               // no postHash
+  mgr._addToReplayCache(role2, { json: envJson, publishId: 'q2', publishTs: 5 });               // re-cache, still no postHash
+  check('postHash backfilled from envelope msgId → upsert (one entry)', role2.replayCache.length === 1);
+  check('backfilled entry carries the msgId as postHash', role2.replayCache[0].postHash === 'MID_Z');
+
   console.log(`\nResult: ${passed} passed, ${failed} failed`);
   process.exit(failed === 0 ? 0 : 1);
 }
