@@ -22,11 +22,20 @@ function shuffle(a) { a = a.slice(); for (let i = a.length - 1; i > 0; i--) { co
 function makeBytes(n) { const u = new Uint8Array(n); for (let i = 0; i < n; i++) u[i] = (i * 31 + 7) & 0xff; return u; }
 
 // In-memory peer: stores publishes per topic, replays on sub(since:'all').
-function mockPeer({ dropIndices = new Set() } = {}) {
+//   dropIndices  — chunk indices the SUB/replay never delivers (a lost chunk).
+//   dropFirst    — chunk indices dropped (not stored) on their FIRST publish but
+//                  stored on re-publish — simulates a burst drop that the
+//                  publish-side verify+repair pass must detect and heal.
+function mockPeer({ dropIndices = new Set(), dropFirst = new Set() } = {}) {
   const store = new Map();
+  const droppedOnce = new Set();
   return {
     published: store,
     async pub(topic, message, _opts) {
+      if (message?.k === 'c' && dropFirst.has(message.i) && !droppedOnce.has(message.i)) {
+        droppedOnce.add(message.i);                 // simulate the first send getting dropped on the wire
+        return 'dropped';
+      }
       if (!store.has(topic)) store.set(topic, []);
       const msgId = 'm' + (store.get(topic).length);
       store.get(topic).push({ message, msgId });
@@ -118,13 +127,29 @@ async function main() {
 
   // ── 8. no silent hang — rejects on a missing chunk (CDC-1) ──
   {
-    const peer = mockPeer({ dropIndices: new Set([2]) });   // chunk index 2 never delivered
+    const peer = mockPeer({ dropIndices: new Set([2]) });   // chunk index 2 never delivered (replay always drops it)
     const input = makeBytes(30_000);
-    const { topic } = await publishChunkedBytes(peer, input, { maxMessageBytes: MAXMSG });
+    // verify:false — this case tests the RECEIVE-side reject on a permanently
+    // missing chunk; publish-side verify can't help (the chunk is dropped on
+    // every replay) and would just slow the test.
+    const { topic } = await publishChunkedBytes(peer, input, { maxMessageBytes: MAXMSG, verify: false });
     let rejected = false, msg = '';
     try { await receiveChunkedBytes(peer, topic, { timeoutMs: 300 }); }
     catch (e) { rejected = true; msg = e.message; }
     check('8. rejects (no hang) on missing chunk, names missing index', rejected && /missing/.test(msg) && /\b2\b/.test(msg));
+  }
+
+  // ── 10. PUBLISH verify+repair heals a burst-dropped chunk (Howard's reload bug) ──
+  {
+    const input = makeBytes(60_000);                       // many chunks
+    // Two chunks get dropped on their FIRST publish (burst loss); a reload
+    // subscriber would otherwise never reassemble. verify+repair must re-publish.
+    const peer = mockPeer({ dropFirst: new Set([1, 4]) });
+    const res = await publishChunkedBytes(peer, input, { maxMessageBytes: MAXMSG, throttleMs: 0, verifyWaitMs: 200 });
+    check('10a. verify re-published the dropped chunks', res.repaired >= 2);
+    // A fresh "reload" subscriber relying only on the cached set reassembles.
+    const file = await receiveChunkedBytes(peer, res.topic, { timeoutMs: 2000 });
+    check('10b. reload subscriber reassembles byte-exact after repair', eqBytes(file.bytes, input));
   }
 
   // ── 9. MULTI-FILE: one reassembler, a stream of files (image-channel bug) ──

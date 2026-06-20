@@ -16,9 +16,14 @@
 //   • COMPLETION: done iff every distinct index 0..n-1 is present — NOT a count
 //     of messages received. (civildefense's reassembler counted receipts, so a
 //     duplicate could fire "done" over a hole → silent truncation.)
-//   • NO SILENT HANG: receiveChunkedBytes() REJECTS on timeout (after a
-//     best-effort pull() re-request of missing chunks) instead of awaiting
-//     forever. A lost chunk surfaces as an error, never an indefinite wait.
+//   • RELIABLE PUBLISH (the reload-timeout fix): peer.pub is fire-and-forget into
+//     the transport buffer, so a fast burst drops chunks before they cache and a
+//     reload subscriber never reassembles. publishChunkedBytes() paces by default
+//     AND verifies what the mesh cached, re-publishing gaps — so the durable set
+//     is complete without the app guessing a throttle.
+//   • NO SILENT HANG: receiveChunkedBytes() REJECTS on timeout (reporting the
+//     missing indices) instead of awaiting forever. A lost chunk surfaces as an
+//     error, never an indefinite wait.
 //   • COUNT CAP (finding O-1): a topic's replay cache holds ~100 messages, so a
 //     late/reload joiner can only reassemble files of ≲ (cacheSize-1) chunks.
 //     At the default chunk size that's ~1.1 MB. publishChunkedBytes() throws if
@@ -155,16 +160,42 @@ export function createReassembler(onComplete, { onProgress = null, fileId = null
 // ── peer-bound high-level helpers ────────────────────────────────────
 const delay = (ms) => new Promise(r => setTimeout(r, ms));
 
+// Default inter-chunk pacing. peer.pub is FIRE-AND-FORGET into the transport
+// send buffer (it does not await the WebRTC/bridge drain), so publishing N chunks
+// in a tight loop bursts the buffer and the mesh silently drops some before they
+// reach the topic's replay cache — which a reload subscriber can then never
+// reassemble (it times out). A small pace lets the buffer drain between chunks;
+// the verify+repair pass below is the actual guarantee, this just cuts the work.
+const DEFAULT_PUBLISH_THROTTLE_MS = 12;
+
 /**
- * Chunk `bytes` and publish every message to a fresh topic. Refuses files that
- * would exceed the replay-cache ceiling (O-1) so you never create a transfer a
- * reload subscriber can't reassemble.
- * @returns {Promise<{ topic, fileId, n, msgIds: string[] }>}
+ * Chunk `bytes` and publish every message to a fresh topic, then VERIFY the mesh
+ * actually cached them and REPAIR any gaps. Refuses files that would exceed the
+ * replay-cache ceiling (O-1) so you never create a transfer a reload subscriber
+ * can't reassemble.
+ *
+ * Reliability (the reason verify exists): peer.pub is fire-and-forget into the
+ * transport buffer, so a fast burst can drop chunks before they durably cache —
+ * leaving a hole only a reload subscriber discovers (it never reassembles). The
+ * old default `throttleMs: 0` made this routine for any non-trivial chunk count,
+ * with no value an app author could reliably pick. So we now (a) pace by default
+ * and (b) read back what the mesh holds and re-publish the missing indices until
+ * the cache is complete (or progress stalls). Re-publishing identical content is
+ * free — the cache upserts by msgId and never double-delivers (kernel ≥3.3.1).
+ *
+ * `verify` defaults true and is BEST-EFFORT: it never throws and never makes a
+ * transfer worse (it only ever re-publishes gaps it positively observes). It
+ * briefly subscribes to `topic` to read it back, so don't pre-subscribe the
+ * publishing peer to the same transfer topic (the intended use — a fresh topic).
+ * Set `verify:false` for loopback/tests where the publisher is also the consumer.
+ *
+ * @returns {Promise<{ topic, fileId, n, msgIds: string[], repaired: number }>}
  */
 export async function publishChunkedBytes(peer, bytes, {
   topic, signWith, name, mime, meta,
-  maxMessageBytes = DEFAULT_MAX_MESSAGE_BYTES, throttleMs = 0,
+  maxMessageBytes = DEFAULT_MAX_MESSAGE_BYTES, throttleMs = DEFAULT_PUBLISH_THROTTLE_MS,
   cacheSize = DEFAULT_REPLAY_CACHE,
+  verify = true, verifyRounds = 4, verifyWaitMs = 1500,
 } = {}) {
   const { messages, fileId, n } = chunkBytes(bytes, { name, mime, meta, maxMessageBytes });
   if (messages.length > cacheSize) {
@@ -173,18 +204,58 @@ export async function publishChunkedBytes(peer, bytes, {
       `(~${((cacheSize - 1) * rawChunkSize(maxMessageBytes) / 1024 / 1024).toFixed(1)} MB). Downsample, or keep the publisher online.`);
   }
   const msgIds = [];
-  for (const m of messages) {                          // manifest first, then chunks
-    const id = await peer.pub(topic, m, { signWith });
-    msgIds.push(id);
-    if (throttleMs) await delay(throttleMs);
+  const pub = async (m) => { const id = await peer.pub(topic, m, { signWith }); msgIds.push(id); if (throttleMs) await delay(throttleMs); return id; };
+  for (const m of messages) await pub(m);              // manifest [0] first, then chunks [1..n]
+
+  // Verify + repair: read back what actually cached, re-publish gaps. Best-effort.
+  let repaired = 0;
+  if (verify && typeof peer.sub === 'function') {
+    for (let round = 0; round < verifyRounds; round++) {
+      let have;
+      try { have = await _cachedChunkSet(peer, topic, fileId, n, verifyWaitMs); }
+      catch { break; }                                  // read-back failed → leave the initial publish as-is
+      const gaps = [];
+      if (!have.has('m')) gaps.push(0);                 // manifest is messages[0]
+      for (let i = 0; i < n; i++) if (!have.has(i)) gaps.push(i + 1);  // chunk i is messages[i+1]
+      if (gaps.length === 0) break;                     // fully cached — done
+      if (round === verifyRounds - 1) break;            // last look was for detection only; don't loop forever
+      for (const gi of gaps) { await pub(messages[gi]); repaired++; }
+    }
   }
-  return { topic, fileId, n, msgIds };
+  return { topic, fileId, n, msgIds, repaired };
 }
 
 /**
- * Subscribe to a chunk topic and reassemble. NEVER hangs: resolves with the
- * file on completion, else REJECTS after timeoutMs (after a best-effort pull()
- * of missing chunks). Always unsubscribes before settling.
+ * Briefly subscribe to `topic` (since:'all') and collect which chunk indices of
+ * `fileId` the mesh currently holds — 'm' for the manifest, integers for chunks.
+ * Used by publishChunkedBytes to find gaps to repair. Always unsubscribes.
+ */
+async function _cachedChunkSet(peer, topic, fileId, n, waitMs) {
+  const have = new Set();
+  const complete = () => { if (!have.has('m')) return false; for (let i = 0; i < n; i++) if (!have.has(i)) return false; return true; };
+  try {
+    await peer.sub(topic, (env) => {
+      if (!env || env.deleted) return;
+      const m = env.message;
+      if (!m || m.f !== CHUNK_FORMAT || m.id !== fileId) return;
+      if (m.k === 'm') have.add('m');
+      else if (m.k === 'c' && typeof m.i === 'number') have.add(m.i);
+    }, { since: 'all' });
+    const deadline = Date.now() + waitMs;
+    while (Date.now() < deadline && !complete()) await delay(60);
+  } finally {
+    try { await peer.unsub?.(topic); } catch { /* */ }
+  }
+  return have;
+}
+
+/**
+ * Subscribe to a chunk topic and reassemble. NEVER hangs: resolves with the file
+ * on completion, else REJECTS after timeoutMs with the missing indices. Always
+ * unsubscribes before settling. (Completeness of the durable set is ensured on
+ * the PUBLISH side by publishChunkedBytes's verify+repair — a reload subscriber
+ * relies on every chunk being cached; the receiver cannot conjure a chunk the
+ * mesh never stored.)
  * @returns {Promise<{ bytes, name, mime, size, meta, id }>}
  */
 export async function receiveChunkedBytes(peer, topic, {
