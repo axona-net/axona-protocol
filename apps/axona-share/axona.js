@@ -4,9 +4,9 @@
 // self-contained keyspace — local nodes root local channels and the bridge is
 // only the rendezvous. (Was: both hardcoded us-east, which pinned every peer +
 // topic to one region and locked out anyone elsewhere.)
-import { AxonaPeer, AxonaDomain, NeuronNode, createNodeIdentity, createAuthorIdentity, KERNEL_VERSION } from '/src/index.js?v=0.11.1';
-import { webTransport } from '/src/transport/web/index.js?v=0.11.1';
-import { resolveAnchor } from '../lib/region.js?v=0.11.1';
+import { AxonaPeer, AxonaDomain, NeuronNode, createNodeIdentity, createAuthorIdentity, KERNEL_VERSION } from '/src/index.js?v=0.12.0';
+import { webTransport } from '/src/transport/web/index.js?v=0.12.0';
+import { resolveAnchor } from '../lib/region.js?v=0.12.0';
 
 export { KERNEL_VERSION };          // surfaced in the app header (kernel-version visibility)
 
@@ -45,6 +45,12 @@ export async function connectAxona(onStatus = () => {}) {
 
   return {
     nodeId: nodeIdentity.id,
+    // Exposed so the app can drive @axona/protocol/std/chunk directly: the chunk
+    // helpers publish/consume OBJECT messages on a structured { region, name }
+    // topic (not the JSON-string convention of sub/pub below), and
+    // publishChunkedBytes(peer, bytes, { topic, signWith }) needs the raw peer +
+    // author + descriptor.
+    peer, author, topicOf,
     // Subscribe to a channel topic; cb gets each parsed message object (chunk).
     async sub(topic, cb) {
       return peer.sub(topicOf(topic), (env) => {

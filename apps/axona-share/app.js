@@ -1,15 +1,20 @@
 // Axona-share — share images over Axona pub/sub. Proof of concept.
 // Channels are pub/sub topics; images are compressed to <1MB then sent as a set
 // of chunk-messages (@axona/protocol/std/chunk) and reassembled on every subscriber.
-import { connectAxona, KERNEL_VERSION, REGION } from './axona.js?v=0.11.1';
+import { connectAxona, KERNEL_VERSION, REGION } from './axona.js?v=0.12.0';
 // ?v= cache-busts the TRANSITIVE module imports too, not just the app.js entry in
 // index.html: a static host serves /std/chunk.js with a ~10-min max-age, so after
 // a kernel/std deploy a browser would otherwise keep running the stale chunk lib.
 // Bump the token (= APP_VERSION) whenever std/chunk or lib/image changes.
-import { chunkBytes, createReassembler } from '/std/chunk.js?v=0.11.1';
-import { compressImage } from '../lib/image.js?v=0.11.1';
+// publishChunkedBytes = the reliable send path (paces + verifies what the mesh
+// cached and re-publishes any gaps), so a RELOAD subscriber reassembles without
+// the app tuning a throttle. createReassembler stays for the RECEIVE side — a
+// channel is a STREAM of images over time (publishChunkedBytes/receiveChunkedBytes
+// is one-shot per file), so we keep one persistent reassembler per channel.
+import { createReassembler, publishChunkedBytes } from '/std/chunk.js?v=0.12.0';
+import { compressImage } from '../lib/image.js?v=0.12.0';
 
-const APP_VERSION = '0.11.1';     // chunks via kernel std/chunk v3.6.0 (reliable publish: verify+repair).
+const APP_VERSION = '0.12.0';     // chunks via kernel std/chunk v3.6.0 (reliable publish: verify+repair).
                                   // Transitive module imports are now ?v=-versioned so a std/chunk deploy
                                   // is picked up immediately (was: stale cached chunk lib after deploy).
 const DEFAULT_CHANNEL = { id: 'axona-share/public-images', name: 'Public Images' };
@@ -64,7 +69,20 @@ async function subscribeChannel(ch) {
     { onProgress: (p) => console.log(`[axona-share] recv chunk ${p.have}/${p.total} (${p.id}) on ${ch.id}`) },
   );
   reasm.set(ch.id, r);
-  try { await axona.sub(ch.id, (msg) => r.accept(msg)); console.log('[axona-share] subscribed', ch.id); }
+  try {
+    // publishChunkedBytes sends OBJECT messages on the { region, name } topic, so
+    // feed env.message straight to the reassembler. Tolerate the legacy JSON-string
+    // form too (older app builds wrapped each chunk in JSON.stringify) so a channel
+    // still mid-transition reassembles either way.
+    await axona.peer.sub(axona.topicOf(ch.id), (env) => {
+      if (!env || env.deleted || !env.message) return;
+      const m = typeof env.message === 'string'
+        ? (() => { try { return JSON.parse(env.message); } catch { return null; } })()
+        : env.message;
+      if (m) r.accept(m);
+    }, { since: 'all' });
+    console.log('[axona-share] subscribed', ch.id);
+  }
   catch (e) { console.error('[axona-share] subscribe failed', ch.id, e); setStatus('subscribe failed: ' + (e.message || e)); }
 }
 
@@ -77,20 +95,23 @@ async function shareImage(file, caption) {
   catch (e) { console.error('[axona-share] compress failed', e); setStatus('image error: ' + (e.message || e)); return; }
   const bytes = new Uint8Array(await blob.arrayBuffer());
   const meta = { caption: caption || '', ts: Date.now() };
-  // std/chunk auto-sizes each message to the kernel's 15 KB reliable-publish floor.
-  const { messages: msgs, fileId } = chunkBytes(bytes, { name: file.name || 'image.jpg', mime: 'image/jpeg', meta });
-  console.log(`[axona-share] sharing ${fileId} · ${bytes.length} bytes · ${msgs.length} chunk(s) → ${activeId}`);
-  // optimistic local card (own publishes may not echo back; seen-set dedups if they do)
-  onImage(activeId, { id: fileId, mime: 'image/jpeg', bytes, meta });
-  const topic = activeId;
-  setStatus(`sending ${(bytes.length / 1024).toFixed(0)} KB in ${msgs.length} piece(s)…`);
+  const channelId = activeId;
+  // Optimistic local card (instant). The published fileId is added to the seen-set
+  // after publish so a self-echo (if the channel returns our own publish) dedups.
+  onImage(channelId, { id: 'self-' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6), mime: 'image/jpeg', bytes, meta });
+  setStatus(`sending ${(bytes.length / 1024).toFixed(0)} KB…`);
   try {
-    for (let i = 0; i < msgs.length; i++) {
-      await axona.pub(topic, msgs[i]); setStatus(`sent ${i + 1}/${msgs.length}…`);
-      if (i < msgs.length - 1) await sleep(150);     // throttle: bursts of large messages get dropped
-    }
-    console.log(`[axona-share] published all ${msgs.length} chunks for ${fileId}`);
-    setStatus('shared ✓');
+    // RELIABLE publish (std/chunk, kernel ≥3.6.0): paces the chunks and then
+    // verifies the mesh cached every one, re-publishing any gaps — so a RELOAD
+    // subscriber reassembles. No manual throttle to guess.
+    const { fileId, n, repaired } = await publishChunkedBytes(axona.peer, bytes, {
+      topic: axona.topicOf(channelId), signWith: axona.author,
+      name: file.name || 'image.jpg', mime: 'image/jpeg', meta,
+    });
+    seenOf(channelId).add(fileId);                  // suppress our own echo
+    console.log(`[axona-share] published ${fileId} · ${bytes.length} bytes · ${n} chunk(s)` +
+      `${repaired ? ` · repaired ${repaired}` : ''} → ${channelId}`);
+    setStatus(`shared ✓${repaired ? ` (repaired ${repaired})` : ''}`);
   } catch (e) { console.error('[axona-share] publish failed', e); setStatus('share failed: ' + (e.message || e)); }
 }
 
