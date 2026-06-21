@@ -4,9 +4,9 @@
 // self-contained keyspace — local nodes root local channels and the bridge is
 // only the rendezvous. (Was: both hardcoded us-east, which pinned every peer +
 // topic to one region and locked out anyone elsewhere.)
-import { AxonaPeer, AxonaDomain, NeuronNode, createNodeIdentity, createAuthorIdentity, KERNEL_VERSION } from '/src/index.js';
-import { webTransport } from '/src/transport/web/index.js';
-import { resolveAnchor } from '../lib/region.js';
+import { AxonaPeer, AxonaDomain, NeuronNode, createNodeIdentity, createAuthorIdentity, KERNEL_VERSION } from '/src/index.js?v=0.11.1';
+import { webTransport } from '/src/transport/web/index.js?v=0.11.1';
+import { resolveAnchor } from '../lib/region.js?v=0.11.1';
 
 export { KERNEL_VERSION };          // surfaced in the app header (kernel-version visibility)
 
