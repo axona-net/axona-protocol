@@ -6,10 +6,10 @@
 // the token (= APP_VERSION) each release to pull fresh kernel exports on reload.
 // (Deeper kernel internals refresh on the Pages cache expiry — query strings
 // can't bust an unbundled module's transitive imports.)
-import { AxonaPeer, AxonaDomain, NeuronNode, createNodeIdentity, createAuthorIdentity, deriveTopicId, KERNEL_VERSION } from '/src/index.js?v=0.5.0';
-import { webTransport } from '/src/transport/web/index.js?v=0.5.0';
-import { regionName }   from '/src/utils/region-names.js?v=0.5.0';
-import { resolveAnchor } from '../lib/region.js?v=0.5.0';
+import { AxonaPeer, AxonaDomain, NeuronNode, createNodeIdentity, createAuthorIdentity, deriveTopicId, KERNEL_VERSION } from '/src/index.js?v=0.6.0';
+import { webTransport } from '/src/transport/web/index.js?v=0.6.0';
+import { regionName }   from '/src/utils/region-names.js?v=0.6.0';
+import { resolveAnchor } from '../lib/region.js?v=0.6.0';
 
 const $ = (id) => document.getElementById(id);
 const status = (t) => { $('status').textContent = t; };
@@ -18,7 +18,7 @@ const status = (t) => { $('status').textContent = t; };
 // the SAME topic-id no matter where they are. The user's OWN identity, by
 // contrast, is rooted at their REAL location (see whereAmI below) — so a message
 // shows where its sender actually sits, while the topic stays one shared keyspace.
-const APP_VERSION = '0.5.0';
+const APP_VERSION = '0.6.0';
 // Bridge selection (same as axona-share): ?bridge=<wss url> → ?net=testnet|prod
 // shortcut → default by hostname. Lets one build run against either network.
 const KNOWN_BRIDGES = { prod: 'wss://bridge.axona.net', testnet: 'wss://testnet.axona.net' };
@@ -36,6 +36,7 @@ const ANCHOR = resolveAnchor({ search: '', fallback: 'useast' });   // topic reg
 const TOPIC_REGION = ANCHOR.token;                                   // the `region` field of every { region, name }
 
 let peer, node$identity, author, currentTopic = null, currentSub = null;
+let myClass = 'unstated';     // our OWN declared author-class — stays 'unstated' until the user opts in
 
 // Durable AUTHOR identity (v0.3 key separation): the node identity authenticates the
 // connection and is ephemeral; this AUTHOR key signs your posts and is persisted
@@ -105,13 +106,17 @@ async function ensureSubscribed(topic) {
   if (topic === currentTopic) return;
   if (currentSub) { try { await currentSub.stop(); } catch {} }
   currentTopic = topic;
-  currentSub = await peer.sub({ region: TOPIC_REGION, name: topic }, (env) => {
+  currentSub = await peer.sub({ region: TOPIC_REGION, name: topic }, async (env) => {
     if (!env || env.deleted || seen.has(env.msgId)) return;   // skip our own already-shown echo
     seen.add(env.msgId);
+    // CONSUME the author-class flag: resolve the SENDER'S declared class from the
+    // signed envelope's signerPubkey (the Author ID), independent of any payload.
+    // Agent-authored messages get highlighted + badged so they stand out at a glance.
+    const cls = await classOf(env.signerPubkey);
     const m = env.message;
     const text = (m && typeof m === 'object') ? (m.text ?? JSON.stringify(m)) : m;
     const node = (m && typeof m === 'object') ? m.node : null;   // the location WE chose to share
-    render(text, idLabel(node), false, topic);
+    render(text, idLabel(node), false, topic, cls);
   }, { since: 'all' });
 }
 
@@ -129,19 +134,52 @@ async function send() {
   // not a protocol disclosure (the signed envelope never carries location).
   const msgId = await peer.pub({ region: TOPIC_REGION, name: topic }, { text, node: node$identity.id }, { signWith: author });
   seen.add(msgId);
-  render(text, idLabel(node$identity.id), true, topic);
+  render(text, idLabel(node$identity.id), true, topic, { class: myClass, operatorVerified: false });
   $('message').value = '';
 }
 
-function render(text, who, self, topic) {
+// Resolve a sender's declared author-class from their Author ID (signerPubkey).
+// Cached per author — getAuthorClass is a network pull of their owner-only profile
+// topic. Absent/unverifiable → 'unstated' (NEVER silently 'human').
+const classCache = new Map();                            // signerPubkey → Promise<{ class, operatorVerified }>
+function classOf(signer) {
+  if (!signer) return Promise.resolve({ class: 'unstated', operatorVerified: false });   // anonymous post
+  if (classCache.has(signer)) return classCache.get(signer);                             // dedup in-flight + cache positives
+  const p = (async () => {
+    try {
+      const r = await peer.getAuthorClass(signer, { timeoutMs: 3000 });   // cold cross-peer pull needs > the 1s default
+      const res = { class: r.class, operatorVerified: !!r.operatorVerified };
+      if (res.class === 'unstated') classCache.delete(signer);            // transient miss — let a later message retry
+      return res;
+    } catch { classCache.delete(signer); return { class: 'unstated', operatorVerified: false }; }
+  })();
+  classCache.set(signer, p);
+  return p;
+}
+
+// 🧑 human / 🤖 agent badge; a verified ring means the operator countersigned.
+function classBadge(cls) {
+  if (!cls || cls.class === 'unstated') return null;
+  const el = document.createElement('span');
+  el.className = `badge ${cls.class}${cls.operatorVerified ? ' verified' : ''}`;
+  el.textContent = cls.class === 'human' ? '🧑 human' : '🤖 agent';
+  el.title = 'signed author-class attestation' + (cls.operatorVerified ? ', operator-countersigned' : '');
+  return el;
+}
+
+function render(text, who, self, topic, cls) {
   const out = $('out');
   if (out.querySelector('.empty')) out.innerHTML = '';
   const el = document.createElement('div');
-  el.className = 'msg' + (self ? ' self' : '');
+  const clsTag = cls && (cls.class === 'agent' || cls.class === 'human') ? ' ' + cls.class : '';
+  el.className = 'msg' + (self ? ' self' : '') + clsTag;   // 'agent'/'human' → row highlight
   el.innerHTML = `<div class="text"><span class="topic"></span><span class="body"></span></div><div class="meta"></div>`;
   el.querySelector('.topic').textContent = topic ? `${topic}: ` : '';
   el.querySelector('.body').textContent = text;
-  el.querySelector('.meta').textContent = `${who} · ${new Date().toLocaleTimeString()}`;
+  const meta = el.querySelector('.meta');
+  const badge = classBadge(cls);
+  if (badge) meta.appendChild(badge);
+  meta.appendChild(document.createTextNode(`${who} · ${new Date().toLocaleTimeString()}`));
   out.appendChild(el);
   out.scrollTop = out.scrollHeight;
 }
@@ -153,6 +191,22 @@ async function showTopicId(topic) {
     ? `${ANCHOR.name} : ${await deriveTopicId({ region: TOPIC_REGION, name: topic })}`
     : '';
 }
+
+// "I am human" — opt-in. Checking it signs a `human` author-class attestation with
+// the durable author key and publishes it to our owner-only profile topic, so any
+// peer can resolve our class from our Author ID alone. DEFAULT OFF = unstated; we
+// never silently declare 'human'. The minimal app declares but does not retract.
+$('human').addEventListener('change', async (e) => {
+  if (!peer) { e.target.checked = false; status('connect first'); return; }
+  if (!e.target.checked) { status('note: unchecking does not retract the published attestation'); return; }
+  try {
+    status('declaring human…');
+    await peer.setAuthorClass('human', { signWith: author });
+    myClass = 'human';
+    classCache.delete(author.pubkeyHex);                 // re-resolve our own badge fresh
+    status('declared: human');
+  } catch (err) { e.target.checked = false; status('declare failed: ' + (err.message || err)); }
+});
 
 $('send').addEventListener('click', () => send().catch((e) => status('send failed: ' + (e.message || e))));
 $('message').addEventListener('keydown', (e) => { if (e.key === 'Enter') $('send').click(); });
