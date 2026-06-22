@@ -2509,7 +2509,20 @@ export class AxonaPeer extends DHT {
     // call peer.sub after the mesh has stabilised, so the
     // initial K-closest is already wide and refresh isn't needed
     // to recover from a stale boot-time target set.
-    return new AxonaManager({ dht });
+    //
+    // Wire `pickRelayPeer` so sub-axon recruitment uses BATCH ADOPTION
+    // (pick a relay XOR-closest to the new subscriber from the whole
+    // synaptome, hand off a batch) instead of the fallback that promotes
+    // an existing child one subscriber at a time.  Without it the axon
+    // tree degenerates into a deep near-linear chain as a topic grows
+    // (measured in dht-sim: depth ~21 at 600 subscribers vs ~4 with batch
+    // adoption) — a latency/fragility scaling problem.  `shouldRecruitSubAxon`
+    // keeps its default (recruit past `maxDirectSubs`).
+    return new AxonaManager({
+      dht,
+      pickRelayPeer: (role, subscriberId, forwarderId) =>
+        this._pickRelayPeer(role, subscriberId, forwarderId),
+    });
   }
 
   _installDeliveryHook(am) {
