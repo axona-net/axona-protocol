@@ -1567,9 +1567,17 @@ export class AxonaManager {
       return 'consumed';
     }
 
-    if (meta.isTerminal && vouchedFor) {
+    if (meta.isTerminal && vouchedFor && (await this._mayHostTopic(topicId))) {
       // First subscriber creates the topic root — but only when its origin
-      // is vouched for, so a relay can't seed a root keyed to a victim.
+      // is vouched for (so a relay can't seed a root keyed to a victim) AND
+      // this node is genuinely in the topic's K-closest set. The proximity
+      // gate mirrors the direct subscribe-k path: routed subscribes (notably
+      // the recruitment fallback's routeMessage('pubsub:subscribe')) terminate
+      // wherever approximate routing can get no closer — which is often NOT a
+      // true root. Without the gate those terminal nodes self-promote, minting
+      // spurious roots that smear load off the canonical set and starve
+      // recruitment. In K-closest mode the direct subscribe-k path is primary
+      // and seats the subscriber on the real roots, so refusing here is safe.
       this.axonRoles.set(topicId, {
         parentId:       null,
         isRoot:         true,
@@ -1623,6 +1631,7 @@ export class AxonaManager {
           await this.dht.sendDirect(relayId, 'pubsub:adopt-subscribers', {
             topicId:       topicIdHex,
             subscriberIds: batchHex,
+            parentId:      selfHex,   // recruiter is the relay's parent (sub-axon link)
           });
           return;
         }
@@ -2151,12 +2160,20 @@ export class AxonaManager {
     // D-1: cap the inbound batch so one adopt message can't make us
     // allocate an unbounded child map.
     const subscriberIds = subscriberIdsHex.slice(0, MAX_SUBSCRIBER_BATCH).map(h => _wire(h));
+    // The recruiter (proven channel peer) is this relay's parent: an adopted
+    // relay is a SUB-AXON hanging under the root that recruited it, not a new
+    // root. Recording parentId keeps it correctly classified (so it isn't
+    // miscounted as a root) and lets it refresh upward like a promote-axon
+    // sub-axon. Prefer the authenticated fromId; fall back to the payload.
+    const parentId = meta?.fromId != null ? _wire(meta.fromId)
+                   : payload.parentId    != null ? _wire(payload.parentId)
+                   : null;
     const now = this._now();
 
     let role = this.axonRoles.get(topicId);
     if (!role) {
       role = {
-        parentId:       null,
+        parentId,
         isRoot:         false,
         children:       new Map(),
         parentLastSent: 0,
@@ -2239,6 +2256,26 @@ export class AxonaManager {
 
     let role = this.axonRoles.get(topicId);
     if (!role) {
+      // Self-proximity gate (mirrors the publish/lazy-axon path's _mayHostTopic).
+      // Without this, ANY node a subscriber's APPROXIMATE K-closest estimate
+      // happens to hit would self-promote to a permanent root — and since
+      // subscribers near a (region-prefixed) topic also sit near each other in
+      // keyspace, their estimates land on peer subscribers, minting dozens of
+      // spurious roots. That smears the subscriber load across many roots so no
+      // root ever reaches maxDirectSubs, and sub-axon RECRUITMENT never fires —
+      // the tree grows sideways (new roots) instead of downward (recruited
+      // sub-axons), which is NOT the intended axon-tree shape. Gate root
+      // self-promotion on genuine K-closeness: a node only becomes a root if it
+      // is actually in findKClosest(topic, rootSetSize). The subscriber fans
+      // subscribe-k to all R of its estimated roots and re-issues every refresh,
+      // so refusing the non-closest ones still leaves it seated on the genuine
+      // roots (delivery preserved by overlap) while the root set collapses to
+      // ~rootSetSize and recruitment can fire as designed. (_mayHostTopic returns
+      // true in non-K-closest/legacy mode, so this is a no-op there.)
+      if (!(await this._mayHostTopic(topicId))) {
+        this._emitLog?.('debug', 'subscribe-root-promotion-rejected', { topicId: toHex(topicId) });
+        return;
+      }
       role = {
         parentId:       null,
         isRoot:         true,
@@ -2252,9 +2289,16 @@ export class AxonaManager {
       };
       this.axonRoles.set(topicId, role);
     } else {
-      role.isInRootSet = true;
-      if (peerRoots.length > 0) {
-        for (const p of peerRoots) role.peerRoots?.add(p);
+      // Only a ROOT-type role (no parent) is "in the root set". A recruited
+      // SUB-AXON (parentId set) that happens to receive a stray subscribe-k
+      // must stay a sub-axon — flipping it to isInRootSet here is what made
+      // recruited relays masquerade as roots (inflating the root count and
+      // hiding the recruitment hierarchy).
+      if (role.parentId == null) {
+        role.isInRootSet = true;
+        if (peerRoots.length > 0) {
+          for (const p of peerRoots) role.peerRoots?.add(p);
+        }
       }
     }
 
