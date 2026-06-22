@@ -52,5 +52,21 @@ ok('owner-only topic ≠ same-name open topic', idA !== open);
 // 7. unstated: a non-attestation verifies as not-ok (caller treats as unstated)
 ok('garbage → not ok', !(await verifyAuthorClass({ kind: 'nope' })).ok);
 
+// 8. operator countersignature (v1.1): bob is alice's operator and vouches back
+const co = await buildAuthorClass({ class: 'agent', operatorSignWith: bob, label: 'run by bob', signWith: alice });
+ok('operator == operator key', co.operator === bob.pubkeyHex.toLowerCase());
+ok('operatorProof present', typeof co.operatorProof === 'string' && co.operatorProof.startsWith('ed25519:'));
+const cv = await verifyAuthorClass(co);
+ok('countersigned verifies + operatorVerified', cv.ok && cv.operatorVerified === true && cv.operator === bob.pubkeyHex.toLowerCase());
+// self-asserted operator (string, no proof) → ok but operatorVerified:false
+const sa = await buildAuthorClass({ class: 'agent', operator: 'ed25519:some-handle', signWith: alice });
+const sav = await verifyAuthorClass(sa);
+ok('self-asserted operator → operatorVerified:false', sav.ok && sav.operatorVerified === false && sav.operator === 'ed25519:some-handle');
+// tampered operatorProof → whole attestation rejected
+ok('bad operatorProof rejected', !(await verifyAuthorClass({ ...co, operatorProof: 'ed25519:' + '00'.repeat(64) })).ok);
+// swapped operator (carol's key) but bob's proof → rejected (author sig + proof both bind operator)
+const carol = await createAuthorIdentity({ extractable: true });
+ok('swapped operator rejected', !(await verifyAuthorClass({ ...co, operator: carol.pubkeyHex.toLowerCase() })).ok);
+
 console.log(fail ? `\n✗ ${fail}/${n} FAILED` : `\n✓ all ${n} passed`);
 process.exit(fail ? 1 : 0);
