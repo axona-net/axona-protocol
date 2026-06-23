@@ -1859,12 +1859,14 @@ export class AxonaPeer extends DHT {
   }
 
   /**
-   * Declare THIS author's class (voluntary human/agent provenance). Publishes a
+   * Declare THIS author's class (voluntary self-asserted provenance). Publishes a
    * signed `axona:author-class:v1` attestation to the author's own owner-only
    * profile topic — so only that author can set its own class, and any reader can
    * resolve it from the Author ID alone. NOT a gate: nothing reads it before
-   * routing. A human-facing app wires its "I am human" toggle to this.
-   * @param {'agent'|'human'} cls
+   * routing. A human-facing app wires its "I am human" toggle to this; infra nodes
+   * self-identify (a bridge declares 'bridge', a relay 'relay'); an automated
+   * app/feed declares 'service'.
+   * @param {'agent'|'human'|'service'|'bridge'|'relay'} cls
    * @param {object} o
    * @param {object} o.signWith            the author identity to declare for + sign with
    * @param {string} [o.operator]          self-asserted operator (pubkey/handle); unverified
@@ -1885,7 +1887,7 @@ export class AxonaPeer extends DHT {
   /**
    * Resolve an author's self-declared class from its Author ID alone. Pulls the
    * author's owner-only profile topic and verifies the attestation. Returns
-   * `{ class:'agent'|'human'|'unstated', operator, operatorVerified, label, ts }`;
+   * `{ class:'agent'|'human'|'service'|'bridge'|'relay'|'unstated', operator, operatorVerified, label, ts }`;
    * any missing/invalid/unparseable attestation resolves to `'unstated'` (never a
    * default class). `operatorVerified` is true only for a valid v1.1 countersignature.
    * @param {string} authorId 64-hex Author ID

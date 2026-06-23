@@ -157,12 +157,21 @@ function classOf(signer) {
   return p;
 }
 
-// 🧑 human / 🤖 agent badge; a verified ring means the operator countersigned.
+// Self-asserted author-class badge; a verified ring means the operator
+// countersigned. Covers every kernel class — a future/unknown value falls back
+// to its raw name rather than being mislabeled as 'agent'.
+const CLASS_LABEL = {
+  human:   '🧑 human',
+  agent:   '🤖 agent',
+  service: '⚙️ service',
+  bridge:  '🌉 bridge',
+  relay:   '📡 relay',
+};
 function classBadge(cls) {
   if (!cls || cls.class === 'unstated') return null;
   const el = document.createElement('span');
   el.className = `badge ${cls.class}${cls.operatorVerified ? ' verified' : ''}`;
-  el.textContent = cls.class === 'human' ? '🧑 human' : '🤖 agent';
+  el.textContent = CLASS_LABEL[cls.class] || `· ${cls.class}`;
   el.title = 'signed author-class attestation' + (cls.operatorVerified ? ', operator-countersigned' : '');
   return el;
 }
@@ -171,8 +180,8 @@ function render(text, who, self, topic, cls) {
   const out = $('out');
   if (out.querySelector('.empty')) out.innerHTML = '';
   const el = document.createElement('div');
-  const clsTag = cls && (cls.class === 'agent' || cls.class === 'human') ? ' ' + cls.class : '';
-  el.className = 'msg' + (self ? ' self' : '') + clsTag;   // 'agent'/'human' → row highlight
+  const clsTag = cls && cls.class && cls.class !== 'unstated' ? ' ' + cls.class : '';
+  el.className = 'msg' + (self ? ' self' : '') + clsTag;   // any known class → row class hook
   el.innerHTML = `<div class="text"><span class="topic"></span><span class="body"></span></div><div class="meta"></div>`;
   el.querySelector('.topic').textContent = topic ? `${topic}: ` : '';
   el.querySelector('.body').textContent = text;

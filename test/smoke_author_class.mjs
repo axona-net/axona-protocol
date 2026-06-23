@@ -68,5 +68,17 @@ ok('bad operatorProof rejected', !(await verifyAuthorClass({ ...co, operatorProo
 const carol = await createAuthorIdentity({ extractable: true });
 ok('swapped operator rejected', !(await verifyAuthorClass({ ...co, operator: carol.pubkeyHex.toLowerCase() })).ok);
 
+// 9. infra classes: bridge + relay are valid, build/verify round-trip
+for (const cls of ['service', 'bridge', 'relay']) {
+  const a = await buildAuthorClass({ class: cls, label: `${cls} node`, signWith: alice });
+  const av = await verifyAuthorClass(a);
+  ok(`${cls} class builds + verifies`, av.ok && av.class === cls);
+}
+// 10. an unknown class still throws at build (closed allow-list) but verifies as
+//     not-ok (UNSTATED) on the read side — graceful, never a wrong default
+let threw2 = false; try { await buildAuthorClass({ class: 'sensor', signWith: alice }); } catch { threw2 = true; }
+ok('unknown class throws at build', threw2);
+ok('unknown class on read → UNSTATED (not-ok)', !(await verifyAuthorClass({ ...att, class: 'sensor' })).ok);
+
 console.log(fail ? `\n✗ ${fail}/${n} FAILED` : `\n✓ all ${n} passed`);
 process.exit(fail ? 1 : 0);
