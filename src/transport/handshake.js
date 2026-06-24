@@ -50,7 +50,22 @@ import { UpgradeRequiredError } from '../errors.js';
  *  string, so a 2.x and a 3.x peer reject each other's envelopes — the
  *  partition is hermetic at the wire layer. The web client sends this in its
  *  client-hello so the bridge gate (REQUIRED_WIRE_MAJOR) rejects a mismatched
- *  major early, cleanly, instead of a silent post-admit envelope failure. */
+ *  major early, cleanly, instead of a silent post-admit envelope failure.
+ *
+ *  ┌─ PENDING FLAG-DAY: PROMOTE TO '4.0' ON THE NEXT VERSION UPDATE ──────────┐
+ *  │ DECISION (2026-06-24): the routing-only axonic-tree pub/sub rewrite       │
+ *  │ (v3.14 clean break) plus the v3.15 convergence + since:'all' replay       │
+ *  │ changes are a BEHAVIORAL break — a pre-3.15 peer that speaks the SAME      │
+ *  │ wire 3.0 still cannot safely interoperate (different root-convergence /    │
+ *  │ replay semantics), so the wire major must reflect that incompatibility.    │
+ *  │ The NEXT kernel version bump MUST set WIRE_VERSION = '4.0' AND the bridge  │
+ *  │ REQUIRED_WIRE_MAJOR = '4' — hermetic at both the bridge gate and the       │
+ *  │ peer↔peer wireCompatible() handshake (closes the browser-app version-floor │
+ *  │ leak the testnet env gate still has). Whole-fleet flag-day: re-vendor      │
+ *  │ peer/relay/dht-sim, re-pin bridge, redeploy + restart together. Consider   │
+ *  │ also bumping AUTH_PROTO for an auth-layer backstop. The testnet            │
+ *  │ MIN_*_VERSION env floor (3.15.0) is the interim SOFT gate until this lands.│
+ *  └────────────────────────────────────────────────────────────────────────┘ */
 export const WIRE_VERSION = '3.0';
 
 /** The kernel's own peer-version string. Apps wrapping the kernel pass their
