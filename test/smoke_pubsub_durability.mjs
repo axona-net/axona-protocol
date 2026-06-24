@@ -106,6 +106,23 @@ async function main() {
     await fab.settle();
     const got = ids.filter(id => late.got.some(g => g.msgId === id)).length;
     check('late joiner recovers the full backlog after GC sweeps', got === 4, `(${got}/4)`);
+
+    // Regression for the LIVE since:'all' backlog-0% bug: exercise the REAL
+    // reset→subscribe path AxonaPeer._applySince('all') drives, instead of
+    // manually seeding ts=0. pubsubResetTopicConsumption must leave the
+    // since-floor at 0 (not delete it) — a deleted entry makes pubsubSubscribe
+    // fall back to since=now(), so the root replays nothing.
+    const late2 = nodes[11];
+    late2.am.pubsubResetTopicConsumption(topicId);          // what _applySince('all') calls
+    check('reset leaves since-floor at 0 (not now) so since:all replays all',
+      late2.am._lastSeenTsByTopic.get(topicId) === 0);
+    late2.am.pubsubSubscribe(topicId);
+    check('subscribe after reset carries since=0 on the wire',
+      late2.am.mySubscriptions.get(topicId)?.since === 0,
+      `(since=${late2.am.mySubscriptions.get(topicId)?.since})`);
+    await fab.settle();
+    const got2 = ids.filter(id => late2.got.some(g => g.msgId === id)).length;
+    check('since:all late joiner (real reset path) recovers full backlog', got2 === 4, `(${got2}/4)`);
   }
 
   const N = 60, S = 50, M = 8;
