@@ -3,7 +3,7 @@
 //
 // Design: axona-docs/architecture/Pubsub-Axon-Tree-v0.1.md
 //
-// CLEAN BREAK (kernel v3.13.0). Routing-only pub/sub. The one rule:
+// CLEAN BREAK (kernel v3.14.0). Routing-only pub/sub. The one rule:
 //
 //     Axona pub/sub uses ONLY DHT message routing. There are no direct
 //     connections. Every interaction is a routed message delivered, hop by
@@ -33,10 +33,16 @@
 // "one of its connections" is satisfied without the manager needing a
 // synaptome/neighbour list; routing reaches the chosen node regardless.)
 //
-// Phase 3 (migration cache handoff / stamped-replay-up durability) and the side
-// functions (kill/unpub/touch/pull/metrics/host) remain thin — markers
-// TODO(Phase 3/4). GONE for good: sendDirect, findKClosest, K-closest fan-out,
-// root sets, the old recruit/adopt/promote/dissolve + msgsync/kill-sync.
+// PHASE 3 — DURABILITY. A SUBSCRIBE advertises the sender's cache high-water; a
+// relay/root that is BEHIND a reattaching subscriber pulls its stamped history
+// UP (PULLUP → REPLAYUP) and adopts it without re-stamping, advancing lastTs so
+// new publishes continue monotonically above it. This carries the topic's recent
+// history across abrupt root death (a fresh empty root recovers it from any
+// surviving cache-bearing relay) and across graceful migration.
+//
+// The side functions (kill/unpub/touch/pull/metrics/host) remain thin —
+// markers TODO(Phase 4). GONE for good: sendDirect, findKClosest, K-closest
+// fan-out, root sets, the old recruit/adopt/promote/dissolve + msgsync/kill-sync.
 // =====================================================================
 
 import { verifyEnvelope, checkFreshness } from './envelope.js';
@@ -60,6 +66,7 @@ const VIA_HOP_BUDGET  = 8;               // hops per via leg (enforced kernel-si
 const TTL_MS          = 48 * 60 * 60 * 1000;   // 48h message hold, keyed on the ROOT timestamp
 const APP_DEDUP_MAX   = 8192;            // exactly-once app-delivery LRU
 const REPLAY_CHUNK_BYTES = 96 * 1024;    // byte budget per replay deliver batch
+const FUTURE_TOLERANCE_MS = 5 * 60 * 1000;   // §5 bad-clock rule: drop replayed stamps this far ahead
 
 // ── Wire message types (all ROUTED) ─────────────────────────────────────
 const T = {
@@ -68,6 +75,8 @@ const T = {
   PUB:      'pubsub:pub',       // publish — routed toward topic id; NO timestamp (root stamps)
   DELIVER:  'pubsub:deliver',   // stamped messages — routed toward a subscriber id
   ADOPT:    'pubsub:adopt',     // delegate: "become my child relay + take these subscribers"
+  PULLUP:   'pubsub:pullup',    // "I'm behind you — replay your stamped history up to me" (§6)
+  REPLAYUP: 'pubsub:replayup',  // a relay's stamped cache delta, routed UP to a behind parent
   KILL:     'pubsub:kill',      // retract a message (thin; TODO Phase 4)
   UNPUB:    'pubsub:unpub',     // retract a topic's feed (thin; TODO Phase 4)
   TOUCH:    'pubsub:touch',     // extend TTL (thin; TODO Phase 4)
@@ -155,6 +164,8 @@ export class AxonaManager {
     on(T.PUB,      this._onPub);
     on(T.DELIVER,  this._onDeliver);
     on(T.ADOPT,    this._onAdopt);
+    on(T.PULLUP,   this._onPullUp);
+    on(T.REPLAYUP, this._onReplayUp);
     on(T.KILL,     this._onKill);
     on(T.UNPUB,    this._onUnpub);
     on(T.TOUCH,    this._onTouch);
@@ -225,8 +236,20 @@ export class AxonaManager {
       if (this.mySubscriptions.has(topicBig)) this._replayLocal(role, since);
       return 'consumed';
     }
+    // Durability (§6 stamped-replay-up): if this subscriber holds newer stamped
+    // history than I do — e.g. I am a fresh root after the old one died, or a
+    // displaced root reattaching — ask it to replay its cache UP to me.
+    const myHw = this._highWater(role);
+    if (Number.isFinite(payload.hw) && payload.hw > myHw) {
+      this._route(idBig(subHex), T.PULLUP, { topicId: idHex(topicBig), sinceHw: myHw, parentId: idHex(this.nodeId) });
+    }
     this._accept(role, subHex, since);
     return 'consumed';
+  }
+
+  // My cache high-water = the newest stamp I hold (or have emitted, as root).
+  _highWater(role) {
+    return Math.max(role.lastTs || 0, role.cache.length ? role.cache[role.cache.length - 1].publishTs : 0);
   }
 
   _onUnsub(payload, meta) {
@@ -366,6 +389,48 @@ export class AxonaManager {
     this._deliverToApp(role.topicId, json, env.msgId, ts);              // local app (if subscribed)
   }
 
+  // ── stamped-replay-up durability (§6) ────────────────────────────────
+  // A behind parent asked us to replay our stamped history up to it; send the
+  // cache delta newer than its high-water, routed to that parent.
+  _onPullUp(payload, meta) {
+    if (meta.targetId !== this.nodeId) return;
+    const role = this.axonRoles.get(idBig(payload.topicId));
+    if (!role || !role.cache.length) return 'consumed';
+    const sinceHw = Number.isFinite(payload.sinceHw) ? payload.sinceHw : 0;
+    const msgs = role.cache.filter(c => c.publishTs > sinceHw)
+                           .map(c => ({ json: c.json, publishTs: c.publishTs, msgId: c.msgId }));
+    if (msgs.length && isHexId(lc(payload.parentId))) {
+      this._route(idBig(payload.parentId), T.REPLAYUP, { topicId: idHex(role.topicId), msgs });
+    }
+    return 'consumed';
+  }
+
+  // Stamped history arriving from below — adopt it WITHOUT re-stamping (the
+  // timestamp rule, §5: a timestamp already present is kept), advance lastTs so
+  // new publishes continue monotonically above it, and propagate it down.
+  async _onReplayUp(payload, meta) {
+    if (meta.targetId !== this.nodeId) return;
+    const role = this.axonRoles.get(idBig(payload.topicId));
+    if (!role) return 'consumed';
+    for (const m of (Array.isArray(payload.msgs) ? payload.msgs : [])) {
+      if (m && typeof m.json === 'string' && Number.isFinite(m.publishTs)) await this._ingestStamped(role, m);
+    }
+    return 'consumed';
+  }
+
+  async _ingestStamped(role, m) {
+    let env;
+    try { env = JSON.parse(m.json); } catch { return; }
+    const v = await verifyEnvelope(env);                                 // B-4 still applies
+    if (!v.ok || env.msgId !== m.msgId) { this._log('warn', 'drop-bad-replayup', { reason: v.reason }); return; }
+    if (m.publishTs > this._now() + FUTURE_TOLERANCE_MS) { this._log('warn', 'drop-future-replayup'); return; } // §5 bad-clock
+    if (role.cacheIds.has(m.msgId)) return;                              // already have it
+    this._cachePush(role, { msgId: m.msgId, publishTs: m.publishTs, json: m.json });
+    if (m.publishTs > role.lastTs) role.lastTs = m.publishTs;            // continue stamping above recovered history
+    this._fanout(role, { json: m.json, publishTs: m.publishTs, msgId: m.msgId }, null);
+    this._deliverToApp(role.topicId, m.json, m.msgId, m.publishTs);
+  }
+
   // ── DELIVER (parent → subscriber; a relay re-fans down the tree) ──────
   _onDeliver(payload, meta) {
     if (meta.targetId !== this.nodeId) return;        // forward (intermediate hop)
@@ -494,7 +559,12 @@ export class AxonaManager {
 
   _sendSubscribe(topicBig) {
     const via = (this._upstream.get(topicBig) || []).slice(0, MAX_VIA);
-    this._send(T.SUB, { topicId: idHex(topicBig), via, subscriberId: idHex(this.nodeId), since: this._sinceFor(topicBig) });
+    const role = this.axonRoles.get(topicBig);
+    this._send(T.SUB, {
+      topicId: idHex(topicBig), via, subscriberId: idHex(this.nodeId),
+      since: this._sinceFor(topicBig),
+      hw: role ? this._highWater(role) : 0,   // a cache-bearing relay advertises its history (§6)
+    });
   }
 
   // ── public API (contract surface) ────────────────────────────────────
