@@ -30,12 +30,15 @@ const idHex = (big) => big.toString(16).padStart(66, '0');
 // minimum in XOR distance to the target (exactly DHT greedy routing on a sparse
 // graph). neighbors() exposes the node's adjacency to the beacon.
 class GappyFabric {
-  constructor() { this.nodes = new Map(); this.adj = new Map(); this.queue = []; this.clock = Date.now(); }
+  constructor(beacons = true) { this.nodes = new Map(); this.adj = new Map(); this.queue = []; this.clock = Date.now(); this.beacons = beacons; }
   addNode(idBig) {
     const handlers = new Map(); const self = this; const me = idBig;
     const dht = {
       getSelfId: () => me,
-      neighbors: () => [...(self.adj.get(me) || [])],
+      // neighbors() is what the kernel beacon consults. Gate it on `beacons` so
+      // the control run (beacons off) exercises the un-helped, stranding path
+      // while routing itself still uses self.adj. Undefined → kernel skips beacons.
+      ...(self.beacons ? { neighbors: () => [...(self.adj.get(me) || [])] } : {}),
       onRoutedMessage: (type, h) => handlers.set(type, h),
       routeMessage: (target, type, payload, meta = {}) => {
         const dest = self._greedyTerminus(me, target);
@@ -95,7 +98,6 @@ async function main() {
   const topicId = await deriveTopicIdBig(desc);
 
   // Generate a pool of node identities and rank by XOR distance to the topic.
-  const fab = new GappyFabric();
   const pool = [];
   for (let i = 0; i < 24; i++) {
     const id = await createNodeIdentity({ lat: (i * 13) % 80 - 40, lng: (i * 29) % 300 - 150 });
@@ -121,57 +123,52 @@ async function main() {
   // farther from R than Z (so Y's greedy step toward R is Z, not P).
   const P = rest.find(id => (id ^ topicId) > (Y ^ topicId) && (id ^ R) > (Z ^ R)) ?? rest[rest.length - 1];
   const subs = rest.filter(id => id !== P).slice(0, 4);
-  for (const id of [R, Y, Z, P, ...subs]) fab.addNode(id);
-
-  // Topology engineered for divergence:
-  //  Y's ONLY neighbor is Z, and d(Z,T) > d(Y,T) → Y is a local minimum (greedy
-  //  arriving at Y stops). Z bridges to R. The publisher flows into Y and stops;
-  //  subscribers attach directly to R. R reaches Y only via the 2-hop beacon R→Z→Y.
-  fab.link(Z, R);
-  fab.link(Z, Y);
-  fab.link(P, Y);
-  for (const s of subs) fab.link(s, R);
-
-  const rec = (id) => fab.nodes.get(id);
   const xstr = (id) => idHex(id).slice(0, 8);
   console.log(`  topic ${xstr(topicId)}…  root R=${xstr(R)} deadend Y=${xstr(Y)} bridge Z=${xstr(Z)} pub P=${xstr(P)}`);
 
-  // sanity: greedy from P really dead-ends at Y (not R)
-  check('publisher greedy-routes to the dead-end Y, not the true root R', fab._greedyTerminus(P, topicId) === Y);
-
-  // subscribers attach (their SUB greedy-reaches R, which becomes root)
-  for (const s of subs) rec(s).am.pubsubSubscribe(topicId);
-  await fab.settle();
-  const rootRole = rec(R).am.axonRoles.get(topicId);
-  check('R became the single root and adopted the subscribers',
-    !!rootRole && rootRole.isRoot && rootRole.subscribers.size === subs.length,
-    `(subs=${rootRole?.subscribers?.size})`);
-
-  // ── CONTROL: publish BEFORE any beacon → dead-ends at Y, subscribers get nothing
-  {
-    const e = await buildEnvelope({ topic: desc, message: { n: 'pre-beacon' }, seq: 1, identity: author, ts: fab.clock });
-    rec(P).am.pubsubPublish(topicId, JSON.stringify(e));
+  // Build the SAME gappy topology, with beacons on or off. Y's only neighbor is Z
+  // (and d(Z,T) > d(Y,T) → Y is a local minimum); Z bridges to R; the publisher
+  // flows into Y and stops; subscribers attach to R. R reaches Y only via the
+  // 2-hop beacon R→Z→Y.
+  async function build(beacons) {
+    const fab = new GappyFabric(beacons);
+    for (const id of [R, Y, Z, P, ...subs]) fab.addNode(id);
+    fab.link(Z, R); fab.link(Z, Y); fab.link(P, Y);
+    for (const s of subs) fab.link(s, R);
+    for (const s of subs) fab.nodes.get(s).am.pubsubSubscribe(topicId);   // R promotes → (if beacons) announces NOW
     await fab.settle();
-    const got = subs.filter(s => rec(s).got.includes(e.msgId)).length;
+    return fab;
+  }
+  const pub = async (fab, seq, tag) => {
+    const e = await buildEnvelope({ topic: desc, message: { n: tag }, seq, identity: author, ts: fab.clock });
+    fab.nodes.get(P).am.pubsubPublish(topicId, JSON.stringify(e));
+    await fab.settle();
+    return subs.filter(s => fab.nodes.get(s).got.includes(e.msgId)).length;
+  };
+
+  // ── CONTROL (beacons OFF): publish strands at Y → 0/N; Y wrongly becomes root
+  {
+    const fab = await build(false);
+    // sanity: greedy from P really dead-ends at Y (not R)
+    check('publisher greedy-routes to the dead-end Y, not the true root R', fab._greedyTerminus(P, topicId) === Y);
+    check('R became the single root and adopted the subscribers',
+      fab.nodes.get(R).am.axonRoles.get(topicId)?.isRoot && fab.nodes.get(R).am.axonRoles.get(topicId)?.subscribers.size === subs.length);
+    const got = await pub(fab, 1, 'no-beacon');
     check('WITHOUT beacon: publish strands at Y → 0/N subscribers (the bug)', got === 0, `(${got}/${subs.length})`);
-    check('Y wrongly became a spurious root for the stranded publish', !!rec(Y).am.axonRoles.get(topicId)?.isRoot);
+    check('Y wrongly became a spurious root for the stranded publish', !!fab.nodes.get(Y).am.axonRoles.get(topicId)?.isRoot);
   }
 
-  // ── emit beacons: R announces itself; flood reaches Y via R→Z→Y (2 layers)
-  fab.clock += 21_000;                 // pass BEACON_MS throttle
-  await fab.tickAll();                 // refreshTick → _emitRootBeacons on R → settle
-  const yBeacon = rec(Y).am._rootBeacons.get(topicId);
-  check('beacon propagated 2 hops to the dead-end Y (Y cached root=R)',
-    !!yBeacon && yBeacon.root === idHex(R), `(${yBeacon ? xstr(BigInt('0x' + yBeacon.root)) : 'none'})`);
-  check('Y did NOT accept a beacon farther than its own best-known (verify-don\'t-trust holds)', !!yBeacon);
-
-  // ── WITH beacon: publish again → Y corrects to R → all subscribers receive
+  // ── TREATMENT (beacons ON): R announces on becoming root → Y holds the pointer
+  //    by publish time → Y corrects the publish to R → ALL subscribers receive.
   {
-    const e = await buildEnvelope({ topic: desc, message: { n: 'post-beacon' }, seq: 2, identity: author, ts: fab.clock });
-    rec(P).am.pubsubPublish(topicId, JSON.stringify(e));
-    await fab.settle();
-    const got = subs.filter(s => rec(s).got.includes(e.msgId)).length;
+    const fab = await build(true);
+    const yBeacon = fab.nodes.get(Y).am._rootBeacons.get(topicId);
+    check('R announced on promotion; beacon reached the dead-end Y (Y cached root=R)',
+      !!yBeacon && yBeacon.root === idHex(R), `(${yBeacon ? xstr(BigInt('0x' + yBeacon.root)) : 'none'})`);
+    check('Y did NOT accept a beacon farther than its own best-known (verify-don\'t-trust holds)', !!yBeacon);
+    const got = await pub(fab, 2, 'with-beacon');
     check('WITH beacon: Y corrects the publish to R → ALL subscribers receive', got === subs.length, `(${got}/${subs.length})`);
+    check('Y did not need to become a spurious root (corrected before claiming)', !fab.nodes.get(Y).am.axonRoles.get(topicId)?.isRoot);
   }
 
   console.log(`\nResult: ${passed} passed, ${failed} failed`);
