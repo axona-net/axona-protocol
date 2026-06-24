@@ -3,7 +3,7 @@
 //
 // Design: axona-docs/architecture/Pubsub-Axon-Tree-v0.1.md
 //
-// CLEAN BREAK (kernel v3.14.1). Routing-only pub/sub. The one rule:
+// CLEAN BREAK (kernel v3.15.0). Routing-only pub/sub. The one rule:
 //
 //     Axona pub/sub uses ONLY DHT message routing. There are no direct
 //     connections. Every interaction is a routed message delivered, hop by
@@ -147,6 +147,7 @@ export class AxonaManager {
 
     // Internal.
     this._upstream        = new Map();  // topicIdBig -> [hex]  the relay we renew toward
+    this._rootHint        = new Map();  // topicIdBig -> { via:hex|null, at }  cached iterative-lookup root
     this._appDelivered    = new Map();  // "topicHex:msgId" -> true (exactly-once LRU)
     this._deliveryCallback = null;
     this._hostKeyspace    = false;
@@ -557,8 +558,37 @@ export class AxonaManager {
     return Math.max(relay, Number.isFinite(seen) ? seen : 0, Number.isFinite(sub) ? sub : 0);
   }
 
+  // Find the topic's true root via the robust ITERATIVE lookup (escapes the
+  // greedy-routing local minima that strand subscribers on a sparse mesh), and
+  // cache it for renewMs so steady-state stays cheap. Returns a hex node id, or
+  // null (no lookup adapter, or lookup failed) → caller falls back to greedy
+  // routing toward the bare topic id.
+  async _findRoot(topicBig) {
+    if (typeof this.dht.lookup !== 'function') return null;
+    const cached = this._rootHint.get(topicBig);
+    if (cached && (this._now() - cached.at) < this.renewMs) return cached.via;
+    let hex = null;
+    try { const id = await this.dht.lookup(topicBig); if (id != null) hex = lc(idHex(idBig(id))); }
+    catch { /* lookup failed → greedy fallback */ }
+    this._rootHint.set(topicBig, { via: hex, at: this._now() });
+    return hex;
+  }
+
+  // Lookup-assisted when UNPINNED (initial join, or healing a strand): find the
+  // true root and route the subscribe toward it. Once pinned to a relay (via the
+  // deliver `from`), renewals use the cheap via-pin and never lookup again.
+  // Sync entry. Pinned (steady state) or no lookup adapter → send synchronously
+  // (unchanged greedy behavior, keeps tests/mock adapters deterministic). Only
+  // when UNPINNED *and* lookup is available do we go async to find the true root.
   _sendSubscribe(topicBig) {
-    const via = (this._upstream.get(topicBig) || []).slice(0, MAX_VIA);
+    const pinned = this._upstream.get(topicBig) || [];
+    if (pinned.length || typeof this.dht.lookup !== 'function') {
+      this._emitSubscribe(topicBig, pinned.slice(0, MAX_VIA));
+      return;
+    }
+    this._findRoot(topicBig).then(root => this._emitSubscribe(topicBig, root ? [root] : [])).catch(() => {});
+  }
+  _emitSubscribe(topicBig, via) {
     const role = this.axonRoles.get(topicBig);
     this._send(T.SUB, {
       topicId: idHex(topicBig), via, subscriberId: idHex(this.nodeId),
@@ -568,8 +598,18 @@ export class AxonaManager {
   }
 
   // ── public API (contract surface) ────────────────────────────────────
+  // Route the UN-stamped publish toward the topic's TRUE root (iterative lookup,
+  // cached) so publisher + subscribers converge on the same root; root stamps it.
   pubsubPublish(topicId, json, meta = {}) {
-    this._send(T.PUB, { topicId: idHex(topicId), via: [], json });
+    if (typeof this.dht.lookup === 'function') {
+      // lookup-assisted: find the TRUE root so publisher + subscribers converge
+      // on the same root (async).
+      this._findRoot(topicId)
+        .then(root => this._send(T.PUB, { topicId: idHex(topicId), via: root ? [root] : [], json }))
+        .catch(() => {});
+    } else {
+      this._send(T.PUB, { topicId: idHex(topicId), via: [], json });   // sync greedy (no lookup adapter)
+    }
     return meta.postHash || '';
   }
 
@@ -632,6 +672,7 @@ export class AxonaManager {
     this._hostedTopics.clear();
     this._lastSeenTsByTopic.clear();
     this._upstream.clear();
+    this._rootHint.clear();
     this._appDelivered.clear();
     for (const p of this._pending.values()) clearTimeout(p.timer);
     this._pending.clear();
