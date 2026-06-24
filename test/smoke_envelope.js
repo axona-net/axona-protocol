@@ -377,55 +377,13 @@ async function testFreshnessHelper() {
     checkFreshness({ ts: 'nope' }, { now }).reason === 'missing_ts');
 }
 
-function mkManager() {
-  // Minimal AxonaManager for unit-testing the ingress freshness/seq gate.
-  const dht = {
-    getSelfId:        () => 1n,
-    onRoutedMessage:  () => {},
-    onDirectMessage:  () => {},
-    onEvent:          () => () => {},
-    sendDirect:       async () => true,
-    routeMessage:     async () => {},
-  };
-  return new AxonaManager({ dht });
-}
-
-async function testIngressFreshnessAndSeq() {
-  console.log('\n── ingress gate: _publishFreshAndOrdered (C-2) ──');
-  const id  = await createAuthorIdentity();
-  const am  = mkManager();
-  const now = 1_700_000_000_000;
-
-  // Fresh, signed, in-order → accepted; advances high-water.
-  const e1   = await buildEnvelope({ topic: TOPIC('t'), message: 1, identity: id, ts: now, seq: now });
-  const j1   = JSON.stringify(e1);
-  check('fresh signed publish accepted', am._publishFreshAndOrdered(j1, now).ok === true);
-  check('high-water recorded for publisher',
-    am._publisherSeq.get(id.pubkeyHex) === now);
-
-  // Same envelope replayed 10 minutes later (signed ts now stale) → dropped.
-  const later = now + 10 * 60_000;
-  const r2 = am._publishFreshAndOrdered(j1, later);
-  check('stale replayed publish dropped', r2.ok === false);
-  check('drop reason is stale',           r2.reason === 'stale');
-
-  // A captured OLD-seq envelope re-injected while still time-fresh, but seq
-  // far behind the publisher's high-water → dropped as replay_seq.
-  const e3 = await buildEnvelope({ topic: TOPIC('t'), message: 2, identity: id, ts: now, seq: now - 5 * 60_000 });
-  const r3 = am._publishFreshAndOrdered(JSON.stringify(e3), now);
-  check('old-seq replay dropped', r3.ok === false);
-  check('drop reason is replay_seq', r3.reason === 'replay_seq');
-
-  // A legitimately reordered message (seq slightly behind, within tolerance) → accepted.
-  const e4 = await buildEnvelope({ topic: TOPIC('t'), message: 3, identity: id, ts: now, seq: now - 5_000 });
-  check('mild-reorder publish accepted (within tolerance)',
-    am._publishFreshAndOrdered(JSON.stringify(e4), now).ok === true);
-
-  // Unsigned envelope is not gated (no attacker-immutable ts/seq).
-  const eu = await buildEnvelope({ topic: TOPIC('t'), message: 4, sign: false, ts: now - 60 * 60_000, seq: 1 });
-  check('unsigned envelope not gated (passes even if old)',
-    am._publishFreshAndOrdered(JSON.stringify(eu), now).ok === true);
-}
+// NOTE (kernel v3.12.0 clean break): the per-publisher seq high-water ingress
+// gate (`_publishFreshAndOrdered` / `_publisherSeq`) was removed with the old
+// K-closest manager. The routing-only core gates a live publish at the root via
+// absolute-time freshness (checkFreshness — see testFreshnessHelper above) plus
+// content-addressed msgId idempotency. Restoring per-publisher seq monotonic
+// replay-detection is a Phase 2 hardening item (design doc §9). Its smoke is
+// parked under test/legacy-pubsub/ until then.
 
 async function main() {
   console.log('Axona signed-envelope (A2) smoke');
@@ -443,7 +401,6 @@ async function main() {
   await testSeqBoundIntoSignature();
   await testDomainSeparation();
   await testFreshnessHelper();
-  await testIngressFreshnessAndSeq();
   await testPeerSignedRoundTrip();
   await testPeerUnsignedRoundTrip();
   await testPeerSignWithoutIdentity();
