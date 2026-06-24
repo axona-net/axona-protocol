@@ -51,30 +51,21 @@ import { UpgradeRequiredError } from '../errors.js';
  *  partition is hermetic at the wire layer. The web client sends this in its
  *  client-hello so the bridge gate (REQUIRED_WIRE_MAJOR) rejects a mismatched
  *  major early, cleanly, instead of a silent post-admit envelope failure.
- *
- *  ┌─ PENDING FLAG-DAY: PROMOTE TO '4.0' ON THE NEXT VERSION UPDATE ──────────┐
- *  │ DECISION (2026-06-24): the routing-only axonic-tree pub/sub rewrite       │
- *  │ (v3.14 clean break) plus the v3.15 convergence + since:'all' replay       │
- *  │ changes are a BEHAVIORAL break — a pre-3.15 peer that speaks the SAME      │
- *  │ wire 3.0 still cannot safely interoperate (different root-convergence /    │
- *  │ replay semantics), so the wire major must reflect that incompatibility.    │
- *  │ The NEXT kernel version bump MUST set WIRE_VERSION = '4.0' AND the bridge  │
- *  │ REQUIRED_WIRE_MAJOR = '4' — hermetic at both the bridge gate and the       │
- *  │ peer↔peer wireCompatible() handshake (closes the browser-app version-floor │
- *  │ leak the testnet env gate still has). Whole-fleet flag-day: re-vendor      │
- *  │ peer/relay/dht-sim, re-pin bridge, redeploy + restart together. Consider   │
- *  │ also bumping AUTH_PROTO for an auth-layer backstop. The testnet            │
- *  │ MIN_*_VERSION env floor (3.15.0) is the interim SOFT gate until this lands.│
- *  └────────────────────────────────────────────────────────────────────────┘ */
-export const WIRE_VERSION = '3.0';
+ *  Bumped 3.0 → 4.0 for the 2026-06-24 routing-only pub/sub flag-day: the
+ *  axonic-tree rewrite (v3.14 clean break) + the v3.15 convergence
+ *  (non-blocking lookup-assist) and since:'all' replay fixes are a BEHAVIORAL
+ *  break — a pre-4.0 peer that still speaks wire 3.0 cannot safely interoperate
+ *  (different root-convergence + replay semantics), so the wire major now
+ *  reflects it. wire-3.x ↔ wire-4.x reject each other at BOTH the bridge gate
+ *  (REQUIRED_WIRE_MAJOR='4') and the peer↔peer wireCompatible() handshake —
+ *  hermetic, closing the soft version-floor leak the testnet env gate had. */
+export const WIRE_VERSION = '4.0';
 
 /** The kernel's own peer-version string. Apps wrapping the kernel pass their
- *  own version through; this is just the default. As of the v0.3 flag-day the
- *  kernel is on the 3.x line and the bridge's old major-version *namespace*
- *  heuristic (kernel-2.x vs peer-app-3.x) no longer discriminates — the
- *  partition now rides on WIRE_VERSION major + AUTH_PROTO, which is the
- *  load-bearing, hermetic gate. */
-export const KERNEL_VERSION = '3.15.2';
+ *  own version through; this is just the default. The 4.x line is the
+ *  routing-only axonic-tree pub/sub; the partition from 3.x rides on
+ *  WIRE_VERSION major (the load-bearing, hermetic gate). */
+export const KERNEL_VERSION = '4.0.0';
 
 /** WebSocket close code for version mismatches (custom, in the
  *  application-specific 4000-4999 range). */

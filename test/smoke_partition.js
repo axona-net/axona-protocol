@@ -29,7 +29,7 @@ import { WIRE_VERSION, wireCompatible, buildClientHello } from '../src/transport
 import { createNodeIdentity } from '../src/identity/index.js';
 
 const OLD_PROTO = 'axona/4';   // the network we are partitioning away from
-const OLD_WIRE  = '2.0';       // v0.3 flag-day: wire major 2.x is now "old"
+const OLD_WIRE  = '3.0';       // routing-only flag-day: wire major 3.x is now "old"
 
 let passed = 0, failed = 0;
 function check(label, cond) {
@@ -42,7 +42,7 @@ async function main() {
 
   // Sanity: this build is the NEW network.
   check(`AUTH_PROTO is the new tag (got ${AUTH_PROTO})`, AUTH_PROTO === 'axona/5');
-  check(`WIRE_VERSION is the new major (got ${WIRE_VERSION})`, WIRE_VERSION === '3.0');
+  check(`WIRE_VERSION is the new major (got ${WIRE_VERSION})`, WIRE_VERSION === '4.0');
 
   const id  = await createNodeIdentity({ lat: 1, lng: 2 });
   const cbv = cbvFromNonces(makeNonce(), makeNonce(), 'mesh');
@@ -83,9 +83,9 @@ async function main() {
   // ── 4. wire-version is the early refusal axis ─────────────────────
   console.log('\n── wire-version major partition ──');
   {
-    check('new wire incompatible with old (3.0 vs 2.0)', wireCompatible(WIRE_VERSION, OLD_WIRE) === false);
-    check('new wire compatible within its major (3.0 vs 3.7)', wireCompatible(WIRE_VERSION, '3.7') === true);
-    check('client-hello advertises the new wire major', buildClientHello({ version: '1.0.0' }).wireVersion === '3.0');
+    check('new wire incompatible with old (4.0 vs 3.0)', wireCompatible(WIRE_VERSION, OLD_WIRE) === false);
+    check('new wire compatible within its major (4.0 vs 4.7)', wireCompatible(WIRE_VERSION, '4.7') === true);
+    check('client-hello advertises the new wire major', buildClientHello({ version: '1.0.0' }).wireVersion === '4.0');
   }
 
   console.log(`\nResult: ${passed} passed, ${failed} failed`);
