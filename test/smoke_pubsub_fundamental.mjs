@@ -55,7 +55,7 @@ class Fabric {
       },
     };
     const am = new AxonaManager({ dht, now: () => self.clock, renewMs: 60_000, dropMs: 180_000 });
-    const rec = { am, handlers, alive: true, received: [] };
+    const rec = { id: idBig, am, handlers, alive: true, received: [] };
     am.onPubsubDelivery((topicId, json, msgId, ts) => rec.received.push({ topicId, json, msgId, ts }));
     this.nodes.set(idBig, rec);
     return rec;
@@ -217,15 +217,19 @@ async function testViaSelfHeal() {
   const desc = { region: 'useast', owner: null, name: 'resilient', write: 'open' };
   const topicId = await deriveTopicIdBig(desc);
 
-  const sub = nodes[5];
+  // The subscriber must NOT be the closest-to-topic node (else IT is the root,
+  // which delivers to itself locally — no via pin, and killing "the root" would
+  // kill the subscriber). Pick a subscriber and publisher that aren't the root.
+  const root1 = fab._closestAlive(topicId);
+  const sub = nodes.find(n => n.id !== root1);
+  const pub = nodes.find(n => n.id !== root1 && n !== sub);
   sub.am.pubsubSubscribe(topicId);
   await fab.settle();
   // deliver one message so the subscriber records via=[root]
   const m1 = await signedJson(desc, { n: 1 }, author);
-  nodes[0].am.pubsubPublish(topicId, m1.json);
+  pub.am.pubsubPublish(topicId, m1.json);
   await fab.settle();
-  check('subscriber has a via pin to its root', (sub.am.mySubscriptions.get(topicId)?.via || []).length === 1);
-  const root1 = fab._closestAlive(topicId);
+  check('subscriber has a via pin to its root', (sub.am._upstream.get(topicId) || []).length === 1);
 
   // KILL the root; the subscriber renews via=[deadRoot] → falls through to the
   // topic id → a NEW closest node becomes root.
@@ -240,7 +244,7 @@ async function testViaSelfHeal() {
   // a publish after the heal reaches the subscriber
   const before = sub.received.length;
   const m2 = await signedJson(desc, { n: 2 }, author);
-  nodes[7].am.pubsubPublish(topicId, m2.json);
+  pub.am.pubsubPublish(topicId, m2.json);
   await fab.settle();
   check('publish after root death reaches the re-seated subscriber', sub.received.length === before + 1);
 }

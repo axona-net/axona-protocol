@@ -3,8 +3,7 @@
 //
 // Design: axona-docs/architecture/Pubsub-Axon-Tree-v0.1.md
 //
-// CLEAN BREAK (kernel v3.12.0). This replaces the K-closest / root-set /
-// `sendDirect` implementation wholesale. The one rule:
+// CLEAN BREAK (kernel v3.13.0). Routing-only pub/sub. The one rule:
 //
 //     Axona pub/sub uses ONLY DHT message routing. There are no direct
 //     connections. Every interaction is a routed message delivered, hop by
@@ -17,43 +16,47 @@
 // to each. Subscribers renew toward the topic id every minute; that renewal
 // is at once the keepalive, the failure detector, the self-heal, and (with a
 // `since` hint) the gap-recovery. A subscriber carries an ordered `via`
-// waypoint list so it can be pinned to a specific relay yet always fall back
-// to the topic id if that waypoint is gone.
+// waypoint list (its `upstream`) so it is pinned to its relay yet always falls
+// back to the topic id if that waypoint is gone.
 //
-// THIS FILE IS PHASE 1: the routed core with a SINGLE root (no tree). Overload
-// delegation (the tree), migration handoff, and stamped-replay-up durability
-// are Phases 2–3. Side functions (kill/unpub/touch/pull/metrics/host) are kept
-// thin and routing-only here — they are reworked after the core is proven, per
-// the standing decision. Markers: TODO(Phase 2/3/4).
+// PHASE 2 — THE TREE. When a relay exceeds MAX_DIRECT subscribers it delegates:
+// it promotes one of its subscribers to a child relay and hands it a batch of
+// the others. A child relay subscribes UP toward the topic id (pinned by its
+// parent via), caches the feed, and re-fans each message DOWN to its own
+// subscribers exactly once. Delegated subscribers receive their deliveries
+// from the child, so they repin to it and renew toward it — the tree is stable
+// — but a dead waypoint always falls through to the topic id and re-seats, so
+// the tree is self-healing and re-roots if the root itself dies.
 //
-// What is GONE vs the old manager: sendDirect, findKClosest, K-closest fan-out
-// (`*-k`), root sets, sub-axon recruitment, adopt/promote/dissolve, msgsync /
-// kill-sync anti-entropy. None of it. The node never assumes a direct channel
-// to a peer it discovered; it only ever calls dht.routeMessage(target, …).
+// (Implementation choice: a relay promotes one of its own SUBSCRIBERS — a
+// known-alive participant it can already route to — as the child. The design's
+// "one of its connections" is satisfied without the manager needing a
+// synaptome/neighbour list; routing reaches the chosen node regardless.)
+//
+// Phase 3 (migration cache handoff / stamped-replay-up durability) and the side
+// functions (kill/unpub/touch/pull/metrics/host) remain thin — markers
+// TODO(Phase 3/4). GONE for good: sendDirect, findKClosest, K-closest fan-out,
+// root sets, the old recruit/adopt/promote/dissolve + msgsync/kill-sync.
 // =====================================================================
 
 import { verifyEnvelope, checkFreshness } from './envelope.js';
 import { deriveTopicIdBig }               from './post.js';
 
 // ── Inbound caps (D-1: bound attacker-controlled payloads) ──────────────
-// Re-exported unchanged from the pre-clean-break manager — AxonaPeer and
-// std/chunk import these as the publish-size contract; they are independent
-// of the pub/sub mechanism, so the routing rewrite leaves them as-is.
+// Re-exported unchanged — AxonaPeer and std/chunk import these as the
+// publish-size contract; independent of the pub/sub mechanism.
 export const MAX_PUBLISH_BYTES = 256 * 1024;         // absolute hard ceiling (chars)
-// RELIABLE-delivery ceiling (finding O-5): the only size guaranteed receivable
-// by every conformant WebRTC stack across arbitrary hops is the ~16 KiB interop
-// floor. peer.pub rejects above this so oversize fails LOUD at the publisher
-// instead of vanishing en route; larger payloads go through std/chunk. Set just
-// under 16 KiB to leave headroom for the outer deliver frame.
-export const MAX_RELIABLE_PUBLISH_BYTES = 15 * 1024;
+export const MAX_RELIABLE_PUBLISH_BYTES = 15 * 1024; // WebRTC-interop reliable floor (O-5)
 
 // ── Tunable constants (design §Appendix) ────────────────────────────────
 const RENEW_MS        = 60_000;          // re-subscribe cadence
 const DROP_MS         = 180_000;         // evict a subscriber after 3 missed renewals
 const CACHE_MAX       = 1024;            // messages cached per relay
 const CACHE_BYTES     = 16 * 1024 * 1024;// byte ceiling on a relay's cache
+const MAX_DIRECT      = 20;              // direct subscribers before a relay delegates
+const DELEGATE_BATCH  = 8;               // subscribers handed off when promoting a child
 const MAX_VIA         = 8;               // ordered-waypoint list length cap (wire sanity)
-const VIA_HOP_BUDGET  = 8;               // hops per via leg (enforced kernel-side in Phase 2)
+const VIA_HOP_BUDGET  = 8;               // hops per via leg (enforced kernel-side, Phase 2+)
 const TTL_MS          = 48 * 60 * 60 * 1000;   // 48h message hold, keyed on the ROOT timestamp
 const APP_DEDUP_MAX   = 8192;            // exactly-once app-delivery LRU
 const REPLAY_CHUNK_BYTES = 96 * 1024;    // byte budget per replay deliver batch
@@ -61,9 +64,10 @@ const REPLAY_CHUNK_BYTES = 96 * 1024;    // byte budget per replay deliver batch
 // ── Wire message types (all ROUTED) ─────────────────────────────────────
 const T = {
   SUB:      'pubsub:sub',       // subscribe — routed toward topic id (or a via waypoint)
-  UNSUB:    'pubsub:unsub',     // explicit unsubscribe (prompt removal; renewal-lapse also drops)
+  UNSUB:    'pubsub:unsub',     // explicit unsubscribe (renewal lapse also drops)
   PUB:      'pubsub:pub',       // publish — routed toward topic id; NO timestamp (root stamps)
-  DELIVER:  'pubsub:deliver',   // one-or-more stamped messages — routed toward a subscriber id
+  DELIVER:  'pubsub:deliver',   // stamped messages — routed toward a subscriber id
+  ADOPT:    'pubsub:adopt',     // delegate: "become my child relay + take these subscribers"
   KILL:     'pubsub:kill',      // retract a message (thin; TODO Phase 4)
   UNPUB:    'pubsub:unpub',     // retract a topic's feed (thin; TODO Phase 4)
   TOUCH:    'pubsub:touch',     // extend TTL (thin; TODO Phase 4)
@@ -75,21 +79,19 @@ const T = {
 const idHex = (big) => big.toString(16).padStart(66, '0');
 const idBig = (hex) => (typeof hex === 'bigint' ? hex : BigInt('0x' + String(hex)));
 const lc    = (s) => String(s ?? '').toLowerCase();
+const isHexId = (s) => /^[0-9a-f]{1,66}$/.test(s);
 
-/**
- * A relay's per-topic state. A node holds one Role for each topic it hosts —
- * as the root (Phase 1: always) or, from Phase 2, as a non-root relay that
- * renews up to a parent.
- */
-function makeRole(topicId) {
+/** A relay's per-topic state (root or non-root child relay). */
+function makeRole(topicId, isRoot) {
   return {
     topicId,                         // bigint
-    isRoot: true,                    // Phase 1: every host is the root
-    subscribers: new Map(),          // subHex -> { since, via:[hex], lastRenewed }
+    isRoot,                          // closest-to-topic node → true; delegated child → false
+    subscribers: new Map(),          // subHex -> { since, lastRenewed }
+    children: new Set(),             // subHex of subscribers that are themselves child relays
     cache: [],                       // [{ msgId, publishTs, json, bytes }] asc by publishTs
-    cacheIds: new Set(),             // msgId set for O(1) root-side dedup
+    cacheIds: new Set(),             // msgId set for O(1) dedup (root-stamp + relay re-fan)
     cacheBytes: 0,
-    lastTs: 0,                       // highest stamp emitted (monotonic, root authority)
+    lastTs: 0,                       // highest stamp emitted (monotonic; root authority)
     tombstones: new Map(),           // msgId -> expireTs (kill; thin)
   };
 }
@@ -98,10 +100,7 @@ export class AxonaManager {
   /**
    * @param {object} o
    * @param {object} o.dht  adapter: { getSelfId(), routeMessage(target,type,payload,opts?),
-   *                         onRoutedMessage(type, handler) }. sendDirect/findKClosest are
-   *                         NO LONGER USED — present-but-ignored for a drop-in adapter.
-   * Legacy tunables (maxDirectSubs, rootSetSize, …) are accepted and ignored so
-   * construction stays drop-in; the active knobs are renewMs/dropMs/replayCacheSize.
+   *                         onRoutedMessage(type, handler) }. sendDirect/findKClosest unused.
    */
   constructor({
     dht,
@@ -112,10 +111,8 @@ export class AxonaManager {
     refreshIntervalMs = 10_000,
     replayCacheSize = CACHE_MAX,
     replayCacheBytes = CACHE_BYTES,
-    // accepted-and-ignored (clean break): pickRelayPeer, pickRecruitPeer,
-    // shouldRecruitSubAxon, maxDirectSubs, minDirectSubs, rootSetSize,
-    // crossFragmentRoots, maxSubscriptionAgeMs, rootGraceMs …
-    ..._legacy
+    maxDirect = MAX_DIRECT,
+    ..._legacy   // accepted-and-ignored clean-break tunables (pickRelayPeer, rootSetSize, …)
   } = {}) {
     if (!dht || typeof dht.routeMessage !== 'function' || typeof dht.getSelfId !== 'function'
         || typeof dht.onRoutedMessage !== 'function') {
@@ -126,36 +123,38 @@ export class AxonaManager {
     this._now   = now;
     this._logSink = (typeof emitLog === 'function') ? emitLog : null;
 
-    this.renewMs = renewMs;
-    this.dropMs  = dropMs;
+    this.renewMs   = renewMs;
+    this.dropMs    = dropMs;
+    this.maxDirect = maxDirect || MAX_DIRECT;
     this.refreshIntervalMs = refreshIntervalMs;
     this._cacheMax   = replayCacheSize || CACHE_MAX;
     this._cacheBytes = replayCacheBytes || CACHE_BYTES;
 
     // Public/inspectable state (contract surface).
-    this.axonRoles      = new Map();   // topicIdBig -> Role  (topics I host)
-    this.mySubscriptions = new Map();  // topicIdBig -> { since, via:[hex], lastRenewSent, host:false }
-    this._hostedTopics  = new Set();   // topicIdBig hosted without app consumption
-    this._lastSeenTsByTopic = new Map(); // topicIdBig -> ts  (AxonaPeer seeds `since` here)
+    this.axonRoles       = new Map();   // topicIdBig -> Role  (topics I host: root or relay)
+    this.mySubscriptions = new Map();   // topicIdBig -> { since, lastRenewSent }
+    this._hostedTopics   = new Set();   // topicIdBig hosted without app consumption
+    this._lastSeenTsByTopic = new Map();// topicIdBig -> ts  (AxonaPeer seeds `since` here)
 
     // Internal.
-    this._appDelivered    = new Map(); // "topicHex:msgId" -> true  (exactly-once LRU)
+    this._upstream        = new Map();  // topicIdBig -> [hex]  the relay we renew toward
+    this._appDelivered    = new Map();  // "topicHex:msgId" -> true (exactly-once LRU)
     this._deliveryCallback = null;
     this._hostKeyspace    = false;
-    this._pending         = new Map(); // pull corrId -> { resolve, timer }
+    this._pending         = new Map();  // pull corrId -> { resolve, timer }
     this._pullSeq         = 0;
     this._timer           = null;
 
     this._registerHandlers();
   }
 
-  // ── handler registration ──────────────────────────────────────────────
   _registerHandlers() {
     const on = (type, fn) => this.dht.onRoutedMessage(type, (p, m) => fn.call(this, p, m));
     on(T.SUB,      this._onSub);
     on(T.UNSUB,    this._onUnsub);
     on(T.PUB,      this._onPub);
     on(T.DELIVER,  this._onDeliver);
+    on(T.ADOPT,    this._onAdopt);
     on(T.KILL,     this._onKill);
     on(T.UNPUB,    this._onUnpub);
     on(T.TOUCH,    this._onTouch);
@@ -164,65 +163,69 @@ export class AxonaManager {
   }
 
   // ── routing core ────────────────────────────────────────────────────
-  //
-  // `via` is an ordered waypoint list. We route toward via[0] (a specific node
-  // id) if present, else toward the topic id. The terminus reconciles against
-  // the AUTHORITATIVE topic id: a dead waypoint is simply popped and routing
-  // continues toward the next target. A message is never orphaned by a stale
-  // via. (Per-via hop budgeting is enforced kernel-side in Phase 2; today the
-  // global MAX_HOPS backstop bounds the journey, and via lists are length ≤1.)
+  // Route toward via[0] if present, else toward the topic id. The topic id is
+  // authoritative; a dead waypoint is popped and routing continues. Never
+  // orphaned by a stale via.
   _send(type, payload) {
     const via = Array.isArray(payload.via) ? payload.via : [];
     const target = via.length ? idBig(via[0]) : idBig(payload.topicId);
-    // fromId stamps the routed message's originId = us.
     this.dht.routeMessage(target, type, payload, { fromId: idHex(this.nodeId), viaHopBudget: VIA_HOP_BUDGET });
   }
-
-  // Pop the dead/served waypoint and route on toward the next target.
+  _route(targetBig, type, payload) {
+    this.dht.routeMessage(targetBig, type, payload, { fromId: idHex(this.nodeId), viaHopBudget: VIA_HOP_BUDGET });
+  }
   _reroute(type, payload) {
     payload.via = (Array.isArray(payload.via) ? payload.via : []).slice(1);
     this._send(type, payload);
   }
 
   // Decide what a topic-targeted message (SUB/PUB) should do at this node.
-  //   'host'    — I already host this topic → handle locally
-  //   'root'    — I am the routing terminus for the topic id → become root + handle
-  //   'reroute' — the current via waypoint is gone (I'm merely closest to it) → pop + route on
+  //   'handle'  — this is the node that should act on it (the via waypoint, or,
+  //               for a bare-topic message, the routing terminus = the root)
+  //   'reroute' — a via waypoint is gone / consumed → pop it and route on
   //   'forward' — keep routing (return falsy so the kernel forwards)
+  //
+  // Root-ness is decided by ROUTING, not by "do I host it": the node that hosts
+  // a topic but is no longer the closest must NOT intercept bare-topic traffic.
   _topicDecision(payload, meta) {
-    const topicBig = idBig(payload.topicId);
     const via = Array.isArray(payload.via) ? payload.via : [];
-    if (this.axonRoles.has(topicBig)) return 'host';
-    if (via.length && idBig(via[0]) === this.nodeId) return 'reroute'; // named via[0] but I don't host it
-    if (meta.isTerminal) return via.length ? 'reroute' : 'root';        // closest-to-via[0] (dead) vs closest-to-topic
-    return 'forward';
+    if (via.length) {
+      if (idBig(via[0]) === this.nodeId) return this.axonRoles.has(idBig(payload.topicId)) ? 'handle' : 'reroute';
+      return meta.isTerminal ? 'reroute' : 'forward';      // waypoint dead; I'm just closest to it
+    }
+    return meta.isTerminal ? 'handle' : 'forward';         // bare topic id → only the terminus handles
+  }
+
+  // I am the root for a topic iff I am the routing terminus for its bare id.
+  // A non-root relay that becomes the closest node (e.g. after the old root dies)
+  // is promoted here — without this it would reroute bare-topic publishes to
+  // itself forever.
+  _maybePromoteRoot(role, payload, meta) {
+    const viaEmpty = !(Array.isArray(payload.via) && payload.via.length);
+    if (viaEmpty && meta.isTerminal && !role.isRoot) { role.isRoot = true; this._upstream.delete(role.topicId); }
   }
 
   // ── SUBSCRIBE ────────────────────────────────────────────────────────
   _onSub(payload, meta) {
     const d = this._topicDecision(payload, meta);
-    if (d === 'forward') return;                       // keep routing
+    if (d === 'forward') return;
     if (d === 'reroute') { this._reroute(T.SUB, payload); return 'consumed'; }
 
     const topicBig = idBig(payload.topicId);
-    let role = this.axonRoles.get(topicBig);
-    if (!role) role = this._becomeRoot(topicBig);      // 'root': I am the closest node
+    let role = this.axonRoles.get(topicBig) || this._becomeRoot(topicBig);
+    this._maybePromoteRoot(role, payload, meta);
 
-    // subscriberId is self-asserted (meta.fromId is the previous hop, not the
-    // origin). A forged id only makes the root route delivers to a node that
-    // ignores them — harmless. Cryptographic origin-binding is a Phase 2 item.
-    const subHex  = lc(payload.subscriberId);
-    if (!/^[0-9a-f]{1,66}$/.test(subHex)) return 'consumed';
-    const sinceTs = Number.isFinite(payload.since) ? payload.since : 0;
-    role.subscribers.set(subHex, {
-      since: sinceTs,
-      via: Array.isArray(payload.via) ? payload.via.slice(0, MAX_VIA) : [],
-      lastRenewed: this._now(),
-    });
-    // Replay the cache delta (since the subscriber's hint) to the new/renewing
-    // subscriber. On a renewal with an up-to-date `since` this is empty — the
-    // periodic re-subscribe doubles as gap recovery without re-flooding.
-    this._replayTo(role, subHex, sinceTs);
+    const subHex = lc(payload.subscriberId);
+    if (!isHexId(subHex)) return 'consumed';
+    const since = Number.isFinite(payload.since) ? payload.since : 0;
+
+    // The root's own renewal self-loops here. Don't seat self as a subscriber
+    // (no self-fan); just replay locally if the app subscribes.
+    if (idBig(subHex) === this.nodeId) {
+      if (this.mySubscriptions.has(topicBig)) this._replayLocal(role, since);
+      return 'consumed';
+    }
+    this._accept(role, subHex, since);
     return 'consumed';
   }
 
@@ -231,7 +234,87 @@ export class AxonaManager {
     if (d === 'forward') return;
     if (d === 'reroute') { this._reroute(T.UNSUB, payload); return 'consumed'; }
     const role = this.axonRoles.get(idBig(payload.topicId));
-    if (role) role.subscribers.delete(lc(payload.subscriberId));
+    if (role) { const s = lc(payload.subscriberId); role.subscribers.delete(s); role.children.delete(s); }
+    return 'consumed';
+  }
+
+  // Seat a subscriber on a relay, delegating to a child when over capacity.
+  _accept(role, subHex, since) {
+    const existing = role.subscribers.get(subHex);
+    if (existing) {                                   // renewal of a current subscriber
+      existing.lastRenewed = this._now();
+      this._replayTo(role, subHex, since, false);
+      return;
+    }
+    if (role.subscribers.size >= this.maxDirect) {    // overloaded → delegate
+      // WIDEN before DEEPEN: promote a new sibling child (offloading a batch)
+      // so the tree grows bushy (depth ~log_MAX_DIRECT(S)), not into a chain.
+      // Only when every direct is already a child do we deepen — forward the
+      // newcomer down to the child XOR-closest to it.
+      if (!this._promoteChild(role)) {
+        const c = this._pickChild(role, subHex);
+        if (c) { this._delegateTo(c, role, [{ subscriberId: subHex, since }]); return; }
+        // neither possible (no leaf to promote, no child) → seat over capacity
+      }
+    }
+    role.subscribers.set(subHex, { since: Number.isFinite(since) ? since : 0, lastRenewed: this._now() });
+    this._replayTo(role, subHex, since, true);        // delta + a via-repin ping
+  }
+
+  // Choose the child relay XOR-closest to a subscriber (keyspace locality).
+  _pickChild(role, subHex) {
+    const target = idBig(subHex);
+    let best = null, bestD = null;
+    for (const c of role.children) {
+      if (!role.subscribers.has(c)) { role.children.delete(c); continue; }  // stale
+      const dd = idBig(c) ^ target;
+      if (bestD === null || dd < bestD) { bestD = dd; best = c; }
+    }
+    return best;
+  }
+
+  // Promote one leaf subscriber to a child relay and hand it a batch of OTHER
+  // leaves. Only succeeds if it can actually free a slot — promoting the sole
+  // remaining leaf would just re-label it a child and free nothing, so we need
+  // ≥2 leaves. Returning false tells _accept to deepen (delegate to a child)
+  // instead of seating the newcomer over capacity.
+  _promoteChild(role) {
+    const leaves = [];
+    for (const s of role.subscribers.keys()) if (!role.children.has(s)) leaves.push(s);
+    if (leaves.length < 2) return false;
+    const leaf = leaves[0];
+    role.children.add(leaf);
+    const batch = [];
+    for (let i = 1; i < leaves.length && batch.length < DELEGATE_BATCH; i++) {
+      batch.push({ subscriberId: leaves[i], since: role.subscribers.get(leaves[i]).since });
+    }
+    for (const b of batch) role.subscribers.delete(b.subscriberId);
+    this._delegateTo(leaf, role, batch);
+    this._log('info', 'delegated', { child: leaf.slice(0, 12), moved: batch.length });
+    return true;
+  }
+
+  _delegateTo(childHex, role, subs) {
+    this._route(idBig(childHex), T.ADOPT, {
+      topicId: idHex(role.topicId), parent: idHex(this.nodeId), subs,
+    });
+  }
+
+  // A node is told to become a child relay and adopt a set of subscribers.
+  _onAdopt(payload, meta) {
+    if (meta.targetId !== this.nodeId) return;        // routed to me specifically
+    const topicBig = idBig(payload.topicId);
+    let role = this.axonRoles.get(topicBig);
+    if (!role) { role = makeRole(topicBig, false); this.axonRoles.set(topicBig, role);
+                 this._log('info', 'relay-formed', { topic: idHex(topicBig).slice(0, 12) }); }
+    role.isRoot = false;
+    this._upstream.set(topicBig, [lc(payload.parent)]);
+    for (const s of (Array.isArray(payload.subs) ? payload.subs : [])) {
+      const sh = lc(s.subscriberId);
+      if (isHexId(sh) && idBig(sh) !== this.nodeId) this._accept(role, sh, s.since);
+    }
+    // Attach UP toward the parent so we receive the live feed + cache replay.
+    this._sendSubscribe(topicBig);
     return 'consumed';
   }
 
@@ -242,11 +325,12 @@ export class AxonaManager {
     if (d === 'reroute') { this._reroute(T.PUB, payload); return 'consumed'; }
 
     const topicBig = idBig(payload.topicId);
-    let role = this.axonRoles.get(topicBig);
-    if (!role) role = this._becomeRoot(topicBig);
-    // TODO(Phase 2): a non-root RELAY must forward a publish UP toward the root,
-    // not stamp it. In Phase 1 every host is the root, so isRoot is always true.
-    if (!role.isRoot) { this._reroute(T.PUB, { ...payload, via: [] }); return 'consumed'; }
+    let role = this.axonRoles.get(topicBig) || this._becomeRoot(topicBig);
+    this._maybePromoteRoot(role, payload, meta);
+    // Only the root (the topic terminus) stamps. A non-root relay can only reach
+    // here for a via-routed publish (a security waypoint) — pop the via and
+    // continue toward the topic id. Bare-topic publishes always promote above.
+    if (!role.isRoot) { this._reroute(T.PUB, payload); return 'consumed'; }
 
     await this._ingestPublish(role, payload.json);
     return 'consumed';
@@ -257,90 +341,72 @@ export class AxonaManager {
     let env;
     try { env = JSON.parse(json); } catch { this._log('warn', 'drop-unparseable'); return; }
 
-    // B-4: verify the signature + content-derived msgId at ingress.
-    const v = await verifyEnvelope(env);
+    const v = await verifyEnvelope(env);                                 // B-4 sig + msgId
     if (!v.ok) { this._log('warn', 'drop-bad-envelope', { reason: v.reason }); return; }
-
-    // C-2: freshness — reject a stale/replayed LIVE publish (the signed ts, not
-    // the wire publishTs). The replay path serves older cache deliberately; this
-    // is the live-ingress gate only.
-    const fr = checkFreshness(env, { now: this._now() });
+    const fr = checkFreshness(env, { now: this._now() });                 // C-2 freshness (live ingress)
     if (!fr.ok) { this._log('warn', 'drop-stale', { reason: fr.reason }); return; }
 
-    // Write policy: recompute the topic id from the SIGNED descriptor; it must
-    // match the topic this root serves, and an owner-only topic admits only the
-    // owner's signature. (Defense in depth — peer.pub pre-checks too.)
     const desc = env.topic;
     let tid;
     try { tid = await deriveTopicIdBig({ region: desc.region, owner: desc.owner, name: desc.name, write: desc.write }); }
     catch { this._log('warn', 'drop-bad-descriptor'); return; }
     if (tid !== role.topicId) { this._log('warn', 'drop-topic-mismatch'); return; }
-    if (desc.write === 'owner') {
-      if (!env.signerPubkey || lc(env.signerPubkey) !== lc(desc.owner)) {
-        this._log('warn', 'drop-write-policy', { topic: desc.name }); return;
-      }
+    if (desc.write === 'owner' && (!env.signerPubkey || lc(env.signerPubkey) !== lc(desc.owner))) {
+      this._log('warn', 'drop-write-policy', { topic: desc.name }); return;
     }
 
-    // Root-side idempotency: a message already cached (re-published or looped) is
-    // not re-stamped or re-fanned.
-    if (role.cacheIds.has(env.msgId)) return;
+    if (role.cacheIds.has(env.msgId)) return;                            // idempotent re-publish
 
-    // STAMP — the root is the topic's single serialization point. Monotonic:
-    // strictly greater than its previous stamp, floored at local time. This ts
-    // orders the queue and starts the 48h clock.
+    // STAMP — single serialization point; strictly monotonic, floored at now.
     const ts = Math.max(role.lastTs + 1, this._now());
     role.lastTs = ts;
-
+    const msg = { json, publishTs: ts, msgId: env.msgId };
     this._cachePush(role, { msgId: env.msgId, publishTs: ts, json });
-    this._fanout(role, { json, publishTs: ts, msgId: env.msgId });
+    this._fanout(role, msg, null);                                       // to subscribers
+    this._deliverToApp(role.topicId, json, env.msgId, ts);              // local app (if subscribed)
   }
 
-  // ── DELIVER (root/relay → subscriber) ────────────────────────────────
+  // ── DELIVER (parent → subscriber; a relay re-fans down the tree) ──────
   _onDeliver(payload, meta) {
-    // A deliver is routed to a specific subscriber id. Consume only at the
-    // target; intermediate hops forward (return falsy).
-    if (meta.targetId !== this.nodeId) return;
+    if (meta.targetId !== this.nodeId) return;        // forward (intermediate hop)
     const topicBig = idBig(payload.topicId);
+    if (payload.from) this._upstream.set(topicBig, [lc(payload.from)]);  // pin to our relay
 
-    // Remember the relay we received from, as the head of our renewal `via`
-    // chain — this is what pins us to our relay (and migrates with it).
-    if (payload.from) this._setVia(topicBig, lc(payload.from));
-
+    const role = this.axonRoles.get(topicBig);        // set iff I'm a relay → re-fan
     for (const m of (Array.isArray(payload.msgs) ? payload.msgs : [])) {
-      // TODO(Phase 2): if I am a non-root RELAY for topicBig, re-fan `m` to my
-      // own subscribers before/while delivering locally.
-      if (m && m.del) this._deliverDelete(topicBig, m);
-      else if (m)     this._deliverToApp(topicBig, m.json, m.msgId, m.publishTs);
+      if (!m) continue;
+      if (m.del) { this._applyDelete(role, topicBig, m); continue; }
+      if (role && !role.cacheIds.has(m.msgId)) {       // relay: cache once + re-fan once
+        this._cachePush(role, { msgId: m.msgId, publishTs: m.publishTs, json: m.json });
+        this._fanout(role, m, lc(payload.from));       // exclude the sender
+      }
+      this._deliverToApp(topicBig, m.json, m.msgId, m.publishTs);
     }
     return 'consumed';
   }
 
-  // Fan a stamped message out to every subscriber by ROUTING a deliver to each
-  // (self-loopback delivers locally). Phase 1: the root is the only fan-out point.
-  _fanout(role, msg) {
+  // Fan a stamped message to every subscriber (optionally excluding the sender).
+  _fanout(role, msg, excludeHex) {
     const base = { topicId: idHex(role.topicId), from: idHex(this.nodeId), msgs: [msg] };
     for (const subHex of role.subscribers.keys()) {
-      const subBig = idBig(subHex);
-      if (subBig === this.nodeId) {                  // loopback
-        if (msg.del) this._deliverDelete(role.topicId, msg);
-        else         this._deliverToApp(role.topicId, msg.json, msg.msgId, msg.publishTs);
-        continue;
-      }
-      this.dht.routeMessage(subBig, T.DELIVER, { ...base }, { fromId: idHex(this.nodeId) });
+      if (excludeHex && subHex === excludeHex) continue;
+      this._route(idBig(subHex), T.DELIVER, { ...base });
     }
   }
 
   // Replay the cache delta (publishTs > since) to one subscriber, chunked by
-  // bytes so a deliver never blows the transport frame cap.
-  _replayTo(role, subHex, sinceTs) {
+  // bytes. `ping` forces a (possibly empty) deliver so a freshly-seated
+  // subscriber repins to us even when the cache has nothing newer.
+  _replayTo(role, subHex, sinceTs, ping) {
     const subBig = idBig(subHex);
     const isSelf = subBig === this.nodeId;
-    let batch = [], bytes = 0;
+    let batch = [], bytes = 0, sent = false;
     const flush = () => {
       if (!batch.length) return;
+      sent = true;
       if (isSelf) for (const m of batch) this._deliverToApp(role.topicId, m.json, m.msgId, m.publishTs);
-      else this.dht.routeMessage(subBig, T.DELIVER,
-        { topicId: idHex(role.topicId), from: idHex(this.nodeId), msgs: batch }, { fromId: idHex(this.nodeId) });
+      else this._route(subBig, T.DELIVER,
+        { topicId: idHex(role.topicId), from: idHex(this.nodeId), msgs: batch });
       batch = []; bytes = 0;
     };
     for (const c of role.cache) {
@@ -350,6 +416,13 @@ export class AxonaManager {
       bytes += c.bytes;
     }
     flush();
+    if (ping && !sent && !isSelf) {                    // repin even with no history
+      this._route(subBig, T.DELIVER, { topicId: idHex(role.topicId), from: idHex(this.nodeId), msgs: [] });
+    }
+  }
+
+  _replayLocal(role, sinceTs) {
+    for (const c of role.cache) if (c.publishTs > sinceTs) this._deliverToApp(role.topicId, c.json, c.msgId, c.publishTs);
   }
 
   // ── cache ────────────────────────────────────────────────────────────
@@ -365,7 +438,6 @@ export class AxonaManager {
       role.cacheBytes -= old.bytes;
     }
   }
-
   _expireCache(role, now) {
     while (role.cache.length && (now - role.cache[0].publishTs) > TTL_MS) {
       const old = role.cache.shift();
@@ -376,15 +448,11 @@ export class AxonaManager {
 
   // ── app delivery (exactly-once) ──────────────────────────────────────
   _deliverToApp(topicBig, json, msgId, publishTs) {
-    // Only the app of a node that actually SUBSCRIBED hears deliveries; a pure
-    // host/relay stores+forwards without consuming.
-    if (!this.mySubscriptions.has(topicBig)) return;
+    if (!this.mySubscriptions.has(topicBig)) return;   // pure relay stores+forwards, doesn't consume
     const key = topicBig.toString(16) + ':' + msgId;
-    if (this._appDelivered.has(key)) return;             // exactly-once
+    if (this._appDelivered.has(key)) return;           // exactly-once
     this._appDelivered.set(key, true);
-    if (this._appDelivered.size > APP_DEDUP_MAX) {
-      this._appDelivered.delete(this._appDelivered.keys().next().value);
-    }
+    if (this._appDelivered.size > APP_DEDUP_MAX) this._appDelivered.delete(this._appDelivered.keys().next().value);
     const prev = this._lastSeenTsByTopic.get(topicBig) || 0;
     if (publishTs > prev) this._lastSeenTsByTopic.set(topicBig, publishTs);
     if (this._deliveryCallback) {
@@ -393,117 +461,96 @@ export class AxonaManager {
     }
   }
 
-  // A delete marker (kill) is delivered on the same app path but must bypass the
-  // content dedup (it shares the killed message's msgId).
-  _deliverDelete(topicBig, m) {
-    if (!this.mySubscriptions.has(topicBig)) return;
-    if (this._deliveryCallback) {
-      try {
-        this._deliveryCallback(topicBig,
-          JSON.stringify({ deleted: true, msgId: m.msgId, topic: m.topic ?? null }),
-          m.msgId, m.publishTs ?? this._now());
-      } catch (e) { this._log('warn', 'delete-callback-threw', { err: e?.message }); }
+  _applyDelete(role, topicBig, m) {
+    if (role && !role.tombstones.has(m.msgId)) {       // relay: drop from cache + re-fan delete once
+      role.tombstones.set(m.msgId, this._now() + TTL_MS);
+      const i = role.cache.findIndex(c => c.msgId === m.msgId);
+      if (i >= 0) { role.cacheBytes -= role.cache[i].bytes; role.cache.splice(i, 1); }
+      role.cacheIds.delete(m.msgId);
+      this._fanout(role, m, null);
+    }
+    if (this.mySubscriptions.has(topicBig) && this._deliveryCallback) {
+      try { this._deliveryCallback(topicBig, JSON.stringify({ deleted: true, msgId: m.msgId, topic: m.topic ?? null }), m.msgId, m.publishTs ?? this._now()); }
+      catch (e) { this._log('warn', 'delete-callback-threw', { err: e?.message }); }
     }
   }
 
-  // ── becoming a root / via tracking ───────────────────────────────────
   _becomeRoot(topicBig) {
-    const role = makeRole(topicBig);
+    const role = makeRole(topicBig, true);
     this.axonRoles.set(topicBig, role);
     this._log('info', 'root-formed', { topic: idHex(topicBig).slice(0, 12) });
     return role;
   }
 
-  _setVia(topicBig, relayHex) {
-    const s = this.mySubscriptions.get(topicBig);
-    if (s) s.via = [relayHex];                 // single waypoint in Phase 1
+  // The `since` to renew with: max of our cache high-water (relay), last app
+  // delivery, and the seeded subscription floor.
+  _sinceFor(topicBig) {
+    const role = this.axonRoles.get(topicBig);
+    const relay = (role && role.cache.length) ? role.cache[role.cache.length - 1].publishTs : 0;
+    const seen  = this._lastSeenTsByTopic.get(topicBig);
+    const sub   = this.mySubscriptions.get(topicBig)?.since;
+    return Math.max(relay, Number.isFinite(seen) ? seen : 0, Number.isFinite(sub) ? sub : 0);
+  }
+
+  _sendSubscribe(topicBig) {
+    const via = (this._upstream.get(topicBig) || []).slice(0, MAX_VIA);
+    this._send(T.SUB, { topicId: idHex(topicBig), via, subscriberId: idHex(this.nodeId), since: this._sinceFor(topicBig) });
   }
 
   // ── public API (contract surface) ────────────────────────────────────
-
-  /** Publish: route an UN-stamped message toward the topic; the root stamps it. */
   pubsubPublish(topicId, json, meta = {}) {
     this._send(T.PUB, { topicId: idHex(topicId), via: [], json });
     return meta.postHash || '';
   }
 
-  /** Subscribe: route a subscribe toward the topic (pinned by our remembered via). */
   pubsubSubscribe(topicId) {
     const seeded = this._lastSeenTsByTopic.get(topicId);
     const since  = Number.isFinite(seeded) ? seeded : this._now();
-    const prev   = this.mySubscriptions.get(topicId);
-    const via    = prev?.via || [];
-    this.mySubscriptions.set(topicId, { since, via, lastRenewSent: this._now(), host: false });
-    this._sendSubscribe(topicId, since, via);
+    this.mySubscriptions.set(topicId, { since, lastRenewSent: this._now() });
+    this._sendSubscribe(topicId);
   }
 
-  _sendSubscribe(topicId, since, via) {
-    this._send(T.SUB, {
-      topicId: idHex(topicId),
-      via: (Array.isArray(via) ? via : []).slice(0, MAX_VIA),
-      subscriberId: idHex(this.nodeId),
-      since,
-    });
-  }
-
-  /** Unsubscribe: stop renewing (natural DROP_MS drop) + prompt explicit removal. */
   pubsubUnsubscribe(topicId) {
-    const s = this.mySubscriptions.get(topicId);
     this.mySubscriptions.delete(topicId);
-    if (s) this._send(T.UNSUB, { topicId: idHex(topicId), via: s.via || [], subscriberId: idHex(this.nodeId) });
+    const via = this._upstream.get(topicId) || [];
+    this._send(T.UNSUB, { topicId: idHex(topicId), via, subscriberId: idHex(this.nodeId) });
     this.pubsubResetTopicConsumption(topicId);
   }
 
-  /** Forget per-topic consumption (lastSeen + app dedup) so a re-sub re-reads. */
   pubsubResetTopicConsumption(topicId) {
     this._lastSeenTsByTopic.delete(topicId);
+    this._upstream.delete(topicId);
     const prefix = topicId.toString(16) + ':';
     for (const k of this._appDelivered.keys()) if (k.startsWith(prefix)) this._appDelivered.delete(k);
   }
 
-  /** Host a topic without consuming it — be a durable participant/root if closest. */
   pubsubHost(topicId) {
     this._hostedTopics.add(topicId);
-    // Pre-warm: a subscribe toward the topic makes us its root if we are closest
-    // (we self-assert our own id; _deliverToApp suppresses app delivery since the
-    // topic is not in mySubscriptions). TODO(Phase 2): proper host-as-relay.
+    // Participate so the node won't be torn down and can root the topic if
+    // closest. TODO(Phase 4): proper host-as-durable-relay semantics.
     this._send(T.SUB, { topicId: idHex(topicId), via: [], subscriberId: idHex(this.nodeId), since: this._now() });
   }
-
   pubsubUnhost(topicId) {
     this._hostedTopics.delete(topicId);
     const role = this.axonRoles.get(topicId);
-    if (role) role.subscribers.delete(lc(idHex(this.nodeId)));
+    if (role) { const me = lc(idHex(this.nodeId)); role.subscribers.delete(me); role.children.delete(me); }
   }
-
-  /** Volunteer to host topics near this node's id. TODO(Phase 2): organic in the routed model. */
   pubsubHostKeyspace(on = true) { this._hostKeyspace = !!on; }
 
-  /** Retract one message (thin; TODO Phase 4). Routes to the root; root drops it + delete-markers subs. */
-  pubsubKill(topicId, kill) { this._send(T.KILL, { topicId: idHex(topicId), via: [], kill }); }
-
-  /** Retract a topic feed (thin; TODO Phase 4). */
+  pubsubKill(topicId, kill)   { this._send(T.KILL,  { topicId: idHex(topicId), via: [], kill }); }
   pubsubUnpub(topicId, unpub) { this._send(T.UNPUB, { topicId: idHex(topicId), via: [], unpub }); }
-
-  /** Extend hold time (thin; TODO Phase 4). */
   pubsubTouch(topicId, touch) { this._send(T.TOUCH, { topicId: idHex(topicId), via: [], touch }); }
 
-  /** Pull: routed on-demand fetch of the latest (or a specific) cached message. */
   requestPull(topicId, postHash = null, { timeoutMs = 1000 } = {}) {
     const corrId = idHex(this.nodeId).slice(0, 8) + ':' + (++this._pullSeq);
     return new Promise((resolve) => {
       const timer = setTimeout(() => { this._pending.delete(corrId); resolve(null); }, timeoutMs);
       if (typeof timer.unref === 'function') timer.unref();
       this._pending.set(corrId, { resolve, timer });
-      this._send(T.PULL, {
-        topicId: idHex(topicId), via: [], corrId, postHash: postHash || null,
-        requesterId: idHex(this.nodeId),
-      });
+      this._send(T.PULL, { topicId: idHex(topicId), via: [], corrId, postHash: postHash || null, requesterId: idHex(this.nodeId) });
     });
   }
-
-  /** Metrics: deferred to Phase 4 (per the standing decision). Benign empty shape. */
-  requestMetrics() { return Promise.resolve({ accumulated: [] }); }
+  requestMetrics() { return Promise.resolve({ accumulated: [] }); }   // TODO(Phase 4)
 
   onPubsubDelivery(cb) { this._deliveryCallback = cb; }
   setLogSink(fn) { this._logSink = (typeof fn === 'function') ? fn : null; }
@@ -514,6 +561,7 @@ export class AxonaManager {
     this.mySubscriptions.clear();
     this._hostedTopics.clear();
     this._lastSeenTsByTopic.clear();
+    this._upstream.clear();
     this._appDelivered.clear();
     for (const p of this._pending.values()) clearTimeout(p.timer);
     this._pending.clear();
@@ -527,16 +575,9 @@ export class AxonaManager {
     const topicBig = idBig(payload.topicId);
     const role = this.axonRoles.get(topicBig) || this._becomeRoot(topicBig);
     const msgId = payload.kill?.msgId;
-    if (msgId && role.cacheIds.has(msgId)) {
-      const i = role.cache.findIndex(c => c.msgId === msgId);
-      if (i >= 0) { role.cacheBytes -= role.cache[i].bytes; role.cache.splice(i, 1); }
-      role.cacheIds.delete(msgId);
-      role.tombstones.set(msgId, this._now() + TTL_MS);
-      this._fanout(role, { del: true, msgId, topic: payload.kill?.topic ?? null, publishTs: this._now() });
-    }
+    if (msgId) this._applyDelete(role, topicBig, { del: true, msgId, topic: payload.kill?.topic ?? null, publishTs: this._now() });
     return 'consumed';
   }
-
   _onUnpub(payload, meta) {
     const d = this._topicDecision(payload, meta);
     if (d === 'forward') return;
@@ -545,35 +586,25 @@ export class AxonaManager {
     if (role) { role.cache = []; role.cacheIds.clear(); role.cacheBytes = 0; }
     return 'consumed';
   }
-
   _onTouch(payload, meta) {
     const d = this._topicDecision(payload, meta);
     if (d === 'forward') return;
     if (d === 'reroute') { this._reroute(T.TOUCH, payload); return 'consumed'; }
-    return 'consumed';   // TODO(Phase 4): per-message TTL extension
+    return 'consumed';
   }
-
   _onPull(payload, meta) {
     const d = this._topicDecision(payload, meta);
     if (d === 'forward') return;
     if (d === 'reroute') { this._reroute(T.PULL, payload); return 'consumed'; }
     const role = this.axonRoles.get(idBig(payload.topicId));
     let hit = null;
-    if (role) {
-      hit = payload.postHash
-        ? role.cache.find(c => c.msgId === payload.postHash)
-        : role.cache[role.cache.length - 1];
-    }
+    if (role) hit = payload.postHash ? role.cache.find(c => c.msgId === payload.postHash) : role.cache[role.cache.length - 1];
     const reqBig = idBig(payload.requesterId);
-    const resp = {
-      corrId: payload.corrId, json: hit ? hit.json : null,
-      publishTs: hit ? hit.publishTs : null, requesterId: payload.requesterId,
-    };
+    const resp = { corrId: payload.corrId, json: hit ? hit.json : null, publishTs: hit ? hit.publishTs : null, requesterId: payload.requesterId };
     if (reqBig === this.nodeId) this._onPullResp(resp, { targetId: this.nodeId });
-    else this.dht.routeMessage(reqBig, T.PULLRESP, resp, { fromId: idHex(this.nodeId) });
+    else this._route(reqBig, T.PULLRESP, resp);
     return 'consumed';
   }
-
   _onPullResp(payload, meta) {
     if (meta.targetId !== this.nodeId && idBig(payload.requesterId) !== this.nodeId) return;
     const p = this._pending.get(payload.corrId);
@@ -586,43 +617,43 @@ export class AxonaManager {
     return 'consumed';
   }
 
-  // ── lifecycle: the renewal + eviction + TTL sweep ────────────────────
+  // ── lifecycle: renewal + eviction + TTL sweep ────────────────────────
   start() {
     if (this._timer) return;
     this._timer = setInterval(() => { this.refreshTick().catch(() => {}); }, this.refreshIntervalMs);
     if (typeof this._timer.unref === 'function') this._timer.unref();
   }
-
-  stop() {
-    if (this._timer) { clearInterval(this._timer); this._timer = null; }
-  }
+  stop() { if (this._timer) { clearInterval(this._timer); this._timer = null; } }
 
   async refreshTick() {
     const now = this._now();
 
-    // 1. Renew my subscriptions (and hosted topics) toward the topic id. This is
-    //    keepalive + self-heal + (via the `since` hint) gap recovery.
-    for (const [topicBig, s] of this.mySubscriptions) {
-      if (now - s.lastRenewSent >= this.renewMs) {
-        s.lastRenewSent = now;
-        const since = this._lastSeenTsByTopic.get(topicBig);
-        this._sendSubscribe(topicBig, Number.isFinite(since) ? since : s.since, s.via);
-      }
+    // 1. Renew toward our upstream: app subscriptions + non-root relay roles
+    //    (a root has no parent — its self-loop is a no-op, so we skip it).
+    const toRenew = new Set(this.mySubscriptions.keys());
+    for (const [t, role] of this.axonRoles) if (!role.isRoot && role.subscribers.size > 0) toRenew.add(t);
+    for (const t of toRenew) {
+      const role = this.axonRoles.get(t);
+      if (role && role.isRoot) continue;
+      const s = this.mySubscriptions.get(t);
+      if (s) { if (now - s.lastRenewSent < this.renewMs) continue; s.lastRenewSent = now; }
+      this._sendSubscribe(t);
     }
-    for (const topicBig of this._hostedTopics) {
-      this._send(T.SUB, { topicId: idHex(topicBig), via: [], subscriberId: idHex(this.nodeId), since: now });
+    for (const t of this._hostedTopics) {
+      this._send(T.SUB, { topicId: idHex(t), via: [], subscriberId: idHex(this.nodeId), since: now });
     }
 
-    // 2. Evict subscribers that stopped renewing; expire cache; tear down a role
+    // 2. Evict stale subscribers; expire cache + tombstones; tear down a role
     //    that is empty and not locally needed.
-    for (const [topicBig, role] of this.axonRoles) {
+    for (const [t, role] of this.axonRoles) {
       for (const [subHex, sub] of role.subscribers) {
-        if (now - sub.lastRenewed > this.dropMs) role.subscribers.delete(subHex);
+        if (now - sub.lastRenewed > this.dropMs) { role.subscribers.delete(subHex); role.children.delete(subHex); }
       }
       for (const [msgId, exp] of role.tombstones) if (exp <= now) role.tombstones.delete(msgId);
       this._expireCache(role, now);
-      if (role.subscribers.size === 0 && !this.mySubscriptions.has(topicBig) && !this._hostedTopics.has(topicBig)) {
-        this.axonRoles.delete(topicBig);
+      if (role.subscribers.size === 0 && !this.mySubscriptions.has(t) && !this._hostedTopics.has(t)) {
+        this.axonRoles.delete(t);
+        this._upstream.delete(t);
       }
     }
   }
