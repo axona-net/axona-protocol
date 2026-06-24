@@ -3,7 +3,7 @@
 //
 // Design: axona-docs/architecture/Pubsub-Axon-Tree-v0.1.md
 //
-// CLEAN BREAK (kernel v3.14.0). Routing-only pub/sub. The one rule:
+// CLEAN BREAK (kernel v3.14.1). Routing-only pub/sub. The one rule:
 //
 //     Axona pub/sub uses ONLY DHT message routing. There are no direct
 //     connections. Every interaction is a routed message delivered, hop by
@@ -721,7 +721,15 @@ export class AxonaManager {
       }
       for (const [msgId, exp] of role.tombstones) if (exp <= now) role.tombstones.delete(msgId);
       this._expireCache(role, now);
-      if (role.subscribers.size === 0 && !this.mySubscriptions.has(t) && !this._hostedTopics.has(t)) {
+      // A ROOT holding non-expired cache MUST persist even with zero subscribers
+      // — otherwise a message published before anyone subscribes (or after the
+      // last subscriber leaves) is lost the moment refreshTick runs, breaking the
+      // 48h hold + late-join replay. The cache itself ages out via _expireCache
+      // (TTL), so the role naturally tears down once its history fully expires. A
+      // non-root child relay with no subscribers carries only redundant cache (the
+      // root has it) so it may tear down immediately.
+      const holdsHistory = role.isRoot && role.cache.length > 0;
+      if (role.subscribers.size === 0 && !holdsHistory && !this.mySubscriptions.has(t) && !this._hostedTopics.has(t)) {
         this.axonRoles.delete(t);
         this._upstream.delete(t);
       }

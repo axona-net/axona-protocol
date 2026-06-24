@@ -80,6 +80,34 @@ async function main() {
   const author = await createAuthorIdentity();
   let SEQ = 1;
 
+  // ── backlog survives GC: messages published with NO subscribers must persist
+  //    through refreshTick (the root holds cache for its TTL, not torn down the
+  //    instant subscribers hit 0) so a LATE joiner recovers them. Regression for
+  //    the live-soak finding (backlog/gap recovered 0%). ──
+  {
+    const fab = new Fabric();
+    const nodes = await makeNodes(fab, 30);
+    const desc = { region: 'useast', owner: null, name: 'backlog-gc', write: 'open' };
+    const topicId = await deriveTopicIdBig(desc);
+    const pub = nodes[29];
+    const ids = [];
+    for (let k = 0; k < 4; k++) {
+      const e = await buildEnvelope({ topic: desc, message: { k }, seq: SEQ++, identity: author, ts: fab.clock });
+      ids.push(e.msgId); pub.am.pubsubPublish(topicId, JSON.stringify(e)); await fab.settle();
+    }
+    const root = fab.nodes.get(fab._closestAlive(topicId));
+    check('root cached the backlog with zero subscribers', cacheSize(root, topicId) === 4);
+    // run the refresh sweep (the teardown) several times — must NOT drop the cache
+    for (let r = 0; r < 3; r++) { fab.clock += 11_000; await fab.tickAll(); }
+    check('backlog survives refreshTick GC (root role + cache kept)', cacheSize(root, topicId) === 4, `(${cacheSize(root, topicId)}/4)`);
+    const late = nodes[10];
+    late.am._lastSeenTsByTopic.set(topicId, 0);
+    late.am.pubsubSubscribe(topicId);
+    await fab.settle();
+    const got = ids.filter(id => late.got.some(g => g.msgId === id)).length;
+    check('late joiner recovers the full backlog after GC sweeps', got === 4, `(${got}/4)`);
+  }
+
   const N = 60, S = 50, M = 8;
   const fab = new Fabric();
   const nodes = await makeNodes(fab, N);
