@@ -4,9 +4,9 @@
 // self-contained keyspace — local nodes root local channels and the bridge is
 // only the rendezvous. (Was: both hardcoded us-east, which pinned every peer +
 // topic to one region and locked out anyone elsewhere.)
-import { AxonaPeer, AxonaDomain, NeuronNode, createNodeIdentity, createAuthorIdentity, KERNEL_VERSION } from '/src/index.js?v=0.12.0';
-import { webTransport } from '/src/transport/web/index.js?v=0.12.0';
-import { resolveAnchor } from '../lib/region.js?v=0.12.0';
+import { AxonaPeer, AxonaDomain, NeuronNode, createNodeIdentity, createAuthorIdentity, KERNEL_VERSION } from '/src/index.js?v=0.13.0';
+import { webTransport } from '/src/transport/web/index.js?v=0.13.0';
+import { resolveAnchor } from '../lib/region.js?v=0.13.0';
 
 export { KERNEL_VERSION };          // surfaced in the app header (kernel-version visibility)
 
@@ -45,23 +45,17 @@ export async function connectAxona(onStatus = () => {}) {
 
   return {
     nodeId: nodeIdentity.id,
-    // Exposed so the app can drive @axona/protocol/std/chunk directly: the chunk
-    // helpers publish/consume OBJECT messages on a structured { region, name }
-    // topic (not the JSON-string convention of sub/pub below), and
-    // publishChunkedBytes(peer, bytes, { topic, signWith }) needs the raw peer +
-    // author + descriptor.
+    // axona-share is a FILE/STREAM app: its canonical message convention is
+    // @axona/protocol/std/chunk — the binary sibling of std/message (text). See
+    // programmer-guide/Message-Convention. The app drives the chunk helpers
+    // directly with the raw peer + author + topic descriptor:
+    //   publishChunkedBytes(peer, bytes, { topic: topicOf(id), signWith: author })
+    //   createReassembler(...) fed from peer.sub(topicOf(id), env => …, { since })
+    // Chunk messages are OBJECTS on a { region, name } topic — there is NO
+    // JSON-string wrapper (the old sub/pub helpers double-encoded and conflicted
+    // with the object-message model std/chunk + the kernel use; removed).
     peer, author, topicOf,
-    // Subscribe to a channel topic; cb gets each parsed message object (chunk).
-    async sub(topic, cb) {
-      return peer.sub(topicOf(topic), (env) => {
-        if (!env || env.deleted || !env.message) return;
-        let m; try { m = JSON.parse(env.message); } catch { return; }
-        cb(m);
-      }, { since: 'all' });
-    },
     async unsub(topic) { try { return await peer.unsub?.(topicOf(topic)); } catch { /* */ } },
-    // Publish one message object (a chunk) to a channel topic, signed by our author.
-    async pub(topic, obj) { return peer.pub(topicOf(topic), JSON.stringify(obj), { signWith: author }); },
     async close() { try { await peer.leave?.(); } catch { /* */ } try { await transport.stop?.(); } catch { /* */ } },
   };
 }
