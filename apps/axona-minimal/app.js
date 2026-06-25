@@ -6,10 +6,11 @@
 // the token (= APP_VERSION) each release to pull fresh kernel exports on reload.
 // (Deeper kernel internals refresh on the Pages cache expiry — query strings
 // can't bust an unbundled module's transitive imports.)
-import { AxonaPeer, AxonaDomain, NeuronNode, createNodeIdentity, createAuthorIdentity, deriveTopicId, KERNEL_VERSION } from '/src/index.js?v=0.6.0';
-import { webTransport } from '/src/transport/web/index.js?v=0.6.0';
-import { regionName }   from '/src/utils/region-names.js?v=0.6.0';
-import { resolveAnchor } from '../lib/region.js?v=0.6.0';
+import { AxonaPeer, AxonaDomain, NeuronNode, createNodeIdentity, createAuthorIdentity, deriveTopicId, KERNEL_VERSION } from '/src/index.js?v=0.7.0';
+import { webTransport } from '/src/transport/web/index.js?v=0.7.0';
+import { regionName }   from '/src/utils/region-names.js?v=0.7.0';
+import { resolveAnchor } from '../lib/region.js?v=0.7.0';
+import { makeMessage, readMessage } from '/std/message.js?v=0.7.0';
 
 const $ = (id) => document.getElementById(id);
 const status = (t) => { $('status').textContent = t; };
@@ -18,7 +19,7 @@ const status = (t) => { $('status').textContent = t; };
 // the SAME topic-id no matter where they are. The user's OWN identity, by
 // contrast, is rooted at their REAL location (see whereAmI below) — so a message
 // shows where its sender actually sits, while the topic stays one shared keyspace.
-const APP_VERSION = '0.6.0';
+const APP_VERSION = '0.7.0';
 // Bridge selection (same as axona-share): ?bridge=<wss url> → ?net=testnet|prod
 // shortcut → default by hostname. Lets one build run against either network.
 const KNOWN_BRIDGES = { prod: 'wss://bridge.axona.net', testnet: 'wss://testnet.axona.net' };
@@ -114,7 +115,7 @@ async function ensureSubscribed(topic) {
     // Agent-authored messages get highlighted + badged so they stand out at a glance.
     const cls = await classOf(env.signerPubkey);
     const m = env.message;
-    const text = (m && typeof m === 'object') ? (m.text ?? JSON.stringify(m)) : m;
+    const text = readMessage(m);                                 // canonical std/message body
     const node = (m && typeof m === 'object') ? m.node : null;   // the location WE chose to share
     render(text, idLabel(node), false, topic, cls);
   }, { since: 'all' });
@@ -132,7 +133,7 @@ async function send() {
   // Every publish names its signer: { signWith: author } (v0.3). We voluntarily share
   // our NODE id so subscribers can show the sender's region (idLabel) — an app choice,
   // not a protocol disclosure (the signed envelope never carries location).
-  const msgId = await peer.pub({ region: TOPIC_REGION, name: topic }, { text, node: node$identity.id }, { signWith: author });
+  const msgId = await peer.pub({ region: TOPIC_REGION, name: topic }, makeMessage(text, { node: node$identity.id }), { signWith: author });
   seen.add(msgId);
   render(text, idLabel(node$identity.id), true, topic, { class: myClass, operatorVerified: false });
   $('message').value = '';

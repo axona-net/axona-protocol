@@ -309,12 +309,13 @@ import {
   regionNameForLatLng,
 } from '/src/index.js';
 import { webTransport } from '/src/transport/web/index.js';
+import { makeMessage, readMessage, readSender } from '/std/message.js';
 
 // ─── Constants ────────────────────────────────────────────────────────
 // Bump the middle digit on every code change to this file so the
 // footer reflects what's actually running and stale browser tabs are
 // distinguishable.
-const DEMO_VERSION = '1.18.0';
+const DEMO_VERSION = '1.19.0';
 const BRIDGE_URL   = new URLSearchParams(window.location.search).get('bridge')
                   // Served from a testnet host (e.g. demo-testnet.axona.net) →
                   // default to the testnet bridge (3.0.0 / axona/5 / wire-3),
@@ -572,11 +573,13 @@ function appendMessage(name, body, when) {
 }
 
 const sub = await peer.sub(TOPIC, (envelope) => {
-  // Envelopes from the wire are "Name: Body" strings.
-  const wire = envelope.message || '';
-  const colonAt = wire.indexOf(':');
-  const name = colonAt > 0 ? wire.slice(0, colonAt).trim() : '(unknown)';
-  const body = colonAt > 0 ? wire.slice(colonAt + 1).trim() : wire;
+  // Canonical std/message: body via readMessage(), display name from the body's
+  // `name` extra (this app lets you type one) else the authenticated sender.
+  // Tolerant — renders messages from any app (minimal, peer, …), never crashes.
+  const body = readMessage(envelope.message);
+  const name = (envelope.message && typeof envelope.message === 'object' && envelope.message.name)
+    ? envelope.message.name
+    : readSender(envelope);
   appendMessage(name, body, new Date());
 }, { since: 'all' });
 
@@ -662,7 +665,7 @@ async function publish() {
   if (!msg) return;
   $pubBtn.disabled = true;
   try {
-    await peer.pub(TOPIC, name + ': ' + msg, { signWith: author });
+    await peer.pub(TOPIC, makeMessage(msg, { name }), { signWith: author });
   } catch (err) {
     console.error('[demo] publish failed', err);
   } finally {

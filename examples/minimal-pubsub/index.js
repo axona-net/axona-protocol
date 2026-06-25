@@ -22,6 +22,7 @@ import {
   createNodeIdentity, createAuthorIdentity,
   regionNameForLatLng, clz264,
 } from '@axona/protocol';
+import { makeMessage, readMessage } from '@axona/protocol/std/message.js';
 
 // ── 1. Region ────────────────────────────────────────────────────────
 // us-east (Virginia).  Both peers connect from this cell, and the topic
@@ -132,7 +133,7 @@ const sub = await bob.sub(TOPIC, (envelope) => {
   received.push(envelope);
   console.log('[bob]   received:', {
     msgId:        envelope.msgId,
-    message:      envelope.message,
+    message:      readMessage(envelope.message),   // canonical std/message
     signerPubkey: envelope.signerPubkey?.slice(0, 16) + '…',
   });
 }, { since: 'all' });
@@ -144,7 +145,7 @@ await new Promise(r => setTimeout(r, 100));
 
 // Alice signs the publish with her AUTHOR key (signWith) — the connection
 // key never signs content.
-const msgId = await alice.pub(TOPIC, 'hello from alice', { signWith: aliceAuthor });
+const msgId = await alice.pub(TOPIC, makeMessage('hello from alice'), { signWith: aliceAuthor });
 console.log('[alice] published msgId=' + msgId);
 
 // Let the publish-k → cache → fan-out cycle complete.

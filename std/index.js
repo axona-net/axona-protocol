@@ -11,6 +11,9 @@
 //
 // Modules:
 //   chunk     — reliable large-payload chunking + reassembly over pub/sub.
+//   message   — canonical pub/sub message body convention (makeMessage /
+//               readMessage / readSender) so every app renders every app's
+//               messages. ALL apps publish + render through these.
 //   (image downsampling and other helpers will land here as sibling modules.)
 //
 // Note: the derived metric-topic helpers (metricTopic/isMetricTopic) live in
