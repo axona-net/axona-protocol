@@ -1,8 +1,11 @@
 // =====================================================================
-// smoke_pull_metrics.js — peer.pull(msgId, {topic, publisher}) and
-//                          peer.metrics(topic, {publisher}) against a
-//                          mock AxonaManager that implements
-//                          requestPull / requestMetrics.
+// smoke_pull_metrics.js — peer.pull(msgId, {topic}) against a mock
+// AxonaManager that implements requestPull.
+//
+// NOTE (v4.3.0): peer.metrics() no longer scatter-gathers relay counters
+// (requestMetrics was removed). The publish-based metrics path is covered
+// by smoke_metrics_publish.mjs. This smoke now exercises pull + topic-id
+// read-handle behaviour only.
 // Run: node test/smoke_pull_metrics.js
 // =====================================================================
 
@@ -11,7 +14,7 @@ import { createNodeIdentity, createAuthorIdentity } from '../src/identity/index.
 import { buildEnvelope }   from '../src/pubsub/envelope.js';
 import { deriveTopicId, deriveTopicIdBig } from '../src/pubsub/post.js';
 import { fromHex }         from '../src/utils/hexid.js';
-import { PullError, MetricsError, ErrorCodes } from '../src/errors.js';
+import { PullError, ErrorCodes } from '../src/errors.js';
 
 // v0.3: topics are structured descriptors. Use a stable open topic for the
 // happy-path / metrics tests (no per-publisher anchoring anymore — dedup is the
@@ -178,64 +181,6 @@ async function testPullBumpsCounter() {
   check('pull_count = 2 after second pull', ctr.pull_count === 2);
 }
 
-async function testMetricsAggregation() {
-  console.log('\n── peer.metrics() aggregates relay counters ──');
-  const { peer, am, author } = await setupPeer();
-
-  // Publish three messages on the same topic.
-  const m1 = await peer.pub(CATS, 1, { signWith: author });
-  const m2 = await peer.pub(CATS, 2, { signWith: author });
-  const m3 = await peer.pub(CATS, 3, { signWith: author });
-
-  // Simulate deliveries (each post delivered to 5 subscribers).
-  const topicId = await deriveTopicIdBig(CATS);
-  am._bumpDelivery(topicId, m1, 5);
-  am._bumpDelivery(topicId, m2, 5);
-  am._bumpDelivery(topicId, m3, 5);
-
-  // Simulate two pulls of m1.
-  await peer.pull(m1, { topic: CATS });
-  await peer.pull(m1, { topic: CATS });
-
-  const m = await peer.metrics(CATS);
-  check('publishes count = 3',     m.publishes === 3);
-  check('current_count = 3',       m.current_count === 3);
-  check('deliveries = 15',         m.deliveries === 15);
-  check('pulls = 2',               m.pulls === 2);
-  check('reshares = 0',            m.reshares === 0);
-  check('relayCount = 1',          m.relayCount === 1);
-  check('subscribers reported',    typeof m.subscribers === 'number');
-}
-
-async function testMetricsEmpty() {
-  console.log('\n── peer.metrics() on unknown topic ──');
-  const { peer } = await setupPeer();
-
-  const m = await peer.metrics({ region: 'useast', name: 'never-published' });
-  check('publishes = 0',  m.publishes === 0);
-  check('current_count = 0', m.current_count === 0);
-  check('deliveries = 0', m.deliveries === 0);
-  check('pulls = 0',      m.pulls === 0);
-  check('relayCount = 0 (no relays responded)', m.relayCount === 0);
-}
-
-async function testMetricsValidation() {
-  console.log('\n── peer.metrics() validation ──');
-  const { peer } = await setupPeer();
-
-  // v0.3: a malformed topic descriptor is rejected at resolution.
-  let err = null;
-  try { await peer.metrics({ region: 'useast', name: '' }); }   // empty name
-  catch (e) { err = e; }
-  check('empty topic name → throws', err !== null);
-
-  err = null;
-  try { await peer.metrics({ name: 'cats' }); }   // region omitted → node-region default
-  catch (e) { err = e; }
-  check('open topic without region → node-region default (no region error)',
-    err === null || !/region/i.test(String(err && err.message)));
-}
-
 async function testCrossPublisherIsolation() {
   console.log('\n── owner-topic isolation: distinct owners → distinct topic ids ──');
   const alice = await setupPeer();
@@ -270,10 +215,6 @@ async function testReadByTopicId() {
   const pulled = await peer.pull(msgId, { topic: idHex });
   check('pull by topic id returns the message', pulled?.message?.meow === 9);
 
-  // metrics by the raw id works
-  const m = await peer.metrics(idHex);
-  check('metrics by topic id works', m.publishes === 1);
-
   // publishing with a bare id is rejected — the id is a read handle, not a write credential
   let err = null;
   try { await peer.pub(idHex, 'x', { signWith: author }); } catch (e) { err = e; }
@@ -291,9 +232,6 @@ async function main() {
   await testPullMiss();
   await testPullValidation();
   await testPullBumpsCounter();
-  await testMetricsAggregation();
-  await testMetricsEmpty();
-  await testMetricsValidation();
   await testCrossPublisherIsolation();
   await testReadByTopicId();
   console.log(`\nResult: ${passed} passed, ${failed} failed`);

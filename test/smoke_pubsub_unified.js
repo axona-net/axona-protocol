@@ -278,10 +278,13 @@ async function testSinceModes() {
   check("since:'all' → lastSeenTs = 0",
     am._lastSeenTsByTopic.get(sub2.topicIdBig) === 0);
 
+  // v4.3.0: 'latest' floors at NOW (future tail); the newest retained entry is
+  // delivered out-of-band via the replayLatest flag, not via the ts-floor — so
+  // the floor is no longer the now-1s window that missed older current values.
   const sub3 = await peer.sub({ region: 'useast', name: 'c' }, () => {}, { since: 'latest' });
   const ts3 = am._lastSeenTsByTopic.get(sub3.topicIdBig);
-  check("since:'latest' → lastSeenTs ≈ now-1s",
-    typeof ts3 === 'number' && Math.abs(ts3 - (Date.now() - 1000)) < 100);
+  check("since:'latest' → lastSeenTs ≈ now",
+    typeof ts3 === 'number' && Math.abs(ts3 - Date.now()) < 100);
 
   const sub4 = await peer.sub({ region: 'useast', name: 'd' }, () => {}, { since: 42 });
   check('since:<number> → lastSeenTs set exactly',

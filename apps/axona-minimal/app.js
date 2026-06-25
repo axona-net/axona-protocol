@@ -6,11 +6,11 @@
 // the token (= APP_VERSION) each release to pull fresh kernel exports on reload.
 // (Deeper kernel internals refresh on the Pages cache expiry — query strings
 // can't bust an unbundled module's transitive imports.)
-import { AxonaPeer, AxonaDomain, NeuronNode, createNodeIdentity, createAuthorIdentity, deriveTopicId, KERNEL_VERSION } from '/src/index.js?v=0.7.0';
-import { webTransport } from '/src/transport/web/index.js?v=0.7.0';
-import { regionName }   from '/src/utils/region-names.js?v=0.7.0';
-import { resolveAnchor } from '../lib/region.js?v=0.7.0';
-import { makeMessage, readMessage } from '/std/message.js?v=0.7.0';
+import { AxonaPeer, AxonaDomain, NeuronNode, createNodeIdentity, createAuthorIdentity, deriveTopicId, KERNEL_VERSION } from '/src/index.js?v=0.8.0';
+import { webTransport } from '/src/transport/web/index.js?v=0.8.0';
+import { regionName }   from '/src/utils/region-names.js?v=0.8.0';
+import { resolveAnchor } from '../lib/region.js?v=0.8.0';
+import { makeMessage, readMessage } from '/std/message.js?v=0.8.0';
 
 const $ = (id) => document.getElementById(id);
 const status = (t) => { $('status').textContent = t; };
@@ -19,7 +19,7 @@ const status = (t) => { $('status').textContent = t; };
 // the SAME topic-id no matter where they are. The user's OWN identity, by
 // contrast, is rooted at their REAL location (see whereAmI below) — so a message
 // shows where its sender actually sits, while the topic stays one shared keyspace.
-const APP_VERSION = '0.7.0';
+const APP_VERSION = '0.8.0';
 // Bridge selection (same as axona-share): ?bridge=<wss url> → ?net=testnet|prod
 // shortcut → default by hostname. Lets one build run against either network.
 const KNOWN_BRIDGES = { prod: 'wss://bridge.axona.net', testnet: 'wss://testnet.axona.net' };
