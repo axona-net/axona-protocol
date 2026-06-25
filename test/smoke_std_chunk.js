@@ -167,6 +167,50 @@ async function main() {
       fa.name === 'a.bin' && fb.name === 'b.bin');
   }
 
+  // ── 11. verify pass must NOT tear down a caller's persistent subscription ──
+  // Faithful mock: subscriptions are handler-scoped (a Set per topic) with LIVE
+  // delivery, sub() returns a handle whose .stop() removes ONLY that handler, and
+  // unsub(topic) stops EVERY handler on the topic — exactly the kernel semantics.
+  // axona-share keeps a persistent channel reassembler subscribed to the very
+  // topic it publishes images to; the verify pass inside publishChunkedBytes used
+  // to peer.unsub(topic) and nuke that subscription. This pins the handle-scoped fix.
+  {
+    function livePeer() {
+      const store = new Map();                 // topic -> [{message,msgId}]
+      const subs  = new Map();                 // topic -> Set(cb)
+      const setOf = (t) => subs.get(t) || (subs.set(t, new Set()), subs.get(t));
+      return {
+        _subCount: (t) => (subs.get(t)?.size ?? 0),
+        async pub(topic, message) {
+          if (!store.has(topic)) store.set(topic, []);
+          const msgId = 'm' + store.get(topic).length;
+          store.get(topic).push({ message, msgId });
+          for (const cb of setOf(topic)) cb({ message, msgId });   // live fan-out
+          return msgId;
+        },
+        async sub(topic, cb, _opts) {
+          for (const e of (store.get(topic) || [])) cb({ message: e.message, msgId: e.msgId });  // since:'all' replay
+          const set = setOf(topic); set.add(cb);
+          return { topic, stop: async () => { set.delete(cb); } };  // handle-scoped stop
+        },
+        async unsub(topic) { const set = subs.get(topic); const n = set ? set.size : 0; if (set) set.clear(); return { ok: true, removed: n }; },
+      };
+    }
+    const peer = livePeer();
+    const TOPIC = { region: 'useast', name: 'axona-share/public-images' };
+    // App's persistent channel subscription (a reassembler in real life).
+    let liveAfter = 0;
+    await peer.sub(TOPIC, (env) => { if (env?.message?.__probe) liveAfter++; }, { since: 'all' });
+    const subsBefore = peer._subCount(TOPIC);
+    // Publish an image to the SAME topic with verify ON (the default).
+    await publishChunkedBytes(peer, makeBytes(40_000), { topic: TOPIC, maxMessageBytes: MAXMSG, throttleMs: 0, verifyWaitMs: 200 });
+    const subsAfter = peer._subCount(TOPIC);
+    check(`11a. persistent subscription survives a same-topic verify pass (before=${subsBefore}, after=${subsAfter})`, subsAfter === subsBefore && subsAfter === 1);
+    // And it still receives a subsequent publish (was torn down by the old unsub).
+    await peer.pub(TOPIC, { __probe: true });
+    check('11b. persistent subscription still delivers after the publish', liveAfter === 1);
+  }
+
   console.log(`\nResult: ${passed} passed, ${failed} failed  (rawChunk@16KB=${rawChunkSize()}B)`);
   process.exit(failed === 0 ? 0 : 1);
 }

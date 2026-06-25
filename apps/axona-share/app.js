@@ -1,7 +1,7 @@
 // Axona-share — share images over Axona pub/sub. Proof of concept.
 // Channels are pub/sub topics; images are compressed to <1MB then sent as a set
 // of chunk-messages (@axona/protocol/std/chunk) and reassembled on every subscriber.
-import { connectAxona, KERNEL_VERSION, REGION } from './axona.js?v=0.13.0';
+import { connectAxona, KERNEL_VERSION, REGION } from './axona.js?v=0.14.0';
 // ?v= cache-busts the TRANSITIVE module imports too, not just the app.js entry in
 // index.html: a static host serves /std/chunk.js with a ~10-min max-age, so after
 // a kernel/std deploy a browser would otherwise keep running the stale chunk lib.
@@ -11,10 +11,10 @@ import { connectAxona, KERNEL_VERSION, REGION } from './axona.js?v=0.13.0';
 // the app tuning a throttle. createReassembler stays for the RECEIVE side — a
 // channel is a STREAM of images over time (publishChunkedBytes/receiveChunkedBytes
 // is one-shot per file), so we keep one persistent reassembler per channel.
-import { createReassembler, publishChunkedBytes } from '/std/chunk.js?v=0.13.0';
-import { compressImage } from '../lib/image.js?v=0.13.0';
+import { createReassembler, publishChunkedBytes } from '/std/chunk.js?v=0.14.0';
+import { compressImage } from '../lib/image.js?v=0.14.0';
 
-const APP_VERSION = '0.13.0';     // chunks via kernel std/chunk v3.6.0 (reliable publish: verify+repair).
+const APP_VERSION = '0.14.0';     // chunks via kernel std/chunk v3.6.0 (reliable publish: verify+repair).
                                   // Transitive module imports are now ?v=-versioned so a std/chunk deploy
                                   // is picked up immediately (was: stale cached chunk lib after deploy).
 const DEFAULT_CHANNEL = { id: 'axona-share/public-images', name: 'Public Images' };
