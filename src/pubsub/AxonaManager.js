@@ -97,6 +97,7 @@ const T = {
   ADOPT:    'pubsub:adopt',     // delegate: "become my child relay + take these subscribers"
   PULLUP:   'pubsub:pullup',    // "I'm behind you — replay your stamped history up to me" (§6)
   REPLAYUP: 'pubsub:replayup',  // a relay's stamped cache delta, routed UP to a behind parent
+  HANDOFF:  'pubsub:handoff',   // graceful-leave: a departing root pushes its cache to its heir
   KILL:     'pubsub:kill',      // retract a message (thin; TODO Phase 4)
   UNPUB:    'pubsub:unpub',     // RESERVED — removed v4.3.0 (no handler/sender); wire string kept so legacy frames are ignored, not misrouted
   TOUCH:    'pubsub:touch',     // extend TTL (thin; TODO Phase 4)
@@ -194,6 +195,7 @@ export class AxonaManager {
     on(T.ADOPT,    this._onAdopt);
     on(T.PULLUP,   this._onPullUp);
     on(T.REPLAYUP, this._onReplayUp);
+    on(T.HANDOFF,  this._onHandoff);
     on(T.KILL,     this._onKill);
     on(T.TOUCH,    this._onTouch);   // no-op (peer.touch deprecated v4.3.0); kept for wire compat
     on(T.PULL,     this._onPull);
@@ -485,6 +487,47 @@ export class AxonaManager {
     if (m.publishTs > role.lastTs) role.lastTs = m.publishTs;            // continue stamping above recovered history
     this._fanout(role, { json: m.json, publishTs: m.publishTs, msgId: m.msgId }, null);
     this._deliverToApp(role.topicId, m.json, m.msgId, m.publishTs);
+  }
+
+  // ── graceful-leave cache handoff ─────────────────────────────────────
+  // A departing root pushes its cache to its heir (the next-closest live node)
+  // BEFORE it leaves, so a topic's history survives the root's departure even
+  // when no relay/host held a copy. The heir adopts the cache and becomes the
+  // root, so subscribers that re-home to it (or join after) still replay the
+  // pre-departure history via since:'all'. This is the common-case durability fix
+  // for single-root topics — nodes that leave gracefully (peer.leave()) hand off;
+  // abrupt death still needs a replica/in-region host (separate work).
+  async _onHandoff(payload, meta) {
+    if (meta.targetId !== this.nodeId) return;
+    const topicBig = idBig(payload.topicId);
+    // Adopt as a root: _becomeRoot makes the role (isRoot) if we don't have one,
+    // so we serve the inherited history; routing/beacons reconcile root-ness.
+    const role = this.axonRoles.get(topicBig) || this._becomeRoot(topicBig);
+    for (const m of (Array.isArray(payload.msgs) ? payload.msgs : [])) {
+      if (m && typeof m.json === 'string' && Number.isFinite(m.publishTs)) await this._ingestStamped(role, m);
+    }
+    return 'consumed';
+  }
+
+  // Called from AxonaPeer.leave() while the transport is still up: for every
+  // topic we ROOT and hold cache for, push the cache to the heir (next-closest
+  // live node) so the history isn't lost when we go. Best-effort; never throws.
+  async pubsubLeaveHandoff() {
+    if (typeof this.dht.findKClosest !== 'function') return;
+    for (const [t, role] of this.axonRoles) {
+      if (!role.isRoot || !role.cache.length) continue;
+      let heir = null;
+      try {
+        const arr = await this.dht.findKClosest(t, 3);
+        for (const id of (Array.isArray(arr) ? arr : [])) {
+          const b = idBig(id);
+          if (b !== this.nodeId) { heir = b; break; }   // closest node that isn't us
+        }
+      } catch { /* no heir resolvable → nothing we can do */ }
+      if (heir === null) continue;
+      const msgs = role.cache.map(c => ({ json: c.json, publishTs: c.publishTs, msgId: c.msgId }));
+      try { this._route(heir, T.HANDOFF, { topicId: idHex(t), msgs }); } catch { /* best-effort */ }
+    }
   }
 
   // ── DELIVER (parent → subscriber; a relay re-fans down the tree) ──────
