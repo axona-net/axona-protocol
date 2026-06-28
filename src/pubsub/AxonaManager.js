@@ -690,7 +690,13 @@ export class AxonaManager {
         : null;
     if (!resolveClosest) return null;
     const cached = this._rootHint.get(topicBig);
-    const fresh = cached && (this._now() - cached.at) < this.renewMs;
+    // While we have no pin (a fresh subscriber, or one whose root just churned and
+    // we dropped the pin), treat the cached hint as stale after only renewFastMs
+    // so we re-resolve the CURRENT closest reachable root every few seconds —
+    // instead of sitting on a 60s-cached hint that points at a dead/wrong node.
+    const attached = (this._upstream.get(topicBig) || []).length > 0;
+    const freshFor = attached ? this.renewMs : this.renewFastMs;
+    const fresh = cached && (this._now() - cached.at) < freshFor;
     if (!fresh) {
       if (!this._lookupInflight) this._lookupInflight = new Set();
       if (!this._lookupInflight.has(topicBig)) {
@@ -1026,10 +1032,19 @@ export class AxonaManager {
       if (role && role.isRoot) continue;
       const s = this.mySubscriptions.get(t);
       if (s) {
-        const iv = s.interval || this.renewFastMs;
+        // Stay at the fast floor while UNATTACHED (no upstream pin yet — a fresh
+        // or stranded subscriber) so it retries + re-resolves quickly; back off
+        // ×1.5 only once attached + stable. Paired with the unattached root-hint
+        // re-resolve in _rootHint_, this turns a stranded subscriber's 60s-cached
+        // dead-hint wait into a few-second re-home (the dead-pin case is already
+        // covered by the route-via-dead-waypoint reroute).
+        const attached = (this._upstream.get(t) || []).length > 0;
+        const iv = attached ? (s.interval || this.renewFastMs) : this.renewFastMs;
         if (now - s.lastRenewSent < iv) continue;
         s.lastRenewSent = now;
-        s.interval = Math.min(this.renewMs, Math.round(iv * RENEW_BACKOFF));   // back off toward ceiling while stable
+        s.interval = attached
+          ? Math.min(this.renewMs, Math.round((s.interval || this.renewFastMs) * RENEW_BACKOFF))
+          : this.renewFastMs;
       }
       this._sendSubscribe(t);
     }

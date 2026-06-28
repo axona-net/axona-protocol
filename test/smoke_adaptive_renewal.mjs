@@ -43,19 +43,19 @@ async function main() {
   mgr.pubsubSubscribe(TOPIC);
   check(`1. fresh subscription interval = renewFastMs (${ivOf()} = ${RENEW_FAST})`, ivOf() === RENEW_FAST);
 
-  // 2. successive renewals back off ×1.5 up to the ceiling
-  const expected = [];
-  let iv = RENEW_FAST;
-  for (let i = 0; i < 8; i++) { iv = Math.min(RENEW_CEIL, Math.round(iv * 1.5)); expected.push(iv); }
+  // 2. while UNATTACHED (no upstream pin yet — a fresh or stranded subscriber),
+  //    renewals stay at the fast floor. Backoff is gated on attachment (v4.8.3
+  //    liveness re-route): a subscriber that hasn't heard back must keep retrying
+  //    fast, not back off into a long orphan window. (Backoff once attached: §3.)
   const got = [];
   for (let i = 0; i < 8; i++) {
     clock += ivOf();                 // advance exactly one current-interval
-    await tick();                    // a renewal fires → interval backs off
+    await tick();                    // a renewal fires; unattached → stays fast
     got.push(ivOf());
   }
-  check(`2a. backoff sequence matches ×1.5 capped at ${RENEW_CEIL}: [${got.join(',')}]`,
-        JSON.stringify(got) === JSON.stringify(expected));
-  check(`2b. interval saturates at the ceiling (${got[got.length-1]} = ${RENEW_CEIL})`, got[got.length-1] === RENEW_CEIL);
+  check(`2a. unattached renewals stay at the fast floor: [${got.join(',')}]`,
+        got.every((v) => v === RENEW_FAST));
+  check('2b. no backoff while unattached', got[got.length - 1] === RENEW_FAST);
 
   // 3. a re-pin (deliver from a NEW relay) snaps back to fast
   const relayA = lc(idHex((0x42n << 248n) | 0x1n));
