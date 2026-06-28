@@ -19,7 +19,7 @@ const status = (t) => { $('status').textContent = t; };
 // the SAME topic-id no matter where they are. The user's OWN identity, by
 // contrast, is rooted at their REAL location (see whereAmI below) — so a message
 // shows where its sender actually sits, while the topic stays one shared keyspace.
-const APP_VERSION = '0.13.0';
+const APP_VERSION = '0.14.0';
 // Bridge selection (same as axona-share): ?bridge=<wss url> → ?net=testnet|prod
 // shortcut → default by hostname. Lets one build run against either network.
 const KNOWN_BRIDGES = { prod: 'wss://bridge.axona.net', testnet: 'wss://testnet.axona.net' };
@@ -91,12 +91,15 @@ async function connect() {
 
   await transport.start(node$identity.id);
   await peer.start();
-  const until = Date.now() + 30000;
-  while (Date.now() < until && (node.synaptome?.size ?? 0) < 3) {
-    status(`forming mesh… (${node.synaptome?.size ?? 0})`);
-    await new Promise((r) => setTimeout(r, 600));
-  }
-  status('connected');
+  // Weave into the mesh, then wait until it's wide enough to pub/sub reliably.
+  // peer.ready() (kernel v4.8.2) resolves on synaptome>=minPeers OR a stable
+  // synaptome OR timeout — so a solo tab converges fast instead of polling for
+  // a count it can't reach. Subscribing before this strands the SUB in a
+  // not-yet-formed mesh (slow first delivery).
+  status('forming mesh…');
+  peer.integrate().catch(() => {});
+  const ready = await peer.ready({ minPeers: 4, timeoutMs: 8000 });
+  status(`connected (${ready.peers} peer${ready.peers === 1 ? '' : 's'}${ready.ready ? '' : ', mesh thin'})`);
   $('ver').textContent = `app v${APP_VERSION} · kernel v${KERNEL_VERSION} · ${NETWORK} · you ${idLabel(node$identity.id)}`;
   $('send').disabled = false;
 }
