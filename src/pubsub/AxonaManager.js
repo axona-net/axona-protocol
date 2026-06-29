@@ -769,6 +769,13 @@ export class AxonaManager {
               this._send(T.PUB, { topicId: idHex(topicBig), via: [hex], json: pend.json });
               this._pendingPub.delete(topicBig);
             }
+            // Same strand-heal for a kill (tombstone): re-send toward the now-known
+            // root, once. Idempotent — the root dedups the tombstone by msgId.
+            const pkill = this._pendingKill && this._pendingKill.get(topicBig);
+            if (hex && pkill && (this._now() - pkill.at) < PENDING_PUB_TTL_MS) {
+              this._send(T.KILL, { topicId: idHex(topicBig), via: [hex], kill: pkill.kill });
+              this._pendingKill.delete(topicBig);
+            }
           })
           .catch(() => { /* resolve failed → greedy stays in effect */ })
           .finally(() => this._lookupInflight.delete(topicBig));
@@ -975,7 +982,19 @@ export class AxonaManager {
   }
   pubsubHostKeyspace(on = true) { this._hostKeyspace = !!on; }
 
-  pubsubKill(topicId, kill)   { this._send(T.KILL,  { topicId: idHex(topicId), via: [], kill }); }
+  // Route the kill (tombstone) toward the topic's root EXACTLY like a publish:
+  // via the warm true-root hint if we have one, else greedy. A kill is a one-shot
+  // routed message — without the hint it strands on the greedy walk just as a cold
+  // publish does, and (unlike a renewed subscribe) never re-routes on its own, so a
+  // stranded kill = a tombstone that never reaches subscribers (the ~30% "kill not
+  // received" flake). Retain it briefly so the background lookup re-sends it toward
+  // the true root once resolved. Idempotent — the root dedups the tombstone by msgId.
+  pubsubKill(topicId, kill) {
+    const hint = this._rootHint_(topicId);
+    if (!this._pendingKill) this._pendingKill = new Map();
+    this._pendingKill.set(topicId, { kill, at: this._now() });
+    this._send(T.KILL, { topicId: idHex(topicId), via: hint ? [hint] : [], kill });
+  }
   // pubsubUnpub() — REMOVED v4.3.0 (decision 2026-06-25: keep kill, drop unpub)
   pubsubTouch(topicId, touch) { this._send(T.TOUCH, { topicId: idHex(topicId), via: [], touch }); }
 
