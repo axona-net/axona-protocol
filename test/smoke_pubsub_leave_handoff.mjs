@@ -132,7 +132,13 @@ async function main() {
     const ids = await buildAndPublish(fab, nodes, desc, topicId, author, M, SEQ);
 
     const root1 = fab.nodes.get(fab._closestAlive(topicId));
-    fab.kill(root1.id);   // abrupt — NO handoff
+    // Exhaust the publisher's persistent publish-retry window FIRST (v4.8.6:
+    // a recent publish is re-sent to the current root for up to maxTries/TTL,
+    // which is a SEPARATE durability path that would otherwise re-land these
+    // messages on the new root). Past that window, only the cache (handoff)
+    // can save the history — which is exactly what this control isolates.
+    for (let r = 0; r < 9; r++) { fab.clock += 5_000; await fab.tickAll(); }
+    fab.kill(root1.id);   // abrupt — NO handoff (cache dies with it)
     for (let r = 0; r < 3; r++) { fab.clock += 5_000; await fab.tickAll(); }
 
     const late = fab.addNode(BigInt('0x' + (await createNodeIdentity({ lat: 2, lng: 2 })).id));

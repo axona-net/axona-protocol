@@ -1,17 +1,15 @@
 // =====================================================================
-// smoke_pubsub_kill_heal.mjs — kill routes like publish (hint + strand-heal).
+// smoke_pubsub_kill_heal.mjs — persistent, confirmation-gated publish/kill
+// retry under packet loss (v4.8.6).
 //
-// Regression for the ~30% "kill not received" flake: pubsubKill sent
-// `via: []` (a bare greedy walk, NO root hint, NO retry) while pubsubPublish
-// seeds the warm root hint AND retains the publish in _pendingPub so a stranded
-// send is re-routed toward the true root once the background findKClosest
-// resolves. A kill is a one-shot routed message too — without the hint it
-// strands on the greedy walk just like a cold publish, and never re-routes on
-// its own, so a stranded kill = a tombstone that never reaches subscribers.
-//
-// This pins: (1) a kill issued with a WARM hint carries via=[root];
-//            (2) a kill issued COLD is retained and RE-SENT toward the root the
-//                moment the background lookup resolves, then cleared.
+// A routed PUB/KILL is one-shot fire-and-forget. Under loss the initial send +
+// a single heal both dropping = the message never reaches the root and is lost
+// for EVERYONE (the ~1/3 publish-strand under 10-30% loss; the ~30% "kill not
+// received" flake). Fix: retain the publish/kill keyed by msgId and RE-SEND it
+// toward the current root hint each refreshTick until the publisher observes its
+// own msgId (implicit ACK → _confirmPending) or maxTries/TTL — idempotent (the
+// root dedups by msgId). Two quick publishes to the same topic each retry
+// independently (msgId-keyed, not topic-keyed).
 //
 // Run: node test/smoke_pubsub_kill_heal.mjs
 // =====================================================================
@@ -19,7 +17,6 @@ import { AxonaManager } from '../src/pubsub/AxonaManager.js';
 
 let n = 0, fail = 0;
 const ok = (m, c) => { if (c) { console.log(`  ok ${++n} - ${m}`); } else { console.log(`  ✗  ${m}`); fail++; } };
-const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 const idHex = (b) => b.toString(16).padStart(66, '0');
 
 function mkManager({ closest }) {
@@ -32,40 +29,72 @@ function mkManager({ closest }) {
     neighbors: () => [],
     async findKClosest() { return closest != null ? [closest] : []; },
   };
-  const am = new AxonaManager({ dht, now: () => Date.now(), renewMs: 60_000, dropMs: 180_000 });
+  const am = new AxonaManager({ dht, now: () => Date.now(), renewMs: 60_000, renewFastMs: 5_000, dropMs: 180_000 });
   am.nodeId = selfId;
-  return { am, sends };
+  return { am, sends, selfId };
 }
-const kills = (sends) => sends.filter(s => String(s.type).includes('kill'));
+const byType = (sends, t) => sends.filter(s => String(s.type).includes(t));
+const root = 0x89n << 248n | 0xabcdn;
 
-// ── 1. WARM hint → the kill carries via=[root] ───────────────────────
+// ── 1. warm hint → publish + kill carry via=[root] ──────────────────
 {
-  const root = 0x89n << 248n | 0xabcdn;
   const { am, sends } = mkManager({ closest: root });
   const topic = 0x89n << 248n | 0xbeefn;
-  await am.warmRootHint(topic, 1000);                 // seed the hint
-  am.pubsubKill(topic, { msgId: 'm1' });
-  const k = kills(sends);
-  ok('warm kill emitted one KILL', k.length === 1);
-  ok('warm kill carries via=[root] (not bare greedy)',
-     k[0] && Array.isArray(k[0].payload.via) && k[0].payload.via[0] === idHex(root));
+  await am.warmRootHint(topic, 1000);
+  am.pubsubPublish(topic, JSON.stringify({ msgId: 'p1', message: 1 }));
+  am.pubsubKill(topic, { msgId: 'k1' });
+  const p = byType(sends, 'pub'), k = byType(sends, 'kill');
+  ok('warm publish carries via=[root]', p[0]?.payload.via?.[0] === idHex(root));
+  ok('warm kill carries via=[root]',    k[0]?.payload.via?.[0] === idHex(root));
 }
 
-// ── 2. COLD → retained in _pendingKill, RE-SENT toward root on resolve ─
+// ── 2. two quick publishes to the SAME topic are BOTH retained (msgId-keyed) ──
 {
-  const root = 0x89n << 248n | 0x1234n;
-  const { am, sends } = mkManager({ closest: root });
+  const { am } = mkManager({ closest: root });
   const topic = 0x89n << 248n | 0x5678n;
-  am.pubsubKill(topic, { msgId: 'm2' });              // cold: hint null, kicks bg resolve
-  const first = kills(sends);
-  ok('cold kill sent immediately (greedy, via empty)',
-     first.length === 1 && (first[0].payload.via || []).length === 0);
-  ok('cold kill retained in _pendingKill', am._pendingKill && am._pendingKill.has(topic));
-  await sleep(60);                                     // let the bg findKClosest resolve
-  const after = kills(sends);
-  ok('kill RE-SENT toward the resolved root', after.length === 2 &&
-     Array.isArray(after[1].payload.via) && after[1].payload.via[0] === idHex(root));
-  ok('_pendingKill cleared after the heal (no infinite re-send)', !am._pendingKill.has(topic));
+  am.pubsubPublish(topic, JSON.stringify({ msgId: 'a', message: 1 }));
+  am.pubsubPublish(topic, JSON.stringify({ msgId: 'b', message: 2 }));
+  ok('both publishes retained independently (msgId-keyed, no overwrite)',
+     am._pendingPub.has('a') && am._pendingPub.has('b'));
+}
+
+// ── 3. refreshTick RE-SENDS pending publish/kill (persistent, not one-shot) ──
+{
+  const { am, sends } = mkManager({ closest: root });
+  const topic = 0x89n << 248n | 0x9999n;
+  await am.warmRootHint(topic, 1000);
+  am.pubsubPublish(topic, JSON.stringify({ msgId: 'p', message: 1 }));
+  am.pubsubKill(topic, { msgId: 'k' });
+  const before = sends.length;
+  await am.refreshTick();
+  await am.refreshTick();
+  ok('refreshTick re-sends the pending publish (>1 PUB total)', byType(sends, 'pub').length >= 2);
+  ok('refreshTick re-sends the pending kill (>1 KILL total)',   byType(sends, 'kill').length >= 2);
+  ok('re-sends went out after the initial send', sends.length > before);
+}
+
+// ── 4. _confirmPending (implicit ACK) stops the retry ───────────────
+{
+  const { am, sends } = mkManager({ closest: root });
+  const topic = 0x89n << 248n | 0x1111n;
+  await am.warmRootHint(topic, 1000);
+  am.pubsubPublish(topic, JSON.stringify({ msgId: 'p', message: 1 }));
+  am._confirmPending(topic, 'p');                    // publisher observed its own msg
+  ok('confirmed publish removed from _pendingPub', !am._pendingPub.has('p'));
+  const after = byType(sends, 'pub').length;
+  await am.refreshTick(); await am.refreshTick();
+  ok('no further re-sends after confirmation', byType(sends, 'pub').length === after);
+}
+
+// ── 5. maxTries bounds an un-confirmed publish (no unbounded re-send) ──
+{
+  const { am, sends } = mkManager({ closest: root });
+  const topic = 0x89n << 248n | 0x2222n;
+  await am.warmRootHint(topic, 1000);
+  am.pubsubPublish(topic, JSON.stringify({ msgId: 'p', message: 1 }));
+  for (let i = 0; i < 20; i++) await am.refreshTick();   // never confirmed
+  ok('un-confirmed publish eventually dropped (maxTries bound)', !am._pendingPub.has('p'));
+  ok('total PUB sends bounded (initial + ≤maxTries)', byType(sends, 'pub').length <= 1 + 6);
 }
 
 console.log(`\n${fail ? '✗' : '✓'} smoke_pubsub_kill_heal: ${n} passed, ${fail} failed`);
