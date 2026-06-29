@@ -11,6 +11,10 @@
 //   4. PROVISIONAL + enforce-on-arrival: a kill that reaches the root BEFORE the
 //      target is accepted provisionally; when the target arrives it's suppressed
 //      iff its author matches the kill's signer — a forged early kill is revoked.
+//   5. REGRESSION (permanent-leak edge, v4.8.8): a subscriber whose replay cursor
+//      (`since`) has already advanced PAST the kill's ts still receives the kill on
+//      renewal — tombstones replay regardless of `since`, so a node that missed the
+//      delete but kept seeing newer messages can never keep the killed body forever.
 //
 // Run: node test/smoke_pubsub_kill.mjs
 // =====================================================================
@@ -56,7 +60,7 @@ const tombstoned = (rec, t, id) => rec.am.axonRoles.get(t)?.tombstones?.has(id);
 async function mkNodes(fab, n, salt) { const a = []; for (let i = 0; i < n; i++) { const id = await createNodeIdentity({ lat:(i*11+salt)%80-40, lng:(i*17+salt)%300-150 }); a.push(fab.addNode(BigInt('0x'+id.id))); } return a; }
 
 async function main() {
-  console.log('Axona pub/sub — kill = verified publish + delete side-effect (v4.8.7)');
+  console.log('Axona pub/sub — kill = verified publish + delete side-effect (v4.8.8)');
   const alice = await createAuthorIdentity();
   const bob   = await createAuthorIdentity();   // a DIFFERENT author (forger)
 
@@ -150,6 +154,33 @@ async function main() {
     fab2.clock += 100; n2[1].am.pubsubPublish(t2, JSON.stringify(e2)); await fab2.settle();
     check('4b. forged early kill REVOKED on arrival — authentic message delivered',
       cacheHas(r2, t2, e2.msgId) && n2[0].got.includes(e2.msgId) && !tombstoned(r2, t2, e2.msgId));
+  }
+
+  // ── 5: REGRESSION — renewal with `since` AHEAD of killTs still backfills the kill ──
+  {
+    const fab = new Fabric();
+    const nodes = await mkNodes(fab, 8, 77);
+    const desc = { region:'useast', owner:null, name:'kill-since-ahead', write:'open' };
+    const topicId = await deriveTopicIdBig(desc);
+    nodes[0].am.pubsubSubscribe(topicId); await fab.settle(); fab.clock += 6000; await fab.tickAll();
+    const e = await buildEnvelope({ topic: desc, message: { z: 1 }, seq: 1, identity: alice, ts: fab.clock });
+    nodes[1].am.pubsubPublish(topicId, JSON.stringify(e)); await fab.settle();
+    const r = root(fab, topicId);
+    const killTs = fab.clock + 100;
+    const kill = await buildKill({ topicId: idHex(topicId), msgId: e.msgId, seq: 2, ts: killTs, identity: alice });
+    fab.clock = killTs; r.am.pubsubKill(topicId, kill); await fab.settle();
+    check('5a. root tombstoned the target', tombstoned(r, topicId, e.msgId));
+    // A late subscriber whose since-cursor is set WELL PAST the kill (it saw newer
+    // activity from a stale replica that held the body but never got the kill). The
+    // OLD gate (killTs > since) would never replay the tombstone here → permanent
+    // killed-body leak. The fix replays every ACTIVE tombstone regardless of `since`.
+    const late = fab.addNode(BigInt('0x' + (await createNodeIdentity({ lat: 9, lng: 9 })).id));
+    fab.clock += 50_000;
+    late.am._lastSeenTsByTopic.set(topicId, fab.clock);   // since AHEAD of killTs
+    late.am.pubsubSubscribe(topicId);
+    await fab.settle(); fab.clock += 5000; await fab.tickAll(); await fab.settle();
+    check('5b. late sub with since AHEAD of killTs STILL received the kill (leak fixed)', late.dels.includes(e.msgId), `(dels=${JSON.stringify(late.dels)})`);
+    check('5c. late sub never saw the killed body', !late.got.includes(e.msgId));
   }
 
   console.log(`\nResult: ${passed} passed, ${failed} failed`);
