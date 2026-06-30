@@ -202,7 +202,10 @@ async function testSubReceives() {
   check('handler invoked once', received.length === 1);
   check('envelope.msgId is content-derived (from envelope, not publishId)',
     received[0].msgId === env.msgId);
-  check('envelope.ts (from envelope, not delivery ts)', received[0].ts === 1234567);
+  // Root time is the single ordering authority (v4.9.1): the delivered `ts` is the
+  // root's monotonic delivery stamp (999 here), NOT the publisher's signed claim
+  // (1234567) — so every subscriber orders identically regardless of publisher clocks.
+  check('envelope.ts is the ROOT delivery stamp, not the publisher claim', received[0].ts === 999);
   check('envelope.topic', received[0].topic?.name === 'cats');
   check('envelope.message', received[0].message.hi === 1);
 }

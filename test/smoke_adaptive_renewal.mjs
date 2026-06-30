@@ -27,10 +27,16 @@ const TOPIC = (0x42n << 248n) | 0xabcn;
 const RENEW_CEIL = 8000, RENEW_FAST = 1000;
 
 const sends = [];
+// A neighbour XOR-CLOSER to the topic than self, so the reachable-root fallback
+// (v4.9.1) does NOT fire — this test exercises renewal BACKOFF, which requires the
+// node to stay a subscriber (a node that is itself the closest reachable peer would
+// correctly self-claim root after the unattached window and stop renewing).
+const CLOSER = (0x42n << 248n) | 0x800n;   // ^TOPIC = 0x2bc  <  self ^TOPIC = 0xabc
 const dht = {
   getSelfId: () => SELF,
   routeMessage: (target, type, payload) => { sends.push({ type, payload }); },
   onRoutedMessage: () => {},
+  neighbors: () => [CLOSER],
 };
 const mgr = new AxonaManager({ dht, now: () => clock, renewMs: RENEW_CEIL, renewFastMs: RENEW_FAST });
 const ivOf = () => mgr.mySubscriptions.get(TOPIC)?.interval;
