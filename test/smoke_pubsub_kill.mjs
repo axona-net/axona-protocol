@@ -95,11 +95,19 @@ async function main() {
     const late = fab.addNode(BigInt('0x' + (await createNodeIdentity({ lat: 3, lng: 4 })).id));
     late.am._lastSeenTsByTopic.set(topicId, 0); late.am.pubsubSubscribe(topicId);
     await fab.settle(); fab.clock += 5000; await fab.tickAll(); await fab.settle();
-    check('3a. late since:all subscriber received the kill (tombstone replays)', late.dels.includes(e.msgId));
-    check('3b. late subscriber did NOT receive the killed message body', !late.got.includes(e.msgId));
+    // The CONVERGENCE guarantee is the tombstone STATE reaching the late sub (so the body
+    // stays suppressed) — NOT an app callback. A since:'all' joiner that never received the
+    // body gets no spurious {deleted} notification (there's nothing to retract); it simply
+    // never sees m1. (v4.9.2: kill callback gated on prior body delivery.)
+    check('3a. late since:all sub that never saw the body gets NO spurious {deleted} event', !late.dels.includes(e.msgId));
+    check('3b. late subscriber did NOT receive the killed message body (the real anti-leak guarantee)', !late.got.includes(e.msgId));
   }
 
-  // ── 3c: kill SELF-HEALS under message loss (the residual this closes) ──
+  // ── 3c: kill SELF-HEALS under message loss — the RETRACTION guarantee the gate
+  //   preserves. Subscribers that RECEIVED the body, then missed the live kill (loss),
+  //   must still converge the {deleted} retraction over renewals (tombstone replays like
+  //   a cached message). This is the case where a delete-callback is correct — the app is
+  //   holding m1 and must drop it. (Contrast 3a: a never-saw sub gets nothing.) ──
   {
     let recovered = 0, total = 0;
     for (let seed = 1; seed <= 8; seed++) {
@@ -107,20 +115,23 @@ async function main() {
       const nodes = await mkNodes(fab, 8, seed);
       const desc = { region:'useast', owner:null, name:`kill-loss-${seed}`, write:'open' };
       const topicId = await deriveTopicIdBig(desc);
-      nodes[0].am.pubsubSubscribe(topicId); await fab.settle(); fab.clock += 6000; await fab.tickAll();
+      // 3 subscribers join + receive the body FIRST (so a later kill is a real retraction)
+      const subs = nodes.slice(2, 5);
+      for (const s of subs) s.am.pubsubSubscribe(topicId);
+      nodes[0].am.pubsubSubscribe(topicId); await fab.settle(); fab.clock += 6000; await fab.tickAll(); await fab.settle();
       const e = await buildEnvelope({ topic: desc, message: { k: 1 }, seq: 1, identity: alice, ts: fab.clock });
       nodes[1].am.pubsubPublish(topicId, JSON.stringify(e)); await fab.settle();
+      const gotBody = subs.filter(s => s.got.includes(e.msgId)).length;
       const r = root(fab, topicId);
       const kill = await buildKill({ topicId: idHex(topicId), msgId: e.msgId, seq: 2, identity: alice });
-      fab.clock += 100; r.am.pubsubKill(topicId, kill); await fab.settle();
-      // now LOSS on: late subscribers join, must still converge on the kill over renewals
+      // kill happens UNDER LOSS — the subs that hold the body must converge the retraction
       fab.drop = 0.3;
-      const subs = [];
-      for (let i = 0; i < 3; i++) { const id = await createNodeIdentity({ lat: 5+i, lng: 6+i }); const s = fab.addNode(BigInt('0x'+id.id)); s.am._lastSeenTsByTopic.set(topicId, 0); s.am.pubsubSubscribe(topicId); subs.push(s); }
+      fab.clock += 100; r.am.pubsubKill(topicId, kill); await fab.settle();
       for (let t = 0; t < 30; t++) { fab.clock += 5000; await fab.tickAll(); }
       for (const s of subs) { total++; if (s.dels.includes(e.msgId)) recovered++; }
+      if (gotBody !== subs.length) { total = -1; break; }   // precondition: all subs saw the body
     }
-    check('3c. kill self-heals under 30% loss (all late subs eventually get it)', recovered === total, `(${recovered}/${total})`);
+    check('3c. kill self-heals under 30% loss (body-holding subs CONVERGE the retraction)', recovered === total && total > 0, `(${recovered}/${total})`);
   }
 
   // ── 4: provisional kill (before target) + enforce-on-arrival ──────────
@@ -179,7 +190,11 @@ async function main() {
     late.am._lastSeenTsByTopic.set(topicId, fab.clock);   // since AHEAD of killTs
     late.am.pubsubSubscribe(topicId);
     await fab.settle(); fab.clock += 5000; await fab.tickAll(); await fab.settle();
-    check('5b. late sub with since AHEAD of killTs STILL received the kill (leak fixed)', late.dels.includes(e.msgId), `(dels=${JSON.stringify(late.dels)})`);
+    // The leak-prevention guarantee is that the late sub never RECEIVES THE KILLED BODY —
+    // even with its since-cursor ahead of killTs (the stale-replica path). It never saw the
+    // body, so (per the gate) it gets no {deleted} event either; what matters is the body
+    // stays suppressed everywhere it could attach.
+    check('5b. late sub with since AHEAD of killTs never receives the killed body (leak fixed)', !late.got.includes(e.msgId), `(got=${JSON.stringify(late.got)})`);
     check('5c. late sub never saw the killed body', !late.got.includes(e.msgId));
   }
 

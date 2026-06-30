@@ -44,7 +44,11 @@ class Fabric {
           .slice(0, _k);
       },
     };
-    const am = new AxonaManager({ dht, now: () => self.clock, renewMs: 60_000, renewFastMs: 5_000, dropMs: 180_000 });
+    // rootReplicas: 0 — this suite isolates the graceful-leave HANDOFF mechanism; with
+    // cohort replication on (default) a backup would also hold the cache, defeating the
+    // "handoff is the ONLY thing that saved it" control. Replication is covered separately
+    // in smoke_root_replication / smoke_kill_migration.
+    const am = new AxonaManager({ dht, now: () => self.clock, renewMs: 60_000, renewFastMs: 5_000, dropMs: 180_000, rootReplicas: 0 });
     const rec = { id: idBig, am, handlers, alive: true, got: [] };
     am.onPubsubDelivery((_t, _j, msgId) => rec.got.push(msgId));
     this.nodes.set(idBig, rec);
