@@ -54,7 +54,7 @@ import { buildEnvelope }  from '../pubsub/envelope.js';
 import { buildKill }      from '../pubsub/kill.js';
 import { buildTouch }     from '../pubsub/touch.js';
 import { AxonaManager, MAX_PUBLISH_BYTES, MAX_RELIABLE_PUBLISH_BYTES } from '../pubsub/AxonaManager.js';
-import { metricTopic } from '../pubsub/metrics.js';
+import { metricTopic, isMetricTopicName, dataTopicIdOf } from '../pubsub/metrics.js';
 import { authorClassTopic, buildAuthorClass, verifyAuthorClass } from '../pubsub/authorClass.js';
 import { PublishError, SubscribeError, KillError, TouchError, PullError, MetricsError, ErrorCodes } from '../errors.js';
 
@@ -1846,8 +1846,36 @@ export class AxonaPeer extends DHT {
     }
 
     am.pubsubSubscribe(topicIdBig, { replayLatest: opts.since === 'latest' });
+
+    // Demand-driven metrics: subscribing to a metricTopic(dataId) turns metrics ON
+    // for the underlying DATA topic — a renewable METRICSON lease routed to that
+    // topic's root, which then publishes snapshots to this metric topic. ANY node
+    // that roots the data topic honors it (no special/relay node); the lease lapses
+    // when the last metric subscriber unsubscribes. See AxonaManager metrics block.
+    if (isMetricTopicName(desc.name) && typeof am.pubsubMetricsOn === 'function') {
+      const dataIdHex = dataTopicIdOf(desc);
+      if (dataIdHex) {
+        const dataBig = BigInt('0x' + dataIdHex);
+        this._ensureMetricsPublisher(am);
+        if (!this._metricDataByMetricTopic) this._metricDataByMetricTopic = new Map();
+        this._metricDataByMetricTopic.set(topicIdBig, dataBig);
+        am.pubsubMetricsOn(dataBig);
+      }
+    }
+
     this._markPersistDirty('subscriptions');
     return sub;
+  }
+
+  // Register (once) the hook the kernel calls to publish a metric snapshot: any
+  // root with an active metrics lease produces a snapshot, and we publish it to
+  // the derived metric topic — ANONYMOUS (the metric topic is open + advisory, so
+  // no node exposes an author key just to emit infra stats).
+  _ensureMetricsPublisher(am) {
+    if (this._metricsPublisherSet || typeof am.setMetricsPublisher !== 'function') return;
+    this._metricsPublisherSet = true;
+    am.setMetricsPublisher((dataTopicIdHex, snapshot) =>
+      this.pub(metricTopic(dataTopicIdHex), JSON.stringify(snapshot), { signWith: ANONYMOUS }));
   }
 
   /**
@@ -1961,7 +1989,12 @@ export class AxonaPeer extends DHT {
       if (set.size === 0) {
         this._subscriptions.delete(key);
         try {
-          this._requireAxonaManager('unsubscribe').pubsubUnsubscribe(key);
+          const am = this._requireAxonaManager('unsubscribe');
+          am.pubsubUnsubscribe(key);
+          // If this was a metric-topic subscription, drop the metrics lease on the
+          // underlying data topic so its root stops publishing (soft-state turn-off).
+          const dataBig = this._metricDataByMetricTopic?.get(key);
+          if (dataBig !== undefined && typeof am.pubsubMetricsOff === 'function') { am.pubsubMetricsOff(dataBig); this._metricDataByMetricTopic.delete(key); }
         } catch { /* unsubscribe is best-effort */ }
       }
       this._markPersistDirty('subscriptions');
@@ -2502,6 +2535,10 @@ export class AxonaPeer extends DHT {
       am.setLogSink((level, msg, context) => this._emitLog(level, msg, context));
       this._managerLogWired = am;
     }
+    // Wire the metrics publisher eagerly so ANY node that ever roots a topic with
+    // an active metrics lease publishes its snapshots — including a headless host()
+    // relay that never subscribes to a metric topic itself.
+    if (am) this._ensureMetricsPublisher(am);
     return am;
   }
 
