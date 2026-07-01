@@ -1,126 +1,72 @@
 // =====================================================================
-// smoke_rooted_topics.mjs — AxonaManager.rootedTopics() / AxonaPeer.rootedTopics()
-// the read side of the derived metric-topic convention.
+// smoke_rooted_topics.mjs — AxonaManager.rootedTopics() (routing-only 4.x).
 //
-// A root must be able to enumerate the topics it serves, each with its signed
-// topic descriptor + a locally-computed metric snapshot (no network), so an
-// infrastructure node can republish those snapshots to metricTopic(T) on a
-// timer. This checks the MECHANISM the kernel supplies; the POLICY (skip metric
-// topics, skip owned topics, cadence, signing) lives in the relay loop.
+// The PRODUCER side of the derived metric-topic convention: a root enumerates the
+// topics it serves, each with a locally-computed snapshot (no network), so an infra
+// node republishes them to metricTopic(T). rootedTopics() was dropped in the v3.12
+// clean break (silently killing all 4.x metrics) and re-added in v4.10.1 with the
+// message counter (seq) + cache count.
 //
-//   1. a rooted open topic appears with its descriptor + current_count + subscribers
-//   2. the descriptor is the SIGNED { region, owner, name, write } (recursion
-//      guard + open/owned policy can be applied to it)
-//   3. bytes reflects the cached envelope size; empty/expired roles report 0
-//   4. a rooted METRIC topic is flagged by the core isMetricTopic() guard
-//   5. an owned topic is recognisable as non-open (write:'owner') for the
-//      privacy filter
-//   6. a role with no cached envelope yields descriptor:null (caller skips it)
+//   1. a rooted topic is enumerated with descriptor recovered from the cached envelope
+//   2. current_count = messages currently in cache
+//   3. seq = the root's dense message counter (high-water)   ← v4.10.1
+//   4. subscribers = this member's subscriber count; bytes = cached bytes
+//   5. a non-root role is NOT enumerated
+//   6. a role with no cached envelope → descriptor:null (caller skips it)
 //
 //   node test/smoke_rooted_topics.mjs
 // =====================================================================
+import { AxonaManager } from '../src/pubsub/AxonaManager.js';
 
-import { AxonaManager }        from '../src/pubsub/AxonaManager.js';
-import { createAuthorIdentity } from '../src/identity/index.js';
-import { buildEnvelope }       from '../src/pubsub/envelope.js';
-import { toHex }               from '../src/utils/hexid.js';
-import { deriveTopicId, metricTopic, isMetricTopic } from '../src/index.js';
+let n = 0, fail = 0;
+const ok = (m, c) => { if (c) { console.log(`  ok ${++n} - ${m}`); } else { console.log(`  ✗  ${m}`); fail++; } };
+const REG = 0x87n << 248n, idHex = (b) => b.toString(16).padStart(66, '0');
+const SELF = REG | 0x11n, OPEN = REG | 0xa1n, OWNED = REG | 0xb2n, EMPTY = REG | 0xc3n, NOTROOT = REG | 0xd4n;
 
-let passed = 0, failed = 0;
-const check = (label, cond) => { if (cond) { console.log(`  ✓ ${label}`); passed++; } else { console.log(`  ✗ ${label}`); failed++; } };
-
-const T = 1_700_000_000_000;
-const emptyRole = () => ({ isRoot: true, isInRootSet: true, children: new Map(), replayCache: [], peerRoots: new Set(), roleCreatedAt: T, emptiedAt: 0 });
-
-function spawnMgr(selfId) {
-  const routed = new Map(), direct = new Map();
-  const dht = {
-    getSelfId: () => selfId,
-    onRoutedMessage: (t, h) => routed.set(t, h),
-    onDirectMessage: (t, h) => direct.set(t, h),
-    onEvent: () => () => {},
-    findKClosest: async () => [],
-    routeMessage: async () => {},
-    sendDirect: async () => false,
-  };
-  const mgr = new AxonaManager({ dht, now: () => T });
-  mgr.nodeId = selfId;
-  return mgr;
+function mk() {
+  const dht = { getSelfId: () => SELF, onRoutedMessage: () => {}, routeMessage: () => {}, neighbors: () => [], bridgeId: () => null };
+  const am = new AxonaManager({ dht, now: () => 1_700_000_000_000 }); am.nodeId = SELF;
+  return am;
+}
+// push a cache entry whose json carries a topic descriptor (rootedTopics JSON.parses .topic)
+const envJson = (desc, i) => JSON.stringify({ msgId: 'm' + i, topic: desc, message: 'x' + i });
+function seedRoot(am, topicBig, desc, { count = 1, seq = 0, subs = 0 } = {}) {
+  const role = am._becomeRoot(topicBig);
+  for (let i = 0; i < count; i++) { const j = envJson(desc, i); role.cache.push({ msgId: 'm' + i, publishTs: 100 + i, json: j, seq: i + 1, bytes: j.length }); role.cacheIds.add('m' + i); role.cacheBytes += j.length; }
+  role.seq = seq;
+  for (let i = 0; i < subs; i++) role.subscribers.set('s' + i, { since: 0, lastRenewed: 0 });
+  return role;
 }
 
-async function rootTopic(mgr, descriptor, { message = 'hello', subscribers = 0 } = {}) {
-  const author = await createAuthorIdentity();
-  const env    = await buildEnvelope({ topic: descriptor, message, identity: author, ts: T, seq: T });
-  const id     = await deriveTopicId(descriptor);
-  const big    = BigInt('0x' + id);
-  const role   = emptyRole();
-  for (let i = 0; i < subscribers; i++) role.children.set('sub' + i, { createdAt: T, lastRenewed: T });
-  mgr.axonRoles.set(big, role);
-  mgr._addToReplayCache(role, { json: JSON.stringify(env), postHash: env.msgId, publishTs: T, publisher: null });
-  return { id, big, env };
-}
+const am = mk();
+seedRoot(am, OPEN,  { region: 'useast', name: 'lobby', write: 'open' }, { count: 3, seq: 7, subs: 2 });
+seedRoot(am, OWNED, { region: 'useast', owner: 'aa', name: 'feed', write: 'owner' }, { count: 1, seq: 1, subs: 0 });
+// empty root: is root, subscribers, but no cache
+{ const r = am._becomeRoot(EMPTY); r.subscribers.set('s0', { since: 0, lastRenewed: 0 }); }
+// a NON-root role (backup) must not be enumerated
+{ const r = am._becomeRoot(NOTROOT); r.isRoot = false; r.cache.push({ msgId: 'z', publishTs: 1, json: envJson({ region: 'useast', name: 'z' }, 0), seq: 1, bytes: 10 }); }
 
-async function main() {
-  console.log('Axona rootedTopics() — derived-metric read side');
-  const mgr = spawnMgr(0x1234n);
+const rooted = am.rootedTopics();
+const byId = (b) => rooted.find(r => r.topicId === idHex(b));
 
-  // ── 1–3. a rooted OPEN topic with one cached post + 2 subscribers ──
-  const lobby = { region: 'useast', name: 'lobby' };
-  const { id: lobbyId } = await rootTopic(mgr, lobby, { message: 'first', subscribers: 2 });
+const L = byId(OPEN);
+ok('rooted open topic enumerated', !!L);
+ok('current_count = messages in cache (3)', L?.current_count === 3);
+ok('seq = the message counter (7)', L?.seq === 7);
+ok('subscribers = 2', L?.subscribers === 2);
+ok('bytes > 0 (cached envelope bytes)', typeof L?.bytes === 'number' && L.bytes > 0);
+ok('descriptor recovered from cached envelope (name)', L?.descriptor?.name === 'lobby');
+ok('descriptor recovered (write:open)', L?.descriptor?.write === 'open');
 
-  // ── 4. a rooted METRIC topic (its descriptor name is in the reserved ns) ──
-  const metricDesc = metricTopic(lobbyId);
-  const { id: metricId } = await rootTopic(mgr, metricDesc, { message: JSON.stringify({ current_count: 1 }) });
+const O = byId(OWNED);
+ok('owned topic enumerated + descriptor write:owner + owner set', O?.descriptor?.write === 'owner' && O?.descriptor?.owner === 'aa');
 
-  // ── 5. a rooted OWNED topic (write:'owner') ──
-  const owner = await createAuthorIdentity();
-  const ownedDesc = { region: 'useast', owner: owner.authorId, name: 'feed', write: 'owner' };
-  const { id: ownedId } = await rootTopic(mgr, ownedDesc, { message: 'mine' });
+const E = byId(EMPTY);
+ok('empty root enumerated', !!E);
+ok('empty root current_count = 0', E?.current_count === 0);
+ok('empty root descriptor = null (no envelope to recover → caller skips)', E?.descriptor === null);
 
-  // ── 6. a role with NO cached envelope (subscribers only) ──
-  const emptyId = await deriveTopicId({ region: 'useast', name: 'ghost' });
-  const emptyRoleObj = emptyRole();
-  emptyRoleObj.children.set('s', { createdAt: T, lastRenewed: T });
-  mgr.axonRoles.set(BigInt('0x' + emptyId), emptyRoleObj);
+ok('non-root role is NOT enumerated', !byId(NOTROOT));
 
-  const rooted = mgr.rootedTopics();
-  const byId = (id) => rooted.find(r => r.topicId === id);
-
-  // 1
-  const L = byId(lobbyId);
-  check('1. rooted open topic is enumerated', !!L);
-  check('1b. current_count = 1 cached post', L?.current_count === 1);
-  check('1c. subscribers = 2', L?.subscribers === 2);
-
-  // 2 — descriptor is the signed one, usable by the policy filters
-  check('2a. descriptor carries the topic name', L?.descriptor?.name === 'lobby');
-  check('2b. open topic descriptor: write !== "owner"', L?.descriptor?.write !== 'owner');
-  check('2c. open topic is NOT flagged as a metric topic', isMetricTopic(L?.descriptor) === false);
-
-  // 3 — bytes
-  check('3. bytes reflects the cached envelope size', typeof L?.bytes === 'number' && L.bytes > 0);
-
-  // 4 — metric topic flagged by the core guard (relay would SKIP it)
-  const M = byId(metricId);
-  check('4a. metric topic is enumerated', !!M);
-  check('4b. isMetricTopic(descriptor) is true → recursion guard skips it',
-    isMetricTopic(M?.descriptor) === true);
-
-  // 5 — owned topic recognisable as non-open (privacy filter)
-  const O = byId(ownedId);
-  const isOpen = (d) => d?.write === 'open' || !d?.owner;
-  check('5a. owned topic is enumerated', !!O);
-  check('5b. owned topic descriptor: write === "owner" + owner set', O?.descriptor?.write === 'owner' && !!O?.descriptor?.owner);
-  check('5c. open-policy predicate rejects the owned topic', isOpen(O?.descriptor) === false);
-  check('5d. open-policy predicate accepts the lobby topic', isOpen(L?.descriptor) === true);
-
-  // 6 — empty role → descriptor null (caller skips: nothing to report)
-  const E = byId(emptyId);
-  check('6a. empty role is enumerated', !!E);
-  check('6b. empty role has descriptor:null (no envelope to recover)', E?.descriptor === null);
-  check('6c. empty role current_count = 0', E?.current_count === 0);
-
-  console.log(`\nResult: ${passed} passed, ${failed} failed`);
-  process.exit(failed === 0 ? 0 : 1);
-}
-main().catch((e) => { console.error('smoke threw:', e?.stack || e); process.exit(2); });
+console.log(`\n${fail ? '✗' : '✓'} smoke_rooted_topics: ${n} passed, ${fail} failed`);
+process.exit(fail ? 1 : 0);
