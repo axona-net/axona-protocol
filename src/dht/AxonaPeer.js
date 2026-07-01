@@ -40,7 +40,7 @@
 import { DHT }            from '../contracts/DHT.js';
 import { Synapse }        from './Synapse.js';
 import { Subscription }   from './Subscription.js';
-import { clz264, toHex, fromHex, isHexId, extractS2Prefix, BAD_ID_CODE } from '../utils/hexid.js';
+import { clz264, toHex, fromHex, isHexId, extractS2Prefix, asId, BAD_ID_CODE } from '../utils/hexid.js';
 import { resolveTopic, deriveTopicId, deriveTopicIdBig } from '../pubsub/post.js';
 
 /**
@@ -582,9 +582,7 @@ export class AxonaPeer extends DHT {
     // excluding the requestor itself (otherwise they'd see themselves
     // as a candidate — useless).
     transport.onRequest('local_probe', async (fromId, _payload) => {
-      const fromBig = (typeof fromId === 'bigint')
-        ? fromId
-        : BigInt('0x' + fromId);
+      const fromBig = asId(fromId);   // wire→internal id gate
       const peerIds = [];
       for (const syn of node.synaptome.values()) {
         if (syn.peerId !== fromBig) peerIds.push(syn.peerId);
@@ -608,9 +606,7 @@ export class AxonaPeer extends DHT {
     // discovery.  Insertion-sorted scan; cheap because synaptome is
     // bounded by MAX_SYNAPTOME.  Caller merges results across rounds.
     transport.onRequest('find_closest_set', async (_fromId, payload) => {
-      const targetBig = (typeof payload.target === 'bigint')
-        ? payload.target
-        : BigInt('0x' + String(payload.target));
+      const targetBig = asId(payload.target);   // wire→internal id gate
       const K = payload.K ?? domain._k;
       const top = [];
       for (const syn of node.synaptome.values()) {
@@ -637,9 +633,7 @@ export class AxonaPeer extends DHT {
     // route_msg request and bubbles the downstream reply unchanged.
     transport.onRequest('route_msg', async (fromId, msg) => {
       const { type, payload, targetId, hops, originId } = msg;
-      const targetBig = (typeof targetId === 'bigint')
-        ? targetId
-        : BigInt('0x' + String(targetId));
+      const targetBig = asId(targetId);   // wire→internal id gate
 
       // Greedy 1-hop forward — only over synapses we are actually connected
       // to (skip dead/unbound entries, e.g. the bridge after it drops; see
@@ -1568,7 +1562,7 @@ export class AxonaPeer extends DHT {
         ? ErrorCodes.TOPIC_REGION_REQUIRED : ErrorCodes.PUBLISH_INVALID_TOPIC;
       throw new PublishError(code, `peer.${op}: ${cause.message}`, { cause, context: { topic } });
     }
-    r.topicIdBig = BigInt('0x' + r.topicId);
+    r.topicIdBig = asId(r.topicId);
     return r;
   }
 
@@ -1595,7 +1589,7 @@ export class AxonaPeer extends DHT {
       return {
         region: parseInt(id.slice(0, 2), 16),
         owner: null, name: null, write: null,
-        topicId: id, topicIdBig: BigInt('0x' + id), byId: true,
+        topicId: id, topicIdBig: asId(id), byId: true,
       };
     }
     return this._resolveTopicOrThrow(topic, op);
@@ -1857,7 +1851,7 @@ export class AxonaPeer extends DHT {
     if (isMetricTopicName(desc.name) && typeof am.pubsubMetricsOn === 'function') {
       const dataIdHex = dataTopicIdOf(desc);
       if (dataIdHex) {
-        const dataBig = BigInt('0x' + dataIdHex);
+        const dataBig = asId(dataIdHex);
         this._ensureMetricsPublisher(am);
         if (!this._metricDataByMetricTopic) this._metricDataByMetricTopic = new Map();
         this._metricDataByMetricTopic.set(topicIdBig, dataBig);
@@ -1888,13 +1882,13 @@ export class AxonaPeer extends DHT {
   // lookup), we don't false-refuse — the kernel still won't root an out-of-region
   // topic, so the worst case is a silent no-op, never a wrong-region hotspot.
   async _assertRegionUsable(topicIdBig, ErrCls, opName) {
-    const big = (v) => (v == null ? null : (typeof v === 'bigint' ? v : BigInt('0x' + String(v).replace(/^0x/, ''))));
-    const selfBig     = big(this._node?.id);
-    const selfRegion  = (selfBig != null) ? extractS2Prefix(selfBig) : null;
-    const topicRegion = extractS2Prefix(big(topicIdBig));
+    // node.id is a BigInt by construction (DHTNode gate); asId() keeps the topic arg
+    // honest whether it arrived as a BigInt or a hex id, without any local type-guessing.
+    const selfRegion  = (this._node?.id != null) ? extractS2Prefix(asId(this._node.id)) : null;
+    const topicRegion = extractS2Prefix(asId(topicIdBig));
     if (selfRegion === topicRegion) return;          // we ARE an in-region node → the region is populated
     let closest = null;
-    try { const a = await this.findKClosest(topicIdBig, 1); closest = (Array.isArray(a) && a.length) ? big(a[0]) : null; }
+    try { const a = await this.findKClosest(asId(topicIdBig), 1); closest = (Array.isArray(a) && a.length) ? asId(a[0]) : null; }
     catch { closest = null; }
     if (closest == null) return;                     // indeterminate — don't false-refuse
     if (extractS2Prefix(closest) !== topicRegion) {
@@ -3098,9 +3092,7 @@ export class AxonaPeer extends DHT {
    */
   _greedyNextHopToward(targetId) {
     if (!this._node?.alive) return null;
-    const target = (typeof targetId === 'bigint')
-      ? targetId
-      : BigInt('0x' + targetId);
+    const target = asId(targetId);   // wire→internal id gate
     // Only forward to a synapse we are ACTUALLY connected to.  A dead synapse
     // (e.g. the bridge after it dies — peers keep the synapse until anneal
     // cleans it) is XOR-near many targets and would be picked as the greedy
@@ -3143,9 +3135,7 @@ export class AxonaPeer extends DHT {
    */
   async _findCloserInTwoHops(targetId) {
     const node = this._node;
-    const target = (typeof targetId === 'bigint')
-      ? targetId
-      : BigInt('0x' + targetId);
+    const target = asId(targetId);   // wire→internal id gate
     const myDist = node.id ^ target;
     let bestPeerId = null;        // the FIRST-HOP (adjacent) peer to forward to
     let bestDist   = myDist;

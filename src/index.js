@@ -220,6 +220,7 @@ export {
   toHex,
   fromHex,
   isHexId,
+  asId,        // canonical id coercion gate (wire/hex → validated BigInt)
   assembleId,
   extractS2Prefix,
   extractHash,

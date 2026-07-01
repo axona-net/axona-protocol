@@ -48,7 +48,7 @@
 import { verifyEnvelope, checkFreshness } from './envelope.js';
 import { verifyKill }                     from './kill.js';
 import { deriveTopicIdBig }               from './post.js';
-import { extractS2Prefix }                from '../utils/hexid.js';
+import { extractS2Prefix, asId }          from '../utils/hexid.js';
 
 // ── Inbound caps (D-1: bound attacker-controlled payloads) ──────────────
 // Re-exported unchanged — AxonaPeer and std/chunk import these as the
@@ -162,8 +162,11 @@ const METRICS_PUB_MS   = 20_000;   // snapshot cadence at the root while the lea
 const METRICS_COALESCE_MS = 8_000; // a path node re-forwards METRICSON upstream at most this often (fan-in dedup; still keeps the root's lease alive)
 
 // ── id helpers (264-bit ids ⇄ 66-char hex) ──────────────────────────────
+// Address invariant: bigint internally, hex only on the JSON wire. idHex is the
+// egress (bigint → wire hex); idBig is the ingress gate, delegating to the kernel's
+// canonical asId() so every wire→internal id conversion is validated the same way.
 const idHex = (big) => big.toString(16).padStart(66, '0');
-const idBig = (hex) => (typeof hex === 'bigint' ? hex : BigInt('0x' + String(hex)));
+const idBig = asId;
 const lc    = (s) => String(s ?? '').toLowerCase();
 const isHexId = (s) => /^[0-9a-f]{1,66}$/.test(s);
 
