@@ -18,6 +18,8 @@ import { AxonaManager } from '../src/pubsub/AxonaManager.js';
 import { buildEnvelope } from '../src/pubsub/envelope.js';
 import { deriveTopicIdBig } from '../src/pubsub/post.js';
 import { createNodeIdentity, createAuthorIdentity } from '../src/identity/index.js';
+import { regionCenter } from '../src/utils/region-names.js';
+const __LOC = regionCenter('useast');  // region-lock: co-region test nodes with the 'useast' topics
 
 let passed = 0, failed = 0;
 const check = (label, cond, extra = '') => {
@@ -100,7 +102,7 @@ async function main() {
   // Generate a pool of node identities and rank by XOR distance to the topic.
   const pool = [];
   for (let i = 0; i < 24; i++) {
-    const id = await createNodeIdentity({ lat: (i * 13) % 80 - 40, lng: (i * 29) % 300 - 150 });
+    const id = await createNodeIdentity(__LOC);
     pool.push(BigInt('0x' + id.id));
   }
   pool.sort((a, b) => { const da = a ^ topicId, db = b ^ topicId; return da < db ? -1 : da > db ? 1 : 0; });

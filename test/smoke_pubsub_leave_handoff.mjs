@@ -18,6 +18,8 @@ import { AxonaManager } from '../src/pubsub/AxonaManager.js';
 import { buildEnvelope } from '../src/pubsub/envelope.js';
 import { deriveTopicIdBig } from '../src/pubsub/post.js';
 import { createNodeIdentity, createAuthorIdentity } from '../src/identity/index.js';
+import { regionCenter } from '../src/utils/region-names.js';
+const __LOC = regionCenter('useast');  // region-lock: co-region test nodes with the 'useast' topics
 
 let passed = 0, failed = 0;
 const check = (label, cond, extra = '') => {
@@ -99,7 +101,7 @@ async function main() {
   {
     const fab = new Fabric();
     const nodes = [];
-    for (let i = 0; i < 20; i++) { const id = await createNodeIdentity({ lat: (i*11)%80-40, lng: (i*17)%300-150 }); nodes.push(fab.addNode(BigInt('0x'+id.id))); }
+    for (let i = 0; i < 20; i++) { const id = await createNodeIdentity(__LOC); nodes.push(fab.addNode(BigInt('0x'+id.id))); }
     const desc = { region: 'useast', owner: null, name: 'handoff-on', write: 'open' };
     const topicId = await deriveTopicIdBig(desc);
     const ids = await buildAndPublish(fab, nodes, desc, topicId, author, M, SEQ);
@@ -118,7 +120,7 @@ async function main() {
     const heir = fab.nodes.get(fab._closestAlive(topicId));
     check('the heir inherited the full cache via handoff', cacheSize(heir, topicId) === M, `(${cacheSize(heir, topicId)}/${M})`);
 
-    const late = fab.addNode(BigInt('0x' + (await createNodeIdentity({ lat: 1, lng: 1 })).id));
+    const late = fab.addNode(BigInt('0x' + (await createNodeIdentity(__LOC)).id));
     late.am._lastSeenTsByTopic.set(topicId, 0);
     late.am.pubsubSubscribe(topicId);
     await fab.settle(); fab.clock += 5_000; await fab.tickAll(); await fab.settle();
@@ -130,7 +132,7 @@ async function main() {
   {
     const fab = new Fabric();
     const nodes = [];
-    for (let i = 0; i < 20; i++) { const id = await createNodeIdentity({ lat: (i*13)%80-40, lng: (i*19)%300-150 }); nodes.push(fab.addNode(BigInt('0x'+id.id))); }
+    for (let i = 0; i < 20; i++) { const id = await createNodeIdentity(__LOC); nodes.push(fab.addNode(BigInt('0x'+id.id))); }
     const desc = { region: 'useast', owner: null, name: 'handoff-off', write: 'open' };
     const topicId = await deriveTopicIdBig(desc);
     const ids = await buildAndPublish(fab, nodes, desc, topicId, author, M, SEQ);
@@ -145,7 +147,7 @@ async function main() {
     fab.kill(root1.id);   // abrupt — NO handoff (cache dies with it)
     for (let r = 0; r < 3; r++) { fab.clock += 5_000; await fab.tickAll(); }
 
-    const late = fab.addNode(BigInt('0x' + (await createNodeIdentity({ lat: 2, lng: 2 })).id));
+    const late = fab.addNode(BigInt('0x' + (await createNodeIdentity(__LOC)).id));
     late.am._lastSeenTsByTopic.set(topicId, 0);
     late.am.pubsubSubscribe(topicId);
     await fab.settle(); fab.clock += 5_000; await fab.tickAll(); await fab.settle();

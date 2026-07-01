@@ -23,6 +23,8 @@ import { buildEnvelope } from '../src/pubsub/envelope.js';
 import { buildKill } from '../src/pubsub/kill.js';
 import { deriveTopicIdBig } from '../src/pubsub/post.js';
 import { createNodeIdentity, createAuthorIdentity } from '../src/identity/index.js';
+import { regionCenter } from '../src/utils/region-names.js';
+const __LOC = regionCenter('useast');  // region-lock: co-region test nodes with the 'useast' topics
 
 let passed = 0, failed = 0;
 const check = (label, cond, extra = '') => { if (cond) { console.log(`  ✓ ${label}`); passed++; } else { console.log(`  ✗ ${label} ${extra}`); failed++; } };
@@ -57,7 +59,7 @@ const root = (fab, topicBig) => fab.nodes.get(fab._closest(topicBig));
 const cacheHas = (rec, t, id) => (rec.am.axonRoles.get(t)?.cache || []).some(c => c.msgId === id);
 const tombstoned = (rec, t, id) => rec.am.axonRoles.get(t)?.tombstones?.has(id);
 
-async function mkNodes(fab, n, salt) { const a = []; for (let i = 0; i < n; i++) { const id = await createNodeIdentity({ lat:(i*11+salt)%80-40, lng:(i*17+salt)%300-150 }); a.push(fab.addNode(BigInt('0x'+id.id))); } return a; }
+async function mkNodes(fab, n, salt) { const a = []; for (let i = 0; i < n; i++) { const id = await createNodeIdentity(__LOC); a.push(fab.addNode(BigInt('0x'+id.id))); } return a; }
 
 async function main() {
   console.log('Axona pub/sub — kill = verified publish + delete side-effect (v4.8.8)');
@@ -92,7 +94,7 @@ async function main() {
     check('1c. subscribers received the {deleted} callback', subA.dels.includes(e.msgId) && subB.dels.includes(e.msgId));
 
     // SELF-HEAL: a late since:'all' subscriber learns of the kill via replay
-    const late = fab.addNode(BigInt('0x' + (await createNodeIdentity({ lat: 3, lng: 4 })).id));
+    const late = fab.addNode(BigInt('0x' + (await createNodeIdentity(__LOC)).id));
     late.am._lastSeenTsByTopic.set(topicId, 0); late.am.pubsubSubscribe(topicId);
     await fab.settle(); fab.clock += 5000; await fab.tickAll(); await fab.settle();
     // The CONVERGENCE guarantee is the tombstone STATE reaching the late sub (so the body
@@ -185,7 +187,7 @@ async function main() {
     // activity from a stale replica that held the body but never got the kill). The
     // OLD gate (killTs > since) would never replay the tombstone here → permanent
     // killed-body leak. The fix replays every ACTIVE tombstone regardless of `since`.
-    const late = fab.addNode(BigInt('0x' + (await createNodeIdentity({ lat: 9, lng: 9 })).id));
+    const late = fab.addNode(BigInt('0x' + (await createNodeIdentity(__LOC)).id));
     fab.clock += 50_000;
     late.am._lastSeenTsByTopic.set(topicId, fab.clock);   // since AHEAD of killTs
     late.am.pubsubSubscribe(topicId);

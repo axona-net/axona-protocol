@@ -26,6 +26,8 @@ import { AxonaManager } from '../src/pubsub/AxonaManager.js';
 import { buildEnvelope } from '../src/pubsub/envelope.js';
 import { deriveTopicIdBig } from '../src/pubsub/post.js';
 import { createNodeIdentity, createAuthorIdentity } from '../src/identity/index.js';
+import { regionCenter } from '../src/utils/region-names.js';
+const __LOC = regionCenter('useast');  // region-lock: co-region test nodes with the 'useast' topics
 
 let passed = 0, failed = 0;
 const check = (label, cond) => {
@@ -83,7 +85,7 @@ async function signedJson(descriptor, message, author) {
 async function makeNodes(fab, n) {
   const out = [];
   for (let i = 0; i < n; i++) {
-    const id = await createNodeIdentity({ lat: 30 + i, lng: -100 + i });
+    const id = await createNodeIdentity(__LOC);
     out.push(fab.addNode(BigInt('0x' + id.id)));
   }
   return out;

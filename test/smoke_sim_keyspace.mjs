@@ -30,6 +30,8 @@ const { AxonaManager }      = await import('../src/pubsub/AxonaManager.js');
 const { buildEnvelope, verifyEnvelope } = await import('../src/pubsub/envelope.js');
 const { deriveTopicIdBig }  = await import('../src/pubsub/post.js');
 const { createNodeIdentity, createAuthorIdentity } = await import('../src/identity/index.js');
+const { regionCenter }      = await import('../src/utils/region-names.js');
+const __LOC = regionCenter('useast');  // region-lock: co-region mesh nodes with the 'useast' topics
 
 let passed = 0, failed = 0;
 const check = (label, cond) => {
@@ -91,7 +93,7 @@ async function signedJson(descriptor, message, author) {
 async function makeNodes(fab, n) {
   const out = [];
   for (let i = 0; i < n; i++) {
-    const id = await createNodeIdentity({ lat: 30 + i, lng: -100 + i });
+    const id = await createNodeIdentity({ ...__LOC });
     out.push(fab.addNode(BigInt('0x' + id.id)));
   }
   return out;
@@ -203,7 +205,7 @@ async function testFastIdentity() {
   // routes/delivers: build a small mesh of fast-identity peers via the Fabric
   const fab = new Fabric();
   for (let i = 0; i < 8; i++) {
-    const id = await createNodeIdentity({ lat: 30 + i, lng: -100 + i, fast: true });
+    const id = await createNodeIdentity({ ...__LOC, fast: true });
     fab.addNode(BigInt('0x' + id.id));
   }
   const author = await createAuthorIdentity();

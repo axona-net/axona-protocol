@@ -48,6 +48,7 @@
 import { verifyEnvelope, checkFreshness } from './envelope.js';
 import { verifyKill }                     from './kill.js';
 import { deriveTopicIdBig }               from './post.js';
+import { extractS2Prefix }                from '../utils/hexid.js';
 
 // ── Inbound caps (D-1: bound attacker-controlled payloads) ──────────────
 // Re-exported unchanged — AxonaPeer and std/chunk import these as the
@@ -315,7 +316,21 @@ export class AxonaManager {
       if (idBig(via[0]) === this.nodeId) return this.axonRoles.has(idBig(payload.topicId)) ? 'handle' : 'reroute';
       return meta.isTerminal ? 'reroute' : 'forward';      // waypoint dead; I'm just closest to it
     }
-    return meta.isTerminal ? 'handle' : 'forward';         // bare topic id → only the terminus handles
+    // Bare topic id → only the terminus handles. REGION RULE: a topic may only be
+    // rooted by a node IN ITS REGION. If I'm the routing terminus but out-of-region,
+    // the topic's region has no node — REFUSE rather than root it here (which would
+    // pull a foreign region's traffic into mine and hotspot my region). The handlers
+    // treat 'reject' as "drop, don't seat/store/root."
+    if (!meta.isTerminal) return 'forward';
+    return this._sameRegion(idBig(payload.topicId)) ? 'handle' : 'reject';
+  }
+
+  // True iff a topic (or any id) shares this node's region byte (S2 prefix). The
+  // region byte is the high byte of every 264-bit id; only same-region nodes may
+  // form a topic's axon-tree infrastructure (root + child relays).
+  _sameRegion(idBigVal) {
+    try { return extractS2Prefix(idBigVal) === extractS2Prefix(this.nodeId); }
+    catch { return false; }
   }
 
   // I am the root for a topic iff I am the routing terminus for its bare id.
@@ -337,6 +352,7 @@ export class AxonaManager {
   _onSub(payload, meta) {
     const d = this._topicDecision(payload, meta);
     if (d === 'forward') return;
+    if (d === 'reject') return 'consumed';   // out-of-region terminus: topic's region has no node → don't root/seat/store here
     if (d === 'reroute') { this._reroute(T.SUB, payload); return 'consumed'; }
 
     const topicBig = idBig(payload.topicId);
@@ -372,6 +388,7 @@ export class AxonaManager {
   _onUnsub(payload, meta) {
     const d = this._topicDecision(payload, meta);
     if (d === 'forward') return;
+    if (d === 'reject') return 'consumed';   // out-of-region terminus: topic's region has no node → don't root/seat/store here
     if (d === 'reroute') { this._reroute(T.UNSUB, payload); return 'consumed'; }
     const role = this.axonRoles.get(idBig(payload.topicId));
     if (role) { const s = lc(payload.subscriberId); role.subscribers.delete(s); role.children.delete(s); }
@@ -426,8 +443,15 @@ export class AxonaManager {
   // ≥2 leaves. Returning false tells _accept to deepen (delegate to a child)
   // instead of seating the newcomer over capacity.
   _promoteChild(role) {
+    // REGION RULE: the tree's relay infrastructure must be IN-REGION. Only promote
+    // an in-region leaf to a child relay; foreign leaves stay as direct leaves of
+    // the root (they still receive, they just never relay for a region not theirs).
     const leaves = [];
-    for (const s of role.subscribers.keys()) if (!role.children.has(s)) leaves.push(s);
+    for (const s of role.subscribers.keys()) {
+      if (role.children.has(s)) continue;
+      if (!this._sameRegion(idBig(s))) continue;   // out-of-region subscriber: never a relay child
+      leaves.push(s);
+    }
     if (leaves.length < 2) return false;
     const leaf = leaves[0];
     role.children.add(leaf);
@@ -451,6 +475,10 @@ export class AxonaManager {
   _onAdopt(payload, meta) {
     if (meta.targetId !== this.nodeId) return;        // routed to me specifically
     const topicBig = idBig(payload.topicId);
+    // REGION RULE: never become a child relay for a topic outside my region (the
+    // tree infrastructure is region-homogeneous). A correct parent won't delegate
+    // here, but refuse defensively so a stale/foreign ADOPT can't spill the tree.
+    if (!this._sameRegion(topicBig)) return 'consumed';
     let role = this.axonRoles.get(topicBig);
     if (!role) { role = makeRole(topicBig, false); this.axonRoles.set(topicBig, role);
                  this._log('info', 'relay-formed', { topic: idHex(topicBig).slice(0, 12) }); }
@@ -469,6 +497,7 @@ export class AxonaManager {
   async _onPub(payload, meta) {
     const d = this._topicDecision(payload, meta);
     if (d === 'forward') return;
+    if (d === 'reject') return 'consumed';   // out-of-region terminus: topic's region has no node → don't root/seat/store here
     if (d === 'reroute') { this._reroute(T.PUB, payload); return 'consumed'; }
 
     const topicBig = idBig(payload.topicId);
@@ -1368,6 +1397,7 @@ export class AxonaManager {
     const now = this._now();
     const d = this._topicDecision(payload, meta);
     if (d === 'reroute') { this._reroute(T.METRICSON, payload); return 'consumed'; }
+    if (d === 'reject') return 'consumed';   // out-of-region terminus: no in-region root to arm a metrics lease on
     if (d === 'handle') {
       const role = this.axonRoles.get(topicBig) || this._becomeRoot(topicBig);
       this._maybePromoteRoot(role, payload, meta);
@@ -1396,6 +1426,11 @@ export class AxonaManager {
   }
 
   pubsubHost(topicId) {
+    // REGION RULE backstop: a node hosts/roots only topics in its own region.
+    if (!this._sameRegion(topicId)) {
+      this._log('warn', 'host-refused-foreign-region', { topic: idHex(topicId).slice(0, 12) });
+      return;
+    }
     this._hostedTopics.add(topicId);
     // Participate so the node won't be torn down and can root the topic if closest.
     // Route the announce through _sendSubscribe (lookup-assisted → the true root, and
@@ -1500,6 +1535,7 @@ export class AxonaManager {
   async _onKill(payload, meta) {
     const d = this._topicDecision(payload, meta);
     if (d === 'forward') return;
+    if (d === 'reject') return 'consumed';   // out-of-region terminus: topic's region has no node → don't root/seat/store here
     if (d === 'reroute') { this._reroute(T.KILL, payload); return 'consumed'; }
     const topicBig = idBig(payload.topicId);
     const role = this.axonRoles.get(topicBig) || this._becomeRoot(topicBig);
@@ -1534,6 +1570,7 @@ export class AxonaManager {
   _onTouch(payload, meta) {
     const d = this._topicDecision(payload, meta);
     if (d === 'forward') return;
+    if (d === 'reject') return 'consumed';   // out-of-region terminus: topic's region has no node → don't root/seat/store here
     if (d === 'reroute') { this._reroute(T.TOUCH, payload); return 'consumed'; }
     return 'consumed';
   }
@@ -1559,6 +1596,7 @@ export class AxonaManager {
     }
     const d = this._topicDecision(payload, meta);
     if (d === 'forward') return;
+    if (d === 'reject') return 'consumed';   // out-of-region terminus: topic's region has no node → don't root/seat/store here
     if (d === 'reroute') { this._reroute(T.PULL, payload); return 'consumed'; }
     // Terminus (root/closest) fall-through: answer if we hold it, else a genuine null.
     const hit = role ? (payload.postHash ? role.cache.find(c => c.msgId === payload.postHash) : role.cache[role.cache.length - 1]) : null;
@@ -1624,7 +1662,7 @@ export class AxonaManager {
           this._unattachedSince.delete(t);
         } else {
           if (!this._unattachedSince.has(t)) this._unattachedSince.set(t, now);
-          if (now - this._unattachedSince.get(t) >= ROOT_CLAIM_MS && this._selfClosestReachable(t)) {
+          if (now - this._unattachedSince.get(t) >= ROOT_CLAIM_MS && this._sameRegion(t) && this._selfClosestReachable(t)) {
             const role2 = this.axonRoles.get(t) || this._becomeRoot(t);
             role2.isRoot = true;
             this._upstream.delete(t);
@@ -1672,7 +1710,7 @@ export class AxonaManager {
       // are the closest reachable node, promote NOW with our full cache (gap-free
       // takeover). Otherwise drop the backup marker (a closer node should hold it).
       role.backupOf = null;
-      if (this._selfClosestReachable(t)) {
+      if (this._sameRegion(t) && this._selfClosestReachable(t)) {   // in-region only — never root a foreign region
         role.isRoot = true;
         this._announceRoot(t);
         this._log('info', 'backup-promoted-root', { topic: idHex(t).slice(0, 12) });

@@ -19,6 +19,8 @@ import { AxonaManager } from '../src/pubsub/AxonaManager.js';
 import { buildEnvelope } from '../src/pubsub/envelope.js';
 import { deriveTopicIdBig } from '../src/pubsub/post.js';
 import { createNodeIdentity, createAuthorIdentity } from '../src/identity/index.js';
+import { regionCenter } from '../src/utils/region-names.js';
+const __LOC = regionCenter('useast');  // region-lock: co-region test nodes with the 'useast' topics
 
 let passed = 0, failed = 0;
 const check = (label, cond, extra = '') => {
@@ -81,7 +83,7 @@ async function main() {
   // 30 nodes; 6 subscribe. A tree forms; the closest node is root.
   const nodes = [];
   for (let i = 0; i < 30; i++) {
-    const id = await createNodeIdentity({ lat: (i * 11) % 80 - 40, lng: (i * 17) % 300 - 150 });
+    const id = await createNodeIdentity(__LOC);
     nodes.push(fab.addNode(BigInt('0x' + id.id)));
   }
   const subs = nodes.slice(0, 6);
