@@ -59,11 +59,20 @@ const pullResps = (sent) => sent.filter(s => s.type === T_PULLRESP);
   ok('non-holder forwards a by-msgId pull (no early-answer)', ret === undefined && pullResps(sent).length === 0, `(ret=${ret}, resps=${pullResps(sent).length})`);
 }
 
-// 3. pull-LATEST at a NON-terminal node → does NOT early-answer (forwards to terminus)
+// 3. pull-LATEST at a NON-terminal replica that HOLDS cache → early-answers with its newest (v4.11.2)
 {
   const { am, sent } = mk();
   const ret = am._onPull({ topicId: idHex(TOPIC), postHash: null, corrId: 'c3', requesterId: idHex(REQ), via: [] }, { isTerminal: false });
-  ok('pull-latest does NOT early-answer at a non-terminal replica', ret === undefined && pullResps(sent).length === 0, `(ret=${ret}, resps=${pullResps(sent).length})`);
+  const r = pullResps(sent);
+  ok('pull-latest early-answers at a non-terminal replica with its newest',
+    ret === 'consumed' && r.length === 1 && JSON.parse(r[0].payload.json)?.message === 'target', `(resps=${r.length})`);
+}
+
+// 3b. pull-LATEST at a role-holder with EMPTY cache → forwards (nothing on hand)
+{
+  const { am, sent } = mk({ seedCache: false });
+  const ret = am._onPull({ topicId: idHex(TOPIC), postHash: null, corrId: 'c3b', requesterId: idHex(REQ), via: [] }, { isTerminal: false });
+  ok('pull-latest does NOT early-answer from an empty replica (forwards)', ret === undefined && pullResps(sent).length === 0, `(ret=${ret}, resps=${pullResps(sent).length})`);
 }
 
 // 4. pull-LATEST at the terminus → answers with the newest entry
