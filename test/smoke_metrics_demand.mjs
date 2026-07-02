@@ -3,7 +3,9 @@
 // Metrics are NOT a relay feature: ANY node that roots a topic publishes its
 // snapshots WHILE a metrics lease is active, and stops when it lapses.
 //   1. requesting metrics sends METRICSON toward the data topic + renews it
-//   2. the ROOT arms a lease and publishes a snapshot to metricTopic(T) on the tick
+//   2. the ROOT arms a lease and publishes the FIRST snapshot immediately
+//      (v4.16.1 — at routing latency, not the next tick), throttled so renewals
+//      don't storm; subsequent snapshots follow on the tick each METRICS_PUB_MS
 //   3. a path (non-terminal) node forwards the first METRICSON, short-circuits a
 //      quick duplicate, and an inheriting root picks the lease up on promotion
 //   4. the lease self-expires → the root stops publishing (no orphan load)
@@ -48,16 +50,23 @@ function mk() {
   am.stop();
 }
 
-// 2. the ROOT arms a lease and publishes a snapshot on the tick
+// 2. the ROOT arms a lease and answers the demand IMMEDIATELY (v4.16.1),
+//    then continues on the tick cadence
 {
   const { am, pubs } = mk();
   am._onMetricsOn({ topicId: idHex(TOPIC), via: [], requesterId: idHex(REQ) }, { isTerminal: true });
   const role = am.axonRoles.get(TOPIC);
   ok('root arms a metrics lease', !!role && role.isRoot && role.metricsOn > now(), `(metricsOn=${role?.metricsOn})`);
+  ok('root publishes the FIRST snapshot immediately (no tick needed)',
+    pubs.length === 1 && pubs[0].dataIdHex === idHex(TOPIC), `(${pubs.length})`);
+  ok('snapshot carries the metric fields', pubs.length === 1 && pubs[0].snap && 'current_count' in pubs[0].snap && 'seq' in pubs[0].snap && 'subscribers' in pubs[0].snap);
+  // a prompt renewal (second METRICSON inside METRICS_PUB_MS) must NOT re-publish
+  clock += 3_000;
+  am._onMetricsOn({ topicId: idHex(TOPIC), via: [], requesterId: idHex(REQ) }, { isTerminal: true });
+  ok('a renewal inside the cadence is throttled (no publish storm)', pubs.length === 1, `(${pubs.length})`);
   clock += 21_000;                       // past METRICS_PUB_MS
   await am.refreshTick();
-  ok('root publishes a snapshot to metricTopic while leased', pubs.length === 1 && pubs[0].dataIdHex === idHex(TOPIC), `(${pubs.length})`);
-  ok('snapshot carries the metric fields', pubs.length === 1 && pubs[0].snap && 'current_count' in pubs[0].snap && 'seq' in pubs[0].snap && 'subscribers' in pubs[0].snap);
+  ok('root publishes the next snapshot on the tick cadence', pubs.length === 2, `(${pubs.length})`);
   // 3b. lease self-expires → publishing stops
   clock += 80_000;                       // past METRICS_LEASE_MS (70s)
   const before = pubs.length;
