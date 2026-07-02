@@ -56,6 +56,24 @@ import { extractS2Prefix, asId }          from '../utils/hexid.js';
 export const MAX_PUBLISH_BYTES = 256 * 1024;         // absolute hard ceiling (chars)
 export const MAX_RELIABLE_PUBLISH_BYTES = 15 * 1024; // WebRTC-interop reliable floor (O-5)
 
+// ── Region-occupancy enforcement (v4.13.0), gated (v4.15.0) ─────────────
+// The region rule — a topic may only be rooted by a node IN ITS REGION, and a
+// pub/sub to a region with no reachable in-region node is refused — is correct
+// long-term (it prevents cross-region hotspots). But PRE-critical-mass most
+// regions, even populated ones, have no nodes yet, so enforcing it would refuse
+// nearly every real pub/sub. So it is OFF BY DEFAULT: when disabled, an
+// out-of-region node may root a topic (pre-4.13.0 behavior — nearest node wins),
+// and the peer-side REGION_UNPOPULATED pre-send guard is a no-op. Flip it on with
+// configureRegionLock({ enforce: true }) once the network has enough regional
+// coverage. Gates BOTH layers (manager _regionOk + peer _assertRegionUsable) so
+// disabling it never leaves an empty-region topic silently un-rooted.
+let _regionLockEnforced = false;
+export function configureRegionLock({ enforce } = {}) {
+  _regionLockEnforced = !!enforce;
+  return _regionLockEnforced;
+}
+export function isRegionLockEnforced() { return _regionLockEnforced; }
+
 // ── Tunable constants (design §Appendix) ────────────────────────────────
 const RENEW_MS        = 60_000;          // re-subscribe cadence CEILING (stable state)
 // Adaptive renewal (churn re-home fix): a subscriber re-homes only when it renews,
@@ -325,7 +343,7 @@ export class AxonaManager {
     // pull a foreign region's traffic into mine and hotspot my region). The handlers
     // treat 'reject' as "drop, don't seat/store/root."
     if (!meta.isTerminal) return 'forward';
-    return this._sameRegion(idBig(payload.topicId)) ? 'handle' : 'reject';
+    return this._regionOk(idBig(payload.topicId)) ? 'handle' : 'reject';
   }
 
   // True iff a topic (or any id) shares this node's region byte (S2 prefix). The
@@ -334,6 +352,14 @@ export class AxonaManager {
   _sameRegion(idBigVal) {
     try { return extractS2Prefix(idBigVal) === extractS2Prefix(this.nodeId); }
     catch { return false; }
+  }
+
+  // The region GATE used by every enforcement site. When the region lock is off
+  // (default, pre-critical-mass) this is always true → an out-of-region node may
+  // root/relay/host any topic (nearest node wins, pre-4.13.0 behavior). When on,
+  // it collapses to the strict same-region check.
+  _regionOk(idBigVal) {
+    return !_regionLockEnforced || this._sameRegion(idBigVal);
   }
 
   // I am the root for a topic iff I am the routing terminus for its bare id.
@@ -452,7 +478,7 @@ export class AxonaManager {
     const leaves = [];
     for (const s of role.subscribers.keys()) {
       if (role.children.has(s)) continue;
-      if (!this._sameRegion(idBig(s))) continue;   // out-of-region subscriber: never a relay child
+      if (!this._regionOk(idBig(s))) continue;   // out-of-region subscriber: never a relay child (when region lock on)
       leaves.push(s);
     }
     if (leaves.length < 2) return false;
@@ -481,7 +507,7 @@ export class AxonaManager {
     // REGION RULE: never become a child relay for a topic outside my region (the
     // tree infrastructure is region-homogeneous). A correct parent won't delegate
     // here, but refuse defensively so a stale/foreign ADOPT can't spill the tree.
-    if (!this._sameRegion(topicBig)) return 'consumed';
+    if (!this._regionOk(topicBig)) return 'consumed';
     let role = this.axonRoles.get(topicBig);
     if (!role) { role = makeRole(topicBig, false); this.axonRoles.set(topicBig, role);
                  this._log('info', 'relay-formed', { topic: idHex(topicBig).slice(0, 12) }); }
@@ -1429,8 +1455,8 @@ export class AxonaManager {
   }
 
   pubsubHost(topicId) {
-    // REGION RULE backstop: a node hosts/roots only topics in its own region.
-    if (!this._sameRegion(topicId)) {
+    // REGION RULE backstop (when enforced): a node hosts/roots only topics in its region.
+    if (!this._regionOk(topicId)) {
       this._log('warn', 'host-refused-foreign-region', { topic: idHex(topicId).slice(0, 12) });
       return;
     }
@@ -1665,7 +1691,7 @@ export class AxonaManager {
           this._unattachedSince.delete(t);
         } else {
           if (!this._unattachedSince.has(t)) this._unattachedSince.set(t, now);
-          if (now - this._unattachedSince.get(t) >= ROOT_CLAIM_MS && this._sameRegion(t) && this._selfClosestReachable(t)) {
+          if (now - this._unattachedSince.get(t) >= ROOT_CLAIM_MS && this._regionOk(t) && this._selfClosestReachable(t)) {
             const role2 = this.axonRoles.get(t) || this._becomeRoot(t);
             role2.isRoot = true;
             this._upstream.delete(t);
@@ -1713,7 +1739,7 @@ export class AxonaManager {
       // are the closest reachable node, promote NOW with our full cache (gap-free
       // takeover). Otherwise drop the backup marker (a closer node should hold it).
       role.backupOf = null;
-      if (this._sameRegion(t) && this._selfClosestReachable(t)) {   // in-region only — never root a foreign region
+      if (this._regionOk(t) && this._selfClosestReachable(t)) {   // in-region only when region lock on — never root a foreign region
         role.isRoot = true;
         this._announceRoot(t);
         this._log('info', 'backup-promoted-root', { topic: idHex(t).slice(0, 12) });

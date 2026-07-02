@@ -119,7 +119,7 @@ export { Synapse }      from './dht/Synapse.js';
 export { Subscription } from './dht/Subscription.js';
 
 // ── Pub/sub primitives ─────────────────────────────────────────────
-export { AxonaManager } from './pubsub/AxonaManager.js';
+export { AxonaManager, configureRegionLock, isRegionLockEnforced } from './pubsub/AxonaManager.js';
 export {
   resolveTopic,
   deriveTopicId,

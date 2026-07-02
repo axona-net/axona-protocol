@@ -53,7 +53,7 @@ export const ANONYMOUS = Symbol.for('axona.publish.anonymous');
 import { buildEnvelope }  from '../pubsub/envelope.js';
 import { buildKill }      from '../pubsub/kill.js';
 import { buildTouch }     from '../pubsub/touch.js';
-import { AxonaManager, MAX_PUBLISH_BYTES, MAX_RELIABLE_PUBLISH_BYTES } from '../pubsub/AxonaManager.js';
+import { AxonaManager, MAX_PUBLISH_BYTES, MAX_RELIABLE_PUBLISH_BYTES, isRegionLockEnforced } from '../pubsub/AxonaManager.js';
 import { metricTopic, isMetricTopicName, dataTopicIdOf } from '../pubsub/metrics.js';
 import { authorClassTopic, buildAuthorClass, verifyAuthorClass } from '../pubsub/authorClass.js';
 import { PublishError, SubscribeError, KillError, TouchError, PullError, MetricsError, ErrorCodes } from '../errors.js';
@@ -1882,6 +1882,11 @@ export class AxonaPeer extends DHT {
   // lookup), we don't false-refuse — the kernel still won't root an out-of-region
   // topic, so the worst case is a silent no-op, never a wrong-region hotspot.
   async _assertRegionUsable(topicIdBig, ErrCls, opName) {
+    // Gated (v4.15.0): the region-occupancy rule is OFF by default pre-critical-mass —
+    // most regions have no node yet, so refusing empty-region pub/sub would break nearly
+    // everything. When off, this guard is a no-op and the nearest node roots (pre-4.13.0).
+    // configureRegionLock({ enforce: true }) turns it back on once coverage exists.
+    if (!isRegionLockEnforced()) return;
     // node.id is a BigInt by construction (DHTNode gate); asId() keeps the topic arg
     // honest whether it arrived as a BigInt or a hex id, without any local type-guessing.
     const selfRegion  = (this._node?.id != null) ? extractS2Prefix(asId(this._node.id)) : null;

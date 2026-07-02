@@ -12,7 +12,13 @@
 //   6. pubsubHost refuses a foreign-region topic
 //
 // Run: node test/smoke_region_lock.mjs
-import { AxonaManager } from '../src/pubsub/AxonaManager.js';
+//
+// NOTE (v4.15.0): the region lock is OFF BY DEFAULT (pre-critical-mass). This smoke
+// turns it ON to exercise enforcement, then flips it OFF to prove the permissive
+// fallback (out-of-region rooting allowed).
+import { AxonaManager, configureRegionLock } from '../src/pubsub/AxonaManager.js';
+
+configureRegionLock({ enforce: true });   // enforcement path for the assertions below
 
 let n = 0, fail = 0;
 const ok = (m, c, extra = '') => { console.log(`  ${c ? '✓' : '✗'} ${m} ${extra}`); c ? n++ : fail++; };
@@ -88,6 +94,20 @@ const bare = (t) => ({ topicId: idHex(t), via: [] });
   ok('pubsubHost refuses a foreign-region topic', !am._hostedTopics.has(FOREIGN));
   am.pubsubHost(HOME);
   ok('pubsubHost accepts an in-region topic', am._hostedTopics.has(HOME));
+}
+
+// 7. Region lock OFF (default pre-critical-mass) → out-of-region rooting allowed
+{
+  configureRegionLock({ enforce: false });
+  const { am } = newAM();
+  ok('lock off: out-of-region bare terminus → handle (not reject)',
+     am._topicDecision(bare(FOREIGN), termIn) === 'handle');
+  am._onSub({ ...bare(FOREIGN), subscriberId: idHex(mk(0x89, 0x77)), since: 0 }, termIn);
+  const role = am.axonRoles.get(FOREIGN);
+  ok('lock off: out-of-region subscribe forms a root anyway', !!role && role.isRoot);
+  am.pubsubHost(FOREIGN);
+  ok('lock off: pubsubHost accepts a foreign-region topic', am._hostedTopics.has(FOREIGN));
+  configureRegionLock({ enforce: true });   // restore for any later runs in-process
 }
 
 console.log(`\n${fail ? '✗' : '✓'} smoke_region_lock: ${n} passed, ${fail} failed`);
