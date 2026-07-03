@@ -100,25 +100,31 @@ async function main() {
   const topicId = await deriveTopicIdBig(desc);
 
   // Generate a pool of node identities and rank by XOR distance to the topic.
-  const pool = [];
-  for (let i = 0; i < 24; i++) {
-    const id = await createNodeIdentity(__LOC);
-    pool.push(BigInt('0x' + id.id));
-  }
-  pool.sort((a, b) => { const da = a ^ topicId, db = b ^ topicId; return da < db ? -1 : da > db ? 1 : 0; });
-  const R = pool[0];        // true root (closest to topic)
-  // Find Y (local-minimum dead-end toward the TOPIC) + Z (bridge that is closer
-  // to R than Y, so a forward Y→Z→R actually progresses). Both constraints must
-  // hold simultaneously — distance-to-topic and distance-to-root are independent.
-  let Y = null, Z = null;
-  for (const y of pool.slice(1)) {
-    for (const z of pool) {
-      if (z === R || z === y) continue;
-      if ((z ^ topicId) > (y ^ topicId) && (z ^ R) < (y ^ R)) { Y = y; Z = z; break; }
+  // A random pool may contain no (Y, Z) pair satisfying both constraints below —
+  // ids are random, so REGENERATE the pool until one does (a handful of tries at
+  // most in practice) instead of bailing and flaking the suite.
+  let pool, R, Y, Z;
+  for (let attempt = 0; attempt < 25 && !Y; attempt++) {
+    pool = [];
+    for (let i = 0; i < 24; i++) {
+      const id = await createNodeIdentity(__LOC);
+      pool.push(BigInt('0x' + id.id));
     }
-    if (Y) break;
+    pool.sort((a, b) => { const da = a ^ topicId, db = b ^ topicId; return da < db ? -1 : da > db ? 1 : 0; });
+    R = pool[0];            // true root (closest to topic)
+    // Find Y (local-minimum dead-end toward the TOPIC) + Z (bridge that is closer
+    // to R than Y, so a forward Y→Z→R actually progresses). Both constraints must
+    // hold simultaneously — distance-to-topic and distance-to-root are independent.
+    Y = null; Z = null;
+    for (const y of pool.slice(1)) {
+      for (const z of pool) {
+        if (z === R || z === y) continue;
+        if ((z ^ topicId) > (y ^ topicId) && (z ^ R) < (y ^ R)) { Y = y; Z = z; break; }
+      }
+      if (Y) break;
+    }
   }
-  if (!Y || !Z) { console.error('topology search failed (regenerate pool)'); process.exit(2); }
+  if (!Y || !Z) { console.error('topology search failed (25 pools exhausted)'); process.exit(2); }
   const used = new Set([R, Y, Z]);
   const rest = pool.filter(id => !used.has(id));
   // P must be farther from the TOPIC than Y (so it funnels INTO Y and stops) AND

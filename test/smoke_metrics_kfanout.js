@@ -1,157 +1,130 @@
 // =====================================================================
-// smoke_metrics_kfanout.js — peer.metrics must sweep the WHOLE K-closest
-// root set, not just the single node a routed walk lands on.
+// smoke_metrics_kfanout.js — peer.metrics() must aggregate across the WHOLE
+// root cohort, not trust any single root's snapshot.
 //
-// Regression: a publish replicates to all K roots (pubsub:publish-k), but
-// the old requestMetrics did one routeMessage(topicId), reaching only the
-// globally-closest root + its subscriber-children.  In an asymmetric mesh
-// that root's replayCache can be empty/diverged while a sibling root (and
-// the replay-on-subscribe path) holds the queue — so current_count read 0
-// even though new subscribers received a full replay.  Also: the response's
-// `subscribers` field was dropped on receive and never aggregated.
-//
-// This builds a tiny in-memory mesh of real AxonaManager instances where
-// the routed walk lands on an EMPTY root and the queue lives on a SIBLING
-// root, and asserts the fan-out finds it.
+// Lineage: this smoke originally guarded the pre-v4.10.1 scatter-gather
+// requestMetrics() against reading only the routed root. That path is gone —
+// metrics are demand-driven (v4.12.0): each cohort root publishes its own
+// signed snapshot to metricTopic(dataId), and peer.metrics() collects them
+// over a window and AGGREGATES. The invariant survives in new clothes:
+// one root's view is a PARTIAL cohort view, so
+//   - `subscribers` is SUMMED (each root reports only its own children)
+//   - `current_count` / `seq` / `bytes` are MAXED (they converge via
+//     anti-entropy; max tolerates a lagging member)
+//   - one node publishing twice must not double-count (freshest per `by` wins)
 //
 // Run: node test/smoke_metrics_kfanout.js
 // =====================================================================
+import assert from 'node:assert';
+import { AxonaPeer } from '../src/dht/AxonaPeer.js';
+import { createNodeIdentity, createAuthorIdentity } from '../src/identity/index.js';
+import { deriveTopicId } from '../src/pubsub/post.js';
+import { metricTopic } from '../src/pubsub/metrics.js';
+import { buildEnvelope } from '../src/pubsub/envelope.js';
 
-import { AxonaManager } from '../src/pubsub/AxonaManager.js';
-import { toHex }        from '../src/utils/hexid.js';
+let n = 0; const ok = (m) => console.log(`  ok ${++n} - ${m}`);
+const delay = (ms) => new Promise(r => setTimeout(r, ms));
 
-let passed = 0, failed = 0;
-function check(label, cond) {
-  if (cond) { console.log(`  ✓ ${label}`); passed++; }
-  else      { console.log(`  ✗ ${label}`); failed++; }
-}
-
-// ── In-memory mesh: nodeId(bigint) → AxonaManager, wired by sendDirect /
-//    routeMessage / findKClosest over XOR distance to the topicId. ──────
-class MockNet {
-  constructor() { this.mgrs = new Map(); }
-
-  kclosest(topicId, K) {
-    return [...this.mgrs.keys()]
-      .sort((a, b) => {
-        const da = a ^ topicId, db = b ^ topicId;
-        return da < db ? -1 : da > db ? 1 : 0;
-      })
-      .slice(0, K);
+class MockAM {
+  constructor(nodeId) {
+    this.nodeId = nodeId;
+    this._lastSeenTsByTopic = new Map();
+    this._cb = null;
+    this.subscribed = [];
+    this.unsubscribed = [];
   }
+  pubsubPublish() { return 'pub'; }
+  pubsubSubscribe(topicId) { this.subscribed.push(topicId); }
+  pubsubUnsubscribe(topicId) { this.unsubscribed.push(topicId); }
+  onPubsubDelivery(cb) { this._cb = cb; }
+  deliver(topicId, json) { this._cb?.(topicId, json, 'pub', Date.now()); }
+}
 
-  makeDht(selfId) {
-    const net = this;
-    const routed = new Map(), direct = new Map();
-    const dht = {
-      getSelfId: () => selfId,
-      onRoutedMessage: (t, h) => routed.set(t, h),
-      onDirectMessage: (t, h) => direct.set(t, h),
-      onEvent: () => () => {},
-      findKClosest: async (topicId, K) => net.kclosest(topicId, K),
-      routeMessage: async (topicId, type, payload) => {
-        const target = net.kclosest(topicId, 1)[0];
-        const m = net.mgrs.get(target);
-        const h = m?._dht._routed.get(type);
-        if (h) await h(payload, { fromId: toHex(selfId) });
-      },
-      sendDirect: async (target, type, payload) => {
-        const m = net.mgrs.get(target);              // fake children → no-op
-        if (!m) return false;
-        const h = m._dht._direct.get(type);
-        if (h) await h(payload, { fromId: toHex(selfId) });
-        return true;
-      },
-      _routed: routed, _direct: direct,
-    };
-    return dht;
+async function mkPeer() {
+  const node = await createNodeIdentity({ lat: 38, lng: -78 });
+  const engine = { onEvent: () => () => {}, simEpoch: 0 };
+  const am = new MockAM(node.id);
+  const peer = new AxonaPeer({ engine, node: { id: BigInt('0x' + node.id) }, axonaManager: am, nodeIdentity: node });
+  return { peer, am };
+}
+
+// A metric snapshot envelope exactly as a cohort root's metrics loop builds it:
+// the OPEN metricTopic(dataId) descriptor, signed by the publishing root.
+async function snapshotEnv(dataId, snapshot, signer) {
+  const mt = metricTopic(dataId);
+  return buildEnvelope({
+    topic: { region: mt.region, owner: null, name: mt.name, write: 'open' },
+    message: snapshot, seq: 1, identity: signer, sign: true,
+  });
+}
+
+// Drive one metrics() read, delivering each cohort snapshot mid-window.
+async function readWithSnapshots(peer, am, dataId, snaps, timeoutMs = 600) {
+  const p = peer.metrics(dataId, { timeoutMs });
+  await delay(30);                                  // let sub() register the metric topic
+  const mtId = am.subscribed[am.subscribed.length - 1];
+  for (const { snapshot, signer } of snaps) {
+    const env = await snapshotEnv(dataId, snapshot, signer);
+    am.deliver(mtId, JSON.stringify(env));
   }
-
-  spawn(selfId) {
-    const dht = this.makeDht(selfId);
-    const mgr = new AxonaManager({ dht, now: () => 1_700_000_000_000 });
-    mgr._dht = dht;                                  // tests reach handlers via this
-    this.mgrs.set(selfId, mgr);
-    return mgr;
-  }
+  return p;
 }
 
-// Give a manager a hosted role: `n` live cache entries anchored at `owner`
-// (kernel v3.5.0 makes metrics() OWNER-ONLY, so the cached posts must carry the
-// owning anchor and the requester must BE that owner) and `subs` children.
-function hostRole(mgr, topicId, n, subs, owner) {
-  const replayCache = [];
-  for (let i = 0; i < n; i++) replayCache.push({ json: '{}', postHash: `h${i}`, publisher: owner });
-  const children = new Map();
-  for (let i = 0; i < subs; i++) children.set(BigInt(1000 + i), {});
-  mgr.axonRoles.set(topicId, { isRoot: true, replayCache, children });
+const rootA = await createAuthorIdentity();
+const rootB = await createAuthorIdentity();
+const rootC = await createAuthorIdentity();
+
+// ── 1. three cohort roots: subscribers summed, counters maxed ──
+{
+  const { peer, am } = await mkPeer();
+  const dataId = await deriveTopicId({ region: 'useast', name: 'kfanout-cohort' });
+  const m = await readWithSnapshots(peer, am, dataId, [
+    { snapshot: { v: 1, topic: dataId, ts: 100, by: 'root-a', current_count: 3, seq: 9,  subscribers: 2, bytes: 512 }, signer: rootA },
+    { snapshot: { v: 1, topic: dataId, ts: 110, by: 'root-b', current_count: 3, seq: 9,  subscribers: 5, bytes: 512 }, signer: rootB },
+    { snapshot: { v: 1, topic: dataId, ts: 120, by: 'root-c', current_count: 2, seq: 7,  subscribers: 1, bytes: 300 }, signer: rootC }, // lagging member
+  ]);
+
+  assert.equal(m.cohortSize, 3, 'three distinct roots reported');
+  assert.equal(m.subscribers, 8, 'subscribers = 2+5+1 summed across the cohort');
+  assert.equal(m.current_count, 3, 'current_count maxed — lagging root C tolerated');
+  assert.equal(m.seq, 9, 'seq maxed — the true high-water');
+  assert.equal(m.bytes, 512, 'bytes maxed');
+  assert.equal(m.ts, 120, 'ts from the newest snapshot');
+  assert.equal(m.stale, false);
+  ok('cohort of 3: subscribers summed, counters maxed, laggard tolerated');
 }
 
-// Mirror AxonaPeer.metrics() aggregation over the accumulated responses.
-function aggregate(responses) {
-  let current_count = 0, subscribers = 0;
-  for (const r of responses) {
-    if (typeof r?.current_count === 'number') current_count = Math.max(current_count, r.current_count);
-    if (typeof r?.subscribers   === 'number') subscribers   = Math.max(subscribers,   r.subscribers);
-  }
-  return { current_count, subscribers, relayCount: responses.length };
+// ── 2. one root publishing twice must not double-count; freshest wins ──
+{
+  const { peer, am } = await mkPeer();
+  const dataId = await deriveTopicId({ region: 'useast', name: 'kfanout-dedupe' });
+  const m = await readWithSnapshots(peer, am, dataId, [
+    { snapshot: { v: 1, topic: dataId, ts: 100, by: 'root-a', current_count: 4, seq: 4, subscribers: 6, bytes: 100 }, signer: rootA },
+    { snapshot: { v: 1, topic: dataId, ts: 200, by: 'root-a', current_count: 5, seq: 5, subscribers: 2, bytes: 120 }, signer: rootA }, // fresher: subs dropped 6→2
+    { snapshot: { v: 1, topic: dataId, ts:  50, by: 'root-a', current_count: 9, seq: 9, subscribers: 9, bytes: 900 }, signer: rootA }, // stale replay — must be ignored
+    { snapshot: { v: 1, topic: dataId, ts: 150, by: 'root-b', current_count: 5, seq: 5, subscribers: 3, bytes: 120 }, signer: rootB },
+  ]);
+
+  assert.equal(m.cohortSize, 2, 'two distinct roots — repeats collapse per `by`');
+  assert.equal(m.subscribers, 5, 'subscribers = 2+3 — freshest per root, no double-count, stale replay ignored');
+  assert.equal(m.current_count, 5, 'current_count from live snapshots only');
+  assert.equal(m.ts, 200, 'ts from the newest live snapshot');
+  ok('per-root dedupe: freshest snapshot wins, repeats never double-count');
 }
 
-async function testFanOutFindsSiblingRoot() {
-  console.log('\n── metrics sweeps the whole K-root set (queue on a sibling, not the routed root) ──');
-  const net = new MockNet();
-  // topicId == A's id, so the routed walk lands on A (closest).  We leave A
-  // EMPTY and put the live queue on sibling root C.
-  const A = net.spawn(0x01n);   // closest to topicId → routeMessage target
-  const B = net.spawn(0x02n);
-  const C = net.spawn(0x04n);
-  const R = net.spawn(0xA0n);   // requester — and the topic OWNER
-  const topicId = 0x01n;
-  const OWNER   = 0xA0n;        // == R's id, so R may read its own topic's metrics
+// ── 3. snapshot without `by` falls back to the envelope signer as cohort key ──
+{
+  const { peer, am } = await mkPeer();
+  const dataId = await deriveTopicId({ region: 'useast', name: 'kfanout-bykey' });
+  const m = await readWithSnapshots(peer, am, dataId, [
+    { snapshot: { v: 1, topic: dataId, ts: 100, current_count: 1, seq: 1, subscribers: 1, bytes: 10 }, signer: rootA },
+    { snapshot: { v: 1, topic: dataId, ts: 110, current_count: 1, seq: 1, subscribers: 1, bytes: 10 }, signer: rootB },
+  ]);
 
-  hostRole(A, topicId, 0, 0, OWNER);   // routed root: EMPTY cache (silent — can't prove owner)
-  hostRole(B, topicId, 1, 0, OWNER);   // a second non-empty root, so the sweep hears ≥2
-  hostRole(C, topicId, 3, 2, OWNER);   // sibling root: 3 live events, 2 subs
-  // R hosts no role for this topic.
-
-  const responses = await R.requestMetrics(topicId, null, { timeoutMs: 50 });
-  await new Promise(r => setTimeout(r, 60));   // let timeout fire / responses settle
-  const m = aggregate(responses);
-
-  check('routed-only would miss it (A is the routed target and is empty)',
-    A.axonRoles.get(topicId).replayCache.length === 0);
-  check('current_count = 3 (found on sibling root C via fan-out)', m.current_count === 3);
-  check('subscribers = 2 (carried through the round trip)',        m.subscribers === 2);
-  check('heard from multiple roots',                               m.relayCount >= 2);
+  assert.equal(m.cohortSize, 2, 'distinct envelope signers count as distinct cohort members');
+  assert.equal(m.subscribers, 2, 'both counted');
+  assert.equal(m.signer, rootB.authorId, 'signer = envelope signer of the newest snapshot');
+  ok('missing `by` keys on the envelope signer — cohort still resolves');
 }
 
-async function testRequesterIsARoot() {
-  console.log('\n── requester is itself a root: own cache folded in without a self-send ──');
-  const net = new MockNet();
-  const A = net.spawn(0x01n);
-  const R = net.spawn(0x02n);   // requester AND a root holding the queue (and the owner)
-  const topicId = 0x01n;        // A is closest; R is a sibling root
-  const OWNER   = 0x02n;        // == R's id
-
-  hostRole(A, topicId, 0, 0, OWNER);
-  hostRole(R, topicId, 5, 4, OWNER);   // requester's own cache
-
-  const responses = await R.requestMetrics(topicId, null, { timeoutMs: 50 });
-  await new Promise(r => setTimeout(r, 60));
-  const m = aggregate(responses);
-
-  check('current_count = 5 (self-root counted locally)', m.current_count === 5);
-  check('subscribers = 4 (self-root)',                   m.subscribers === 4);
-  check('no duplicate self-response',
-    responses.filter(r => r.responderId === toHex(0x02n)).length === 1);
-}
-
-async function main() {
-  console.log('Axona metrics K-closest fan-out smoke');
-  await testFanOutFindsSiblingRoot();
-  await testRequesterIsARoot();
-  console.log(`\nResult: ${passed} passed, ${failed} failed`);
-  process.exit(failed === 0 ? 0 : 1);
-}
-
-main().catch(err => { console.error('smoke threw:', err); process.exit(2); });
+console.log(`\nsmoke_metrics_kfanout: ${n} checks passed`);

@@ -221,9 +221,14 @@ async function testViaSelfHeal() {
 
   // The subscriber must NOT be the closest-to-topic node (else IT is the root,
   // which delivers to itself locally — no via pin, and killing "the root" would
-  // kill the subscriber). Pick a subscriber and publisher that aren't the root.
+  // kill the subscriber) — and it must not become the NEW root after root1 dies
+  // either: a root never seats itself as a subscriber (self-delivery is local),
+  // so the re-seat assertion below would be vacuous in that topology. Pick the
+  // FARTHEST-from-topic node: it can never be the routing terminus while any
+  // other node is alive. The publisher is any other non-root node.
   const root1 = fab._closestAlive(topicId);
-  const sub = nodes.find(n => n.id !== root1);
+  const byDist = nodes.slice().sort((a, b) => ((a.id ^ topicId) < (b.id ^ topicId) ? -1 : 1));
+  const sub = byDist[byDist.length - 1];
   const pub = nodes.find(n => n.id !== root1 && n !== sub);
   sub.am.pubsubSubscribe(topicId);
   await fab.settle();

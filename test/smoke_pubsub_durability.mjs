@@ -133,13 +133,22 @@ async function main() {
   const desc = { region: 'useast', owner: null, name: 'durable', write: 'open' };
   const topicId = await deriveTopicIdBig(desc);
 
+  // The topic's root is fixed by XOR distance the moment the ids exist — and it
+  // is the node this test KILLS. The publisher and the two late joiners must be
+  // drawn from nodes that survive that kill: with random ids, nodes[51] IS the
+  // root ~1/60 of the time, and a dead late joiner can send (the fabric doesn't
+  // gate outbound) but never receive — the post-recovery checks fail for reasons
+  // that have nothing to do with durability.
+  const root1 = fab._closestAlive(topicId);
+  const fresh = nodes.slice(S).filter(n => n.id !== root1);  // non-subscribers that outlive the root
+  const pub = fresh[fresh.length - 1];
+
   // S subscribers → a real tree with child relays that replicate the cache.
   for (const s of nodes.slice(0, S)) s.am.pubsubSubscribe(topicId);
   await fab.settle();
   fab.clock += 61_000; await fab.tickAll();
 
   // publish M messages
-  const pub = nodes[N - 1];
   const ids = [];
   for (let k = 0; k < M; k++) {
     const e = await buildEnvelope({ topic: desc, message: { k }, seq: SEQ++, identity: author, ts: fab.clock });
@@ -147,7 +156,6 @@ async function main() {
     pub.am.pubsubPublish(topicId, JSON.stringify(e));
     await fab.settle();
   }
-  const root1 = fab._closestAlive(topicId);
 
   // a child relay (non-root holder of the cache) exists and holds all M
   let childRelay = null;
@@ -159,7 +167,7 @@ async function main() {
   check('the child relay holds the full feed', childRelay && cacheSize(childRelay, topicId) === M, `(${childRelay && cacheSize(childRelay, topicId)}/${M})`);
 
   // pre-death sanity: a late subscriber on the live root gets all M
-  const lateA = nodes[S];
+  const lateA = fresh[0];
   lateA.am._lastSeenTsByTopic.set(topicId, 0);
   lateA.am.pubsubSubscribe(topicId);
   await fab.settle();
@@ -176,7 +184,7 @@ async function main() {
     cacheSize(root2rec, topicId) === M, `(new-root cache ${cacheSize(root2rec, topicId)}/${M})`);
 
   // ── the real test: a BRAND-NEW late subscriber AFTER the death ────────
-  const lateB = nodes[S + 1];
+  const lateB = fresh[1];
   lateB.am._lastSeenTsByTopic.set(topicId, 0);
   lateB.am.pubsubSubscribe(topicId);
   await fab.settle();
