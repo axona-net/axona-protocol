@@ -5,8 +5,10 @@
 // OUTBOUND traffic is what integrates a newcomer. So while COLD (few neighbours),
 // pubsubPublish re-sends the SAME envelope a few times over the first ~second
 // (idempotent; root dedups by msgId). It must:
-//   1. COLD publisher (neighbours < threshold) → several PUB sends (initial + burst)
-//   2. WARM publisher (neighbours ≥ threshold) → exactly one PUB send (no burst)
+//   1. COLD publisher (neighbours < threshold) → initial + a TWO-PHASE burst
+//      (5 fast @200ms ≈ 1s, then 5 slow @400ms ≈ 2s more)
+//   2. WARM publisher: the FIRST publish to a topic → two sends (200ms apart);
+//      a REPEAT publish to the same topic → exactly one send (no re-send)
 //   3. burst stops early once the publish is confirmed (_confirmPending)
 //   4. stop() cancels any in-flight burst timers
 //
@@ -43,23 +45,31 @@ function publish(am, msgId) {
   am.pubsubPublish(TOPIC, json, { postHash: msgId });
 }
 
-// 1. COLD → burst (initial send + up to 5 re-sends)
+// 1. COLD → two-phase burst (initial + 5 fast @200ms + 5 slow @400ms)
 {
   const { am, pubs } = mk({ neighbours: 2 });     // < COLD_PEER_THRESHOLD (8)
   publish(am, 'a'.repeat(64));
   ok('cold: initial send fires immediately', pubs.length === 1, `(${pubs.length})`);
-  await delay(1300);                              // 5 × 200ms + margin
-  ok('cold: burst re-sends the envelope multiple times', pubs.length >= 5, `(total sends=${pubs.length})`);
-  ok('cold: burst is bounded (≤ initial + COLD_BURST_TRIES)', pubs.length <= 6, `(total sends=${pubs.length})`);
+  await delay(1300);                              // fast phase: 5 × 200ms + margin
+  const afterFast = pubs.length;
+  ok('cold: fast phase re-sends the envelope', afterFast >= 5, `(after ~1s=${afterFast})`);
+  await delay(2200);                              // slow phase: 5 × 400ms + margin
+  ok('cold: slow phase adds more re-sends', pubs.length > afterFast, `(after ~3s=${pubs.length})`);
+  ok('cold: burst bounded (≤ initial + 5 fast + 5 slow)', pubs.length <= 11, `(total sends=${pubs.length})`);
   am.stop();
 }
 
-// 2. WARM → exactly one send, no burst
+// 2. WARM → first publish to a topic re-sends once; a repeat publish does not
 {
-  const { am, pubs } = mk({ neighbours: 20 });    // ≥ threshold
-  publish(am, 'b'.repeat(64));
-  await delay(1300);
-  ok('warm: exactly one send (no burst)', pubs.length === 1, `(total sends=${pubs.length})`);
+  const { am, pubs } = mk({ neighbours: 20 });    // ≥ threshold (warm)
+  publish(am, 'b'.repeat(64));                    // FIRST publish to this topic
+  ok('warm first-publish: immediate send', pubs.length === 1, `(${pubs.length})`);
+  await delay(400);                               // FIRST_PUBLISH_RESEND_MS + margin
+  ok('warm first-publish: re-sends once (two sends total)', pubs.length === 2, `(total sends=${pubs.length})`);
+  const before = pubs.length;
+  publish(am, 'B'.repeat(64));                    // REPEAT publish to the same topic
+  await delay(400);
+  ok('warm repeat-publish: exactly one send (no re-send)', pubs.length === before + 1, `(delta=${pubs.length - before})`);
   am.stop();
 }
 
@@ -73,7 +83,7 @@ function publish(am, msgId) {
   const atConfirm = pubs.length;
   await delay(900);
   ok('confirmed mid-burst → no further re-sends', pubs.length === atConfirm, `(at confirm=${atConfirm}, final=${pubs.length})`);
-  ok('confirmed early → fewer than a full burst', pubs.length < 6, `(total sends=${pubs.length})`);
+  ok('confirmed early → fewer than a full burst', pubs.length < 11, `(total sends=${pubs.length})`);
   am.stop();
 }
 
