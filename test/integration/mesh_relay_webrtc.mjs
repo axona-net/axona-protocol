@@ -73,7 +73,7 @@ try {
 globalThis.RTCPeerConnection = polyfill.RTCPeerConnection;
 
 // ── 1. Kernel under test (local working source) ─────────────────────
-const { deriveIdentity } = await import('../../src/index.js');
+const { createNodeIdentity } = await import('../../src/index.js');
 const { MeshManager }    = await import('../../src/transport/web/mesh.js');
 const { MeshAuth }       = await import('../../src/transport/web/mesh-auth.js');
 
@@ -97,7 +97,7 @@ async function main() {
   const names = ['A', 'B', 'C'];
   const peers = {};
   for (const name of names) {
-    const identity = await deriveIdentity(REGIONS[name]);
+    const identity = await createNodeIdentity(REGIONS[name]);
     peers[name] = {
       name,
       identity,

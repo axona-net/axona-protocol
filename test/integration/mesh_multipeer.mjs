@@ -71,7 +71,7 @@ if (!existsSync(resolve(BRIDGE_ROOT, 'src', 'server.js'))) {
 globalThis.RTCPeerConnection = polyfill.RTCPeerConnection;
 
 // ── 1. Kernel under test (local working source, not a vendored copy) ─
-const { AxonaPeer, AxonaDomain, NeuronNode, deriveIdentity } =
+const { AxonaPeer, AxonaDomain, NeuronNode, createNodeIdentity } =
   await import('../../src/index.js');
 const { webTransport } =
   await import('../../src/transport/web/index.js');
@@ -122,7 +122,7 @@ const REGIONS = [
 
 async function makePeer(i) {
   const region   = REGIONS[i % REGIONS.length];
-  const identity = await deriveIdentity(region);
+  const identity = await createNodeIdentity(region);
   const logs     = [];
   const transport = webTransport({
     bridgeUrl:   BRIDGE_URL,

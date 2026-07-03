@@ -31,6 +31,7 @@
     "test:mesh-relay-e2e": "node test/integration/mesh_relay_e2e.mjs",
     "test:mesh-relay-auto-e2e": "node test/integration/mesh_relay_auto_e2e.mjs",
     "test:mesh-relay-multihop": "node test/integration/mesh_relay_multihop_e2e.mjs",
+    "test:integration": "node test/integration/mesh_relay_e2e.mjs && node test/integration/mesh_relay_auto_e2e.mjs && node test/integration/mesh_relay_multihop_e2e.mjs",
     "test:legacy-pubsub": "node test/smoke_pubsub_authz.js && node test/smoke_pubsub_c3.js && node test/smoke_pubsub_replay.js && node test/smoke_pubsub_gap_replay.js && node test/smoke_pubsub_bigbacklog.mjs && node test/smoke_pubsub_antientropy.js && node test/smoke_pubsub_coldstart.js && node test/smoke_rooted_topics.mjs && node test/smoke_host_participation.js && node test/smoke_msgsync_robustness.js && node test/smoke_pubsub_posthash.js && node test/smoke_pubsub_droplog.js && node test/smoke_pubsub_bounds.js && node test/smoke_kill.js && node test/smoke_kill_remote.mjs && node test/smoke_kill_resurrection.js && node test/smoke_touch.js && node test/smoke_unpub.js && node test/smoke_bounded_queue.js && node test/smoke_hold_ttl.js && node test/smoke_pull_latest.js && node test/smoke_pubsub_republish.mjs && node test/smoke_pubsub_recruit_wiring.mjs && node test/smoke_pubsub_root_election.mjs"
   },
   "engines": {
