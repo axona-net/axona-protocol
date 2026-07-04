@@ -3,7 +3,7 @@
 // A warm backup holding a topic's cache promotes to root when its root goes away.
 // Two speeds:
 //   • root DEPARTED the mesh (no longer a reachable neighbour) → promote after the
-//     SHORT grace (REPLICA_GONE_MS ≈ 8s), so history is served within a churn window
+//     SHORT grace (REPLICA_GONE_MS ≈ 15s), so history is served within a churn window
 //   • root still a NEIGHBOUR but quiet (transient replicate loss) → keep waiting the
 //     full REPLICA_STALE_MS (~65s), never split a live root
 //
@@ -59,11 +59,11 @@ function seedBackup(am) {
   ok('seeded as a backup of the root', !!role && role.backupOf != null && !role.isRoot && role.cache.length === 1,
      `(backupOf=${role?.backupOf?.slice(0,6)})`);
 
-  clock += 5_000;                              // < REPLICA_GONE_MS (8s) — too soon
+  clock += 10_000;                             // 10s < REPLICA_GONE_MS (15s) — too soon
   await am.refreshTick();
   ok('does NOT promote before the short grace', !am.axonRoles.get(TOPIC).isRoot);
 
-  clock += 5_000;                              // now 10s total > REPLICA_GONE_MS
+  clock += 8_000;                              // now 18s total > REPLICA_GONE_MS (15s)
   await am.refreshTick();
   const r = am.axonRoles.get(TOPIC);
   ok('promotes to root shortly after the root departs', r.isRoot && r.backupOf == null && r.cache.length === 1,
