@@ -59,11 +59,11 @@ function seedBackup(am) {
   ok('seeded as a backup of the root', !!role && role.backupOf != null && !role.isRoot && role.cache.length === 1,
      `(backupOf=${role?.backupOf?.slice(0,6)})`);
 
-  clock += 10_000;                             // 10s < REPLICA_GONE_MS (15s) — too soon
+  clock += 60_000;                             // 60s < REPLICA_GONE_MS (65s) — too soon
   await am.refreshTick();
   ok('does NOT promote before the short grace', !am.axonRoles.get(TOPIC).isRoot);
 
-  clock += 8_000;                              // now 18s total > REPLICA_GONE_MS (15s)
+  clock += 10_000;                             // now 70s total > REPLICA_GONE_MS (65s)
   await am.refreshTick();
   const r = am.axonRoles.get(TOPIC);
   ok('promotes to root shortly after the root departs', r.isRoot && r.backupOf == null && r.cache.length === 1,
