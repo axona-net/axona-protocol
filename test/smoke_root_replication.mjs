@@ -46,13 +46,17 @@ const repl=(sends)=>sends.filter(s=>s.type==='pubsub:replicate');
   const role=am.axonRoles.get(TOPIC);
   ok('REPLICATE makes a passive BACKUP (backupOf set, not root)', !!role && role.backupOf===idHex(NEAR1).toLowerCase() && role.isRoot===false);
 }
-// 4. stale backup with no closer reachable neighbour → promotes to root
+// 4. a backup is a SUBSCRIBING child relay (single-root election): _onReplicate joins
+//    _backupTopics, and refreshTick renews a SUB toward the topic every tick — so root
+//    churn is resolved by the normal probe-protected subscribe path (one globally-
+//    closest terminus), NOT a bespoke local-only promotion that split disjoint backups.
 {
-  const {am,clock}=mk({neighbors:[]});   // self is the only/closest reachable node
-  const role=makeRoleBackup(am,TOPIC,idHex(NEAR1));
-  clock.t += 100_000;                     // past REPLICA_STALE_MS (65s)
-  await am.refreshTick();
-  ok('stale backup (root gone) promotes to root when closest', am.axonRoles.get(TOPIC)?.isRoot===true);
+  const {am,sends,clock}=mk({neighbors:[NEAR1]});
+  await am._onReplicate({topicId:idHex(TOPIC), from:idHex(NEAR1), msgs:[], dels:[]}, {targetId:SELF});
+  ok('REPLICATE registers the topic as a backup subscription', am._backupTopics.has(TOPIC));
+  ok('backup is NOT auto-promoted (no bespoke local-only flip)', am.axonRoles.get(TOPIC)?.isRoot===false);
+  sends.length=0; clock.t += 6_000; await am.refreshTick();
+  ok('refreshTick renews a subscribe toward the topic each tick', sends.some(s=>s.type==='pubsub:sub'));
 }
 // 5. KILL at a root with established replicas re-pushes the tombstone SYNCHRONOUSLY
 //    (the kill-leak race: a backup that already holds the body must get the tombstone
@@ -70,13 +74,6 @@ const repl=(sends)=>sends.filter(s=>s.type==='pubsub:replicate');
   ok('kill at a root synchronously re-pushes to replicas', r.length===2);
   ok('the synchronous push carries the new tombstone (no leak window)', carriesTomb);
   ok('the killed message is gone from the replicated cache', r[0]?.payload?.msgs?.every(m=>m.msgId!=='m1'));
-}
-function makeRoleBackup(am,topicBig,fromHex){
-  // mimic _onReplicate having established a backup (without needing signed envelopes)
-  const role=am.axonRoles.get(topicBig);
-  if(role) return role;
-  const r={topicId:topicBig,isRoot:false,subscribers:new Map(),children:new Set(),cache:[{msgId:'m1',publishTs:100,json:'{}',seq:1,bytes:80}],cacheIds:new Set(['m1']),cacheBytes:80,lastTs:100,seq:1,tombstones:new Map(),replicas:new Map(),backupOf:fromHex.toLowerCase(),lastReplicaAt:am._now()};
-  am.axonRoles.set(topicBig,r); return r;
 }
 console.log(`\n${fail?'✗':'✓'} smoke_root_replication: ${n} passed, ${fail} failed`);
 process.exit(fail?1:0);

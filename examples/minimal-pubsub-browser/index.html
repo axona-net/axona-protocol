@@ -307,15 +307,15 @@ import {
   AxonaPeer, AxonaDomain, NeuronNode,
   createNodeIdentity, createAuthorIdentity, deriveTopicId, geoCellId,
   regionNameForLatLng,
-} from '/src/index.js?v=4.17.3';
-import { webTransport } from '/src/transport/web/index.js?v=4.17.3';
-import { makeMessage, readMessage, readSender } from '/std/message.js?v=4.17.3';
+} from '/src/index.js?v=4.18.2';
+import { webTransport } from '/src/transport/web/index.js?v=4.18.2';
+import { makeMessage, readMessage, readSender } from '/std/message.js?v=4.18.2';
 
 // ─── Constants ────────────────────────────────────────────────────────
 // Bump the middle digit on every code change to this file so the
 // footer reflects what's actually running and stale browser tabs are
 // distinguishable.
-const DEMO_VERSION = '1.20.0';
+const DEMO_VERSION = '1.21.0';
 const BRIDGE_URL   = new URLSearchParams(window.location.search).get('bridge')
                   // Served from a testnet host (e.g. demo-testnet.axona.net) →
                   // default to the testnet bridge (3.0.0 / axona/5 / wire-3),
