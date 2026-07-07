@@ -2,28 +2,34 @@
 // node collects results from testers anywhere via pub/sub (no HTTP collector,
 // works across the internet). Lazy-loaded by bench.js only when reporting is on.
 //
-// Mirrors the demo's browser connect (examples/minimal-pubsub-browser/). Results
-// land on a fixed topic anchored at the us-east synthetic publisher, so a local
-// node collects everything with:
-//   node ../../axona-relay/src/cli.js sub "pow-bench/results" --region useast --for 3600
+// v0.19.0: migrated to the v0.3+ identity/topic API (kernel 4.x, wire 4):
+//   · deriveIdentity            → createNodeIdentity  (node key: address only)
+//   · synthetic-publisher topic → descriptor topic { region, name }
+//   · unsigned publish          → signWith a persistent author key
+//   · all /src imports carry ?v= cache-busts (a returning device previously
+//     reloaded a CACHED old kernel graph → old wire → rejected by the bridge,
+//     and results were silently lost — the Howard-morning failure mode).
+//
+// The collector subscribes with:
+//   node ../../axona-relay/pow-collector.js --region useast
+// and both sides meet on { region:'useast', name:'pow-bench/results' }.
 import {
-  AxonaPeer, AxonaDomain, NeuronNode, deriveIdentity, geoCellId,
-} from '/src/index.js';
-import { webTransport } from '/src/transport/web/index.js';
+  AxonaPeer, AxonaDomain, NeuronNode, createNodeIdentity, createAuthorIdentity,
+} from '/src/index.js?v=4.18.2';
+import { webTransport } from '/src/transport/web/index.js?v=4.18.2';
 
 const BRIDGE_URL = new URLSearchParams(location.search).get('bridge')
   || (location.hostname.includes('testnet') ? 'wss://testnet.axona.net'
                                             : 'wss://bridge.axona.net');
 
-// Collection topic + us-east (0x89) synthetic publisher — MUST match the
-// collector's `--region useast`. We anchor HERE regardless of the tester's own
-// location, so all results converge on one topic.
-const TOPIC       = 'pow-bench/results';
-const LEADERBOARD = 'pow-bench/leaderboard';               // collector publishes the comparison here
-const ANCHOR      = { lat: 38.0, lng: -78.0 };             // us-east
-const PUBLISHER   = geoCellId(ANCHOR.lat, ANCHOR.lng, 8).toString(16).padStart(2, '0') + '0'.repeat(64);
+// Collection topics — descriptor form; the region NAME anchors convergence
+// (v0.3 replaced the synthetic us-east publisher). Must match the collector.
+const REGION_NAME   = 'useast';
+const TOPIC         = { region: REGION_NAME, name: 'pow-bench/results' };
+const LEADERBOARD   = { region: REGION_NAME, name: 'pow-bench/leaderboard' };
+const ANCHOR        = { lat: 38.0, lng: -78.0 };   // node placement near the topic region
 
-export const reportTopic  = TOPIC;
+export const reportTopic  = TOPIC.name;
 export const reportBridge = BRIDGE_URL;
 
 /**
@@ -35,7 +41,10 @@ export const reportBridge = BRIDGE_URL;
  */
 export async function createReporter(onStatus = () => {}, onLeaderboard = null, onLog = null) {
   onStatus(`connecting ${BRIDGE_URL}…`);
-  const identity  = await deriveIdentity({ lat: ANCHOR.lat, lng: ANCHOR.lng });
+  const identity  = await createNodeIdentity({ lat: ANCHOR.lat, lng: ANCHOR.lng });
+  // Durable author (localStorage) → a device keeps one stable signer across
+  // runs, so the collector can attribute repeat results to the same tester.
+  const author    = await createAuthorIdentity({ persistAs: 'pow-bench-author' });
   const transport = webTransport({ bridgeUrl: BRIDGE_URL, identity });
   const node      = new NeuronNode({ id: BigInt('0x' + identity.id), lat: ANCHOR.lat, lng: ANCHOR.lng });
   node.transport  = transport;
@@ -66,15 +75,15 @@ export async function createReporter(onStatus = () => {}, onLeaderboard = null, 
     try {
       await peer.sub(LEADERBOARD, (env) => {
         if (!env || !env.message) return;
-        try { onLeaderboard(JSON.parse(env.message)); } catch { /* */ }
-      }, { publisher: PUBLISHER, since: 'all' });
+        try { onLeaderboard(typeof env.message === 'string' ? JSON.parse(env.message) : env.message); } catch { /* */ }
+      }, { since: 'all' });
     } catch { /* leaderboard is best-effort */ }
   }
 
   return {
     nodeId: identity.id,
     async publish(result) {
-      const msgId = await peer.pub(TOPIC, JSON.stringify(result), { publisher: PUBLISHER });
+      const msgId = await peer.pub(TOPIC, JSON.stringify(result), { signWith: author });
       return { ok: true, msgId };
     },
     // Connection-health snapshot for the Copy data export: peer.health()

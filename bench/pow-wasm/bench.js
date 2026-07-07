@@ -3,12 +3,12 @@
 // keep going) → aggregate → render → report. See README.md.
 
 // Bump on every bench change so a stale cached app is obvious in the UI.
-const BENCH_VERSION = '0.18.2';
+const BENCH_VERSION = '0.19.0';
 // Kernel-version visibility: show which kernel this tab is actually running and
 // tag every published result with it — long-running bench tabs keep an OLD
 // kernel in memory across kernel deploys until reloaded, and this is how we
 // spot them in the fleet. handshake.js is tiny and side-effect-free.
-import { KERNEL_VERSION } from '/src/transport/handshake.js';
+import { KERNEL_VERSION } from '/src/transport/handshake.js?v=4.18.2';
 
 // Crash-safe WebAssembly memory-ceiling probe. On iOS Safari navigator.deviceMemory
 // is null and a per-tab WASM cap (not RAM) is the real floor; this measures it
@@ -467,7 +467,7 @@ async function reconnectReporter(why) {
   reconnecting = true;
   diag(`reporter (re)connect — ${why}; ${pendingPublishes.length} queued`);
   try {
-    const { createReporter } = await import('./axona-report.js');
+    const { createReporter } = await import('./axona-report.js?v=0.19.0');
     reporter = await createReporter((m) => { $('status').textContent = m; }, renderLeaderboard, diag);
     diag(`reporter connected (node ${String(reporter.nodeId).slice(0, 10)}…)`);
   } catch (e) {
@@ -578,7 +578,7 @@ async function stopContinuous() {
 // log (connect failures, publish errors, kernel events, page errors) + a live
 // connection-health snapshot are all assembled into one JSON blob.
 async function copyAllData() {
-  let bridge = null; try { bridge = (await import('./axona-report.js')).reportBridge; } catch (e) { diag('copy: reporter module unloadable: ' + (e.message || e)); }
+  let bridge = null; try { bridge = (await import('./axona-report.js?v=0.19.0')).reportBridge; } catch (e) { diag('copy: reporter module unloadable: ' + (e.message || e)); }
   let health = null;
   if (reporter?.health) { try { health = reporter.health(); } catch (e) { health = { error: String(e.message || e) }; } }
   const payload = {
