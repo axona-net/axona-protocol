@@ -55,6 +55,14 @@ class DivergentFabric {
         const cands = [idBig, ...[...rec.neighbors].filter((n) => self.nodes.get(n)?.alive)];
         return cands.sort((a, b) => { const da = a ^ target, db = b ^ target; return da < db ? -1 : da > db ? 1 : 0; }).slice(0, k);
       },
+      // The ITERATIVE lookup: hops the mesh, so it converges on the GLOBAL
+      // closest alive node even from a beacon-shadowed corner (this is what
+      // root self-verification rides on).
+      lookup: async (target) => {
+        let best = null, bestD = null;
+        for (const [id, n] of self.nodes) { if (!n.alive) continue; const d = id ^ target; if (bestD === null || d < bestD) { bestD = d; best = id; } }
+        return best === null ? { path: [] } : { path: [idHex(best)] };
+      },
     };
     rec.am = new AxonaManager({ dht, now: () => self.clock, renewMs: 60_000, renewFastMs: 5_000, dropMs: 180_000 });
     rec.am.onPubsubDelivery((_t, _j, msgId) => rec.got.push(msgId));
@@ -213,6 +221,54 @@ fab.advance(35_000);
 P.am._send('pubsub:pub', { topicId: idHex(T), via: [], json: await envFor('m4') });
 await fab.settle();
 check('delivery works under the new root', S4.got.length >= 1, `S4 got ${S4.got.length}`);
+
+console.log('— phase 5 (root self-verification): beacon-shadowed spurious root demotes itself —');
+// Fresh topic + shadowed corner (the prod orphan-subscriber signature): W is a
+// local minimum for the topic in ITS corner and hears NO beacons (not linked to
+// the root's neighbourhood). A stranded SUB there mints a spurious root with a
+// via-pinned, permanently-orphaned subscriber — until W's own periodic verify
+// (iterative lookup) finds the true root and demotes.
+const T2NAME = { region: 'useast', name: 'root-reconcile-smoke-2', write: 'open' };
+const T2 = await deriveTopicIdBig(T2NAME);
+const near2 = (lo) => T2 ^ BigInt(lo);
+const envFor2 = async (text) => JSON.stringify(await buildEnvelope({ topic: T2NAME, message: text, identity: author }));
+const R  = fab.addNode(near2(0x02));   // true closest for T2
+const W  = fab.addNode(near2(0x70));   // shadowed corner host
+const S5 = fab.addNode(near2(0x74));   // subscriber, knows only W
+const P2 = fab.addNode(near2(0x80));   // publisher, knows R and W
+fab.link(R.id, P2.id); fab.link(W.id, S5.id); fab.link(W.id, P2.id);
+// R roots via a publish (m5) — W hears nothing (no beacon path W←R).
+P2.am._send('pubsub:pub', { topicId: idHex(T2), via: [], json: await envFor2('m5') });
+await fab.settle();
+// S5's SUB strands at W (its only neighbour is W; W is a local min for T2
+// among {W,S5,P2}) → W self-roots (no beacon knowledge — allowed) → SPLIT.
+S5.am.pubsubSubscribe(T2); S5.am.mySubscriptions.get(T2).since = 0;
+await fab.settle();
+const splitRoots = fab.roots(T2);
+check('disease precondition: split exists (R and W both root)', splitRoots.length === 2, JSON.stringify(splitRoots));
+// Advance past ROOT_VERIFY_FIRST_MS; W's tick launches the iterative lookup,
+// which converges on R → W demotes, re-homes, and PULLUP/replay flows down.
+fab.advance(7_000);
+await fab.tickAll();
+await new Promise((r) => setTimeout(r, 20));   // let the non-blocking verify promise land
+await fab.settle();
+await fab.tickAll();                            // W's re-home SUB renewal + replay
+await new Promise((r) => setTimeout(r, 20));
+await fab.settle();
+const healedRoots = fab.roots(T2);
+check('spurious root self-verified and demoted (single root = R)',
+  healedRoots.length === 1 && healedRoots[0] === idHex(R.id).slice(-4), JSON.stringify(healedRoots));
+// The demoted W now KNOWS R's id (verified pointer). In the live kernel the
+// mesh machinery (5-closest-peer rule / introductions) then forms the W↔R
+// synapse; this sparse fabric has no introduction layer, so model that step
+// with an explicit link before W's renewal routes its SUB + hw upward.
+fab.link(W.id, R.id);
+await fab.tickAll();
+await new Promise((r) => setTimeout(r, 20));
+await fab.settle();
+P2.am._send('pubsub:pub', { topicId: idHex(T2), via: [], json: await envFor2('m6') });
+await fab.settle();
+check('orphaned subscriber now receives (history + live)', S5.got.length >= 2, `S5 got ${S5.got.length}`);
 
 console.log(`\n${passed} passed, ${failed} failed`);
 process.exit(failed ? 1 : 0);
