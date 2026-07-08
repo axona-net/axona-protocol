@@ -270,5 +270,28 @@ P2.am._send('pubsub:pub', { topicId: idHex(T2), via: [], json: await envFor2('m6
 await fab.settle();
 check('orphaned subscriber now receives (history + live)', S5.got.length >= 2, `S5 got ${S5.got.length}`);
 
+console.log('— phase 6 (alone-in-the-dark): an unmeshed node must not self-root on subscribe —');
+// Prod signature: EVERY freshly-joined subscriber (mesh not yet formed) minted
+// a transient root for the topic — seven per topic in one instrumented run —
+// splitting the tree until reconciliation caught up. A node with zero
+// non-bridge neighbours must hold the seat and let the renewal re-run the
+// election once it is meshed.
+const Z = fab.addNode(near2(0x60));            // joins with NO links (mesh not formed yet)
+Z.am.pubsubSubscribe(T2); Z.am.mySubscriptions.get(T2).since = 0;
+await fab.settle();
+const zRole = Z.am.axonRoles.get(T2);
+check('unmeshed subscriber did NOT root the topic', !(zRole && zRole.isRoot), zRole ? 'rooted!' : '');
+check('root set unchanged (still exactly R)', JSON.stringify(fab.roots(T2)) === JSON.stringify(healedRoots), JSON.stringify(fab.roots(T2)));
+// The mesh forms; the renewFastMs renewal re-runs the election and seats Z.
+fab.link(Z.id, R.id);
+fab.advance(6_000);
+await fab.tickAll();
+await new Promise((r) => setTimeout(r, 20));
+await fab.settle();
+P2.am._send('pubsub:pub', { topicId: idHex(T2), via: [], json: await envFor2('m7') });
+await fab.settle();
+check('once meshed, the held subscriber seats and receives (history + live)', Z.got.length >= 2, `Z got ${Z.got.length}`);
+check('still exactly one root after the join', fab.roots(T2).length === 1, JSON.stringify(fab.roots(T2)));
+
 console.log(`\n${passed} passed, ${failed} failed`);
 process.exit(failed ? 1 : 0);
