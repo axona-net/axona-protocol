@@ -36,7 +36,23 @@ class FakeWS {
     this._listeners = new Map();
     this.readyState = 0;
     liveSockets.push(this);
-    queueMicrotask(() => { this.readyState = 1; this._fire('open'); });
+    // failNextUpgrades emulates Node `ws` on a failed HTTP upgrade (a proxy
+    // answering 502 while the backend boots): 'error' then 'close', never
+    // 'open'. _fire replicates EventEmitter semantics — an 'error' with NO
+    // listener THROWS; that throw is exactly what escaped webTransport as an
+    // uncaughtException, killed the reconnect chain before 'close' fired, and
+    // wedged all nine prod relays on 2026-07-09.
+    if (FakeWS.failNextUpgrades > 0) {
+      FakeWS.failNextUpgrades--;
+      queueMicrotask(() => {
+        this.readyState = 3;
+        this._fire('error', { message: 'Unexpected server response: 502',
+                              error: new Error('Unexpected server response: 502') });
+        this._fire('close', { code: 1006 });
+      });
+    } else {
+      queueMicrotask(() => { this.readyState = 1; this._fire('open'); });
+    }
   }
   addEventListener(type, h) {
     if (!this._listeners.has(type)) this._listeners.set(type, new Set());
@@ -50,10 +66,14 @@ class FakeWS {
   }
   _fire(type, ev = {}) {
     const set = this._listeners.get(type);
+    if (type === 'error' && (!set || set.size === 0)) {
+      throw ev.error || new Error(ev.message || 'unhandled socket error');
+    }
     if (set) for (const h of set) try { h(ev); } catch {}
   }
   deliver(obj) { this._fire('message', { data: JSON.stringify(obj) }); }
 }
+FakeWS.failNextUpgrades = 0;
 
 let bridgeIdent;   // the bridge's real identity (set in main)
 
@@ -162,6 +182,42 @@ async function main() {
   await sleep(120);
   check('4426 → NO reconnect (no new socket)', liveSockets.length === countAtOpen);
   await t2.stop();
+
+  // ── Failed HTTP upgrade mid-reconnect (the 2026-07-09 prod wedge) ──
+  // Bridge restarts; the relay's reconnect attempts hit a 502 from the proxy
+  // while the backend boots. The transport must survive the 'error' event
+  // (pre-fix: unlistened → THROWS → chain dead) and keep backing off until
+  // an attempt succeeds.
+  liveSockets = [];
+  const t3 = webTransport({
+    bridgeUrl: 'wss://test.example',
+    identity:  alice,
+    WebSocketImpl: FakeWS,
+    handshakeTimeoutMs: 2000,
+    reconnectInitialMs: 30,
+    reconnectMaxMs:     30,
+  });
+  const startP3 = t3.start();
+  await sleep(5);
+  const s3 = t3.socket;
+  feedWelcome(s3);
+  await feedBridgeHello(s3);
+  await startP3;
+  check('t3 connected (baseline)', t3.bridgeState === 'open');
+
+  FakeWS.failNextUpgrades = 3;          // next 3 attempts 502 like a booting proxy
+  const socketsAtDrop = liveSockets.length;
+  s3.close();                           // bridge restart drops the socket
+  await sleep(400);                     // 3 failed attempts × ~30ms backoff + slack
+  check('survived 3 failed upgrades (no crash) and kept retrying',
+    liveSockets.length >= socketsAtDrop + 4);   // 3 failures + the succeeding attempt
+  const s4 = t3.socket;
+  check('a live socket exists after the failures', !!s4 && s4.readyState === 1);
+  feedWelcome(s4);
+  await feedBridgeHello(s4);
+  await sleep(5);
+  check('re-handshake completed after the 502 storm', t3.bridgeState === 'open');
+  await t3.stop();
 
   console.log(`\nResult: ${passed} passed, ${failed} failed`);
   process.exit(failed === 0 ? 0 : 1);
