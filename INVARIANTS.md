@@ -75,10 +75,18 @@ Idle/liveness verdicts must exclude windows where the judging process was
 stalled or not yet consuming (the bridge event-loop-stall admission drops,
 bridge 2.67.0: stall sampler + client-hello grace re-arm + idle-sweep skip).
 
-- Enforced in `axona-bridge` `src/server.js` (`stallTaintedSince()`, grace
-  re-arm). **Coverage gap: no automated test** — the bridge repo has no test
-  for the stall/grace path; verified live only. Flagged for Phase 0 follow-up
-  in the bridge repo.
+- Enforced in `axona-bridge` `src/server.js` (`stallTaintedSince()` +
+  `stallPending()`, grace re-arm). Covered by the bridge's
+  `scripts/smoke-loop-stall.js` (bridge 2.72.1, wired into its `npm test`):
+  reproduces the stall with a test-gated synchronous busy-wait
+  (`BRIDGE_TEST_STALL=on` → `/__test/stall`) and asserts hello-grace
+  admission, idle-sweep skip, eventual kick of a genuinely-idle client once
+  the taint ages out, and the healthz stall counters. Writing the test
+  exposed a timer-ordering hazard — on loop resumption Node fires expired
+  timers in due-time order, so a judgment timer could run *before* the
+  sampler's tick recorded the stall — closed by `stallPending()` (judgment
+  sites also check raw heartbeat drift for a stall the sampler hasn't seen
+  yet).
 
 ## I-6. Observability surfaces exist or fail loudly — never silently zero
 
