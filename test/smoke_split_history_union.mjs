@@ -49,7 +49,7 @@ const idHex = (big) => big.toString(16).padStart(66, '0');
 // neighbour lists, greedy hop-by-hop walk, local-only findKClosest — the real
 // routing's failure mode.
 class DivergentFabric {
-  constructor() { this.nodes = new Map(); this.queue = []; this.clock = Date.now(); }
+  constructor() { this.nodes = new Map(); this.queue = []; this.clock = Date.now(); this.pullups = 0; }
   addNode(idBig) {
     const self = this; const handlers = new Map();
     const rec = { id: idBig, handlers, alive: true, got: [], kills: [], neighbors: new Set() };
@@ -78,6 +78,7 @@ class DivergentFabric {
   link(a, b) { this.nodes.get(a).neighbors.add(b); this.nodes.get(b).neighbors.add(a); }
   kill(idBig) { const n = this.nodes.get(idBig); if (n) n.alive = false; }
   _walk(from, target, type, payload) {
+    if (type === 'pubsub:pullup') this.pullups++;
     const via0 = (Array.isArray(payload?.via) && payload.via.length) ? BigInt('0x' + payload.via[0]) : null;
     let cur = from;
     for (let hop = 0; hop < 32; hop++) {
@@ -183,7 +184,7 @@ check('disease precondition: R holds ONLY the post half', rRole?.cache.length ==
 console.log('— phase 3: kill one PRE message at R before the union (tombstone-first) —');
 // The kill routes to the CURRENT root R, which has never seen the target body —
 // a provisional tombstone. The union arriving later must not resurrect it.
-const killedId = pre[2];
+const killedId = pre[0];   // the OLDEST — its holder's lw stays below the root's forever
 const kill = await buildKill({ topicId: idHex(T), msgId: killedId, identity: author });
 P.am._send('pubsub:kill', { topicId: idHex(T), via: [], kill });
 await fab.settle();
@@ -248,6 +249,19 @@ await fab.tickAll(); await fab.settle();
 await fab.tickAll(); await fab.settle();
 const missing2 = pre2.filter((m) => !S2.got.includes(m));
 check('late union HEALED the attached subscriber (pre half fanned to it)', missing2.length === 0, `missing ${missing2.length}, got ${S2.got.length}`);
+
+console.log('— phase 7 (THE 4.22.1 FIX): a refused pull must QUENCH, not loop —');
+// After the union, H still holds the killed pre-1 as its OLDEST message — R holds
+// its tombstone and will never accept the body, so H's lw sits below R's forever.
+// On 4.22.0 every renewal re-fired PULLUP(sinceHw:0) → H replayed its FULL cache
+// up each tick, forever (the testnet relay storm: flapping roots, 0% backlog runs,
+// leave() drains pinned at timeout). The pull must fire at most once per
+// (subscriber, lw) — re-arming only if the child's lw DECREASES further.
+const before = fab.pullups;
+for (let i = 0; i < 6; i++) { fab.advance(6_000); await fab.tickAll(); await fab.settle(); }
+const rePulls = fab.pullups - before;
+check(`six renewal rounds re-fire at most one pull (got ${rePulls})`, rePulls <= 1, `${rePulls} PULLUPs across 6 rounds`);
+check('killed body still suppressed at R after the rounds', !R.am.axonRoles.get(T)?.cache.some((c) => c.msgId === killedId));
 
 console.log(`\n${passed} passed, ${failed} failed`);
 process.exit(failed ? 1 : 0);
