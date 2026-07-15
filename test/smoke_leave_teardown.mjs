@@ -16,6 +16,11 @@
 //      (well under the 5s default timeout).
 //   3. with an artificially stuck pending entry, leave() drains up to ~the
 //      caller's bound and STILL exits silenced (bounded, then cleared).
+//   3b. the alert-bot pin (v4.23.2): a STALLED pending set (non-root,
+//      non-subscribed publisher — nothing ever confirms) exits early at ~STALL_MS
+//      instead of riding the full 5s window (field: leaveMs pinned at ~5040ms).
+//   3c. while confirmations ARE arriving (pending shrinking), the drain keeps
+//      waiting past STALL_MS — progress resets the stall clock.
 //   4. stop() performs the same teardown (the abrupt path).
 //
 // Run: node test/smoke_leave_teardown.mjs
@@ -87,6 +92,39 @@ async function main() {
   check('stuck pending: leave() drained ~the bound then exited', boundedMs >= 600 && boundedMs < 4500, `${boundedMs}ms`);
   check('stuck pending cleared on departure', (cam._pendingPub?.size ?? 0) === 0);
   check('tick cleared on bounded-drain path too', cam._timer == null);
+
+  // ── 3b: the alert-bot pin — a STALLED pending at the DEFAULT 5s timeout must
+  // exit early (no confirmation is coming), not ride the full window. Before the
+  // stall-exit fix this pinned leaveMs at ~5040ms (field: ~90 topics published
+  // then leave, publisher non-root + non-subscribed so nothing confirms). ──────
+  const e = await makePeer(net);
+  await e.peer.pub(TOPIC, 'm-e', { signWith: author });
+  const eam = e.peer._axonaManager;
+  for (let i = 0; i < 90; i++) eam._pendingPub.set('stuck' + i, { at: Date.now(), tries: 0, topicBig: 1n, json: '{}' });
+  const t2 = Date.now();
+  await e.peer.leave();                        // DEFAULT timeoutMs 5000
+  const stalledMs = Date.now() - t2;
+  check('alert-bot pin: stalled pending exits ~STALL_MS, not the 5s window (<2800ms)', stalledMs < 2800, `${stalledMs}ms`);
+  check('stalled pending cleared on departure', (eam._pendingPub?.size ?? 0) === 0);
+
+  // ── 3c: while confirmations ARE arriving (pending SHRINKS) the drain keeps
+  // waiting past STALL_MS — progress resets the stall clock, so a genuinely
+  // draining publisher is unaffected by the early-exit. ────────────────────────
+  const f = await makePeer(net);
+  await f.peer.pub(TOPIC, 'm-f', { signWith: author });
+  const fam = f.peer._axonaManager;
+  for (let i = 0; i < 40; i++) fam._pendingPub.set('drain' + i, { at: Date.now(), tries: 0, topicBig: 1n, json: '{}' });
+  // delete one entry every 250ms → steady progress well past STALL_MS (1.5s)
+  const drainTimer = setInterval(() => {
+    const k = [...fam._pendingPub.keys()].find(x => x.startsWith('drain'));
+    if (k) fam._pendingPub.delete(k);
+  }, 250);
+  if (typeof drainTimer.unref === 'function') drainTimer.unref();
+  const t3 = Date.now();
+  await f.peer.leave();
+  const progressMs = Date.now() - t3;
+  clearInterval(drainTimer);
+  check('progress resets stall clock: drain honors the window while shrinking (>2000ms)', progressMs > 2000, `${progressMs}ms`);
 
   // ── 4: stop() (abrupt path) performs the same teardown ──────────────
   const d = await makePeer(net);
