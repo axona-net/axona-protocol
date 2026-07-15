@@ -144,8 +144,13 @@
   <div>
     <h1>S2 region visualizer</h1>
     <p class="lede">
-      The 192 S2 cells that anchor every Axona pub/sub topic and nodeId.
-      Hover the globe to see the region name and cell a coordinate falls in; click a swatch in the legend to highlight all coordinates in that cell.
+      The 192 S2 cells that anchor every Axona pub/sub topic and nodeId — coloured by
+      <strong>fold basin</strong>. Only <strong>84</strong> cells are populated
+      <strong>major</strong> regions (named for a neutral in-range animal); the
+      ~108 ocean and sparse cells <strong>fold</strong> into the nearest major, so a
+      topic anchored in empty water lands in a real region instead of hotspotting a
+      boundary. Cells sharing a colour share a major. Hover the globe for the fold
+      relationship; click a legend swatch to highlight its cell.
     </p>
     <div id="globeContainer">
       <canvas id="globeCanvas"></canvas>
@@ -228,6 +233,18 @@
         polar shrinkage. Byte values 0xC0–0xFF are reserved (192–255)
         for future system topics.
       </p>
+      <p style="font-size:0.9rem; margin: 0.6rem 0 0 0;">
+        <strong>The fold.</strong> Roughly half the cells are open ocean or
+        near-empty land — no peers live there. Minting an id at such a cell would
+        make it a hotspot: every topic anchored in that ocean lands on the same few
+        boundary nodes. So <code>canonicalRegion()</code> folds each ocean/sparse
+        cell onto its nearest <strong>major</strong> at mint time (node ids and
+        topic ids alike), and the topic spreads across that major's whole
+        population. The fold is deterministic and carried in the id itself — no
+        coordinator — and wire-compatible: every populated region keeps its exact
+        byte. Regions are labelled with neutral animal names rather than country
+        names (the id carries only the numeric code, never the label).
+      </p>
     </div>
 
   </div>
@@ -250,13 +267,44 @@ import {
   geoCellFace,
   S2_CELL_COUNT,
 } from '../../src/utils/s2.js';
-import { regionName, regionNames } from '../../src/utils/region-names.js';
+import { regionName, regionNames, canonicalRegion, MAJORS } from '../../src/utils/region-names.js';
 import { KERNEL_VERSION } from '../../src/transport/handshake.js';
 
 const hex = (cid) => '0x' + cid.toString(16).padStart(2, '0').toUpperCase();
 
-// "useast · 0x89" — the region's single name + code.
-const cellLabel = (cid) => `${regionName(cid) ?? '?'} · ${hex(cid)}`;
+// A cell is a MAJOR (populated) region iff it names itself; the other ~108
+// ocean/sparse cells FOLD onto their nearest major, so a topic anchored in
+// empty water lands in a real region instead of hotspotting a boundary sliver.
+const isMajor = (cid) => MAJORS[cid] !== undefined;
+const canonOf = (cid) => canonicalRegion(cid);   // the major this cell folds to
+
+// Label: a major shows "osprey · 0x89 (major)"; a folded cell shows which major
+// it belongs to, "pac_68 0x68 ▸ puffin 0x56 (folds in)".
+const cellLabel = (cid) => {
+  const canon = canonOf(cid);
+  if (canon === cid) return `${regionName(cid) ?? '?'} · ${hex(cid)}  (major)`;
+  return `${hex(cid)} ▸ ${regionName(canon)} ${hex(canon)}  (folds in)`;
+};
+
+// Stable, well-spread colour per MAJOR region (golden-angle hue), shared by
+// every cell in that major's fold basin so basins read as one colour.
+const _hueCache = new Map();
+function majorColor(canonCid) {
+  if (_hueCache.has(canonCid)) return _hueCache.get(canonCid);
+  // index of this major among the sorted major codes → golden-angle hue
+  const majors = Object.keys(MAJORS).map(Number).sort((a, b) => a - b);
+  const i = majors.indexOf(canonCid);
+  const hue = (i * 137.508) % 360;
+  const col = hslToRgb(hue / 360, 0.55, 0.55);
+  _hueCache.set(canonCid, col);
+  return col;
+}
+function hslToRgb(h, s, l) {
+  const k = n => (n + h * 12) % 12;
+  const a = s * Math.min(l, 1 - l);
+  const f = n => l - a * Math.max(-1, Math.min(k(n) - 3, Math.min(9 - k(n), 1)));
+  return [Math.round(255 * f(0)), Math.round(255 * f(8)), Math.round(255 * f(4))];
+}
 
 document.getElementById('kernelVer').textContent =
   `@axona/protocol kernel v${KERNEL_VERSION}`;
@@ -409,7 +457,15 @@ function buildCellTexture(highlightCellId = null) {
         data[off+2] = GRID_B;
         data[off+3] = 200;
       } else {
-        data[off+3] = 0;   // fully transparent
+        // Fill the cell interior with its fold-basin colour: every ocean/sparse
+        // cell shares the hue of the major it folds to, so basins read as one
+        // region. Majors are painted a touch more opaque than the water that
+        // folds into them, so the populated core stands out from its basin.
+        const [r, g, b] = majorColor(canonOf(cid));
+        data[off]   = r;
+        data[off+1] = g;
+        data[off+2] = b;
+        data[off+3] = isMajor(cid) ? 78 : 42;
       }
     }
   }
@@ -618,10 +674,15 @@ function buildLabelTexture() {
     ctx.strokeText(hex(code), px, py + 5);
     ctx.fillText(hex(code), px, py + 5);
   };
+  // Label only the 84 MAJOR (populated) regions — the animal name sits on the
+  // cell that actually anchors it. The ~108 ocean/sparse cells that fold in are
+  // left unlabelled (their basin colour already shows which major they belong
+  // to); labelling all 192 would just be clutter over empty water.
   for (let cid = 0; cid < N_CELLS; cid++) {
+    if (!isMajor(cid)) continue;
     const name = regionName(cid);
     if (!name) continue;
-    const [px, py] = xy(geoCellCenter(cid));   // one name, centered on the cell
+    const [px, py] = xy(geoCellCenter(cid));   // animal name, centered on the major
     drawLabel(px, py, name, cid);
   }
   return c;
@@ -819,6 +880,13 @@ function makeSwatch(cid, mode) {
   if (cid === cellHighlightId) s.classList.add('selected');
   s.textContent = cid.toString(16).padStart(2, '0').toUpperCase();
   const face = Math.floor(cid / 32);
+  // Tint by fold-basin colour; MAJORS are solid, folded cells are faded and
+  // dashed so the populated 84 stand out from the ~108 that fold into them.
+  const [r, g, b] = majorColor(canonOf(cid));
+  const major = isMajor(cid);
+  s.style.background = `rgba(${r},${g},${b},${major ? 0.85 : 0.30})`;
+  s.style.color = major ? '#111' : '#555';
+  if (!major) s.style.borderStyle = 'dashed';
   s.title = cellLabel(cid) + '  (' + cid + ')   face ' + face;
   s.addEventListener('click', () => {
     cellHighlightId = (cellHighlightId === cid) ? null : cid;
