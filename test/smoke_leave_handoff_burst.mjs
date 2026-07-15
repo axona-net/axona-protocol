@@ -48,13 +48,22 @@ async function main() {
   const HEIR = SELF ^ 0xFFn;
 
   // ── 1. parallel heir resolution: 24 topics @150ms/lookup ────────────
+  //    (v4.24.0 confirmed handoff: the mock heir ACKS each HANDOFF — the
+  //    modern-heir fast path — so a single send per topic still holds and the
+  //    shared ack window early-exits without adding measurable latency.)
   {
     const routed = [];
+    let amRef = null;
     const { am } = makeManager({
       selfBig: SELF,
       findKClosest: async () => { await sleep(150); return [SELF, HEIR]; },
-      onRoute: (target, type, payload) => { if (type === 'pubsub:handoff') routed.push(payload); },
+      onRoute: (target, type, payload) => {
+        if (type !== 'pubsub:handoff') return;
+        routed.push(payload);
+        amRef._onHandoffAck({ topicId: payload.topicId }, { targetId: SELF });   // heir confirms
+      },
     });
+    amRef = am;
     for (let i = 0; i < 24; i++) {
       const t = SELF ^ BigInt(0x1000 + i);
       const role = { topicId: t, isRoot: true, cache: [{ msgId: 'm'+i, publishTs: i+1, json: '{}', seq: 1 }],
@@ -64,22 +73,53 @@ async function main() {
     const t0 = Date.now();
     await am.pubsubLeaveHandoff();
     const ms = Date.now() - t0;
-    check('all 24 rooted topics handed off', routed.length === 24, `${routed.length}`);
+    check('all 24 rooted topics handed off (once each — acked, no retry)', routed.length === 24, `${routed.length}`);
     check(`parallel: 24 lookups @150ms took ${ms}ms (serial would be ~3600ms)`, ms < 1400, `${ms}ms`);
     check('HANDOFF carries the departing node (`from`)',
       routed.every(p => p.from === idHex(SELF)));
+  }
+
+  // ── 1b. v4.24.0 confirmed handoff: NO ack → bounded retry, then the
+  //    cache+tombstones are sprayed to the K-closest cohort as REPLICATE
+  //    (the old fire-and-forget silently dropped the topic's last copy). ──
+  {
+    const handoffs = [], replicates = [];
+    const { am } = makeManager({
+      selfBig: SELF,
+      findKClosest: async () => [SELF, HEIR],
+      onRoute: (target, type, payload) => {          // heir never acks
+        if (type === 'pubsub:handoff') handoffs.push(payload);
+        if (type === 'pubsub:replicate') replicates.push(payload);
+      },
+    });
+    am._rootReplicas = 2;                            // arm the cohort spray
+    const t = SELF ^ 0x6000n;
+    am.axonRoles.set(t, { topicId: t, isRoot: true, cache: [{ msgId: 'y', publishTs: 1, json: '{}', seq: 1 }],
+      cacheIds: new Set(), children: new Set(), subscribers: new Map(), tombstones: new Map(), replicas: new Map() });
+    const t0 = Date.now();
+    await am.pubsubLeaveHandoff();
+    const ms = Date.now() - t0;
+    check('unacked handoff retried exactly HANDOFF_TRIES times', handoffs.length === 2, `${handoffs.length}`);
+    check('…then the cohort REPLICATE spray fired (durability fallback)', replicates.length >= 1, `${replicates.length}`);
+    check(`no-ack path bounded (~2 ack windows), took ${ms}ms`, ms < 2500, `${ms}ms`);
   }
 
   // ── 2. thin-table leaver falls back to the iterative lookup ─────────
   {
     const routed = [];
     let lookups = 0;
+    let amRef2 = null;
     const { am } = makeManager({
       selfBig: SELF,
       findKClosest: async () => [SELF],                    // local view: nobody but me
       lookup: async () => { lookups++; return { path: [idHex(HEIR)] }; },
-      onRoute: (target, type, payload) => { if (type === 'pubsub:handoff') routed.push({ target, payload }); },
+      onRoute: (target, type, payload) => {
+        if (type !== 'pubsub:handoff') return;
+        routed.push({ target, payload });
+        amRef2._onHandoffAck({ topicId: payload.topicId }, { targetId: SELF });   // heir confirms (v4.24.0)
+      },
     });
+    amRef2 = am;
     const t = SELF ^ 0x2000n;
     am.axonRoles.set(t, { topicId: t, isRoot: true, cache: [{ msgId: 'x', publishTs: 1, json: '{}', seq: 1 }],
       cacheIds: new Set(), children: new Set(), subscribers: new Map(), tombstones: new Map() });
