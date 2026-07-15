@@ -248,34 +248,42 @@ const LEGACY_CELL_NAMES = Object.freeze([
 /**
  * MAJOR regions: `code → neutral animal name`. A cell is major iff it appears
  * here. Everything else folds to its nearest major (great-circle between cell
- * centers). Curation: ≤8 chars /^[a-z0-9_]{1,8}$/, unique, and never a national
- * animal/bird of a country the cell straddles a border with.
+ * centers, with FOLD_OVERRIDES below for hand-tuned cases). Curation: full,
+ * easy-to-spell common animal names /^[a-z0-9]{2,16}$/, unique, and never a
+ * national animal/bird of a country the cell straddles a border with.
  */
 export const MAJORS = Object.freeze({
-  0x07: 'macaw',   0x0c: 'canary',  0x0d: 'lynx',    0x0e: 'fennec',
-  0x0f: 'chimp',   0x10: 'hornbill',0x11: 'oryx',    0x12: 'addax',
-  0x13: 'gecko',   0x14: 'ibis',    0x15: 'jerboa',  0x16: 'gelada',
-  0x17: 'okapi',   0x18: 'zebra',   0x19: 'sable',   0x1a: 'bonobo',
-  0x1b: 'roan',    0x1c: 'meerkat', 0x1e: 'kudu',    0x20: 'lemur',
-  0x26: 'dodo',    0x27: 'fossa',   0x28: 'dikdik',  0x2a: 'gazelle',
-  0x2b: 'urial',   0x2c: 'chinkara',0x2d: 'kiang',   0x2e: 'gaur',
-  0x30: 'tapir',   0x31: 'gibbon',  0x32: 'takin',   0x33: 'panda',
-  0x34: 'egret',   0x35: 'goral',   0x36: 'tarsier', 0x37: 'orang',
-  0x38: 'cuscus',  0x39: 'komodo',  0x3a: 'colugo',  0x3e: 'quokka',
-  0x3f: 'dingo',   0x40: 'tur',     0x41: 'wisent',  0x42: 'saiga',
-  0x43: 'ermine',  0x44: 'reindeer',0x46: 'moose',   0x47: 'boar',
-  0x48: 'badger',  0x4c: 'caribou', 0x4d: 'loon',    0x52: 'elk',
-  0x53: 'cougar',  0x56: 'puffin',  0x59: 'salmon',  0x5b: 'wolvrine',
-  0x5c: 'muskdeer',0x5d: 'argali',  0x5e: 'sika',    0x5f: 'tanuki',
-  0x60: 'serow',   0x6c: 'nene',    0x78: 'kiwi',    0x7d: 'cassowry',
-  0x7e: 'wombat',  0x7f: 'koala',   0x80: 'grizzly', 0x81: 'coyote',
-  0x84: 'iguana',  0x86: 'armadilo',0x87: 'bison',   0x88: 'possum',
-  0x89: 'osprey',  0x8c: 'toucan',  0x8d: 'sloth',   0x8e: 'spectbr',
-  0x8f: 'coati',   0x91: 'llama',   0x92: 'jaguar',  0x93: 'capybara',
-  0x94: 'rhea',    0x95: 'puma',    0x96: 'guanaco', 0xaa: 'penguin',
+  0x07: 'macaw',      0x0c: 'canary',     0x0d: 'lynx',       0x0e: 'fennec',
+  0x0f: 'chimpanzee', 0x10: 'hornbill',   0x11: 'oryx',       0x12: 'addax',
+  0x13: 'gecko',      0x14: 'ibis',       0x15: 'jerboa',     0x16: 'gelada',
+  0x17: 'gorilla',    0x18: 'zebra',      0x19: 'sable',      0x1a: 'bonobo',
+  0x1b: 'roan',       0x1c: 'meerkat',    0x1e: 'kudu',       0x20: 'lemur',
+  0x26: 'dodo',       0x27: 'fossa',      0x28: 'dikdik',     0x2a: 'gazelle',
+  0x2b: 'urial',      0x2c: 'chinkara',   0x2d: 'kiang',      0x2e: 'gaur',
+  0x30: 'tapir',      0x31: 'gibbon',     0x32: 'takin',      0x33: 'panda',
+  0x34: 'egret',      0x35: 'goral',      0x36: 'tarsier',    0x37: 'orangutan',
+  0x38: 'cuscus',     0x39: 'komodo',     0x3a: 'colugo',     0x3e: 'quokka',
+  0x3f: 'dingo',      0x40: 'leopard',    0x41: 'brownbear',  0x42: 'saiga',
+  0x43: 'ermine',     0x44: 'reindeer',   0x46: 'moose',      0x47: 'boar',
+  0x48: 'badger',     0x4c: 'caribou',    0x4d: 'loon',       0x52: 'elk',
+  0x53: 'cougar',     0x56: 'puffin',     0x59: 'salmon',     0x5b: 'wolverine',
+  0x5c: 'muskdeer',   0x5d: 'argali',     0x5e: 'sika',       0x5f: 'tanuki',
+  0x60: 'serow',      0x6c: 'seaturtle',  0x78: 'kiwi',       0x7d: 'cassowary',
+  0x7e: 'wombat',     0x7f: 'koala',      0x80: 'grizzly',    0x81: 'coyote',
+  0x84: 'iguana',     0x86: 'armadillo',  0x87: 'bison',      0x88: 'alligator',
+  0x89: 'eagle',      0x8c: 'toucan',     0x8d: 'anteater',   0x8e: 'ocelot',
+  0x8f: 'coati',      0x91: 'llama',      0x92: 'jaguar',     0x93: 'capybara',
+  0x94: 'rhea',       0x95: 'puma',       0x96: 'guanaco',    0xaa: 'penguin',
 });
 
 const MAJOR_CODES = Object.freeze(Object.keys(MAJORS).map(Number));
+
+/**
+ * Hand-tuned fold targets that override the nearest-major default. Greenland's
+ * two cells (west 0x4e, north/east 0x4f) both fold to caribou (Quebec) rather
+ * than split east→reindeer / west→caribou across the Atlantic.
+ */
+const FOLD_OVERRIDES = Object.freeze({ 0x4e: 0x4c, 0x4f: 0x4c });
 
 /** Great-circle distance (km) between two {lat,lng}. */
 function _greatCircle(a, b) {
@@ -295,6 +303,7 @@ const CANONICAL_CODE = Object.freeze((() => {
   const centers = Array.from({ length: S2_CELL_COUNT }, (_, c) => geoCellCenter(c));
   for (let c = 0; c < S2_CELL_COUNT; c++) {
     if (MAJORS[c] !== undefined) { out[c] = c; continue; }
+    if (FOLD_OVERRIDES[c] !== undefined) { out[c] = FOLD_OVERRIDES[c]; continue; }
     let best = MAJOR_CODES[0], bestD = Infinity;
     for (const m of MAJOR_CODES) {
       const d = _greatCircle(centers[c], centers[m]);

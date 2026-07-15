@@ -663,8 +663,9 @@ function buildLabelTexture() {
   const NAME_FONT = 'bold 9px Inconsolata, monospace';
   const CODE_FONT = '7px Inconsolata, monospace';
   const xy = (ll) => [ (ll.lng + 180) / 360 * TEX_W, (90 - ll.lat) / 180 * TEX_H ];
-  // Region name (line 1) with the code beneath it (line 2, dimmer).
-  const drawLabel = (px, py, name, code) => {
+  const FOLD_FONT = '7px Inconsolata, monospace';
+  // MAJOR label: bold animal name (line 1) + its own code beneath (line 2).
+  const drawMajor = (px, py, name, code) => {
     ctx.font = NAME_FONT;
     ctx.fillStyle = '#1a1a1a';
     ctx.strokeText(name, px, py - 5);
@@ -674,16 +675,24 @@ function buildLabelTexture() {
     ctx.strokeText(hex(code), px, py + 5);
     ctx.fillText(hex(code), px, py + 5);
   };
-  // Label only the 84 MAJOR (populated) regions — the animal name sits on the
-  // cell that actually anchors it. The ~108 ocean/sparse cells that fold in are
-  // left unlabelled (their basin colour already shows which major they belong
-  // to); labelling all 192 would just be clutter over empty water.
+  // FOLDED cell: the canonical major's name in small faint text, so no cell is
+  // blank and each ocean/sparse cell visibly reads as part of its basin.
+  const drawFolded = (px, py, name) => {
+    ctx.font = FOLD_FONT;
+    ctx.lineWidth = 1.5;
+    ctx.strokeStyle = 'rgba(255,255,255,0.55)';
+    ctx.fillStyle = 'rgba(60,60,60,0.62)';
+    ctx.strokeText(name, px, py);
+    ctx.fillText(name, px, py);
+    ctx.strokeStyle = 'white';
+    ctx.lineWidth = 2;
+  };
+  // Every cell gets a name. Majors are bold + carry their code; the ~108
+  // ocean/sparse cells show — faintly — the major they fold into.
   for (let cid = 0; cid < N_CELLS; cid++) {
-    if (!isMajor(cid)) continue;
-    const name = regionName(cid);
-    if (!name) continue;
-    const [px, py] = xy(geoCellCenter(cid));   // animal name, centered on the major
-    drawLabel(px, py, name, cid);
+    const [px, py] = xy(geoCellCenter(cid));
+    if (isMajor(cid)) drawMajor(px, py, MAJORS[cid], cid);
+    else              drawFolded(px, py, regionName(cid));   // regionName = canonical major
   }
   return c;
 }
