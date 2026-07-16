@@ -122,13 +122,13 @@ async function main() {
   check('probe → PULLUP → REPLAYUP: R ingested the FULL history', cacheSize(R, topicId) === M, `(${cacheSize(R, topicId)}/${M})`);
   const role = R.am.axonRoles.get(topicId);
   check('every holder msgId present at R (verified union-ingest)', ids.every(id => role.cacheIds.has(id)));
-  check('probe accounted (probeTries=1)', role.probeTries === 1, `(${role.probeTries})`);
+  check('probe accounted (probeTries=1)', role.sync.probeTries === 1, `(${role.sync.probeTries})`);
 
   // ── 2. quench: a filled root never probes again ──────────────────────────
-  const triesBefore = role.probeTries;
+  const triesBefore = role.sync.probeTries;
   await R.am._emptyRootProbe(topicId);
   await fab.settle();
-  check('non-empty root skips further probes (quench)', role.probeTries === triesBefore, `(${role.probeTries})`);
+  check('non-empty root skips further probes (quench)', role.sync.probeTries === triesBefore, `(${role.sync.probeTries})`);
 
   // ── 3. no-holder topic: bounded probes via refreshTick, then quiet ───────
   const desc2 = { region: 'useast', owner: null, name: 'empty-root-fresh', write: 'open' };
@@ -145,7 +145,7 @@ async function main() {
   }
   const role2 = R2.am.axonRoles.get(topic2);
   check(`fresh no-holder topic probes at most ${EMPTY_ROOT_PROBE_MAX} times then quiets`,
-    role2.probeTries === EMPTY_ROOT_PROBE_MAX, `(${role2.probeTries})`);
+    role2.sync.probeTries === EMPTY_ROOT_PROBE_MAX, `(${role2.sync.probeTries})`);
   check('fresh topic stays an empty root (nothing to pull — correct)', cacheSize(R2, topic2) === 0);
 
   // ── 4. birth-scheduled probe skips when the cache fills within the delay ──
@@ -160,10 +160,10 @@ async function main() {
   role3.cacheIds.add(e3.msgId);
   await sleep(1000);                          // real timer: past EMPTY_ROOT_PROBE_DELAY_MS
   await fab.settle();
-  check('pub-terminal root (cache filled in-delay) never probed', role3.probeTries === 0, `(${role3.probeTries})`);
+  check('pub-terminal root (cache filled in-delay) never probed', role3.sync.probeTries === 0, `(${role3.sync.probeTries})`);
 
   // …and the scheduled path DOES fire for a root still empty after the delay:
-  check('scheduled birth probe fired for the still-empty root R (wall-clock)', role.probeTries >= 1);
+  check('scheduled birth probe fired for the still-empty root R (wall-clock)', role.sync.probeTries >= 1);
 
   console.log(`\nResult: ${passed} passed, ${failed} failed`);
   process.exit(failed ? 1 : 0);
