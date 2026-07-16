@@ -136,6 +136,33 @@ publisher's location.
 - `smoke_cold_burst.mjs` — cold-publish burst confirms + stops on observation
 - `smoke_pubsub_durability.mjs` — replay-up/high-water recovery
 
+## I-10. Standing state is bounded by demand, never by churn history
+
+Per-topic standing state anywhere in the network is O(subscribers + cohort).
+No mechanism may create state that accumulates with join/leave *events*, and
+any mechanism that writes standing state on ANOTHER node must name that
+state's eviction path in the same change. Corollary (the principal-liveness
+rule, paid for by the 4.24.0 backbone collapses): standing state may only be
+planted by a principal alive to maintain it — a departing node transfers
+principal-ship (HANDOFF) or does nothing; it never sends REPLICATE.
+
+- `smoke_churn_amplification.mjs` — ack-dropped burst-publisher churn: zero
+  departure REPLICATE, bounded handoffs, bounded fleet roles, since:'all'
+  durability retained (50/50)
+- `smoke_root_replication.mjs` — delta gate: unchanged roots send keepalives,
+  not full state; state change / new member / 60s backstop re-arm one full push
+
+## I-11. Bulk work never starves liveness
+
+Any loop that ingests or emits unbounded batches yields to the macrotask
+queue at a fixed stride so heartbeats interleave; a node must never be
+evicted by its peers *because* it was absorbing history (the #332 join-storm:
+bulk ingest → missed heartbeats → mass eviction → `state=stale` mesh death).
+
+- `_ingestStampedBatch` (wireHandlers) — macrotask yield every 16 messages on
+  the REPLAYUP/HANDOFF/REPLICATE ingest paths
+- Full mesh re-bootstrap after mass eviction remains open (task #332)
+
 ---
 
 ## Appendix A — Constants audit (AxonaManager.js, 4.19.6)
