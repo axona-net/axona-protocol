@@ -10,7 +10,7 @@
 // behind the 4.24.0 collapse post-mortem: the stale doc actively recommended
 // the removed behavior.
 //
-// Values mirror: axona-docs/architecture/Axona-Architecture.tex §XI (v4.24.1).
+// Values mirror: axona-docs/architecture/Axona-Architecture.tex §XI (v4.26.0).
 //
 // Run: node test/smoke_normative_constants.mjs
 import {
