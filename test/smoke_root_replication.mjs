@@ -20,7 +20,7 @@ const repl=(sends)=>sends.filter(s=>s.type==='pubsub:replicate');
 
 // 1. singleton root → replicate to 2 nearest (NEAR2,NEAR1), not FAR/BRIDGE
 {
-  const {am,sends}=mk({neighbors:[FAR,NEAR1,NEAR2,BRIDGE],bridge:BRIDGE});
+  const {am,sends,clock}=mk({neighbors:[FAR,NEAR1,NEAR2,BRIDGE],bridge:BRIDGE});
   const role=am._becomeRoot(TOPIC);
   role.cache.push({msgId:'m1',publishTs:100,json:'{}',seq:1,bytes:80}); role.cacheIds.add('m1');
   sends.length=0; am._replicateRoots();
@@ -29,11 +29,25 @@ const repl=(sends)=>sends.filter(s=>s.type==='pubsub:replicate');
   ok('does NOT replicate to the farther node', !tgts.has(FAR));
   ok('does NOT replicate to the bridge', !tgts.has(BRIDGE));
   ok('replica push carries the full cache', r[0]?.payload?.msgs?.length===1 && r[0].payload.msgs[0].msgId==='m1');
+  // Delta gate (v4.24.1, #333): an UNCHANGED root's next sweep sends an empty
+  // KEEPALIVE (liveness only) — the per-tick full-cache re-send was the
+  // bandwidth fuel of the role-bloat collapse. A state change re-arms one
+  // full push; the ROOT_REPLICATE_FULL_MS backstop re-arms anti-entropy.
+  sends.length=0; clock.t += 5_000; am._replicateRoots();
+  const ka = repl(sends);
+  ok('unchanged root sends KEEPALIVE (empty msgs), not the full cache',
+    ka.length===2 && ka.every(s2=>s2.payload.msgs.length===0));
+  role.cache.push({msgId:'m2',publishTs:200,json:'{}',seq:2,bytes:80}); role.cacheIds.add('m2');
+  sends.length=0; am._replicateRoots();
+  ok('state change re-arms a FULL push', repl(sends).every(s2=>s2.payload.msgs.length===2));
+  sends.length=0; clock.t += 61_000; am._replicateRoots();
+  ok('anti-entropy backstop re-arms a FULL push after ROOT_REPLICATE_FULL_MS',
+    repl(sends).every(s2=>s2.payload.msgs.length===2));
 }
 // 2. root WITH children STILL replicates to its cohort — co-hosting roots must converge
 //    regardless of any down-tree (the down-tree and the K-closest cohort are disjoint sets).
 {
-  const {am,sends}=mk({neighbors:[NEAR1,NEAR2]});
+  const {am,sends,clock}=mk({neighbors:[NEAR1,NEAR2]});
   const role=am._becomeRoot(TOPIC);
   role.cache.push({msgId:'m1',publishTs:100,json:'{}',seq:1,bytes:80}); role.cacheIds.add('m1');
   role.children.add('cc'); sends.length=0; am._replicateRoots();
@@ -62,7 +76,7 @@ const repl=(sends)=>sends.filter(s=>s.type==='pubsub:replicate');
 //    (the kill-leak race: a backup that already holds the body must get the tombstone
 //    before it can promote, not on the next tick).
 {
-  const {am,sends}=mk({neighbors:[NEAR1,NEAR2],bridge:BRIDGE});
+  const {am,sends,clock}=mk({neighbors:[NEAR1,NEAR2],bridge:BRIDGE});
   const role=am._becomeRoot(TOPIC);
   role.cache.push({msgId:'m1',publishTs:100,json:'{}',seq:1,bytes:80}); role.cacheIds.add('m1');
   am._replicateRoots();                                   // establishes NEAR1/NEAR2 as replicas

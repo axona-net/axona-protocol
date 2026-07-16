@@ -53,7 +53,9 @@ assert.deepEqual(regionCenter(0x89), regionCenter('useast'), 'regionCenter by co
 ok('regionCenter(name|code)');
 
 assert.ok(POPULATED_REGIONS.length > 0 && POPULATED_REGIONS.length < 192, 'populated ⊂ all 192');
-assert.ok(POPULATED_REGIONS.some((r) => r.name === 'useast'), 'useast is populated');
+// Canonical model (v4.23.0): regions carry neutral ANIMAL names; every legacy
+// name ('useast' → eagle/0x89) still resolves as a hidden alias.
+assert.ok(POPULATED_REGIONS.some((r) => r.name === 'eagle'), 'eagle (0x89, legacy useast) is populated');
 assert.ok(!POPULATED_REGIONS.some((r) => /^(pac|atl|ind|sou|arc)_[0-9a-f]{2}$/.test(r.name)),
   'no open-ocean cells in populated set');
 ok(`POPULATED_REGIONS (${POPULATED_REGIONS.length}/192, ocean excluded)`);
@@ -62,7 +64,8 @@ ok(`POPULATED_REGIONS (${POPULATED_REGIONS.length}/192, ocean excluded)`);
 // a topic's region is never derived from the author key.
 assert.ok(POPULATED_REGIONS.every((p) => typeof p.code === 'number' && typeof p.name === 'string'),
   'POPULATED_REGIONS entries are { code, name }');
-assert.ok(POPULATED_REGIONS.some((p) => regionName(p.code) === 'useast'), 'includes a known land region');
+assert.ok(POPULATED_REGIONS.some((p) => p.code === 0x89 && regionName(p.code) === 'eagle'),
+  'includes a known land region (0x89, canonical name)');
 ok('POPULATED_REGIONS is a usable {code,name} land list (no author-derived regions)');
 
 console.log(`\nsmoke_identity_v3: ${n} checks passed`);

@@ -79,28 +79,34 @@ async function main() {
       routed.every(p => p.from === idHex(SELF)));
   }
 
-  // ── 1b. v4.24.0 confirmed handoff: NO ack → bounded retry, then the
-  //    cache+tombstones are sprayed to the K-closest cohort as REPLICATE
-  //    (the old fire-and-forget silently dropped the topic's last copy). ──
+  // ── 1b. v4.24.1 confirmed handoff: NO ack → bounded retry, then ONE
+  //    fallback HANDOFF to the runner-up candidate — and NEVER a REPLICATE
+  //    (task #333: the 4.24.0 cohort spray planted backup roles of a
+  //    definitionally-departed node; under churn those orphan backups
+  //    multiplied into the role-bloat collapse). ─────────────────────────
   {
+    const ALT = SELF ^ 0xFF00n;
     const handoffs = [], replicates = [];
     const { am } = makeManager({
       selfBig: SELF,
-      findKClosest: async () => [SELF, HEIR],
+      findKClosest: async () => [SELF, HEIR, ALT],
       onRoute: (target, type, payload) => {          // heir never acks
-        if (type === 'pubsub:handoff') handoffs.push(payload);
+        if (type === 'pubsub:handoff') handoffs.push({ target, payload });
         if (type === 'pubsub:replicate') replicates.push(payload);
       },
     });
-    am._rootReplicas = 2;                            // arm the cohort spray
+    am._rootReplicas = 2;                            // even armed, a leaver must not spray
     const t = SELF ^ 0x6000n;
     am.axonRoles.set(t, { topicId: t, isRoot: true, cache: [{ msgId: 'y', publishTs: 1, json: '{}', seq: 1 }],
       cacheIds: new Set(), children: new Set(), subscribers: new Map(), tombstones: new Map(), replicas: new Map() });
     const t0 = Date.now();
     await am.pubsubLeaveHandoff();
     const ms = Date.now() - t0;
-    check('unacked handoff retried exactly HANDOFF_TRIES times', handoffs.length === 2, `${handoffs.length}`);
-    check('…then the cohort REPLICATE spray fired (durability fallback)', replicates.length >= 1, `${replicates.length}`);
+    check('unacked handoff: HANDOFF_TRIES heir sends + ONE fallback', handoffs.length === 3, `${handoffs.length}`);
+    check('fallback HANDOFF targets the runner-up (alt), not the dead-silent heir',
+      handoffs[2].target === ALT, `${handoffs[2]?.target?.toString(16)?.slice(0, 8)}`);
+    check('leaver sent ZERO REPLICATE (no backup planting from a departing node)',
+      replicates.length === 0, `${replicates.length}`);
     check(`no-ack path bounded (~2 ack windows), took ${ms}ms`, ms < 2500, `${ms}ms`);
   }
 
