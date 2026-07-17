@@ -67,14 +67,27 @@ class Fabric {
   }
   async settle(cap = 500_000) {
     let i = 0;
-    while (this.queue.length) {
-      if (++i > cap) throw new Error('settle: did not converge');
-      const j = this.queue.shift();
-      const n = this.nodes.get(j.dest);
-      if (!n || !n.alive) continue;
-      const h = n.handlers.get(j.type);
-      if (!h) continue;
-      await h(j.payload, j.meta);
+    for (let round = 0; ; round++) {
+      if (round > 1000) throw new Error('settle: ingest/wire did not converge');
+      while (this.queue.length) {
+        if (++i > cap) throw new Error('settle: did not converge');
+        const j = this.queue.shift();
+        const n = this.nodes.get(j.dest);
+        if (!n || !n.alive) continue;
+        const h = n.handlers.get(j.type);
+        if (!h) continue;
+        await h(j.payload, j.meta);
+      }
+      // REPLICATE/REPLAYUP are queued since #332 — flush each node's ingest
+      // pump too; ingest may emit new wire traffic, so loop until both quiet.
+      let flushed = false;
+      for (const n of this.nodes.values()) {
+        if (n.alive && ((n.am._ingestQueue && n.am._ingestQueue.length) || n.am._ingestPumping)) {
+          await n.am._ingestIdle();
+          flushed = true;
+        }
+      }
+      if (!this.queue.length && !flushed) return;
     }
   }
   async tickAll() { for (const n of this.nodes.values()) if (n.alive) await n.am.refreshTick(); await this.settle(); }

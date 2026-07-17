@@ -53,6 +53,7 @@ function seedRootWithKill(am){
   const env1=JSON.stringify({msgId:'m1', signerPubkey:'aa', message:'killed!'});
   await am._onReplayUp({topicId:idHex(TOPIC), dels:[{del:true,msgId:'m1',killTs:200,signer:'aa',seq:1,publishTs:200}],
                         msgs:[{msgId:'m1',publishTs:100,json:env1,seq:1}]}, {targetId:SELF});
+  await am._ingestIdle();
   ok('migrated tombstone applied → killed body suppressed (not in cache)', !role.cacheIds.has('m1'));
   ok('migrated tombstone recorded', role.tombstones.has('m1'));
 }

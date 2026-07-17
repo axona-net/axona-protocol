@@ -104,14 +104,28 @@ class DivergentFabric {
   }
   async settle(cap = 100_000) {
     let i = 0;
-    while (this.queue.length) {
-      if (++i > cap) throw new Error('settle: did not converge');
-      const j = this.queue.shift();
-      const n = this.nodes.get(j.dest);
-      if (!n || !n.alive) continue;
-      const h = n.handlers.get(j.type);
-      if (!h) continue;
-      try { await h(j.payload, j.meta); } catch (e) { console.error('handler threw:', e.message); }
+    for (let round = 0; ; round++) {
+      if (round > 1000) throw new Error('settle: ingest/wire did not converge');
+      while (this.queue.length) {
+        if (++i > cap) throw new Error('settle: did not converge');
+        const j = this.queue.shift();
+        const n = this.nodes.get(j.dest);
+        if (!n || !n.alive) continue;
+        const h = n.handlers.get(j.type);
+        if (!h) continue;
+        try { await h(j.payload, j.meta); } catch (e) { console.error('handler threw:', e.message); }
+      }
+      // REPLICATE/REPLAYUP are queued since #332 (time-sliced ingest pump) —
+      // flush every node's queue too; ingest can emit new wire messages
+      // (fanout, PULLUP), so loop until BOTH planes are quiet.
+      let flushed = false;
+      for (const [, n] of this.nodes) {
+        if (n.alive && ((n.am._ingestQueue && n.am._ingestQueue.length) || n.am._ingestPumping)) {
+          await n.am._ingestIdle();
+          flushed = true;
+        }
+      }
+      if (!this.queue.length && !flushed) return;
     }
   }
   async tickAll() { for (const [, n] of this.nodes) if (n.alive) n.am.refreshTick(); await this.settle(); }

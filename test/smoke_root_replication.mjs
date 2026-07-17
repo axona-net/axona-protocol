@@ -56,7 +56,7 @@ const repl=(sends)=>sends.filter(s=>s.type==='pubsub:replicate');
 // 3. receiving REPLICATE → passive backup
 {
   const {am}=mk({neighbors:[NEAR1,NEAR2]});
-  await am._onReplicate({topicId:idHex(TOPIC), from:idHex(NEAR1), msgs:[], dels:[]}, {targetId:SELF});
+  await am._onReplicate({topicId:idHex(TOPIC), from:idHex(NEAR1), msgs:[], dels:[]}, {targetId:SELF}); await am._ingestIdle();
   const role=am.axonRoles.get(TOPIC);
   ok('REPLICATE makes a passive BACKUP (backupOf set, not root)', !!role && role.backupOf===idHex(NEAR1).toLowerCase() && role.isRoot===false);
 }
@@ -66,7 +66,7 @@ const repl=(sends)=>sends.filter(s=>s.type==='pubsub:replicate');
 //    closest terminus), NOT a bespoke local-only promotion that split disjoint backups.
 {
   const {am,sends,clock}=mk({neighbors:[NEAR1]});
-  await am._onReplicate({topicId:idHex(TOPIC), from:idHex(NEAR1), msgs:[], dels:[]}, {targetId:SELF});
+  await am._onReplicate({topicId:idHex(TOPIC), from:idHex(NEAR1), msgs:[], dels:[]}, {targetId:SELF}); await am._ingestIdle();
   ok('REPLICATE registers the topic as a backup subscription', am._backupTopics.has(TOPIC));
   ok('backup is NOT auto-promoted (no bespoke local-only flip)', am.axonRoles.get(TOPIC)?.isRoot===false);
   sends.length=0; clock.t += 6_000; await am.refreshTick();

@@ -44,7 +44,7 @@ console.log('role natures — the obligation/eviction table, executable\n');
 // ── 1+2: REPLICATE ingest enters BACKUP through the state machine ──────────
 {
   const { am, logs } = mk({ neighbors: [NEAR1] });
-  await am._onReplicate({ topicId: idHex(TOPIC), from: PRINCIPAL, msgs: [], dels: [] }, { targetId: SELF });
+  await am._onReplicate({ topicId: idHex(TOPIC), from: PRINCIPAL, msgs: [], dels: [] }, { targetId: SELF }); await am._ingestIdle();
   const role = am.axonRoles.get(TOPIC);
   ok('REPLICATE ingest → nature BACKUP (derived, not stored)', roleNature(role) === 'backup');
   ok('backup joined _backupTopics (subscribe obligation armed)', am._backupTopics.has(TOPIC));
@@ -52,7 +52,7 @@ console.log('role natures — the obligation/eviction table, executable\n');
   ok('BACKUP entry logged exactly once (role-nature, why:replicate)',
     nl.length === 1 && nl[0].data.nature === 'backup' && nl[0].data.why === 'replicate', JSON.stringify(nl.map(l => l.data)));
   // refresh from the SAME principal is bookkeeping, not a transition
-  await am._onReplicate({ topicId: idHex(TOPIC), from: PRINCIPAL, msgs: [], dels: [] }, { targetId: SELF });
+  await am._onReplicate({ topicId: idHex(TOPIC), from: PRINCIPAL, msgs: [], dels: [] }, { targetId: SELF }); await am._ingestIdle();
   ok('replica refresh from the same principal logs NO new transition', natureLogs(logs).length === 1);
 }
 
@@ -61,7 +61,7 @@ console.log('role natures — the obligation/eviction table, executable\n');
 // root forever — a ROOT wearing BACKUP state. The _set transition now sheds it.
 {
   const { am, logs } = mk({ neighbors: [NEAR1] });
-  await am._onReplicate({ topicId: idHex(TOPIC), from: PRINCIPAL, msgs: [], dels: [] }, { targetId: SELF });
+  await am._onReplicate({ topicId: idHex(TOPIC), from: PRINCIPAL, msgs: [], dels: [] }, { targetId: SELF }); await am._ingestIdle();
   const role = am.axonRoles.get(TOPIC);
   // the backup's SUB renewal terminates at self → terminal promotion
   am._rootClaim.promote(role, { via: [] }, { isTerminal: true });
@@ -75,7 +75,7 @@ console.log('role natures — the obligation/eviction table, executable\n');
 // ── 4: BACKUP eviction path — principal gone + re-homed + BACKUP_EVICT_MS ──
 {
   const { am, logs, clock } = mk({ neighbors: [NEAR1, NEAR2] });
-  await am._onReplicate({ topicId: idHex(TOPIC), from: PRINCIPAL, msgs: [], dels: [] }, { targetId: SELF });
+  await am._onReplicate({ topicId: idHex(TOPIC), from: PRINCIPAL, msgs: [], dels: [] }, { targetId: SELF }); await am._ingestIdle();
   const role = am.axonRoles.get(TOPIC);
   // model "re-homed under a live root that isn't us": upstream pinned to NEAR2
   am._upstream.set(TOPIC, [idHex(NEAR2).toLowerCase()]);
@@ -91,7 +91,7 @@ console.log('role natures — the obligation/eviction table, executable\n');
 // ── 4b: the eviction NEVER fires while the backup might need to promote ────
 {
   const { am, clock } = mk({ neighbors: [NEAR1] });
-  await am._onReplicate({ topicId: idHex(TOPIC), from: PRINCIPAL, msgs: [], dels: [] }, { targetId: SELF });
+  await am._onReplicate({ topicId: idHex(TOPIC), from: PRINCIPAL, msgs: [], dels: [] }, { targetId: SELF }); await am._ingestIdle();
   const role = am.axonRoles.get(TOPIC);
   // NOT re-homed (no upstream) — the split-brain-protection case
   clock.t += BACKUP_EVICT_MS + 5_000;
@@ -103,7 +103,7 @@ console.log('role natures — the obligation/eviction table, executable\n');
 // ── 5: natures are observable (I-6) ─────────────────────────────────────────
 {
   const { am } = mk({ neighbors: [NEAR1] });
-  await am._onReplicate({ topicId: idHex(TOPIC), from: PRINCIPAL, msgs: [], dels: [] }, { targetId: SELF });
+  await am._onReplicate({ topicId: idHex(TOPIC), from: PRINCIPAL, msgs: [], dels: [] }, { targetId: SELF }); await am._ingestIdle();
   const entry = am.inspectRoles().find(r => r.topicId === idHex(TOPIC));
   ok('inspectRoles carries nature', entry?.nature === 'backup', JSON.stringify(entry));
   ok('inspectRoles carries the holder flag', entry?.holder === false);
