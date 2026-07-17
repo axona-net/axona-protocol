@@ -350,6 +350,15 @@ async function testWebTransportFactory() {
     t.socket && t.socket.readyState === 1);
   check('after start: composite is started', t._started === true);
 
+  // Mesh re-warm bootstrap (task #332 facet 2): the composite can ask the
+  // bridge to resend its peer-list; the frame must land on the socket.
+  check('factory exposes requestPeerIntroductions', typeof t.requestPeerIntroductions === 'function');
+  const sentBefore = t.socket.sent.length;
+  check('requestPeerIntroductions sends while socket open', t.requestPeerIntroductions() === true);
+  const reqFrame = t.socket.sent.slice(sentBefore).map(s => { try { return JSON.parse(s); } catch { return null; } })
+    .find(f => f && f.type === 'peer-list-request');
+  check('peer-list-request frame reached the bridge socket', !!reqFrame);
+
   // Inbound axona-typed frame → routes to BridgeTransport.
   // bindPeer takes BigInt (kernel form).
   t.bridge.bindPeer(BRIDGE, 'bridge');
