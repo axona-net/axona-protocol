@@ -120,9 +120,28 @@ async function main() {
   {
     const peer = mockPeer();
     const input = stringToBytes('civil-defense sighting payload — '.repeat(2000));   // ~64KB string
-    const { topic, n } = await publishChunkedBytes(peer, input, { name: 'note.txt', maxMessageBytes: MAXMSG });
+    const { topic, n, msgIds } = await publishChunkedBytes(peer, input, { name: 'note.txt', maxMessageBytes: MAXMSG });
     const file = await receiveChunkedBytes(peer, topic, { timeoutMs: 2000 });
     check(`7. publish→receive round-trip (${n} chunks, string intact)`, eqBytes(file.bytes, input) && bytesToString(file.bytes).startsWith('civil-defense'));
+    // Receiver-side msgIds: the SAME set the publisher got back — this is how a
+    // later session/device (which never saw publishChunkedBytes's return) learns
+    // what to peer.kill() to delete the transfer.
+    const pub = new Set(msgIds), got = new Set(file.msgIds);
+    check(`7b. file.msgIds matches the publisher's set (${got.size}/${pub.size})`,
+      got.size === pub.size && [...pub].every((id) => got.has(id)));
+  }
+
+  // ── 7c. msgIds are PER FILE — a second file's ids must not leak in ──
+  {
+    const peer = mockPeer();
+    const topic = 'shared-stream';
+    const a = await publishChunkedBytes(peer, makeBytes(20_000), { topic, name: 'a.bin', maxMessageBytes: MAXMSG });
+    const b = await publishChunkedBytes(peer, makeBytes(15_000), { topic, name: 'b.bin', maxMessageBytes: MAXMSG });
+    const file = await receiveChunkedBytes(peer, topic, { timeoutMs: 2000 });   // resolves with the FIRST completed file (a)
+    const got = new Set(file.msgIds), bIds = new Set(b.msgIds), aIds = new Set(a.msgIds);
+    check('7c. msgIds contain only the resolved file\'s ids (none from the other file)',
+      file.name === 'a.bin' && got.size === aIds.size &&
+      [...got].every((id) => aIds.has(id)) && [...got].every((id) => !bIds.has(id)));
   }
 
   // ── 8. no silent hang — rejects on a missing chunk (CDC-1) ──
