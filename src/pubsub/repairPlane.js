@@ -390,7 +390,7 @@ export const repairPlaneMethods = {
     for (const b of cand) {
       if (n >= EMPTY_ROOT_PROBE_FANOUT) break;
       try {
-        this._route(b, T.PULLUP, { topicId: idHex(topicBig), sinceHw: 0, parentId: idHex(this.nodeId) });
+        this._syncPull(b, topicBig, 'EMPTY_ROOT_PROBE', { sinceHw: 0 });
         n++;
       } catch { /* best-effort */ }
     }
@@ -454,10 +454,8 @@ export const repairPlaneMethods = {
       }
       budget.left--;
     }
-    const msgs = full ? role.cache.map(c => ({ json: c.json, publishTs: c.publishTs, msgId: c.msgId, seq: c.seq })) : [];
-    const dels = full ? this._activeDels(role) : [];
     for (const hex of want) {
-      try { this._route(idBig(hex), T.REPLICATE, { topicId: idHex(t), from: idHex(this.nodeId), msgs, dels }); } catch { /* best-effort */ }
+      try { this._syncPush(idBig(hex), t, role, 'COHORT_REPLICATE', { full }); } catch { /* best-effort */ }
       role.replicas.set(hex, { at: now });
     }
     if (full) { role.sync.sig = sig; role.sync.lastFullAt = now; }
@@ -630,10 +628,36 @@ export const repairPlaneMethods = {
     const sendable = jobs.filter(j => j.heir !== null);
     const unacked = () => sendable.filter(j => !this._handoffAcked.has(j.key));
     for (let round = 0; round < HANDOFF_TRIES && unacked().length; round++) {
+      // Heir re-resolve on retry rounds (Phase 8, #340 — FLAGGED behavior
+      // change): a round-0 heir that never acks is often GONE, not slow — the
+      // total-cohort-teardown case (fleet restart: everyone leaves at once and
+      // every leaver's round-0 table names other leavers). Retrying the same
+      // corpse for every round burned the whole ack budget and the history
+      // died with the last holder. Re-resolve each unacked topic's heir from
+      // the CURRENT table before retrying, prefer a REACHABLE candidate, and
+      // remember the previous pick as the runner-up for Phase C.
+      if (round > 0) {
+        for (const j of unacked()) {
+          try {
+            const arr = await this.dht.findKClosest(j.t, 4);
+            let fresh = null, freshReachable = null;
+            for (const id of (Array.isArray(arr) ? arr : [])) {
+              const b = idBig(id);
+              if (b === this.nodeId) continue;
+              if (fresh === null) fresh = b;
+              if (freshReachable === null) {
+                let hex = null; try { hex = lc(idHex(b)); } catch { /* */ }
+                if (hex && typeof this._isReachableId === 'function' && this._isReachableId(hex)) freshReachable = b;
+              }
+              if (fresh !== null && freshReachable !== null) break;
+            }
+            const pick = freshReachable ?? fresh;
+            if (pick !== null && pick !== j.heir) { j.alt = j.heir; j.heir = pick; }
+          } catch { /* keep the previous heir */ }
+        }
+      }
       for (const j of unacked()) {
-        const msgs = j.role.cache.map(c => ({ json: c.json, publishTs: c.publishTs, msgId: c.msgId, seq: c.seq }));
-        const dels = this._activeDels(j.role);
-        try { this._route(j.heir, T.HANDOFF, { topicId: idHex(j.t), msgs, dels, from: idHex(this.nodeId) }); } catch { /* best-effort */ }
+        try { this._syncPush(j.heir, j.t, j.role, 'HANDOFF'); } catch { /* best-effort */ }
       }
       const deadline = Date.now() + HANDOFF_ACK_MS;
       while (Date.now() < deadline && unacked().length) await sleep(25);
@@ -664,9 +688,7 @@ export const repairPlaneMethods = {
         { topic: idHex(j.t).slice(0, 12), heir: j.heir === null ? 'none' : idHex(j.heir).slice(0, 10),
           fallback: target === null ? 'none' : idHex(target).slice(0, 10) });
       if (target === null) continue;
-      const msgs = j.role.cache.map(c => ({ json: c.json, publishTs: c.publishTs, msgId: c.msgId, seq: c.seq }));
-      const dels = this._activeDels(j.role);
-      try { this._route(target, T.HANDOFF, { topicId: idHex(j.t), msgs, dels, from: idHex(this.nodeId) }); } catch { /* best-effort */ }
+      try { this._syncPush(target, j.t, j.role, 'HANDOFF'); } catch { /* best-effort */ }
     }
   },
 

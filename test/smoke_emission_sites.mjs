@@ -47,23 +47,19 @@ function emissions(verb) {
 
 console.log('emission-site guard — the wire verbs with structural constraints\n');
 
-const repl = emissions('REPLICATE');
-check('REPLICATE emitted from exactly ONE site', repl.length === 1, `[${repl}]`);
-check('…and that site is the live-root replication sweep (repairPlane)',
-  repl.every(h => h.startsWith('repairPlane.js')), `[${repl}]`);
-
-const handoff = emissions('HANDOFF').filter(h => {
-  // exclude HANDOFFACK matches (word boundary already does, but belt+braces)
-  return true;
-});
-check('HANDOFF emitted from exactly TWO sites (acked rounds + runner-up fallback)',
-  handoff.length === 2, `[${handoff}]`);
-check('…both inside the departure path (repairPlane)',
-  handoff.every(h => h.startsWith('repairPlane.js')), `[${handoff}]`);
+// Phase 8: the four repair/durability verbs emit ONLY from the sync engine —
+// one emission site per verb, all in syncEngine.js. A second site anywhere
+// else is the 4.24.0 mistake class (a spray path outside the policy table).
+for (const verb of ['REPLICATE', 'HANDOFF', 'PULLUP', 'REPLAYUP']) {
+  const hits = emissions(verb);
+  check(`${verb} emitted from exactly ONE site`, hits.length === 1, `[${hits}]`);
+  check(`…and that site is the sync engine`,
+    hits.every(h => h.startsWith('syncEngine.js')), `[${hits}]`);
+}
 
 const ack = emissions('HANDOFFACK');
-check('HANDOFFACK emitted from exactly ONE site (the heir\'s confirming reply)',
-  ack.length === 1 && ack[0].startsWith('wireHandlers.js'), `[${ack}]`);
+check('HANDOFFACK emitted from exactly ONE site (the heir\'s confirming reply, in the engine\'s HANDOFF ingest hook)',
+  ack.length === 1 && ack[0].startsWith('syncEngine.js'), `[${ack}]`);
 
 console.log(`\nResult: ${passed} passed, ${failed} failed`);
 process.exit(failed ? 1 : 0);
