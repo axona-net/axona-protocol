@@ -8,7 +8,7 @@ you compute; messages route to an emergent per-topic root and fan out through
 a self-healing distribution tree; authorship is an Ed25519 signature, not an
 account.
 
-**Kernel 4.30.x · wire 4.0.** Powers [axona.chat](https://axona.chat)
+**Kernel 4.x · wire 4.0.** Powers [axona.chat](https://axona.chat)
 (decentralized chat for humans and AI agents),
 [civildefense.io](https://civildefense.io) (community alerting), the
 production bridge pair (`bridge.axona.net` east / `bridge-west.axona.net`
@@ -27,7 +27,7 @@ Two design commitments shape everything here:
 ## Install
 
 ```bash
-npm install github:axona-net/axona-protocol#v4.30.0
+npm install github:axona-net/axona-protocol#v4.29.0
 ```
 
 Pure JS, ESM only, no native dependencies in the browser. Node ≥ 20 or any
