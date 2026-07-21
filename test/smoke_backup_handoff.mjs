@@ -109,15 +109,18 @@ async function main() {
   // ── 2. unit: the liveness gate itself ───────────────────────────────
   {
     const self = fabId('unit-self'), heir = fabId('unit-heir');
+    // An OUT-OF-REGION candidate (0x54 prefix) that findKClosest returns FIRST
+    // (i.e. XOR-closer) — the region preference must still pick the in-region heir.
+    const outHeir = BigInt('0x54' + createHash('sha256').update('unit-outheir').digest('hex'));
     const rootAlive = fabId('unit-root-alive'), rootDead = fabId('unit-root-dead');
     const tRooted = fabId('unit-topic-rooted'), tBackAlive = fabId('unit-topic-backalive'), tBackDead = fabId('unit-topic-backdead');
-    const sent = [];   // {type, payloadStr}
+    const sent = [];   // {target, type, payloadStr}
     let clock = CLOCK_BASE;
     const dht = {
       getSelfId: () => self,
       onRoutedMessage: () => {},
-      routeMessage: (_target, type, payload) => { sent.push({ type, payloadStr: JSON.stringify(payload ?? {}) }); },
-      findKClosest: async () => [heir],
+      routeMessage: (target, type, payload) => { sent.push({ target, type, payloadStr: JSON.stringify(payload ?? {}) }); },
+      findKClosest: async () => [outHeir, heir],   // out-of-region candidate listed CLOSER
       neighbors: () => [idHex(rootAlive), idHex(heir)],   // rootAlive IS a live neighbour; rootDead is NOT
     };
     const am = new AxonaManager({ dht, now: () => clock, renewMs: 60_000, renewFastMs: 5_000, dropMs: 180_000 });
@@ -140,6 +143,19 @@ async function main() {
     check('backup with root ALIVE (live neighbour) sends NOTHING', !sentFor(T.HANDOFF, tBackAlive) && !sentFor(T.REPLICATE, tBackAlive));
     check('backup with root DEAD pushes REPLICATE — even with a still-fresh beacon', sentFor(T.REPLICATE, tBackDead));
     check('backup push never mints a root at the receiver (no HANDOFF from a backup)', !sentFor(T.HANDOFF, tBackDead));
+    // Region preference (#362): the PRIMARY heir must be the in-region
+    // candidate even when an out-of-region one is XOR-closer (listed first by
+    // findKClosest) — an out-of-region holder is durable but unfindable by
+    // routed reads. The redundant runner-up push MAY go out-of-region (a
+    // wrong-place second copy beats no second copy).
+    const handoffTargets = sent.filter(s => s.type === T.HANDOFF).map(s => s.target);
+    check('confirmed HANDOFF targets the IN-REGION heir (out-of-region closer candidate skipped)',
+      handoffTargets.length > 0 && handoffTargets.every(t => t === heir),
+      `(targets=${handoffTargets.map(t => idHex(t).slice(0, 4))})`);
+    const backupPrimary = sent.find(s => s.type === T.REPLICATE);
+    check('backup push PRIMARY target is the in-region heir',
+      backupPrimary != null && backupPrimary.target === heir,
+      `(first=${backupPrimary ? idHex(backupPrimary.target).slice(0, 4) : 'none'})`);
   }
 
   console.log(`\nResult: ${passed} passed, ${failed} failed`);
