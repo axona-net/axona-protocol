@@ -142,7 +142,10 @@ async function trial(t, author, SEQ) {
     const e = await buildEnvelope({ topic: desc, message: { phase: 'post', k }, seq: SEQ.n++, identity: author, ts: fab.clock });
     post.push(e.msgId); pub2.am.pubsubPublish(topicId, JSON.stringify(e)); await fab.settle();
   }
-  fab.clock += 6_000; await fab.tickAll(); await fab.settle();
+  // POST_TICKS: renewal rounds granted before measuring live POST delivery
+  // (1 = strictest immediacy; more rounds separate "lost" from "converging").
+  const postTicks = Math.max(1, Number(process.env.POST_TICKS || 1));
+  for (let r = 0; r < postTicks; r++) { fab.clock += 6_000; await fab.tickAll(); await fab.settle(); }
 
   // (a) live subscribers (survivors + newcomers) receive every POST.
   const survivors = subs.filter(s => s.alive);
