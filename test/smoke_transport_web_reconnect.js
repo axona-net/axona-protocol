@@ -219,6 +219,50 @@ async function main() {
   check('re-handshake completed after the 502 storm', t3.bridgeState === 'open');
   await t3.stop();
 
+  // ── 4200 graduation: meshed → NO reconnect; thinned → re-dial ─────
+  // Bootstrap-nursery: the bridge releases an established peer with code 4200.
+  // A meshed client keeps its mesh and stops reconnecting; a watchdog re-dials
+  // only if its bound-peer count later drops below the floor.
+  liveSockets = [];
+  const t4 = webTransport({
+    bridgeUrl: 'wss://test.example', identity: alice, WebSocketImpl: FakeWS,
+    handshakeTimeoutMs: 2000, reconnectInitialMs: 30, reconnectMaxMs: 30,
+    graduationMeshFloor: 3, graduationRecheckMs: 40,
+  });
+  const startP4 = t4.start();
+  await sleep(5);
+  const g1 = t4.socket;
+  feedWelcome(g1); await feedBridgeHello(g1); await startP4;
+  t4.webrtc.boundPeers = () => [1n, 2n, 3n];   // pretend: meshed with 3 peers
+  const nAtGrad = liveSockets.length;
+  g1.close(4200, 'graduated');
+  check('4200 (meshed) → graduated state', t4.bridgeState === 'graduated');
+  await sleep(130);
+  check('4200 (meshed) → NO reconnect while meshed', liveSockets.length === nAtGrad);
+  t4.webrtc.boundPeers = () => [1n];           // mesh thins below the floor
+  await sleep(130);
+  check('4200 → watchdog re-dials when mesh thins', liveSockets.length >= nAtGrad + 1);
+  await t4.stop();
+
+  // Graduated while NOT actually meshed → immediate reconnect (self-correct).
+  liveSockets = [];
+  const t5 = webTransport({
+    bridgeUrl: 'wss://test.example', identity: alice, WebSocketImpl: FakeWS,
+    handshakeTimeoutMs: 2000, reconnectInitialMs: 30, reconnectMaxMs: 30,
+    graduationMeshFloor: 3, graduationRecheckMs: 40,
+  });
+  const startP5 = t5.start();
+  await sleep(5);
+  const h1 = t5.socket;
+  feedWelcome(h1); await feedBridgeHello(h1); await startP5;
+  t5.webrtc.boundPeers = () => [];             // not actually meshed
+  const nAtGrad5 = liveSockets.length;
+  h1.close(4200, 'graduated');
+  await sleep(120);
+  check('4200 (not meshed) → reconnects (self-correct)', liveSockets.length >= nAtGrad5 + 1);
+  check('4200 (not meshed) → not stuck graduated', t5.bridgeState !== 'graduated');
+  await t5.stop();
+
   console.log(`\nResult: ${passed} passed, ${failed} failed`);
   process.exit(failed === 0 ? 0 : 1);
 }
