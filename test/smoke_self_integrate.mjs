@@ -88,10 +88,46 @@ async function testSelfIntegrate() {
   check('a base peer routes a packet to the joiner', !!(r && r.consumed && r.atNode === joinerBig));
 }
 
+// ── 3. join() with NO sponsor still self-integrates (kernel v4.39.0) ──────
+// The bug: a bridge-connected node that calls peer.join() WITHOUT a sponsor
+// (the alert-bot / connect() bootstrap shape) used to return before
+// _selfIntegrate ever ran, so it sat at the passive-adoption churn floor —
+// self-rooting its topics as singletons in a sparse region (the cross-region
+// pub/sub loss). A no-sponsor join() must still weave the node in when a
+// transport already holds peers (as a bridge welcome-frame seed provides).
+async function testNoSponsorSelfIntegrate() {
+  console.log('\n── join() with NO sponsor still self-integrates (bridge-seeded) ──');
+  const net = new SimNetwork();
+  const domain = new AxonaDomain();
+  const base = [];
+  for (let i = 0; i < 8; i++) base.push(await makePeer(net, domain, (i * 17) % 80 - 40, (i * 53) % 360 - 180));
+  for (let i = 0; i < base.length; i++)
+    for (let j = i + 1; j < base.length; j++)
+      await base[i].transport.openConnection(base[j].id.id);
+  await wait(20);
+
+  // Newcomer gets ONE seed peer (as a bridge welcome frame would hand out),
+  // then calls join() with NO sponsor — the alert-bot bootstrap shape.
+  const nc = await makePeer(net, domain, 12, 22);
+  const seedBig = fromHex(base[0].id.id);
+  await nc.transport.openConnection(base[0].id.id);
+  await wait(10);
+  check('newcomer starts seeded with a single peer', nc.node.synaptome.size >= 1 && nc.node.synaptome.size <= 2);
+
+  await nc.peer.join();               // NO sponsor — must still self-integrate
+  await wait(30);
+
+  const ncBig = fromHex(nc.id.id);
+  check('no-sponsor join self-integrated beyond the seed (synaptome > 1)', nc.node.synaptome.size > 1);
+  const adopters = base.filter(b => b.node.id !== seedBig && b.node.synaptome.has(ncBig));
+  check('a non-seed neighbour adopted the newcomer (reachable)', adopters.length >= 1);
+}
+
 async function main() {
-  console.log('Axona self-integration smoke (v4.7.0)');
+  console.log('Axona self-integration smoke (v4.39.0)');
   await testBindEvents();
   await testSelfIntegrate();
+  await testNoSponsorSelfIntegrate();
   console.log(`\nResult: ${passed} passed, ${failed} failed`);
   process.exit(failed === 0 ? 0 : 1);
 }
