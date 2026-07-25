@@ -50,9 +50,13 @@ console.log('sync engine — one operation, one policy table\n');
   }
   ok('every policy row carries the full typed shape', complete);
   ok('every nature-planting row names its evictor (principal-liveness, I-10)', evicted);
-  ok('all six repair policies + the PUB_DURABLE gate are present',
-    ['REPLAY_UP', 'SPLIT_UNION', 'EMPTY_ROOT_PROBE', 'COHORT_REPLICATE', 'UNION_AT_ROOT', 'HANDOFF', 'PUB_DURABLE']
+  ok('all seven repair policies + the PUB_DURABLE gate are present',
+    ['REPLAY_UP', 'SPLIT_UNION', 'EMPTY_ROOT_PROBE', 'READ_REPAIR', 'COHORT_REPLICATE', 'UNION_AT_ROOT', 'HANDOFF', 'PUB_DURABLE']
       .every(k => k in SYNC_POLICIES));
+  // The table is CLOSED (review 2026-07-25): a policy name flowing through the
+  // engine without a row is the READ_REPAIR drift class — fence both directions.
+  ok('no un-tabled policies (table is exactly the eight known rows)',
+    Object.keys(SYNC_POLICIES).length === 8, `${Object.keys(SYNC_POLICIES).length}`);
 }
 
 // ── 2. SPLIT_UNION ledger is engine-enforced (one-shot per (child, lw)) ────
