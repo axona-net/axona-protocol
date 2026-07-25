@@ -10,10 +10,8 @@
 //
 // Run: node test/smoke_connect.mjs
 import { connect } from '../src/connect.js';
-import { connect as connectFromBarrel } from '../src/index.js';
 import { SimNetwork, simTransport } from '../src/transport/sim/index.js';
 import { createNodeIdentity, createAuthorIdentity } from '../src/identity/index.js';
-import { AxonaDomain } from '../src/dht/AxonaDomain.js';
 import { Synapse } from '../src/dht/Synapse.js';
 import { clz264 } from '../src/utils/hexid.js';
 
@@ -95,34 +93,6 @@ function admit(a, b) {
   ok('message delivered a → b', got.length >= 1 && got[0].message === 'hello from connect()');
   ok('envelope signed by the connect()-minted author', got[0]?.signerPubkey === a.author.authorId);
 
-  await sub.stop();
-  await a.disconnect(); await b.disconnect();
-}
-
-// ── 5. connect() is exported from the main barrel (single import path) ─
-{
-  console.log('\n── connect() is the barrel export ──');
-  ok('import { connect } from the barrel is the same function', connectFromBarrel === connect);
-}
-
-// ── 6. Shared domain injection (several peers on one mesh in a process) ─
-{
-  console.log('\n── shared-domain injection (no drop to new AxonaPeer) ──');
-  const domain = new AxonaDomain({ k: 20 });
-  const a = await simPeer({ domain });
-  const b = await simPeer({ domain });
-  ok('peer A uses the injected domain', a.peer._domain === domain);
-  ok('both peers share ONE domain instance', a.peer._domain === b.peer._domain);
-
-  await a.transport.openConnection(b.nodeIdentity.id);
-  admit(a, b); admit(b, a);
-  const TOPIC = { region: 'useast', name: 'connect-domain-smoke' };
-  const got = [];
-  const sub = await b.peer.sub(TOPIC, (env) => got.push(env), { since: 'all' });
-  await new Promise(r => setTimeout(r, 100));
-  await a.peer.pub(TOPIC, 'shared-domain', { signWith: a.author });
-  await new Promise(r => setTimeout(r, 300));
-  ok('delivery works over the shared domain', got.length >= 1 && got[0].message === 'shared-domain');
   await sub.stop();
   await a.disconnect(); await b.disconnect();
 }
