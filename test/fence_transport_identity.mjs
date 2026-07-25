@@ -34,7 +34,10 @@ import { execSync } from 'node:child_process';
 const BANNED = [
   { re: /\bloadOrCreateNodeIdentity\b/,          why: 'load-or-create implies persistence' },
   { re: /\b[A-Z_]*(NODE|RELAY|BRIDGE)_IDENTITY_PATH\b/, why: 'a filesystem path for a transport identity' },
-  { re: /identity[.\w-]*\.json/,                 why: 'a transport identity on disk' },
+  // A file *named* identity*.json — note the leading path/quote boundary, so an
+  // author store like `claude-mcp-identity.json` (legitimately durable) does not
+  // match, while `./identity.relay.json` and `/var/lib/.../identity.west.json` do.
+  { re: /[/'"`\s(]identity[.\w-]*\.json/,        why: 'a transport identity on disk' },
   { re: /stable\s+nodeId/i,                      why: 'promises node-identity continuity' },
   { re: /nodeId\s+across\s+restarts/i,           why: 'promises node-identity continuity' },
   { re: /persist(ent|ed)?\s+(node|transport)\s+identity/i, why: 'states the anti-pattern outright' },
