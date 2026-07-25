@@ -35,7 +35,7 @@
 import { spawn }            from 'node:child_process';
 import { fileURLToPath }    from 'node:url';
 import { dirname, resolve } from 'node:path';
-import { existsSync, rmSync } from 'node:fs';
+import { existsSync } from 'node:fs';
 
 const __dirname    = dirname(fileURLToPath(import.meta.url));
 const KERNEL_ROOT  = resolve(__dirname, '..', '..');          // axona-protocol/
@@ -78,14 +78,11 @@ const { webTransport } =
 
 // ── 2. Boot the real bridge on a throwaway port ─────────────────────
 function startBridge() {
-  const identityPath = `/tmp/axona-bridge-mesh-${process.pid}.json`;
-  try { rmSync(identityPath, { force: true }); } catch {}
   const child = spawn(process.execPath, ['src/server.js'], {
     cwd: BRIDGE_ROOT,
     env: {
       ...process.env,
       PORT: String(BRIDGE_PORT),
-      BRIDGE_IDENTITY_PATH: identityPath,
       LOG_LEVEL: process.env.VERBOSE ? 'info' : 'warn',
       MIN_PEER_VERSION: '0.0.1',
     },
@@ -98,7 +95,7 @@ function startBridge() {
     if (process.env.VERBOSE) process.stdout.write('[bridge] ' + s);
   });
   child.stderr.on('data', (c) => { if (process.env.VERBOSE) process.stderr.write('[bridge] ' + c.toString()); });
-  return { child, identityPath, ready: () => ready };
+  return { child, ready: () => ready };
 }
 
 async function waitFor(predicate, { timeoutMs = 15000, everyMs = 200, label = 'condition' } = {}) {
@@ -210,7 +207,6 @@ async function main() {
   } finally {
     for (const p of peers) { try { await p.transport.stop?.(); } catch {} }
     bridge.child.kill('SIGTERM');
-    try { rmSync(bridge.identityPath, { force: true }); } catch {}
     // node-datachannel keeps a worker thread alive; force a clean exit.
     try { polyfill.RTCPeerConnection?.cleanup?.(); } catch {}
   }

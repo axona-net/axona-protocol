@@ -66,8 +66,11 @@ async function testSnapshotShape() {
   check('formatVersion = 1.0',         snap.formatVersion === '1.0');
   check('snapshotAt is recent',        Math.abs(snap.snapshotAt - Date.now()) < 1000);
   check('wireVersion present',         typeof snap.wireVersion === 'string');
-  check('identity envelope present',   snap.identity != null);
-  check('identity.id matches',         snap.identity.id === identity.id);
+  // INVARIANT I-ID — a snapshot exists to be STORED, so it must never carry the
+  // transport keypair. It used to embed the private key outright.
+  check('NO identity envelope in the snapshot (I-ID)', snap.identity == null);
+  check('no field of the snapshot carries the nodeId (I-ID)',
+    !JSON.stringify(snap).includes(identity.id));
   check('synaptome length = 2',        snap.synaptome.length === 2);
   check('synaptome entries hex',
     snap.synaptome.every(s => isHexId(s.peerId)));
@@ -108,14 +111,18 @@ async function testFromSnapshot() {
   const json = JSON.stringify(snap);
   const restored = JSON.parse(json);
 
+  // A restart mints a FRESH transport identity and hands it in; the snapshot
+  // restores knowledge (synaptome, subscriptions), never the address.
+  const fresh = await createNodeIdentity(LONDON);
   const newPeer = await AxonaPeer.fromSnapshot(restored, {
     engine: { onEvent: () => () => {} },
+    nodeIdentity: fresh,
   });
 
-  check('restored peer has same nodeId',
-    newPeer.getNodeId() === identity.id);
-  check('restored peer has identity',
-    newPeer._identity?.id === identity.id);
+  check('restored peer does NOT reuse the old nodeId (I-ID)',
+    newPeer.getNodeId() !== identity.id);
+  check('restored peer uses the freshly supplied identity',
+    newPeer._identity?.id === fresh.id);
   check('restored synaptome has 2 entries',
     newPeer.peers().length === 2);
   check('restored synaptome includes PEER1',
@@ -174,8 +181,8 @@ async function testEmptyPeerSnapshot() {
     Array.isArray(snap.synaptome) && snap.synaptome.length === 0);
   check('no subscriptions → empty array',
     Array.isArray(snap.subscriptions) && snap.subscriptions.length === 0);
-  check('identity still present',
-    snap.identity?.id === id.id);
+  check('still no identity on an empty snapshot (I-ID)',
+    snap.identity == null);
 }
 
 async function main() {

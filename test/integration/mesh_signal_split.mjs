@@ -25,7 +25,7 @@
 import { spawn }            from 'node:child_process';
 import { fileURLToPath }    from 'node:url';
 import { dirname, resolve } from 'node:path';
-import { existsSync, rmSync } from 'node:fs';
+import { existsSync } from 'node:fs';
 
 const __dirname   = dirname(fileURLToPath(import.meta.url));
 const KERNEL_ROOT = resolve(__dirname, '..', '..');
@@ -47,11 +47,9 @@ globalThis.RTCPeerConnection = polyfill.RTCPeerConnection;
 const { connect } = await import('../../src/connect.js');
 
 function startBridge() {
-  const identityPath = `/tmp/axona-bridge-signalsplit-${process.pid}.json`;
-  try { rmSync(identityPath, { force: true }); } catch { /* */ }
   const child = spawn(process.execPath, ['src/server.js'], {
     cwd: BRIDGE_ROOT,
-    env: { ...process.env, PORT: String(BRIDGE_PORT), BRIDGE_IDENTITY_PATH: identityPath,
+    env: { ...process.env, PORT: String(BRIDGE_PORT),
            LOG_LEVEL: process.env.VERBOSE ? 'info' : 'warn', MIN_PEER_VERSION: '0.0.1' },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
@@ -59,7 +57,7 @@ function startBridge() {
   child.stdout.on('data', (c) => { if (c.toString().includes('"event":"listen"')) ready = true;
     if (process.env.VERBOSE) process.stdout.write('[bridge] ' + c); });
   child.stderr.on('data', (c) => { if (process.env.VERBOSE) process.stderr.write('[bridge] ' + c); });
-  return { child, identityPath, ready: () => ready };
+  return { child, ready: () => ready };
 }
 
 async function waitFor(pred, { timeoutMs = 30000, everyMs = 250 } = {}) {
@@ -134,7 +132,6 @@ async function main() {
   } catch (err) { console.error('harness threw:', err); process.exitCode = 2; }
   finally {
     bridge.child.kill('SIGTERM');
-    try { rmSync(bridge.identityPath, { force: true }); } catch { /* */ }
     try { polyfill.RTCPeerConnection?.cleanup?.(); } catch { /* */ }
   }
   await sleep(150);

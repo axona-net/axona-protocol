@@ -40,13 +40,16 @@ class MockAxonaManager {
 
 // ── Tests ────────────────────────────────────────────────────────────
 
-async function testIdentityLoadOnStart() {
-  console.log('\n── start() loads identity from persist ──');
+async function testIdentityNeverLoadedFromPersist() {
+  console.log('\n── INVARIANT I-ID: start() NEVER adopts a stored identity ──');
   const persist = new InMemoryPersistence();
   const id = await createNodeIdentity(LONDON);
+  // Plant one exactly as an older build would have left it behind.
   await persist.save('identity', await dumpIdentity(id));
 
-  // Construct WITHOUT identity — should be loaded from persist.
+  // Construct WITHOUT identity. Before 2026-07-25 this inherited the stored
+  // keypair, which is what silently gave every persist-wired app one single
+  // correlatable address that outlived every restart.
   const node = { id: id.id, alive: true, synaptome: new Map() };
   const peer = new AxonaPeer({
     engine: { onEvent: () => () => {} },
@@ -56,21 +59,25 @@ async function testIdentityLoadOnStart() {
   check('no identity before start',   peer._identity === null);
 
   await peer.start();
-  check('identity loaded from persist after start',
-    peer._identity?.id === id.id);
-  check('loaded identity can sign',
-    peer._identity?.privateKey != null);
+  check('stored identity is IGNORED, not adopted (I-ID)',
+    peer._identity === null);
+  check('start still succeeds with a stale identity envelope present',
+    peer._started === true);
 
   await peer.leave({ drain: false, notify: false });
+  check('leave() does NOT write the transport identity back (I-ID)',
+    (await persist.load('identity'))?.id === id.id);   // unchanged: the planted one, never re-written
   await persist.close();
 }
 
 async function testIdentityFromConstructorWins() {
-  console.log('\n── constructor identity takes precedence over persist ──');
+  console.log('\n── the constructor is the ONLY source of a transport identity ──');
   const persist = new InMemoryPersistence();
   const stored = await createNodeIdentity(LONDON);
   await persist.save('identity', await dumpIdentity(stored));
 
+  // The caller mints and supplies its own identity per process; storage is never
+  // consulted, so the stored London envelope must have no effect on this Tokyo peer.
   const ctor = await createNodeIdentity({ lat: 35.6762, lng: 139.6503 });
   const node = { id: ctor.id, alive: true, synaptome: new Map() };
   const peer = new AxonaPeer({
@@ -81,6 +88,8 @@ async function testIdentityFromConstructorWins() {
   await peer.start();
   check('constructor identity preserved',
     peer._identity?.id === ctor.id);
+  check('stored identity had no influence (I-ID)',
+    peer._identity?.id !== stored.id);
 
   await peer.leave({ drain: false, notify: false });
 }
@@ -116,9 +125,11 @@ async function testSubscriptionsPersisted() {
 
   await peer.leave({ drain: false, notify: false });
 
-  // After leave, identity + wireVersion are written.
+  // After leave, wireVersion is written — but NOT the transport identity. It used
+  // to be force-flushed here regardless of dirty state, which is exactly how a
+  // node's address became durable across restarts (I-ID).
   const idEnv = await persist.load('identity');
-  check('identity flushed on leave', idEnv?.id === id.id);
+  check('transport identity NOT flushed on leave (I-ID)', idEnv == null);
   const wire = await persist.load('wireVersion');
   check('wireVersion flushed on leave', typeof wire === 'string');
 
@@ -173,7 +184,9 @@ async function testRoundTrip() {
   await new Promise(r => setTimeout(r, 100));
   await peer1.leave({ drain: false, notify: false });
 
-  // Rebuild — no constructor identity, let persist supply it.
+  // Rebuild against the SAME store, with no constructor identity. This is the
+  // restart case, and it is the load-bearing check for I-ID: subscriptions must
+  // survive, the transport identity must NOT.
   const peer2 = new AxonaPeer({
     engine: { onEvent: () => () => {} },
     node: { id: id1.id, alive: true, synaptome: new Map() },
@@ -181,8 +194,8 @@ async function testRoundTrip() {
   });
   await peer2.start();
 
-  check('rebuilt peer has same identity',
-    peer2._identity?.id === id1.id);
+  check('RESTART DOES NOT INHERIT THE OLD nodeId (I-ID)',
+    peer2._identity == null || peer2._identity.id !== id1.id);
   check('rebuilt peer has pendingSubscriptions',
     Array.isArray(peer2.pendingSubscriptions) &&
     peer2.pendingSubscriptions.length === 2);
@@ -232,10 +245,11 @@ async function testCorruptedIdentityIgnored() {
   });
 
   await peer.start();
-  // Identity remained null since persist value was corrupt.
+  // Identity remains null because the namespace is never read at all — a corrupt
+  // envelope is now indistinguishable from a valid one: both are ignored.
   check('start does not throw on corrupt identity',
     peer._started === true);
-  check('identity remains null after failed load',
+  check('identity remains null (namespace never read)',
     peer._identity === null);
 
   await peer.leave({ drain: false, notify: false });
@@ -244,7 +258,7 @@ async function testCorruptedIdentityIgnored() {
 
 async function main() {
   console.log('Axona persistence wiring (P4) smoke');
-  await testIdentityLoadOnStart();
+  await testIdentityNeverLoadedFromPersist();
   await testIdentityFromConstructorWins();
   await testSubscriptionsPersisted();
   await testSubscriptionStopPersisted();
