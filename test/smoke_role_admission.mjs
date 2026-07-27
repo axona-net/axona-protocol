@@ -1,4 +1,4 @@
-// smoke_role_admission.mjs — a node must be able to say "no" to a role (v4.46.0).
+// smoke_role_admission.mjs — a node must be able to say "no", and must KNOW WHEN (v4.47.0).
 //
 // THE GAP THIS FENCES. The NEUROMORPHIC layer has had capacity discipline for a
 // long time: a declared degree budget (AxonaDomain.MAX_SYNAPTOME = 50), a real
@@ -15,7 +15,16 @@
 // (actually a client-hello timeout — the join-storm spiral of #332/#338).
 //
 // THE CONTRACT UNDER TEST
-//   1. MAX_ROLES is a real ceiling — saturated() flips at it.
+//   1. CAPACITY IS MEASURED, NOT COUNTED (v4.47.0). saturated() reads observed
+//      pressure against real protocol deadlines, never axonRoles.size:
+//        servicePressure = age of least-recently-serviced role / DROP_MS
+//          (1.0 = a role has SILENTLY ROTTED — the cohort gave up on it)
+//        helloPressure   = observed event-loop lag / HELLO_DEADLINE_MS
+//          (1.0 = this node is being closed by the bridge — the #332 spiral)
+//      MAX_ROLES survives ONLY as a far-off (8x) backstop for when telemetry
+//      itself is dead, and must never be the primary signal again. The headline
+//      case: MAX_ROLES roles all serviced on time is a HEALTHY node, and the
+//      old count-based predicate called it full.
 //   2. Grace refuses MANAGEMENT but never transport; seated() is not a bare
 //      timer (a node past its clock with no mesh is still not seated).
 //   3. TWO TIERS. 'bridge' is HARD and the floor must never override it.
@@ -34,7 +43,8 @@
 import { AxonaManager } from '../src/pubsub/AxonaManager.js';
 import { createNodeIdentity } from '../src/identity/index.js';
 import { regionCenter } from '../src/utils/region-names.js';
-import { MAX_ROLES, ROLE_GRACE_MS, ROLE_ADMIT_PER_TICK } from '../src/pubsub/constants.js';
+import { MAX_ROLES, ROLE_GRACE_MS, ROLE_ADMIT_PER_TICK,
+         HELLO_DEADLINE_MS, SATURATION_PRESSURE, DROP_MS, ROOT_REPLICATE_FULL_MS } from '../src/pubsub/constants.js';
 
 let passed = 0, failed = 0;
 const check = (label, cond, extra = '') => {
@@ -42,6 +52,10 @@ const check = (label, cond, extra = '') => {
   else      { console.log(`  ✗ ${label} ${extra}`); failed++; }
 };
 const __LOC = regionCenter('useast');
+
+// A role with the sync ledger the capacity metric reads. Bare { topicId } objects
+// are deliberately used elsewhere to represent UNMEASURABLE roles.
+const mkRole = (topicId, servicedAt) => ({ topicId, sync: { lastServicedAt: servicedAt } });
 
 // clock is injected so grace is testable without sleeping 90 s
 function makeManager(selfBig, { neverRoot = false, meshed = true, ...opts } = {}) {
@@ -65,7 +79,7 @@ function makeManager(selfBig, { neverRoot = false, meshed = true, ...opts } = {}
 }
 
 async function main() {
-  console.log('Axonic admission control — a node must be able to say "no" (v4.46.0)\n');
+  console.log('Axonic admission control + measured capacity (v4.47.0)\n');
   const ident = await createNodeIdentity({ lat: __LOC.lat, lng: __LOC.lng });
   const SELF = BigInt('0x' + ident.id);
   const T = (n) => SELF ^ BigInt(n + 1);
@@ -89,16 +103,59 @@ async function main() {
     check('clock long expired but NO mesh ⇒ still not seated (not a bare timer)', am.seated() === false);
   }
 
-  // ── 2. MAX_ROLES is a real ceiling ──────────────────────────────────────
+  // ── 2. capacity is measured, not counted ────────────────────────────────
   console.log('\n── 2. saturation ──');
+  {
+    const { am, advance, now } = makeManager(SELF);
+    advance(ROLE_GRACE_MS + 1);
+    check('an empty node is not saturated', am.saturated() === false);
+    // THE POINT OF v4.47.0: a count is not capacity. MAX_ROLES worth of roles
+    // that are all being serviced on time is a healthy node, and the old
+    // count-based saturated() called it full.
+    for (let i = 0; i < MAX_ROLES; i++) am.axonRoles.set(T(i), mkRole(T(i), now()));
+    check(`${MAX_ROLES} roles ALL SERVICED ON TIME is NOT saturated (count != capacity)`,
+      am.saturated() === false);
+    check('  → servicePressure ~0 when everything is fresh',
+      am.inspectCapacity().servicePressure < 0.05, JSON.stringify(am.inspectCapacity()));
+
+    // Now let the SAME roles go stale past the saturation fraction of DROP_MS.
+    advance(Math.ceil(DROP_MS * SATURATION_PRESSURE) + 1000);
+    check('the same roles, now stale past SATURATION_PRESSURE x DROP_MS, ARE saturated',
+      am.saturated() === true, JSON.stringify(am.inspectCapacity()));
+    check('  → servicePressure >= threshold', am.inspectCapacity().servicePressure >= SATURATION_PRESSURE);
+    check('  → canAcceptRole refuses with saturated', am.canAcceptRole().why === 'saturated');
+    check('  → and it is SOFT (floor may still override)', am.canAcceptRole().hard === false);
+    check('  → overdue counts the roles it is failing', am.inspectCapacity().overdue === MAX_ROLES);
+  }
+
+  // ── 2b. hello pressure: about to be kicked off the bridge ───────────────
+  console.log('\n── 2b. hello pressure (event-loop lag) ──');
   {
     const { am, advance } = makeManager(SELF);
     advance(ROLE_GRACE_MS + 1);
-    check('an empty node is not saturated', am.saturated() === false);
-    for (let i = 0; i < MAX_ROLES; i++) am.axonRoles.set(T(i), { topicId: T(i) });
-    check(`at MAX_ROLES (${MAX_ROLES}) it declares saturated`, am.saturated() === true);
-    check('  → canAcceptRole refuses with saturated', am.canAcceptRole().why === 'saturated');
-    check('  → and it is SOFT', am.canAcceptRole().hard === false);
+    check('a responsive node has helloPressure 0', am.inspectCapacity().helloPressure === 0);
+    // Simulate the #332 signature: a tick that could not run for longer than
+    // the bridge's hello window. One stall is enough to be closed.
+    am._tickLagMax = HELLO_DEADLINE_MS;
+    check('lag at the 5s hello deadline => helloPressure 1.0',
+      am.inspectCapacity().helloPressure === 1);
+    check('  → and that alone declares saturated', am.saturated() === true);
+    check('  → with NO stale roles at all (independent signal)',
+      am.inspectCapacity().servicePressure === 0);
+  }
+
+  // ── 2c. telemetry-dead backstop ─────────────────────────────────────────
+  console.log('\n── 2c. backstop when telemetry is dead ──');
+  {
+    const { am, advance } = makeManager(SELF);
+    advance(ROLE_GRACE_MS + 1);
+    // No sync ledger at all => no service age, no lag: every pressure reads 0.
+    // MAX_ROLES survives ONLY for this case, and only far away (8x).
+    for (let i = 0; i < MAX_ROLES * 8; i++) am.axonRoles.set(T(i), { topicId: T(i) });
+    check('unmeasurable roles still trip the absolute backstop at 8x MAX_ROLES',
+      am.saturated() === true);
+    check('  → and they are reported as unserviced, not as debt',
+      am.inspectCapacity().unserviced === MAX_ROLES * 8);
   }
 
   // ── 3. The bridge fence is HARD ─────────────────────────────────────────
@@ -137,10 +194,11 @@ async function main() {
       am.admitPushedRole(T(0)) === true);
   }
   {
-    const { am, advance, logs } = makeManager(SELF);
+    const { am, advance, logs, now } = makeManager(SELF);
     advance(ROLE_GRACE_MS + 1);
-    for (let i = 0; i < MAX_ROLES; i++) am.axonRoles.set(T(i), { topicId: T(i) });
-    check('a SATURATED node refuses a handoff ("I cannot" is honest)',
+    for (let i = 0; i < MAX_ROLES; i++) am.axonRoles.set(T(i), mkRole(T(i), now()));
+    advance(Math.ceil(DROP_MS * SATURATION_PRESSURE) + 1000);   // let them rot
+    check('a node FAILING TO SERVICE its roles refuses a handoff ("I cannot" is honest)',
       am.admitPushedRole(T(999)) === false);
     check('  → warns so the operator can see it', logs.some(l => l.tag === 'role-refused' && l.data?.pushed === true));
   }
