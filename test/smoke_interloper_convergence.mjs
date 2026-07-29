@@ -53,8 +53,8 @@ const check = (l, c, extra = '') => {
   c ? passed++ : failed++;
 };
 
-async function makePeer(network, domain) {
-  const identity = await createNodeIdentity({ lat: LAT, lng: LNG });
+async function makePeer(network, domain, identity = null) {
+  identity = identity || await createNodeIdentity({ lat: LAT, lng: LNG });
   const transport = simTransport({ network, identity, heartbeatMs: 0 });
   await transport.start(identity.id);
   const node = new NeuronNode({ id: BigInt('0x' + identity.id), lat: LAT, lng: LNG });
@@ -63,6 +63,43 @@ async function makePeer(network, domain) {
   await peer.start();
   peer._requireAxonaManager?.('interloper-smoke');
   return { peer, node, hex: identity.id, big: node.id };
+}
+
+// CONSTRUCT, DON'T SEARCH — mint N+1 identities and DESIGNATE the closest to the
+// topic as the interloper, instead of rejection-sampling for one.
+//
+// The old loop minted a whole peer at a time and kept going until one landed
+// closer to the topic than the closest of the N existing peers, giving up after
+// 400 tries. That looks safe if you assume the per-try hit rate is the mean,
+// 1/(N+1): (30/31)^400 is 2e-6. It is not safe, because that rate is not fixed.
+// It IS the (random) distance of the closest-of-N, which is ~Beta(1,N) and
+// heavily skewed small, so the honest figure integrates over it:
+//
+//     P(fail) = ∫ N(1-p)^(N-1) · (1-p)^T dp = N / (N + T)
+//
+// which at N=30, T=400 is 30/430 = 6.98% per loop — two loops per run, so ~13.5%,
+// and measured 14.3% (2 failures in 14 runs) before this change. The tail is
+// POLYNOMIAL, not exponential, so no budget rescues it: P(fail)=1e-6 would need
+// 30 MILLION tries. Raising the limit was never going to work.
+//
+// Sorting a pool is exact, costs N+1 keypairs instead of an unbounded number, and
+// removes a second defect: rejected candidates were peer.stop()'d, but
+// AxonaPeer.stop() does not call transport.stop(), and transport.stop() is what
+// calls network._unregister(). So every reject stayed REGISTERED — measured 30
+// registered nodes growing to 82 in one run — leaving hundreds of started,
+// half-dead phantoms in the fabric for the rest of the scenario.
+//
+// Identities are minted here but peers are built by the caller, so the interloper
+// can still be CONSTRUCTED at the moment the scenario wants it to appear rather
+// than existing (and self-integrating) from t=0.
+async function mintPool(topicBig, n) {
+  const ids = [];
+  for (let i = 0; i < n + 1; i++) ids.push(await createNodeIdentity({ lat: LAT, lng: LNG }));
+  ids.sort((a, b) => {
+    const da = BigInt('0x' + a.id) ^ topicBig, db = BigInt('0x' + b.id) ^ topicBig;
+    return da < db ? -1 : da > db ? 1 : 0;
+  });
+  return { interloperIdentity: ids[0], peerIdentities: ids.slice(1) };
 }
 
 function linkTables(peers, k) {
@@ -105,15 +142,16 @@ async function scenarioWarm(rep) {
   console.log(`\n── A. warm interloper (#353) — rep ${rep + 1}/${REPS} ──`);
   const network = new SimNetwork();
   const domain = new AxonaDomain({ k: K });
+  // topic first: mintPool needs it to pick the closest identity
+  const topic = { region: 'useast', name: `interloper-${rep}-${Math.floor(Math.random() * 1e9)}` };
+  const topicBig = BigInt('0x' + await deriveTopicId(topic));
+  const { interloperIdentity, peerIdentities } = await mintPool(topicBig, N);
   const peers = [];
-  for (let i = 0; i < N; i++) peers.push(await makePeer(network, domain));
+  for (const id of peerIdentities) peers.push(await makePeer(network, domain, id));
   const byBig = new Map(peers.map(p => [p.big, p]));
   linkTables(peers, K);
   await openChannels(peers, byBig);
   await wait(150);
-
-  const topic = { region: 'useast', name: `interloper-${rep}-${Math.floor(Math.random() * 1e9)}` };
-  const topicBig = BigInt('0x' + await deriveTopicId(topic));
   const author = await createAuthorIdentity();
 
   // Seated subscribers: the three peers FARTHEST from the topic (pure leaves).
@@ -139,13 +177,13 @@ async function scenarioWarm(rep) {
   const r0 = standing[0] ?? byDist[0];
 
   // ── the interloper: strictly closer to the topic than anyone alive ──
-  let interloper = null;
-  for (let tries = 0; tries < 400 && !interloper; tries++) {
-    const cand = await makePeer(network, domain);
-    if ((cand.big ^ topicBig) < (byDist[0].big ^ topicBig)) interloper = cand;
-    else { try { await cand.peer.stop?.(); } catch { /* */ } }
-  }
-  check('minted a strictly-closest joiner', !!interloper);
+  // Built HERE, not at t=0, so the joiner appears only now — but its identity was
+  // chosen up front by mintPool, so "strictly closest" holds by construction and
+  // cannot flake. The check stays: it is now an invariant assertion, and if it ever
+  // fails, mintPool's ordering is wrong rather than a search having been unlucky.
+  const interloper = await makePeer(network, domain, interloperIdentity);
+  check('interloper is strictly closest to the topic (by construction)',
+    (interloper.big ^ topicBig) < (byDist[0].big ^ topicBig));
   if (!interloper) return { converged: false };
 
   // Wire it the way the PROD capture had it — asymmetrically:
@@ -299,15 +337,16 @@ async function scenarioEphemeral(rep) {
   console.log(`\n── C. ephemeral interloper, eager-push heal (#353) — rep ${rep + 1}/${REPS} ──`);
   const network = new SimNetwork();
   const domain = new AxonaDomain({ k: K });
+  // topic first: mintPool needs it to pick the closest identity
+  const topic = { region: 'useast', name: `ephemeral-${rep}-${Math.floor(Math.random() * 1e9)}` };
+  const topicBig = BigInt('0x' + await deriveTopicId(topic));
+  const { interloperIdentity, peerIdentities } = await mintPool(topicBig, N);
   const peers = [];
-  for (let i = 0; i < N; i++) peers.push(await makePeer(network, domain));
+  for (const id of peerIdentities) peers.push(await makePeer(network, domain, id));
   const byBig = new Map(peers.map(p => [p.big, p]));
   linkTables(peers, K);
   await openChannels(peers, byBig);
   await wait(150);
-
-  const topic = { region: 'useast', name: `ephemeral-${rep}-${Math.floor(Math.random() * 1e9)}` };
-  const topicBig = BigInt('0x' + await deriveTopicId(topic));
   const author = await createAuthorIdentity();
   const byDist = peers.slice().sort((a, b) => ((a.big ^ topicBig) < (b.big ^ topicBig) ? -1 : 1));
   const subsPeers = byDist.slice(-3);
@@ -322,13 +361,13 @@ async function scenarioEphemeral(rep) {
   await drive(peers, 4);
   const r0 = rootsOf(peers, topicBig)[0] ?? byDist[0];
 
-  let interloper = null;
-  for (let tries = 0; tries < 400 && !interloper; tries++) {
-    const cand = await makePeer(network, domain);
-    if ((cand.big ^ topicBig) < (byDist[0].big ^ topicBig)) interloper = cand;
-    else { try { await cand.peer.stop?.(); } catch { /* */ } }
-  }
-  check('minted a strictly-closest joiner', !!interloper);
+  // Built HERE, not at t=0, so the joiner appears only now — but its identity was
+  // chosen up front by mintPool, so "strictly closest" holds by construction and
+  // cannot flake. The check stays: it is now an invariant assertion, and if it ever
+  // fails, mintPool's ordering is wrong rather than a search having been unlucky.
+  const interloper = await makePeer(network, domain, interloperIdentity);
+  check('interloper is strictly closest to the topic (by construction)',
+    (interloper.big ^ topicBig) < (byDist[0].big ^ topicBig));
   if (!interloper) return;
   const hood = byDist.slice(0, K + 1).filter(p => p !== r0).slice(0, K);
   for (const nb of hood) {
