@@ -129,7 +129,17 @@ async function main() {
       // kill happens UNDER LOSS — the subs that hold the body must converge the retraction
       fab.drop = 0.3;
       fab.clock += 100; r.am.pubsubKill(topicId, kill); await fab.settle();
-      for (let t = 0; t < 30; t++) { fab.clock += 5000; await fab.tickAll(); }
+      // HEALING BUDGET — 300 ticks, not 30. This assertion is about WHETHER the
+      // retraction converges under loss, not how fast. At 30 ticks it failed 5 runs
+      // in 20 (measured 2026-07-29), always at exactly 23/24: one straggler, one run
+      // in four. Raising the budget 10x made it 12/12, which proves the straggler was
+      // SLOW rather than wedged — so the old threshold was fencing convergence LATENCY
+      // while claiming to fence convergence, and a 25%-flaky test sat in the default
+      // class where it gates every release. Per the plan's own SLO rule (REPS >= 5,
+      // mean +- sd; single runs are directional only), a 24/24 pass/fail on one
+      // stochastic run is the wrong shape of assertion. If we ever want to fence how
+      // QUICKLY a kill converges, that is a separate, explicitly-budgeted check.
+      for (let t = 0; t < 300; t++) { fab.clock += 5000; await fab.tickAll(); }
       for (const s of subs) { total++; if (s.dels.includes(e.msgId)) recovered++; }
       if (gotBody !== subs.length) { total = -1; break; }   // precondition: all subs saw the body
     }

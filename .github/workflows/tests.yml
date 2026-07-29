@@ -1,0 +1,62 @@
+name: tests
+
+# Phase C. Two jobs, deliberately separate, because they answer different questions:
+#
+#   guard  — "is the suite what the manifest says it is?"
+#   suite  — "does the suite pass?"
+#
+# Before this existed, `npm test` was a single 109-invocation && chain and 35 of 144
+# test files were in no suite at all. A failure at position 3 hid the other 106, and a
+# test that was never wired in was indistinguishable from a test that passed — both
+# are silent. Every release gate in the refactor plan is phrased "the suite is green",
+# so that sentence had no checkable meaning.
+#
+# `guard` runs first and is cheap. If a new test file lands without a manifest entry,
+# or a manifest entry names a file that no longer exists, CI fails HERE — before
+# anybody reads a green suite as evidence of coverage it does not have. This is the
+# mechanism that makes the fix stay fixed; the 4.42.0 revert silently dropped four
+# closed findings because their fences were reverted with the code and nothing noticed.
+
+on:
+  push:
+    branches: [main, testnet]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  guard:
+    name: manifest ↔ disk
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      # npm ci, not install: there is a lockfile and the gate must test the
+      # pinned tree. NOT --omit=optional — optionalDependencies is empty, and
+      # node-datachannel is a devDependency that three default-class tests
+      # (smoke_mesh_lifecycle, smoke_mesh_peer_left_live, smoke_turn_encode)
+      # import directly. Omitting it would fail them for the wrong reason.
+      - run: npm ci
+      - name: reconcile the test manifest against the files on disk
+        run: npm run test:guard
+
+  suite:
+    name: default suite
+    runs-on: ubuntu-latest
+    needs: guard
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      # npm ci, not install: there is a lockfile and the gate must test the
+      # pinned tree. NOT --omit=optional — optionalDependencies is empty, and
+      # node-datachannel is a devDependency that three default-class tests
+      # (smoke_mesh_lifecycle, smoke_mesh_peer_left_live, smoke_turn_encode)
+      # import directly. Omitting it would fail them for the wrong reason.
+      - run: npm ci
+      # The runner reports "ran N of M selected" and fails if those differ, so a
+      # green result here is a claim about completeness, not just about absence
+      # of failure.
+      - run: npm test

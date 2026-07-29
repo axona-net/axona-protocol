@@ -1,0 +1,665 @@
+{
+  "$comment": [
+    "THE test manifest. Every test file on disk must appear here exactly once, and every entry",
+    "here must exist on disk — test/run.mjs --guard fails the build on either mismatch. This file",
+    "is the answer to \"what is the suite?\". Before it existed that question had no answer, and 35",
+    "of 144 test files had never run in CI: a test that is not wired in looks exactly like a test",
+    "that passes, because both are silent.",
+    "",
+    "classes:",
+    "  default      runs on every npm test. This is the release gate.",
+    "  extended     correct but slow or heavy. Run deliberately, not on every commit.",
+    "  integration  needs real WebRTC, a live bridge, or the network. Not hermetic, not a gate.",
+    "  quarantined  KNOWN UNRUN, awaiting triage. A debt with a number attached, never a resting",
+    "               place: the guard prints the count on every run so it cannot go quiet. Each",
+    "               entry must say why it is here and what would resolve it.",
+    "  retired      deliberately not run, with a recorded reason. A decision, not a drift."
+  ],
+  "generated": "2026-07-29 — classes MEASURED by running every test against kernel 4.49.0, not inferred. 11 never-wired tests passed and were promoted; 24 failed against removed internals and were retired with the missing symbol named in each reason.",
+  "tests": [
+    {
+      "file": "fence_transport_identity.mjs",
+      "class": "default"
+    },
+    {
+      "file": "integration/graduation_probe.mjs",
+      "class": "integration"
+    },
+    {
+      "file": "integration/mesh_multipeer.mjs",
+      "class": "integration"
+    },
+    {
+      "file": "integration/mesh_relay_auto_e2e.mjs",
+      "class": "integration"
+    },
+    {
+      "file": "integration/mesh_relay_e2e.mjs",
+      "class": "integration"
+    },
+    {
+      "file": "integration/mesh_relay_multihop_e2e.mjs",
+      "class": "integration"
+    },
+    {
+      "file": "integration/mesh_relay_webrtc.mjs",
+      "class": "integration"
+    },
+    {
+      "file": "integration/mesh_signal_split.mjs",
+      "class": "integration"
+    },
+    {
+      "file": "smoke_adaptive_renewal.mjs",
+      "class": "default"
+    },
+    {
+      "file": "smoke_addr_v3.mjs",
+      "class": "default"
+    },
+    {
+      "file": "smoke_addressing.js",
+      "class": "default"
+    },
+    {
+      "file": "smoke_author_class.mjs",
+      "class": "default"
+    },
+    {
+      "file": "smoke_backup_handoff.mjs",
+      "class": "default"
+    },
+    {
+      "file": "smoke_bounded_queue.js",
+      "class": "retired",
+      "reason": "Retired 2026-07-29. White-box test against the pre-Phase-1 AxonaManager: calls _addToReplayCache, which the routing-only core (task #220) does not define. Behaviour it covered is now covered by the Phase-1+ smokes; reviving it means rewriting against the current API, not re-wiring it."
+    },
+    {
+      "file": "smoke_bridge_directory.js",
+      "class": "default"
+    },
+    {
+      "file": "smoke_canonical.js",
+      "class": "default"
+    },
+    {
+      "file": "smoke_churn_amplification.mjs",
+      "class": "default"
+    },
+    {
+      "file": "smoke_cold_burst.mjs",
+      "class": "default"
+    },
+    {
+      "file": "smoke_connect.mjs",
+      "class": "default"
+    },
+    {
+      "file": "smoke_decline_paths.mjs",
+      "class": "default"
+    },
+    {
+      "file": "smoke_default_adapter_lookup.mjs",
+      "class": "default"
+    },
+    {
+      "file": "smoke_departure_hint.mjs",
+      "class": "default",
+      "reason": "Passes on 4.49.0. Fences the #364-B bridge departure hints."
+    },
+    {
+      "file": "smoke_direct.js",
+      "class": "default"
+    },
+    {
+      "file": "smoke_dual_key.mjs",
+      "class": "default"
+    },
+    {
+      "file": "smoke_eclipse_admission.js",
+      "class": "default"
+    },
+    {
+      "file": "smoke_ed25519_fallback.js",
+      "class": "default"
+    },
+    {
+      "file": "smoke_emission_sites.mjs",
+      "class": "default"
+    },
+    {
+      "file": "smoke_empty_root_pull.mjs",
+      "class": "default"
+    },
+    {
+      "file": "smoke_envelope.js",
+      "class": "default"
+    },
+    {
+      "file": "smoke_errors.js",
+      "class": "default"
+    },
+    {
+      "file": "smoke_geo.js",
+      "class": "default",
+      "reason": "Passes on 4.49.0. Utils coverage added by task #392."
+    },
+    {
+      "file": "smoke_ghost_read.mjs",
+      "class": "default",
+      "reason": "Passes on 4.49.0. Fences the #364-A2 ghost-slice read escalation."
+    },
+    {
+      "file": "smoke_handoff_ack_honesty.mjs",
+      "class": "default"
+    },
+    {
+      "file": "smoke_handoff_scaling.mjs",
+      "class": "default"
+    },
+    {
+      "file": "smoke_handshake_auth.js",
+      "class": "default"
+    },
+    {
+      "file": "smoke_handshake.js",
+      "class": "default"
+    },
+    {
+      "file": "smoke_health.js",
+      "class": "default"
+    },
+    {
+      "file": "smoke_hexid.js",
+      "class": "default",
+      "reason": "Passes on 4.49.0. Utils coverage added by task #392."
+    },
+    {
+      "file": "smoke_hold_ttl.js",
+      "class": "retired",
+      "reason": "Retired 2026-07-29. White-box test against the pre-Phase-1 AxonaManager: calls _addToReplayCache, which the routing-only core (task #220) does not define. Behaviour it covered is now covered by the Phase-1+ smokes; reviving it means rewriting against the current API, not re-wiring it."
+    },
+    {
+      "file": "smoke_host_address_rule.mjs",
+      "class": "default"
+    },
+    {
+      "file": "smoke_host_participation.js",
+      "class": "retired",
+      "reason": "Retired 2026-07-29. host() was removed 2026-07-25 — see the comment at AxonaManager.js:362, which records WHY (a bridge must never be seated as root). Asserting \"pubsubHost emits subscribe-k\" now asserts the opposite of the intended design."
+    },
+    {
+      "file": "smoke_id_invariant.mjs",
+      "class": "default"
+    },
+    {
+      "file": "smoke_identity_v3.mjs",
+      "class": "default"
+    },
+    {
+      "file": "smoke_identity.js",
+      "class": "default"
+    },
+    {
+      "file": "smoke_interloper_convergence.mjs",
+      "class": "default"
+    },
+    {
+      "file": "smoke_join_leave.js",
+      "class": "default"
+    },
+    {
+      "file": "smoke_join_storm.mjs",
+      "class": "default"
+    },
+    {
+      "file": "smoke_keyspace_hosting.mjs",
+      "class": "default"
+    },
+    {
+      "file": "smoke_kill_migration.mjs",
+      "class": "default"
+    },
+    {
+      "file": "smoke_kill_remote.mjs",
+      "class": "retired",
+      "reason": "Retired 2026-07-29. White-box test against the pre-Phase-1 AxonaManager: calls _handleKill/_isTombstoned/_onDeliver, which the routing-only core (task #220) does not define. Behaviour it covered is now covered by the Phase-1+ smokes; reviving it means rewriting against the current API, not re-wiring it. Its \"precondition: S received the original message\" failure is a consequence of the same dead scaffolding, not a delivery defect."
+    },
+    {
+      "file": "smoke_kill_resurrection.js",
+      "class": "retired",
+      "reason": "Retired 2026-07-29. White-box test against the pre-Phase-1 AxonaManager: calls _asyncKill, which the routing-only core (task #220) does not define. Behaviour it covered is now covered by the Phase-1+ smokes; reviving it means rewriting against the current API, not re-wiring it. Replica-divergence convergence is now fenced by smoke_pubsub_kill_heal.mjs."
+    },
+    {
+      "file": "smoke_kill.js",
+      "class": "retired",
+      "reason": "Retired 2026-07-29. White-box test against the pre-Phase-1 AxonaManager: calls _handleKill, which the routing-only core (task #220) does not define. Behaviour it covered is now covered by the Phase-1+ smokes; reviving it means rewriting against the current API, not re-wiring it. Current kill coverage lives in smoke_pubsub_kill.mjs (13 assertions, default class)."
+    },
+    {
+      "file": "smoke_leave_handoff_burst.mjs",
+      "class": "default",
+      "reason": "Passes on 4.49.0 (2s). Fences leave-handoff scaling (#390)."
+    },
+    {
+      "file": "smoke_leave_teardown.mjs",
+      "class": "default",
+      "reason": "Passes on 4.49.0 (9s). Fences leave-order teardown (#363)."
+    },
+    {
+      "file": "smoke_mesh_auth_cbv.js",
+      "class": "default"
+    },
+    {
+      "file": "smoke_mesh_auth_loopback.js",
+      "class": "default"
+    },
+    {
+      "file": "smoke_mesh_closed_teardown.js",
+      "class": "default"
+    },
+    {
+      "file": "smoke_mesh_dedup.js",
+      "class": "default"
+    },
+    {
+      "file": "smoke_mesh_eviction.js",
+      "class": "default"
+    },
+    {
+      "file": "smoke_mesh_lifecycle.mjs",
+      "class": "default"
+    },
+    {
+      "file": "smoke_mesh_negotiation_watchdog.js",
+      "class": "default"
+    },
+    {
+      "file": "smoke_mesh_peer_left_live.js",
+      "class": "default"
+    },
+    {
+      "file": "smoke_mesh_ready.mjs",
+      "class": "default"
+    },
+    {
+      "file": "smoke_mesh_relay_glue.js",
+      "class": "default"
+    },
+    {
+      "file": "smoke_mesh_signal.js",
+      "class": "default"
+    },
+    {
+      "file": "smoke_mesh.js",
+      "class": "default"
+    },
+    {
+      "file": "smoke_metric_topic.mjs",
+      "class": "default"
+    },
+    {
+      "file": "smoke_metrics_demand.mjs",
+      "class": "default"
+    },
+    {
+      "file": "smoke_metrics_kfanout.js",
+      "class": "default"
+    },
+    {
+      "file": "smoke_metrics_publish.mjs",
+      "class": "default"
+    },
+    {
+      "file": "smoke_msgsync_robustness.js",
+      "class": "retired",
+      "reason": "Retired 2026-07-29. White-box test against the pre-Phase-1 AxonaManager: calls _onMsgSync, which the routing-only core (task #220) does not define. Behaviour it covered is now covered by the Phase-1+ smokes; reviving it means rewriting against the current API, not re-wiring it."
+    },
+    {
+      "file": "smoke_normative_constants.mjs",
+      "class": "default"
+    },
+    {
+      "file": "smoke_partial_root_union.mjs",
+      "class": "default",
+      "reason": "Added 2026-07-29 while chasing #412. Pins the guarantee that a root inheriting a PARTIAL history converges the rest for a fresh since:all subscriber. Written as a hypothesis test (prediction: it would NOT converge, because every empty-root cohort-pull gate in repairPlane.js requires cache.length === 0); the prediction was refuted — the union lands on the first renewal tick. Kept inverted because the guarantee was previously untested and a future edit to any of those cache.length gates could break it silently."
+    },
+    {
+      "file": "smoke_partition.js",
+      "class": "default"
+    },
+    {
+      "file": "smoke_persist_namespaces.mjs",
+      "class": "default"
+    },
+    {
+      "file": "smoke_persistence_file.js",
+      "class": "default"
+    },
+    {
+      "file": "smoke_persistence_indexeddb.js",
+      "class": "default"
+    },
+    {
+      "file": "smoke_persistence_inmemory.js",
+      "class": "default"
+    },
+    {
+      "file": "smoke_persistence_wiring.js",
+      "class": "default"
+    },
+    {
+      "file": "smoke_pow.js",
+      "class": "default"
+    },
+    {
+      "file": "smoke_public_topics.mjs",
+      "class": "default",
+      "reason": "Passes on 4.49.0. Fences public/open topic addressing."
+    },
+    {
+      "file": "smoke_pubsub_antientropy.js",
+      "class": "retired",
+      "reason": "Retired 2026-07-29. White-box test against the pre-Phase-1 AxonaManager: calls _antiEntropyTopic, which the routing-only core (task #220) does not define. Behaviour it covered is now covered by the Phase-1+ smokes; reviving it means rewriting against the current API, not re-wiring it."
+    },
+    {
+      "file": "smoke_pubsub_authz.js",
+      "class": "retired",
+      "reason": "Retired 2026-07-29. White-box test against the pre-Phase-1 AxonaManager: calls _onSubscribeDirect, which the routing-only core (task #220) does not define. Behaviour it covered is now covered by the Phase-1+ smokes; reviving it means rewriting against the current API, not re-wiring it."
+    },
+    {
+      "file": "smoke_pubsub_beacon.mjs",
+      "class": "default"
+    },
+    {
+      "file": "smoke_pubsub_bigbacklog.mjs",
+      "class": "retired",
+      "reason": "Retired 2026-07-29. White-box test against the pre-Phase-1 AxonaManager: calls _addToReplayCache, which the routing-only core (task #220) does not define. Behaviour it covered is now covered by the Phase-1+ smokes; reviving it means rewriting against the current API, not re-wiring it. NOTE: its assertions 2/3a/3b also read as delivery failures, but they are downstream of the same missing method — the backlog is never built. Not evidence of replay loss."
+    },
+    {
+      "file": "smoke_pubsub_bounds.js",
+      "class": "retired",
+      "reason": "Retired 2026-07-29. White-box test against the pre-Phase-1 AxonaManager: calls _capStore, which the routing-only core (task #220) does not define. Behaviour it covered is now covered by the Phase-1+ smokes; reviving it means rewriting against the current API, not re-wiring it."
+    },
+    {
+      "file": "smoke_pubsub_c3.js",
+      "class": "retired",
+      "reason": "Retired 2026-07-29. White-box test against the pre-Phase-1 AxonaManager: calls _onMetricsReqDirect, which the routing-only core (task #220) does not define. Behaviour it covered is now covered by the Phase-1+ smokes; reviving it means rewriting against the current API, not re-wiring it."
+    },
+    {
+      "file": "smoke_pubsub_coldstart.js",
+      "class": "retired",
+      "reason": "Retired 2026-07-29. Hand-builds roles with the pre-rewrite field name `replayCache` instead of `cache`, so refreshTick crashes in _emptyRootProbeSweep (repairPlane.js:382) reading role.cache.length. Verified NOT a production bug: every real role-creation site goes through makeRole() (rootClaim.js:60), which initialises cache: []. It does show _emptyRootProbeSweep has no shape guard — that belongs to the S4 closed-shapes fence, which is already on the plan."
+    },
+    {
+      "file": "smoke_pubsub_droplog.js",
+      "class": "retired",
+      "reason": "Retired 2026-07-29. White-box test against the pre-Phase-1 AxonaManager: calls _onPublishDirect, which the routing-only core (task #220) does not define. Behaviour it covered is now covered by the Phase-1+ smokes; reviving it means rewriting against the current API, not re-wiring it."
+    },
+    {
+      "file": "smoke_pubsub_durability.mjs",
+      "class": "default"
+    },
+    {
+      "file": "smoke_pubsub_fundamental.mjs",
+      "class": "default"
+    },
+    {
+      "file": "smoke_pubsub_gap_replay.js",
+      "class": "retired",
+      "reason": "Retired 2026-07-29. White-box test against the pre-Phase-1 AxonaManager: calls _maybeSendReplay, which the routing-only core (task #220) does not define. Behaviour it covered is now covered by the Phase-1+ smokes; reviving it means rewriting against the current API, not re-wiring it."
+    },
+    {
+      "file": "smoke_pubsub_host_durability.mjs",
+      "class": "default"
+    },
+    {
+      "file": "smoke_pubsub_kill_heal.mjs",
+      "class": "default"
+    },
+    {
+      "file": "smoke_pubsub_kill.mjs",
+      "class": "default"
+    },
+    {
+      "file": "smoke_pubsub_leave_handoff.mjs",
+      "class": "default"
+    },
+    {
+      "file": "smoke_pubsub_liveness_reroute.mjs",
+      "class": "default"
+    },
+    {
+      "file": "smoke_pubsub_posthash.js",
+      "class": "retired",
+      "reason": "Retired 2026-07-29. White-box test against the pre-Phase-1 AxonaManager: calls _postHashConsistent, which the routing-only core (task #220) does not define. Behaviour it covered is now covered by the Phase-1+ smokes; reviving it means rewriting against the current API, not re-wiring it."
+    },
+    {
+      "file": "smoke_pubsub_recruit_wiring.mjs",
+      "class": "retired",
+      "reason": "Retired 2026-07-29. Fences pickRelayPeer / shouldRecruitSubAxon / maxDirectSubs. Verified gone: pickRelayPeer now appears ONLY in the accepted-and-ignored _legacy tunables (AxonaManager.js:104); the other two have zero hits in src/. The Phase-1 clean break replaced this recruitment design deliberately. WARNING: this test existed BECAUSE the mechanism drifted silently once before (its own header says so), and retiring it leaves the current recruitment shape unfenced. See the follow-up task."
+    },
+    {
+      "file": "smoke_pubsub_replay.js",
+      "class": "retired",
+      "reason": "Retired 2026-07-29. White-box test against the pre-Phase-1 AxonaManager: calls _onSubscribeDirect, which the routing-only core (task #220) does not define. Behaviour it covered is now covered by the Phase-1+ smokes; reviving it means rewriting against the current API, not re-wiring it."
+    },
+    {
+      "file": "smoke_pubsub_republish.mjs",
+      "class": "retired",
+      "reason": "Retired 2026-07-29. White-box test against the pre-Phase-1 AxonaManager: calls _addToReplayCache, which the routing-only core (task #220) does not define. Behaviour it covered is now covered by the Phase-1+ smokes; reviving it means rewriting against the current API, not re-wiring it."
+    },
+    {
+      "file": "smoke_pubsub_root_election.mjs",
+      "class": "retired",
+      "reason": "Retired 2026-07-29. Asserts \"recruitment fired — sub-axons exist under the roots\", i.e. the same pre-Phase-1 recruitment design as smoke_pubsub_recruit_wiring.mjs. Retired for the same reason, and covered by the same follow-up: the current recruitment shape needs a fence written against the current API."
+    },
+    {
+      "file": "smoke_pubsub_sweep.mjs",
+      "class": "default"
+    },
+    {
+      "file": "smoke_pubsub_unified.js",
+      "class": "default"
+    },
+    {
+      "file": "smoke_pubsub_v3.mjs",
+      "class": "default"
+    },
+    {
+      "file": "smoke_pull_early_answer.mjs",
+      "class": "default"
+    },
+    {
+      "file": "smoke_pull_envelope.mjs",
+      "class": "default"
+    },
+    {
+      "file": "smoke_pull_latest.js",
+      "class": "retired",
+      "reason": "Retired 2026-07-29. White-box test against the pre-Phase-1 AxonaManager: calls _addToReplayCache, which the routing-only core (task #220) does not define. Behaviour it covered is now covered by the Phase-1+ smokes; reviving it means rewriting against the current API, not re-wiring it."
+    },
+    {
+      "file": "smoke_pull_metrics.js",
+      "class": "default"
+    },
+    {
+      "file": "smoke_reachable_root.mjs",
+      "class": "default"
+    },
+    {
+      "file": "smoke_read_repair.mjs",
+      "class": "default"
+    },
+    {
+      "file": "smoke_read_routing.mjs",
+      "class": "default"
+    },
+    {
+      "file": "smoke_region_lock.mjs",
+      "class": "default"
+    },
+    {
+      "file": "smoke_region_names.js",
+      "class": "default"
+    },
+    {
+      "file": "smoke_replica_fast_promote.mjs",
+      "class": "default"
+    },
+    {
+      "file": "smoke_reroute_termination.mjs",
+      "class": "default"
+    },
+    {
+      "file": "smoke_restart_handoff.mjs",
+      "class": "default",
+      "reason": "Passes on 4.49.0 (59s — the slowest test in the suite). Fences restart handoff (#340/#363). Kept in default despite cost: the leave/handoff family has regressed repeatedly, and extended classes do not get run."
+    },
+    {
+      "file": "smoke_resubscribe.js",
+      "class": "retired",
+      "reason": "Retired 2026-07-29. White-box test against the pre-Phase-1 AxonaManager: calls _onReplayBatch, which the routing-only core (task #220) does not define. Behaviour it covered is now covered by the Phase-1+ smokes; reviving it means rewriting against the current API, not re-wiring it."
+    },
+    {
+      "file": "smoke_role_admission.mjs",
+      "class": "default"
+    },
+    {
+      "file": "smoke_role_natures.mjs",
+      "class": "default"
+    },
+    {
+      "file": "smoke_root_claim.mjs",
+      "class": "default"
+    },
+    {
+      "file": "smoke_root_hint.mjs",
+      "class": "default"
+    },
+    {
+      "file": "smoke_root_reconcile_reach.mjs",
+      "class": "default"
+    },
+    {
+      "file": "smoke_root_reconcile.mjs",
+      "class": "default",
+      "reason": "Passes on 4.49.0. Fences root reconciliation (#304)."
+    },
+    {
+      "file": "smoke_root_replication.mjs",
+      "class": "default"
+    },
+    {
+      "file": "smoke_root_time_delivery.mjs",
+      "class": "default"
+    },
+    {
+      "file": "smoke_rooted_topics.mjs",
+      "class": "default"
+    },
+    {
+      "file": "smoke_s2.js",
+      "class": "default"
+    },
+    {
+      "file": "smoke_self_integrate.mjs",
+      "class": "default"
+    },
+    {
+      "file": "smoke_sim_keyspace.mjs",
+      "class": "default"
+    },
+    {
+      "file": "smoke_since_latest.mjs",
+      "class": "default"
+    },
+    {
+      "file": "smoke_snapshot.js",
+      "class": "default"
+    },
+    {
+      "file": "smoke_split_history_union.mjs",
+      "class": "default"
+    },
+    {
+      "file": "smoke_standalone_lookup.mjs",
+      "class": "default",
+      "reason": "Passes on 4.49.0. Fences the #354 standalone lookup shape."
+    },
+    {
+      "file": "smoke_std_chunk.js",
+      "class": "default"
+    },
+    {
+      "file": "smoke_std_message.mjs",
+      "class": "default"
+    },
+    {
+      "file": "smoke_synaptome_eclipse.mjs",
+      "class": "default"
+    },
+    {
+      "file": "smoke_synaptome_maintain.mjs",
+      "class": "default"
+    },
+    {
+      "file": "smoke_sync_engine.mjs",
+      "class": "default"
+    },
+    {
+      "file": "smoke_tick_lag_window.mjs",
+      "class": "default"
+    },
+    {
+      "file": "smoke_touch.js",
+      "class": "retired",
+      "reason": "Retired 2026-07-29. touch() was deprecated in v4.3.0 (task #242). Calls am._handleTouch, which no longer exists. The feature is gone by decision, not by drift."
+    },
+    {
+      "file": "smoke_transport_node_auth.js",
+      "class": "default"
+    },
+    {
+      "file": "smoke_transport_node.js",
+      "class": "default"
+    },
+    {
+      "file": "smoke_transport_sim_auth.js",
+      "class": "default"
+    },
+    {
+      "file": "smoke_transport_sim.js",
+      "class": "default"
+    },
+    {
+      "file": "smoke_transport_web_full.js",
+      "class": "default"
+    },
+    {
+      "file": "smoke_transport_web_reconnect.js",
+      "class": "default"
+    },
+    {
+      "file": "smoke_transport_web.js",
+      "class": "default"
+    },
+    {
+      "file": "smoke_turn_encode.mjs",
+      "class": "default",
+      "reason": "Passes on 4.49.0. Fences the #343 TURN REST username encoding."
+    },
+    {
+      "file": "smoke_unpub.js",
+      "class": "retired",
+      "reason": "Retired 2026-07-29. unpub.js was DELETED in refactor-1 (task #389). Calls am._handleUnpub. The feature is gone by decision. Its envelope-level assertions (build/verify/tamper) still pass, which is why it fails late rather than on import."
+    },
+    {
+      "file": "smoke_unsub.js",
+      "class": "default"
+    },
+    {
+      "file": "smoke_upstream_rehome.mjs",
+      "class": "default"
+    }
+  ]
+}
