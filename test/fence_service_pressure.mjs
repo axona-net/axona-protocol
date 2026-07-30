@@ -170,5 +170,74 @@ console.log('service pressure — the capacity metric can report its own failure
     after === before && after >= SATURATION_PRESSURE, `before=${before} after=${after}`);
 }
 
+// ── 6. MECHANISM, NOT ARITHMETIC — driven by the real refreshTick ──────────
+// Aster's C8: sections 1-5 advance a fake clock and write fields, so they pin
+// the metric's arithmetic and nothing about the code that feeds it. These cases
+// drive the actual tick. They are the ones that would have caught C9.
+{
+  // 6a. C9 — a LOCALLY ROOTED subscription must not accrue APP_SUB debt.
+  // refreshTick skips the topic at `if (role && role.isRoot) continue`, so
+  // lastRenewSent is written once at subscribe and never again. Charging it made
+  // an ordinary node — subscribed, then became root — falsely saturate and start
+  // refusing pushed roles. Pre-C9 this section goes RED.
+  const { am, clock } = mk();
+  const T = REG | 0x5001n;
+  am.pubsubSubscribe(T);
+  am._becomeRoot(T);
+  ok('6a. self-rooted: the role is root and the subscription is live',
+    am.axonRoles.get(T)?.isRoot === true && am.mySubscriptions.has(T));
+
+  // Drive PAST the point where an APP_SUB row would have saturated.
+  const ticks = Math.ceil((SATURATION_PRESSURE * DROP_MS + 20_000) / TICK);
+  for (let i = 0; i < ticks; i++) { clock.t += TICK; await am.refreshTick(); }
+  const c = am.inspectCapacity();
+  ok(`6b. after ${ticks} real ticks (${(ticks * TICK) / 1000}s) a self-rooted subscriber is NOT saturated`,
+    am.saturated() === false, `pressure=${c.servicePressure} worst=${c.worstObligation}`);
+  ok('6c. …and still admits pushed roles (the availability half)',
+    am.admitPushedRole(REG | 0x5999n) === true);
+  ok('6d. …and the topic is still MEASURED, via its ROOT row, not silently dropped',
+    am.mySubscriptions.has(T) && am.axonRoles.has(T));
+}
+{
+  // 6e. THE CONTROL. C9 must not degenerate into "never measure APP_SUB" — that
+  // would reopen the coverage hole D0 exists to close. A subscription with NO
+  // local root, left unrenewed, must still saturate.
+  const { am, clock } = mk();
+  const S = REG | 0x6001n;
+  am.pubsubSubscribe(S);
+  clock.t += Math.ceil(SATURATION_PRESSURE * DROP_MS) + 5_000;   // no ticks: nothing renews it
+  const c = am.inspectCapacity();
+  ok('6e. CONTROL — an unrooted, unrenewed subscription still saturates',
+    c.servicePressure >= SATURATION_PRESSURE && c.worstObligation === 'APP_SUB',
+    `pressure=${c.servicePressure} worst=${c.worstObligation}`);
+}
+{
+  // 6f. C1/C2 — pubsubPeerDied writes lastRenewSent = 0 to force an immediate
+  // re-emit. Read as a time, that made the subscription permanently exempt.
+  // createdAt is the activation stamp, so debt accrues from birth even at 0.
+  const { am, clock } = mk();
+  const S = REG | 0x7001n;
+  am.pubsubSubscribe(S);
+  const sub = am.mySubscriptions.get(S);
+  sub.lastRenewSent = 0;                                          // exactly what pubsubPeerDied does
+  clock.t += Math.ceil(SATURATION_PRESSURE * DROP_MS) + 5_000;
+  const c = am.inspectCapacity();
+  ok('6f. a subscription reset to lastRenewSent=0 accrues debt from createdAt, not forever-innocent',
+    c.servicePressure >= SATURATION_PRESSURE && c.worstObligation === 'APP_SUB',
+    `pressure=${c.servicePressure} worst=${c.worstObligation} unserviced=${c.unserviced}`);
+  ok('6g. …and is reported as never-discharged, not merely late', c.unserviced >= 1);
+}
+{
+  // 6h. C7 — overdueFrac is a fraction of OBLIGATIONS. On a node with zero roles
+  // and one overdue subscription the old denominator divided by zero and read 0.
+  const { am, clock } = mk();
+  am.pubsubSubscribe(REG | 0x8001n);
+  clock.t += DROP_MS + 5_000;                    // past its OWN deadline — overdue, not merely pressured
+  const c = am.inspectCapacity();
+  ok('6h. overdueFrac is meaningful with zero roles held',
+    c.roles === 0 && c.obligations === 1 && c.overdueFrac === 1,
+    `roles=${c.roles} obligations=${c.obligations} frac=${c.overdueFrac}`);
+}
+
 console.log(`\n${fail ? `✗ ${fail} of ${n} failed` : `✓ all ${n} checks passed`}`);
 process.exit(fail ? 1 : 0);

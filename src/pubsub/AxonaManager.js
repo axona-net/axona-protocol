@@ -316,6 +316,7 @@ export class AxonaManager {
     // the rows are comparable. Previously one DROP_MS denominator served every
     // nature, which made 1.0 meaningful for renewal and arbitrary for the rest.
     let worstRatio = 0, worstAgeMs = 0, worstKind = null, overdue = 0, unserviced = 0;
+    let obligations = 0;                             // the DENOMINATOR: rows evaluated, not roles held
     // `since` is the stamp when the obligation has been discharged at least once,
     // and the role's BIRTH when it never has. A zero stamp is innocent only while
     // the role is younger than its own deadline: past that, it has never been
@@ -323,12 +324,21 @@ export class AxonaManager {
     // "never discharged" as unconditionally not-debt was a false negative of the
     // same shape as the bug D0 exists to fix — caught by smoke_role_admission.mjs,
     // which builds 96 never-serviced roles and rightly expects saturation.
+    //
+    // C2: 0 is a SENTINEL here, never a real clock value, and the two cases must
+    // not share a test. `pubsubPeerDied` deliberately writes lastRenewSent = 0 to
+    // force an immediate re-emit; read as a time that made the subscription
+    // permanently exempt from pressure — the exact false negative D0 removes —
+    // because `at || bornAt` cannot tell "reset to renew now" from "unknown".
+    // Presence is asked explicitly, of each field separately.
+    const stamped = (t) => typeof t === 'number' && t > 0;
     const consider = (kind, at, deadline, bornAt = 0) => {
-      const since = at || bornAt;
+      obligations++;                                 // counted even when unmeasurable — see overdueFrac
+      const since = stamped(at) ? at : (stamped(bornAt) ? bornAt : 0);
       if (!since) { unserviced++; return; }          // no stamp AND no birth time — genuinely unknown
       const age = now - since;
       const ratio = age / deadline;
-      if (!at) unserviced++;                         // still counted as never-discharged, but no longer exempt
+      if (!stamped(at)) unserviced++;                // still counted as never-discharged, but no longer exempt
       if (ratio >= 1) overdue++;                     // past ITS OWN deadline, not a shared one
       if (ratio > worstRatio) { worstRatio = ratio; worstAgeMs = age; worstKind = kind; }
     };
@@ -357,15 +367,32 @@ export class AxonaManager {
     }
     // APP_SUB — the coverage hole. mySubscriptions is a separate map, so before
     // D0 the node's own subscriptions were unmeasurable rather than mismeasured.
-    for (const sub of this.mySubscriptions.values()) {
-      consider('APP_SUB', sub.lastRenewSent, OBLIGATIONS.APP_SUB.deadline);
+    //
+    // C9: a LOCALLY ROOTED subscription owes nothing here, and charging it was an
+    // availability regression introduced by D0 itself. refreshTick renews app
+    // subscriptions by walking mySubscriptions, but skips the topic outright at
+    // `if (role && role.isRoot) continue` (repairPlane.js) — correctly, since a
+    // root has no upstream to renew toward and serves itself from local cache.
+    // sub.lastRenewSent is therefore written once at subscribe and never again,
+    // so measuring it against DROP_MS made an ordinary node — one that subscribed
+    // to a topic and then became its root, which is topology-random and common on
+    // a small mesh — falsely saturate ~110s later and start refusing pushed roles.
+    // The topic is not unmeasured by skipping it: the ROOT row above already
+    // carries this node's real obligation for it.
+    for (const [topicBig, sub] of this.mySubscriptions) {
+      if (this.axonRoles.get(topicBig)?.isRoot) continue;
+      consider('APP_SUB', sub.lastRenewSent, OBLIGATIONS.APP_SUB.deadline, sub.createdAt);
     }
     const roles = this.axonRoles.size;
     return {
       roles,
       subscriptions: this.mySubscriptions.size,      // now measured, not just held
       overdue,                                       // obligations past their OWN deadline
-      overdueFrac: roles ? +(overdue / roles).toFixed(3) : 0,
+      obligations,                                   // rows evaluated this pass
+      // C7: the denominator is obligations EVALUATED, not roles held. Dividing by
+      // roles let a hosted root contribute two rows against one role (>1.0), and
+      // made app subscriptions on a role-less node divide by zero.
+      overdueFrac: obligations ? +(overdue / obligations).toFixed(3) : 0,
       unserviced,                                    // born but not yet discharged once
       worstAgeMs,
       worstObligation: worstKind,                    // WHICH obligation is worst — the old number could not say
@@ -635,6 +662,11 @@ export class AxonaManager {
     // cache entry regardless of age (the ts-floor can't express "newest"). Sticky
     // across renewals (re-delivery is deduped); cleared by a later non-latest sub.
     this.mySubscriptions.set(topicId, {
+      // C1: createdAt is the ACTIVATION time and is never rewritten. lastRenewSent
+      // is reset to 0 by pubsubPeerDied to force an immediate re-emit, so it cannot
+      // double as the birth time — without this, a subscription whose first re-emit
+      // after upstream death never lands reads as pressure 0 forever.
+      createdAt: this._now(),
       since, lastRenewSent: this._now(), interval: this.renewFastMs,
       replayLatest: !!opts.replayLatest,
     });
