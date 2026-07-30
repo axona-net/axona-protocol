@@ -331,11 +331,21 @@ export class AxonaManager {
     // permanently exempt from pressure — the exact false negative D0 removes —
     // because `at || bornAt` cannot tell "reset to renew now" from "unknown".
     // Presence is asked explicitly, of each field separately.
-    const stamped = (t) => typeof t === 'number' && t > 0;
+    //
+    // The sentinel is null, NOT zero. `t > 0` would have made an injected clock
+    // that starts at 0 permanently unknown — production Date.now never does that,
+    // but `now` is a public injection point and simulations routinely start at 0,
+    // so the metric would have been silently blind under exactly the harness we
+    // use to test it. 0 is a valid instant; absence is null. (Aster, 8fbb1a9 P2.)
+    const stamped = (t) => typeof t === 'number' && Number.isFinite(t);
     const consider = (kind, at, deadline, bornAt = 0) => {
       obligations++;                                 // counted even when unmeasurable — see overdueFrac
-      const since = stamped(at) ? at : (stamped(bornAt) ? bornAt : 0);
-      if (!since) { unserviced++; return; }          // no stamp AND no birth time — genuinely unknown
+      // Presence is a SEPARATE question from value. Collapsing them into `!since`
+      // reintroduced the same defect one layer down: a legitimate stamp of 0 read
+      // as absence, so a clock starting at 0 was exempt from pressure forever.
+      const hasAt = stamped(at), hasBorn = stamped(bornAt);
+      if (!hasAt && !hasBorn) { unserviced++; return; }   // never stamped AND no birth time — unknown
+      const since = hasAt ? at : bornAt;
       const age = now - since;
       const ratio = age / deadline;
       if (!stamped(at)) unserviced++;                // still counted as never-discharged, but no longer exempt

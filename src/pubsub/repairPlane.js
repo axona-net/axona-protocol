@@ -730,7 +730,7 @@ export const repairPlaneMethods = {
       if (Array.isArray(up) && up[0] === dead) {
         this._upstream.delete(t);
         const s = this.mySubscriptions.get(t);
-        if (s) { s.interval = this.renewFastMs; s.lastRenewSent = 0; }
+        if (s) { s.interval = this.renewFastMs; s.lastRenewSent = null; }  // null = 'renew now', NOT a time (C2)
       }
     }
   },

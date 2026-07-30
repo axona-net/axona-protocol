@@ -63,7 +63,10 @@ async function main() {
   check('dead peer\'s root beacon purged (pre-existing sweep)', !am._rootBeacons.has(T1));
   const s1 = am.mySubscriptions.get(T1);
   check('renewal interval snapped to fast', s1.interval === am.renewFastMs, `${s1.interval}`);
-  check('renewal clock reset (fires on the NEXT tick, not in ≤60s)', s1.lastRenewSent === 0);
+  // The reset sentinel is null, not 0, since v4.52.0: 0 is a valid instant on an
+  // injected clock, so it cannot also mean "no time". Behaviour is unchanged —
+  // the next-tick re-home below is what actually proves the reset works.
+  check('renewal clock reset (fires on the NEXT tick, not in ≤60s)', s1.lastRenewSent === null);
   check('control topic keeps its backed-off clock', am.mySubscriptions.get(T2).lastRenewSent > 0);
 
   // ── next tick re-homes unpinned ────────────────────────────────────

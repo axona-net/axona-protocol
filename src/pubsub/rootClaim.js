@@ -57,7 +57,7 @@ export function roleNature(role) {
 }
 
 /** A relay's per-topic state (root or non-root child relay). */
-export function makeRole(topicId, isRoot, createdAt = 0) {
+export function makeRole(topicId, isRoot, createdAt = null) {
   return {
     topicId,                         // bigint
     createdAt,                       // _now() when this role was admitted (D0 / M4).
@@ -88,8 +88,8 @@ export function makeRole(topicId, isRoot, createdAt = 0) {
     // properties; the 4.22.0 lw-pull storm lived in exactly this kind of guard.
     sync: {
       sig: '',                       // (when ROOT) state signature at the last FULL replica push (4.24.1 delta gate)
-      lastFullAt: 0,                 // (when ROOT) _now() of the last FULL push (backstop re-arms at ROOT_REPLICATE_FULL_MS)
-      lastRenewAt: 0,                // _now() of the last SUB actually EMITTED for this role (D0 / M4).
+      lastFullAt: null,              // (when ROOT) _now() of the last FULL push; null = never (NOT 0 — see C2) (backstop re-arms at ROOT_REPLICATE_FULL_MS)
+      lastRenewAt: null,                // _now() of the last SUB actually EMITTED for this role (D0 / M4).
                                      // Completion point for the CHILD / BACKUP / HOLDER obligations — stamped in
                                      // _emitSubscribe AFTER the send, not before, so it records work done rather
                                      // than work attempted. Deadline is DROP_MS: past it the upstream has evicted us.

@@ -195,8 +195,49 @@ console.log('service pressure — the capacity metric can report its own failure
     am.saturated() === false, `pressure=${c.servicePressure} worst=${c.worstObligation}`);
   ok('6c. …and still admits pushed roles (the availability half)',
     am.admitPushedRole(REG | 0x5999n) === true);
-  ok('6d. …and the topic is still MEASURED, via its ROOT row, not silently dropped',
-    am.mySubscriptions.has(T) && am.axonRoles.has(T));
+  // 6d. THE TRUTHFUL CONTRACT. The original wording here claimed the topic was
+  // "still measured via its ROOT row" and asserted only that the role EXISTS —
+  // which proves nothing about measurement. Aster checked it: this fixture
+  // self-roots an EMPTY role, and inspectCapacity considers ROOT only when
+  // `cache.length || tombstones.size`, so obligations is 0. The claim was false.
+  // An empty self-root genuinely owes nothing — _replicateRole returns early on
+  // an empty cache — so the honest statement is that it has NO obligation, and
+  // the replacement-row claim belongs in 6i where a root actually holds state.
+  ok('6d. an EMPTY self-root owes nothing at all — no APP_SUB row and no ROOT row',
+    c.obligations === 0 && am.axonRoles.has(T), `obligations=${c.obligations}`);
+}
+{
+  // 6i. …and the moment that root HOLDS something, the ROOT row appears. This is
+  // the real "not silently dropped" proof 6d used to assert without testing.
+  const { am, clock } = mk();
+  const T = REG | 0x5002n;
+  am.pubsubSubscribe(T);
+  am._becomeRoot(T);
+  am.axonRoles.get(T).cache.push({ msgId: 'm1', ts: clock.t, json: '{}' });
+  for (let i = 0; i < 26; i++) { clock.t += TICK; await am.refreshTick(); }
+  const c = am.inspectCapacity();
+  ok('6i. a self-root that HOLDS state is measured, and as ROOT not APP_SUB',
+    c.obligations === 1 && c.worstObligation === 'ROOT',
+    `obligations=${c.obligations} worst=${c.worstObligation}`);
+}
+{
+  // 6j. C2 boundary — an injected clock starting at 0. `t > 0` made this state
+  // permanently unknown: obligations counted, pressure 0, forever. Production
+  // Date.now never yields 0, but `now` is a public injection point and sims start
+  // at 0, so the metric was blind under the very harness that tests it.
+  const clock = { t: 0 };
+  const dht = {
+    getSelfId: () => SELF, onRoutedMessage: () => {}, routeMessage: () => {},
+    neighbors: () => [], bridgeId: () => null,
+  };
+  const am = new AxonaManager({ dht, now: () => clock.t, rootReplicas: 2 });
+  am.nodeId = SELF; am.setLogSink(() => {});
+  am.pubsubSubscribe(REG | 0x9001n);            // createdAt === 0, a REAL instant
+  clock.t = DROP_MS + 5_000;
+  const c = am.inspectCapacity();
+  ok('6j. a clock that starts at 0 still accrues debt — 0 is an instant, null is absence',
+    c.servicePressure >= 1 && c.worstObligation === 'APP_SUB',
+    `pressure=${c.servicePressure} worst=${c.worstObligation}`);
 }
 {
   // 6e. THE CONTROL. C9 must not degenerate into "never measure APP_SUB" — that
@@ -219,7 +260,7 @@ console.log('service pressure — the capacity metric can report its own failure
   const S = REG | 0x7001n;
   am.pubsubSubscribe(S);
   const sub = am.mySubscriptions.get(S);
-  sub.lastRenewSent = 0;                                          // exactly what pubsubPeerDied does
+  sub.lastRenewSent = null;                                       // exactly what pubsubPeerDied does (null, not 0)
   clock.t += Math.ceil(SATURATION_PRESSURE * DROP_MS) + 5_000;
   const c = am.inspectCapacity();
   ok('6f. a subscription reset to lastRenewSent=0 accrues debt from createdAt, not forever-innocent',
