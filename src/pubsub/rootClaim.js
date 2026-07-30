@@ -57,9 +57,17 @@ export function roleNature(role) {
 }
 
 /** A relay's per-topic state (root or non-root child relay). */
-export function makeRole(topicId, isRoot) {
+export function makeRole(topicId, isRoot, createdAt = 0) {
   return {
     topicId,                         // bigint
+    createdAt,                       // _now() when this role was admitted (D0 / M4).
+                                     // Needed because "never discharged" is only innocent for a role
+                                     // that is NEW. A role held for longer than its obligation's
+                                     // deadline with a zero stamp has never been serviced at all,
+                                     // which is the WORST case, not an exempt one — capacity measures
+                                     // age from birth until the first discharge, then from the stamp.
+                                     // Caught by smoke_role_admission.mjs, which builds 96 roles that
+                                     // were never serviced and rightly expects saturation.
     isRoot,                          // closest-to-topic node → true; delegated child → false
     subscribers: new Map(),          // subHex -> { since, lastRenewed }
     children: new Set(),             // subHex of subscribers that are themselves child relays
@@ -81,10 +89,17 @@ export function makeRole(topicId, isRoot) {
     sync: {
       sig: '',                       // (when ROOT) state signature at the last FULL replica push (4.24.1 delta gate)
       lastFullAt: 0,                 // (when ROOT) _now() of the last FULL push (backstop re-arms at ROOT_REPLICATE_FULL_MS)
-      lastServicedAt: 0,             // _now() of the last time the refresh tick SERVICED this role (any nature).
-                                     // lastFullAt above is roots-only; this one is universal, because capacity
-                                     // is measured as "age of my least-recently-serviced role / DROP_MS" and a
-                                     // partial field would under-report a node drowning in non-root work.
+      lastRenewAt: 0,                // _now() of the last SUB actually EMITTED for this role (D0 / M4).
+                                     // Completion point for the CHILD / BACKUP / HOLDER obligations — stamped in
+                                     // _emitSubscribe AFTER the send, not before, so it records work done rather
+                                     // than work attempted. Deadline is DROP_MS: past it the upstream has evicted us.
+      lastServicedAt: 0,             // DIAGNOSIS ONLY since D0 (2026-07-30) — drives nothing.
+                                     // Was the capacity input, stamped on every role at the TOP of refreshTick
+                                     // before any work, which made it mean "a tick began" rather than "the
+                                     // obligation was discharged". It read 0 while a role sat 95s past its own
+                                     // 60s deadline. Retained (unstamped by the tick) only so a reader diffing
+                                     // against an older kernel can see the field is deliberately dead rather than
+                                     // accidentally missing. See OBLIGATIONS in constants.js.
       probeTries: 0,                 // empty-self-root cohort pulls fired (4.24.0; quenches at EMPTY_ROOT_PROBE_MAX)
       probeAt: 0,                    // _now() of the last cohort pull (rate-limits the refreshTick re-probe)
       pulledLw: new Map(),           // subHex -> lowest lw already PULLUP'd from that child (4.22.1:
@@ -237,7 +252,7 @@ export class RootClaim {
     // syncEngine HANDOFF (see there). That asymmetry is the design, not an
     // oversight — a terminus that refuses drops data.
     if (!m.admitRole(topicBig, false)) return null;    // HARD only (bridge)
-    const role = makeRole(topicBig, true);
+    const role = makeRole(topicBig, true, m._now());
     role.formedAt = m._now(); role.lastVerify = 0;
     m.axonRoles.set(topicBig, role);
     m._log('info', 'root-formed', { topic: idHex(topicBig).slice(0, 12) });
@@ -323,7 +338,7 @@ export class RootClaim {
     const m = this.m;
     let role = m.axonRoles.get(topicBig);
     if (!role) {
-      role = makeRole(topicBig, false);
+      role = makeRole(topicBig, false, m._now());
       m.axonRoles.set(topicBig, role);
       m._log('info', 'relay-formed', { topic: idHex(topicBig).slice(0, 12) });
     }

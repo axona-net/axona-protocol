@@ -58,7 +58,7 @@ import { isRegionLockEnforced as _regionLock,
          METRICS_COALESCE_MS,
          MAX_ROLES, ROLE_GRACE_MS, ROLE_ADMIT_PER_TICK,
          HELLO_DEADLINE_MS, SATURATION_PRESSURE, ROOT_REPLICATE_FULL_MS,
-         TICK_LAG_WINDOW } from './constants.js';
+         TICK_LAG_WINDOW, OBLIGATIONS } from './constants.js';
 import { topicStoreMethods }   from './topicStore.js';
 import { rootElectionMethods } from './rootElection.js';
 import { repairPlaneMethods }  from './repairPlane.js';
@@ -311,22 +311,65 @@ export class AxonaManager {
    */
   inspectCapacity() {
     const now = this._now();
-    let worstAgeMs = 0, overdue = 0, unserviced = 0;
+    // D0 / M4: pressure is the MAX over per-obligation (age / that obligation's
+    // OWN deadline), so 1.0 means "this obligation has failed" for every row and
+    // the rows are comparable. Previously one DROP_MS denominator served every
+    // nature, which made 1.0 meaningful for renewal and arbitrary for the rest.
+    let worstRatio = 0, worstAgeMs = 0, worstKind = null, overdue = 0, unserviced = 0;
+    // `since` is the stamp when the obligation has been discharged at least once,
+    // and the role's BIRTH when it never has. A zero stamp is innocent only while
+    // the role is younger than its own deadline: past that, it has never been
+    // serviced at all, which is the worst case rather than an exempt one. Treating
+    // "never discharged" as unconditionally not-debt was a false negative of the
+    // same shape as the bug D0 exists to fix — caught by smoke_role_admission.mjs,
+    // which builds 96 never-serviced roles and rightly expects saturation.
+    const consider = (kind, at, deadline, bornAt = 0) => {
+      const since = at || bornAt;
+      if (!since) { unserviced++; return; }          // no stamp AND no birth time — genuinely unknown
+      const age = now - since;
+      const ratio = age / deadline;
+      if (!at) unserviced++;                         // still counted as never-discharged, but no longer exempt
+      if (ratio >= 1) overdue++;                     // past ITS OWN deadline, not a shared one
+      if (ratio > worstRatio) { worstRatio = ratio; worstAgeMs = age; worstKind = kind; }
+    };
     for (const role of this.axonRoles.values()) {
-      const at = role.sync?.lastServicedAt || 0;
-      if (!at) { unserviced++; continue; }          // never serviced yet (just born) — not yet debt
-      const age = now - at;
-      if (age > worstAgeMs) worstAgeMs = age;
-      if (age > ROOT_REPLICATE_FULL_MS) overdue++;  // past its own service interval
+      // A role with no sync ledger is UNMEASURABLE, not absent. Skipping it here
+      // would hide it from `unserviced` and leave the 8x MAX_ROLES backstop —
+      // which exists precisely for telemetry-dead roles — with nothing to report.
+      if (!role.sync) { unserviced++; continue; }
+      const nature = roleNature(role);               // 'root' | 'backup' | 'child' — derived, never stored
+      if (nature === 'root') {
+        // Only a root that HOLDS something owes a full push; _replicateRole returns
+        // early on an empty cache, so an empty root is not in debt for never pushing.
+        if (role.cache.length || role.tombstones.size) {
+          consider('ROOT', role.sync.lastFullAt, OBLIGATIONS.ROOT.deadline, role.createdAt);
+        }
+      } else {
+        const kind = nature === 'backup' ? 'BACKUP' : 'CHILD';
+        consider(kind, role.sync.lastRenewAt, OBLIGATIONS[kind].deadline, role.createdAt);
+      }
+      // HOLDER is an ORTHOGONAL flag, not a primary nature: a hosted root owes
+      // both. Same stamp, same deadline, so it cannot double-count into a worse
+      // ratio than the renewal row already produced.
+      if (this._hostedTopics?.has(role.topicId)) {
+        consider('HOLDER', role.sync.lastRenewAt, OBLIGATIONS.HOLDER.deadline, role.createdAt);
+      }
+    }
+    // APP_SUB — the coverage hole. mySubscriptions is a separate map, so before
+    // D0 the node's own subscriptions were unmeasurable rather than mismeasured.
+    for (const sub of this.mySubscriptions.values()) {
+      consider('APP_SUB', sub.lastRenewSent, OBLIGATIONS.APP_SUB.deadline);
     }
     const roles = this.axonRoles.size;
     return {
       roles,
-      overdue,                                       // roles I am demonstrably failing to keep up with
+      subscriptions: this.mySubscriptions.size,      // now measured, not just held
+      overdue,                                       // obligations past their OWN deadline
       overdueFrac: roles ? +(overdue / roles).toFixed(3) : 0,
-      unserviced,                                    // born but not yet reached by a tick
+      unserviced,                                    // born but not yet discharged once
       worstAgeMs,
-      servicePressure: +(worstAgeMs / this.dropMs).toFixed(3),
+      worstObligation: worstKind,                    // WHICH obligation is worst — the old number could not say
+      servicePressure: +worstRatio.toFixed(3),
       tickLagMs: this._tickLagMs,
       tickLagMaxMs: this._tickLagMax,      // ROLLING max over the last TICK_LAG_WINDOW ticks (v4.49.0)
       tickLagWindow: this._tickLagRing.length,
@@ -541,6 +584,14 @@ export class AxonaManager {
       lw: role ? this._lowWater(role) : 0,    // …and its OLDEST stamp, so a root missing the pre-transition half pulls it
       latest,
     });
+    // D0 / M4 COMPLETION STAMP. The renewal obligation (CHILD / BACKUP / HOLDER /
+    // APP_SUB in OBLIGATIONS) is discharged HERE — after the SUB is on the wire,
+    // not when the tick decided to try. Placed in _emitSubscribe rather than at
+    // the three refreshTick call sites because this is the single funnel they all
+    // pass through, so a future caller cannot forget to stamp.
+    const nowAt = this._now();
+    if (role) role.sync.lastRenewAt = nowAt;
+    if (sub)  sub.lastRenewSent     = nowAt;
     // One-shot: 'latest' delivers the current value once at subscribe, not on
     // every renewal — clear the flag after this first emit.
     if (latest) sub.replayLatest = false;

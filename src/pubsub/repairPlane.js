@@ -54,11 +54,18 @@ export const repairPlaneMethods = {
     }
     this._tickAt = now;
 
-    // Stamp every role this tick is about to service. Done up-front and for
-    // ALL natures: the measurement must reflect "a tick reached this role",
-    // and a stamp buried behind a per-nature branch would read as debt on
-    // roles that are simply cheap to service.
-    for (const role of this.axonRoles.values()) if (role.sync) role.sync.lastServicedAt = now;
+    // REMOVED 2026-07-30 (D0 / M4). This loop stamped `lastServicedAt` on every
+    // role here, at the top of the tick, before any work — and its own comment
+    // defended that as necessary so cheap-to-service roles would not read as debt.
+    // That trade is exactly what made the metric unable to report real debt: the
+    // stamp meant "a tick began while this role existed", so servicePressure read
+    // 0 while a role sat 95s past its own 60s replication deadline, and
+    // admitPushedRole() kept returning true (measured: test/d0_probe.mjs, 89c0798).
+    //
+    // Obligations are now stamped at their COMPLETION POINTS instead — see
+    // OBLIGATIONS in constants.js. `lastFullAt` (roots) was already correct and
+    // merely unread; `lastRenewAt` is stamped in _emitSubscribe after the send.
+    // Nothing replaces this loop: a blanket stamp is the defect, not the mechanism.
 
     // 1. Renew toward our upstream: app subscriptions + non-root relay roles
     //    (a root has no parent — its self-loop is a no-op, so we skip it).
@@ -495,7 +502,7 @@ export const repairPlaneMethods = {
     // legit relay/backup role is never ours to repair-pull into.
     if (role && (role.isRoot || role.cache.length || role.backupOf || this._backupTopics.has(topicBig))) return;
     const now = this._now();
-    if (!role) { role = makeRole(topicBig, false); role.readHolder = true; this.axonRoles.set(topicBig, role); }
+    if (!role) { role = makeRole(topicBig, false, this._now()); role.readHolder = true; this.axonRoles.set(topicBig, role); }
     if (!role.readHolder) return;
     if (role.sync.probeTries >= EMPTY_ROOT_PROBE_MAX) return;
     if (now - role.sync.probeAt < EMPTY_ROOT_PROBE_INTERVAL_MS) return;

@@ -211,7 +211,7 @@ export const syncEngineMethods = {
       if (payload.from && isHexId(lc(payload.from))) from = lc(payload.from);
       else if (meta?.fromId != null) { try { from = lc(idHex(idBig(meta.fromId))); } catch { /* */ } }
       let role = this.axonRoles.get(topicBig);
-      if (!role) { role = makeRole(topicBig, false); this.axonRoles.set(topicBig, role); }
+      if (!role) { role = makeRole(topicBig, false, this._now()); this.axonRoles.set(topicBig, role); }
       this._rootClaim.becomeBackup(topicBig, role, from);   // nature transition (I-10)
       this._applyDels(role, topicBig, payload.dels);
       await this._ingestStampedBatch(role, payload.msgs);

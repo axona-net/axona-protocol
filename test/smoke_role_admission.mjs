@@ -55,7 +55,26 @@ const __LOC = regionCenter('useast');
 
 // A role with the sync ledger the capacity metric reads. Bare { topicId } objects
 // are deliberately used elsewhere to represent UNMEASURABLE roles.
-const mkRole = (topicId, servicedAt) => ({ topicId, sync: { lastServicedAt: servicedAt } });
+// D0 / M4 (2026-07-30): capacity is now measured from COMPLETION-POINT stamps
+// against PER-OBLIGATION deadlines, not from one universal `lastServicedAt`
+// written at the top of the tick. This fixture therefore stamps `lastRenewAt`
+// — the completion point for the CHILD/BACKUP/HOLDER renewal obligation, whose
+// deadline is DROP_MS, which is the deadline this test's arithmetic already
+// used. `createdAt` is set so a role that has NEVER been serviced still ages
+// from its birth rather than reading as exempt.
+//
+// The test's INTENT is unchanged and was not weakened: MAX_ROLES roles serviced
+// on time are healthy; the same roles left to rot past SATURATION_PRESSURE x
+// DROP_MS are saturated. Only the field the fixture writes has moved.
+const mkRole = (topicId, servicedAt) => ({
+  topicId,
+  createdAt: servicedAt,
+  isRoot: false,
+  backupOf: null,
+  cache: [],
+  tombstones: new Map(),
+  sync: { lastRenewAt: servicedAt, lastFullAt: 0, lastServicedAt: servicedAt },
+});
 
 // clock is injected so grace is testable without sleeping 90 s
 function makeManager(selfBig, { neverRoot = false, meshed = true, ...opts } = {}) {
@@ -125,7 +144,18 @@ async function main() {
     check('  → servicePressure >= threshold', am.inspectCapacity().servicePressure >= SATURATION_PRESSURE);
     check('  → canAcceptRole refuses with saturated', am.canAcceptRole().why === 'saturated');
     check('  → and it is SOFT (floor may still override)', am.canAcceptRole().hard === false);
-    check('  → overdue counts the roles it is failing', am.inspectCapacity().overdue === MAX_ROLES);
+    // D0 / M4: `overdue` now means "past ITS OWN deadline" (ratio >= 1), not
+    // "past a single 60s threshold applied to every nature" — the same category
+    // error as the single denominator. At 0.6 x DROP_MS these roles are
+    // SATURATED (pressure >= threshold, admission refuses) but not yet past
+    // DROP_MS, so nothing has actually been dropped and overdue is correctly 0.
+    // Saturation is the early warning; overdue is the failure that follows.
+    check('  → overdue is 0: saturated is a WARNING, not yet a failure',
+      am.inspectCapacity().overdue === 0, JSON.stringify(am.inspectCapacity()));
+    check('  → but pushing past the deadline DOES count them overdue', (() => {
+      advance(DROP_MS);                       // now well past DROP_MS since the stamp
+      return am.inspectCapacity().overdue === MAX_ROLES;
+    })(), JSON.stringify(am.inspectCapacity()));
   }
 
   // ── 2b. hello pressure: about to be kicked off the bridge ───────────────
