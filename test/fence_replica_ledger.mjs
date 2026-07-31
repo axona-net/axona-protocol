@@ -1,18 +1,31 @@
 // fence_replica_ledger.mjs — C4 (partial). A root must not record a backup it
 // never managed to send to.
 //
-// WHY THIS IS A FENCE AND NOT A TIDY-UP. _replicateRole pushed to each cohort
-// member inside a try/catch that swallowed the error, then recorded the member
-// in `role.replicas` unconditionally. That is not merely a wrong number:
+// STATUS: THIS FENCE IS INSUFFICIENT AND ITS SUBJECT IS NOT FIXED.
+// Aster (council, 2026-07-31) rejected c1c435d as the C4 ledger fix, and I
+// reproduced it: `_syncPush` calls `_route` without awaiting or returning it
+// (syncEngine.js), and `_route` discards the Promise from `dht.routeMessage`
+// (AxonaManager.js). Production routing reports failure by RESOLVING an
+// exhausted result, which no try/catch can see. Measured on c1c435d with a real
+// _syncPush and `routeMessage: async () => ({exhausted:true})`: 13 route calls,
+// all failed, and still `replicas: 2` with `lastFullAt` advanced.
 //
-//     const full = sig !== role.sync.sig
-//       || want.some((hex) => !role.replicas.has(hex))     // <-- the retry
-//       || (now - role.sync.lastFullAt) >= ROOT_REPLICATE_FULL_MS;
+// Worse, the fence below stubs `_syncPush` out entirely and throws
+// synchronously — so it exercises the catch block I wrote rather than the
+// production dispatch chain. It certified its own premise. A real fence must
+// drive `dht.routeMessage` failure, and the repair must thread an observed
+// dispatch outcome through `_route`/`_syncPush` (or adopt a consciously weaker,
+// honestly named enqueue-only contract).
 //
-// the full-push re-arms precisely when a wanted member is MISSING from the
-// ledger. A falsely credited member therefore looks seeded forever and is never
-// pushed to again. The false record suppressed its own repair, and the root sat
-// believing it had a durable backup that had received nothing.
+// I originally wrote here that the false credit also "suppressed its own
+// repair" and the member "is never pushed to again". That was retracted in the
+// v4.54.0 commit message and in repairPlane.js but NOT here — the third of
+// three sites, missed. Case 2a passes both ways: pushes DO continue, because
+// the signature check and the ROOT_REPLICATE_FULL_MS backstop re-arm
+// independently.
+//
+// What the fence below still legitimately pins: a SYNCHRONOUS throw out of the
+// push path must not credit a replica, and a working transport must.
 //
 // This fence pins the ledger, NOT the completion contract. What discharges the
 // ROOT obligation — local dispatch, an ACK, or observed possession via the
