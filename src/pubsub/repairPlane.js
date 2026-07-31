@@ -27,6 +27,26 @@ import {
 import { idHex, idBig, lc, isHexId } from './ids.js';
 import { makeRole } from './rootClaim.js';
 
+// Q2/C4 — classify what the TRANSPORT said about one send.
+//
+//   {consumed:true}  / 'consumed'  → 'consumed'    a routing verdict: delivered
+//   {consumed:false}              → 'failed'      a routing verdict: it did not
+//   anything else                 → 'unreported'  NOT a verdict at all
+//
+// The third case is the one that matters and the one I got wrong first. A verdict
+// is recognised BY SHAPE — an object carrying a boolean `consumed`. Adapters
+// legitimately return other things (the sim returns nothing; test doubles return
+// the length of a sends[] array), and reading an unrecognised value as failure is
+// the same confident-false-negative as Q1, pointed the other way. Silence and
+// gibberish both mean "I do not know", never "it failed".
+const dispatchVerdict = (r) => {
+  if (r && typeof r === 'object' && typeof r.consumed === 'boolean') {
+    return r.consumed ? 'consumed' : 'failed';
+  }
+  if (r === 'consumed') return 'consumed';
+  return 'unreported';
+};
+
 export const repairPlaneMethods = {
   async refreshTick() {
     const now = this._now();
@@ -569,9 +589,13 @@ export const repairPlaneMethods = {
   // heartbeat + anti-entropy: co-hosting roots converge to the union of cache+tombstones,
   // and tombstones keep killed bodies suppressed. Called every tick AND eagerly the
   // instant a message is stamped or a kill lands, so no holder lags the cohort.
+  // Returns {attempted, verified, unreported, failed, reason?} — ALWAYS, including
+  // on every early return, so a caller gating a durability confirm on the shape
+  // does not crash on the paths that are hit most and matter least.
   async _replicateRole(t, role, bridge, now, budget = null, idx = -1) {
-    if (!this._rootReplicas || !role || !role.isRoot) return;
-    if (role.cache.length === 0 && role.tombstones.size === 0) return;         // nothing to preserve yet
+    const nil = (reason) => ({ attempted: 0, verified: 0, unreported: 0, failed: 0, reason });
+    if (!this._rootReplicas || !role || !role.isRoot) return nil('not-a-replicating-root');
+    if (role.cache.length === 0 && role.tombstones.size === 0) return nil('nothing-to-preserve');
     let want;
     if (typeof this.dht.findKClosest === 'function') {
       let arr = [];
@@ -599,7 +623,7 @@ export const repairPlaneMethods = {
     }
     const wantSet = new Set(want);
     for (const hex of [...role.replicas.keys()]) if (!wantSet.has(hex)) role.replicas.delete(hex);   // retire those no longer in the cohort
-    if (want.length === 0) return;
+    if (want.length === 0) return nil('no-cohort-available');
     // Delta gate (v4.24.1, #333): push the FULL state only when it changed, a
     // new cohort member needs seeding, or the anti-entropy backstop elapsed —
     // otherwise this tick's push is an empty KEEPALIVE (refreshes the backup's
@@ -620,7 +644,7 @@ export const repairPlaneMethods = {
     if (full && budget) {
       if (budget.left <= 0) {
         if (budget.deferredAt < 0) { budget.deferredAt = idx; this._replicateCursor = idx; }
-        return;
+        return nil('deferred-no-budget');
       }
       budget.left--;
     }
@@ -643,13 +667,43 @@ export const repairPlaneMethods = {
     // selection / dispatch / receipt. Renaming it (and deciding what discharges
     // the ROOT obligation) is the open C4 decision; this change deliberately
     // does not pre-empt it, and lastFullAt below is untouched for that reason.
-    for (const hex of want) {
-      let dispatched = true;
-      try { this._syncPush(idBig(hex), t, role, 'COHORT_REPLICATE', { full }); }
-      catch { dispatched = false; }                 // best-effort send, honest ledger
-      if (dispatched) role.replicas.set(hex, { at: now });
+    // The ledger records the EVIDENCE, per Aster's selection / dispatch / receipt
+    // split. routeMessage reports failure by RESOLVING {consumed:false,...} rather
+    // than throwing, so the verdict comes from the resolved value:
+    //   consumed:true    → recorded via:'consumed'    — verified dispatch
+    //   consumed:false   → NOT recorded               — explicit failure
+    //   rejection        → NOT recorded               — explicit failure
+    //   no report at all → recorded via:'unreported'  — honest ignorance
+    //
+    // 'unreported' is deliberate. Sim and test adapters return undefined; reading
+    // their silence as failure would fabricate a negative in the other direction,
+    // which is the Q1 mistake wearing a different hat. It is recorded, and it is
+    // never counted as verified.
+    //
+    // Pushes are issued together and classified afterwards. Serialising them would
+    // put one routing round-trip per cohort member on the publish confirm path,
+    // which wireHandlers awaits.
+    const sent = want.map((hex) => {
+      let p;
+      try { p = this._syncPush(idBig(hex), t, role, 'COHORT_REPLICATE', { full }); }
+      catch { return Promise.resolve({ hex, verdict: 'failed' }); }   // sync throw
+      return Promise.resolve(p).then(
+        (r) => ({ hex, verdict: dispatchVerdict(r) }),
+        () => ({ hex, verdict: 'failed' }),                            // async reject
+      );
+    });
+    const out = { attempted: want.length, verified: 0, unreported: 0, failed: 0 };
+    for (const { hex, verdict } of await Promise.all(sent)) {
+      if (verdict === 'failed') { out.failed++; continue; }
+      if (verdict === 'consumed') out.verified++; else out.unreported++;
+      role.replicas.set(hex, { at: now, via: verdict });
     }
+    // A prior credit is NOT deleted when this tick's push fails. That entry
+    // records what was true at its own `at` — a member that took delivery ten
+    // minutes ago most likely still holds the state, and erasing it would replace
+    // a past fact with a present one. Age is preserved for callers that care.
     if (full) { role.sync.sig = sig; role.sync.lastFullAt = now; }
+    return out;
   },
 
   _nearestReachable(tBig, n, bridge) {
@@ -935,9 +989,26 @@ export const repairPlaneMethods = {
           // ack exists for REPLICATE): this is a TARGETED push to the topic-
           // closest node — which post-churn is normally the already-promoted
           // heir — not the 4.24.0 K-closest cohort spray (Phase C note below).
-          this._syncPush(j.heir, j.t, j.role, 'REPLICATE');
-          if (j.alt !== null && j.alt !== j.heir) this._syncPush(j.alt, j.t, j.role, 'REPLICATE');
-          this._handoffAcked.add(j.key);   // fire-and-forget: exempt from retry rounds + Phase C
+          // Q2/C4 — THE EXEMPTION IS EARNED, NOT ASSUMED. This previously marked
+          // the handoff acked unconditionally, on the strength of a call that had
+          // not thrown. routeMessage reports failure by RESOLVING exhausted, so a
+          // departing holder whose push went nowhere retired itself from the retry
+          // rounds and took the history with it — the #361 loss mode, on the one
+          // path where a dropped push is PERMANENT because the sender is leaving.
+          // No REPLICATE ack exists, so the evidence available is dispatch: an
+          // explicit failure keeps `j` in unacked() for the next round; a silent
+          // (unreporting) adapter is treated as sent, exactly as before.
+          const dispatched = (p) => Promise.resolve(p).then(
+            (r) => dispatchVerdict(r) !== 'failed',   // unreported counts as sent
+            () => false,
+          );
+          const sends = [dispatched(this._syncPush(j.heir, j.t, j.role, 'REPLICATE'))];
+          if (j.alt !== null && j.alt !== j.heir) {
+            sends.push(dispatched(this._syncPush(j.alt, j.t, j.role, 'REPLICATE')));
+          }
+          Promise.all(sends).then((oks) => {
+            if (oks.some(Boolean)) this._handoffAcked.add(j.key);   // exempt from retry rounds + Phase C
+          });
         } catch { /* best-effort */ }
       }
       // Ack window — SCALED and PROGRESS-AWARE (review 2026-07-25). The flat

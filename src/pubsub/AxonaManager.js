@@ -197,8 +197,13 @@ export class AxonaManager {
     const target = via.length ? idBig(via[0]) : idBig(payload.topicId);
     this.dht.routeMessage(target, type, payload, { fromId: idHex(this.nodeId), viaHopBudget: VIA_HOP_BUDGET });
   }
+  // RETURNS the routeMessage result (Q2/C4). Production routing reports failure
+  // by RESOLVING {consumed:false, exhausted:true} — it does not throw — so a
+  // caller that discards this promise cannot distinguish delivery from silence,
+  // and no try/catch around it ever will. Callers that need the outcome await it;
+  // the many fire-and-forget callers are unaffected by a returned value.
   _route(targetBig, type, payload) {
-    this.dht.routeMessage(targetBig, type, payload, { fromId: idHex(this.nodeId), viaHopBudget: VIA_HOP_BUDGET });
+    return this.dht.routeMessage(targetBig, type, payload, { fromId: idHex(this.nodeId), viaHopBudget: VIA_HOP_BUDGET });
   }
   // Pop a dead waypoint and keep routing. When the via chain empties, _send
   // falls through to the TOPIC ID — that is deliberate and load-bearing: it is

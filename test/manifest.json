@@ -1,7 +1,7 @@
 {
   "$comment": [
     "THE test manifest. Every test file on disk must appear here exactly once, and every entry",
-    "here must exist on disk \u2014 test/run.mjs --guard fails the build on either mismatch. This file",
+    "here must exist on disk — test/run.mjs --guard fails the build on either mismatch. This file",
     "is the answer to \"what is the suite?\". Before it existed that question had no answer, and 35",
     "of 144 test files had never run in CI: a test that is not wired in looks exactly like a test",
     "that passes, because both are silent.",
@@ -15,22 +15,27 @@
     "               entry must say why it is here and what would resolve it.",
     "  retired      deliberately not run, with a recorded reason. A decision, not a drift."
   ],
-  "generated": "2026-07-29 \u2014 classes MEASURED by running every test against kernel 4.49.0, not inferred. 11 never-wired tests passed and were promoted; 24 failed against removed internals and were retired with the missing symbol named in each reason.",
+  "generated": "2026-07-29 — classes MEASURED by running every test against kernel 4.49.0, not inferred. 11 never-wired tests passed and were promoted; 24 failed against removed internals and were retired with the missing symbol named in each reason.",
   "tests": [
     {
       "file": "fence_pull_outcome.mjs",
       "class": "default",
-      "note": "Q1 \u2014 requestPull must distinguish response/empty-response/timeout/invalid-response instead of collapsing all four to null. Verified RED against the pre-fix tree (empty, timeout and malformed were all null and indistinguishable). Drives the real requestPull + _onPullResp path; nothing stubbed."
+      "note": "Q1 — requestPull must distinguish response/empty-response/timeout/invalid-response instead of collapsing all four to null. Verified RED against the pre-fix tree (empty, timeout and malformed were all null and indistinguishable). Drives the real requestPull + _onPullResp path; nothing stubbed."
+    },
+    {
+      "file": "fence_dispatch_contract.mjs",
+      "class": "default",
+      "note": "Q2/C4 — a root's replica ledger records dispatch EVIDENCE, not a call that failed to throw. routeMessage reports failure by RESOLVING {consumed:false}, so consumed:false and async rejection must never credit a replica, while an adapter that returns no verdict at all is 'unreported' and still credits. Verified RED (exhausted/terminal/rejection all recorded 2 replicas). Drives the real _syncPush/_route chain; only the transport's answer varies."
     },
     {
       "file": "fence_replica_ledger.mjs",
       "class": "default",
-      "note": "C4 (partial) \u2014 a root must not record a cohort member in role.replicas when the push to it threw. Verified RED against the pre-fix code (1b/2b fail, replicas=2). Pins the LEDGER only; what discharges the ROOT obligation is the open C4 decision and sync.lastFullAt is deliberately not asserted."
+      "note": "C4 (partial) — a root must not record a cohort member in role.replicas when the push to it threw. Verified RED against the pre-fix code (1b/2b fail, replicas=2). Pins the LEDGER only; what discharges the ROOT obligation is the open C4 decision and sync.lastFullAt is deliberately not asserted."
     },
     {
       "file": "fence_service_pressure.mjs",
       "class": "default",
-      "note": "D0/M4 \u2014 capacity metric must report its own failure; fails against pre-D0 code"
+      "note": "D0/M4 — capacity metric must report its own failure; fails against pre-D0 code"
     },
     {
       "file": "fence_transport_identity.mjs",
@@ -201,7 +206,7 @@
     {
       "file": "smoke_host_participation.js",
       "class": "retired",
-      "reason": "Retired 2026-07-29. host() was removed 2026-07-25 \u2014 see the comment at AxonaManager.js:362, which records WHY (a bridge must never be seated as root). Asserting \"pubsubHost emits subscribe-k\" now asserts the opposite of the intended design."
+      "reason": "Retired 2026-07-29. host() was removed 2026-07-25 — see the comment at AxonaManager.js:362, which records WHY (a bridge must never be seated as root). Asserting \"pubsubHost emits subscribe-k\" now asserts the opposite of the intended design."
     },
     {
       "file": "smoke_id_invariant.mjs",
@@ -336,7 +341,7 @@
     {
       "file": "smoke_partial_root_union.mjs",
       "class": "default",
-      "reason": "Added 2026-07-29 while chasing #412. Pins the guarantee that a root inheriting a PARTIAL history converges the rest for a fresh since:all subscriber. Written as a hypothesis test (prediction: it would NOT converge, because every empty-root cohort-pull gate in repairPlane.js requires cache.length === 0); the prediction was refuted \u2014 the union lands on the first renewal tick. Kept inverted because the guarantee was previously untested and a future edit to any of those cache.length gates could break it silently."
+      "reason": "Added 2026-07-29 while chasing #412. Pins the guarantee that a root inheriting a PARTIAL history converges the rest for a fresh since:all subscriber. Written as a hypothesis test (prediction: it would NOT converge, because every empty-root cohort-pull gate in repairPlane.js requires cache.length === 0); the prediction was refuted — the union lands on the first renewal tick. Kept inverted because the guarantee was previously untested and a future edit to any of those cache.length gates could break it silently."
     },
     {
       "file": "smoke_partition.js",
@@ -388,7 +393,7 @@
     {
       "file": "smoke_pubsub_bigbacklog.mjs",
       "class": "retired",
-      "reason": "Retired 2026-07-29. White-box test against the pre-Phase-1 AxonaManager: calls _addToReplayCache, which the routing-only core (task #220) does not define. Behaviour it covered is now covered by the Phase-1+ smokes; reviving it means rewriting against the current API, not re-wiring it. NOTE: its assertions 2/3a/3b also read as delivery failures, but they are downstream of the same missing method \u2014 the backlog is never built. Not evidence of replay loss."
+      "reason": "Retired 2026-07-29. White-box test against the pre-Phase-1 AxonaManager: calls _addToReplayCache, which the routing-only core (task #220) does not define. Behaviour it covered is now covered by the Phase-1+ smokes; reviving it means rewriting against the current API, not re-wiring it. NOTE: its assertions 2/3a/3b also read as delivery failures, but they are downstream of the same missing method — the backlog is never built. Not evidence of replay loss."
     },
     {
       "file": "smoke_pubsub_bounds.js",
@@ -403,7 +408,7 @@
     {
       "file": "smoke_pubsub_coldstart.js",
       "class": "retired",
-      "reason": "Retired 2026-07-29. Hand-builds roles with the pre-rewrite field name `replayCache` instead of `cache`, so refreshTick crashes in _emptyRootProbeSweep (repairPlane.js:382) reading role.cache.length. Verified NOT a production bug: every real role-creation site goes through makeRole() (rootClaim.js:60), which initialises cache: []. It does show _emptyRootProbeSweep has no shape guard \u2014 that belongs to the S4 closed-shapes fence, which is already on the plan."
+      "reason": "Retired 2026-07-29. Hand-builds roles with the pre-rewrite field name `replayCache` instead of `cache`, so refreshTick crashes in _emptyRootProbeSweep (repairPlane.js:382) reading role.cache.length. Verified NOT a production bug: every real role-creation site goes through makeRole() (rootClaim.js:60), which initialises cache: []. It does show _emptyRootProbeSweep has no shape guard — that belongs to the S4 closed-shapes fence, which is already on the plan."
     },
     {
       "file": "smoke_pubsub_droplog.js",
@@ -466,7 +471,7 @@
     {
       "file": "smoke_pubsub_root_election.mjs",
       "class": "retired",
-      "reason": "Retired 2026-07-29. Asserts \"recruitment fired \u2014 sub-axons exist under the roots\", i.e. the same pre-Phase-1 recruitment design as smoke_pubsub_recruit_wiring.mjs. Retired for the same reason, and covered by the same follow-up: the current recruitment shape needs a fence written against the current API."
+      "reason": "Retired 2026-07-29. Asserts \"recruitment fired — sub-axons exist under the roots\", i.e. the same pre-Phase-1 recruitment design as smoke_pubsub_recruit_wiring.mjs. Retired for the same reason, and covered by the same follow-up: the current recruitment shape needs a fence written against the current API."
     },
     {
       "file": "smoke_pubsub_sweep.mjs",
@@ -528,7 +533,7 @@
     {
       "file": "smoke_restart_handoff.mjs",
       "class": "default",
-      "reason": "Passes on 4.49.0 (59s \u2014 the slowest test in the suite). Fences restart handoff (#340/#363). Kept in default despite cost: the leave/handoff family has regressed repeatedly, and extended classes do not get run."
+      "reason": "Passes on 4.49.0 (59s — the slowest test in the suite). Fences restart handoff (#340/#363). Kept in default despite cost: the leave/handoff family has regressed repeatedly, and extended classes do not get run."
     },
     {
       "file": "smoke_resubscribe.js",

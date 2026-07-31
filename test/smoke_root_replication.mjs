@@ -5,6 +5,16 @@
 //   3. receiving a REPLICATE makes a node a passive BACKUP (backupOf set, not root)
 //   4. a backup whose root stopped replicating (stale) promotes to root iff closest
 import { AxonaManager } from '../src/pubsub/AxonaManager.js';
+
+// Q2/C4 TIMING NOTE. The replica ledger is now written when the TRANSPORT answers
+// (routeMessage resolves), not synchronously inside the push loop — that is the
+// whole point of the fix: a credit must follow evidence, and evidence arrives
+// asynchronously. Sweeps driven back-to-back in a test therefore need the
+// microtask queue drained between them, or the second sweep reads a ledger the
+// first sweep has not finished writing and re-sends a FULL push. In production
+// the tick interval is seconds; here it is nothing at all.
+const settle = () => new Promise((r) => setImmediate(r));
+
 let n=0,fail=0; const ok=(m,c)=>{ if(c){console.log(`  ok ${++n} - ${m}`)}else{console.log(`  ✗  ${m}`);fail++} };
 const REG=0x87n<<248n, idHex=(b)=>b.toString(16).padStart(66,'0');
 const SELF=REG|0x011n, TOPIC=REG|0xabcn;
@@ -23,7 +33,7 @@ const repl=(sends)=>sends.filter(s=>s.type==='pubsub:replicate');
   const {am,sends,clock}=mk({neighbors:[FAR,NEAR1,NEAR2,BRIDGE],bridge:BRIDGE});
   const role=am._becomeRoot(TOPIC);
   role.cache.push({msgId:'m1',publishTs:100,json:'{}',seq:1,bytes:80}); role.cacheIds.add('m1');
-  sends.length=0; am._replicateRoots();
+  sends.length=0; am._replicateRoots(); await settle();
   const r=repl(sends); const tgts=new Set(r.map(s=>s.target));
   ok('replicates to exactly the 2 nearest neighbours', r.length===2 && tgts.has(NEAR1) && tgts.has(NEAR2));
   ok('does NOT replicate to the farther node', !tgts.has(FAR));
@@ -33,14 +43,14 @@ const repl=(sends)=>sends.filter(s=>s.type==='pubsub:replicate');
   // KEEPALIVE (liveness only) — the per-tick full-cache re-send was the
   // bandwidth fuel of the role-bloat collapse. A state change re-arms one
   // full push; the ROOT_REPLICATE_FULL_MS backstop re-arms anti-entropy.
-  sends.length=0; clock.t += 5_000; am._replicateRoots();
+  sends.length=0; clock.t += 5_000; am._replicateRoots(); await settle();
   const ka = repl(sends);
   ok('unchanged root sends KEEPALIVE (empty msgs), not the full cache',
     ka.length===2 && ka.every(s2=>s2.payload.msgs.length===0));
   role.cache.push({msgId:'m2',publishTs:200,json:'{}',seq:2,bytes:80}); role.cacheIds.add('m2');
-  sends.length=0; am._replicateRoots();
+  sends.length=0; am._replicateRoots(); await settle();
   ok('state change re-arms a FULL push', repl(sends).every(s2=>s2.payload.msgs.length===2));
-  sends.length=0; clock.t += 61_000; am._replicateRoots();
+  sends.length=0; clock.t += 61_000; am._replicateRoots(); await settle();
   ok('anti-entropy backstop re-arms a FULL push after ROOT_REPLICATE_FULL_MS',
     repl(sends).every(s2=>s2.payload.msgs.length===2));
 }
@@ -50,7 +60,7 @@ const repl=(sends)=>sends.filter(s=>s.type==='pubsub:replicate');
   const {am,sends,clock}=mk({neighbors:[NEAR1,NEAR2]});
   const role=am._becomeRoot(TOPIC);
   role.cache.push({msgId:'m1',publishTs:100,json:'{}',seq:1,bytes:80}); role.cacheIds.add('m1');
-  role.children.add('cc'); sends.length=0; am._replicateRoots();
+  role.children.add('cc'); sends.length=0; am._replicateRoots(); await settle();
   ok('root with a sub-axon tree STILL replicates to the cohort', repl(sends).length===2);
 }
 // 3. receiving REPLICATE → passive backup
@@ -79,7 +89,7 @@ const repl=(sends)=>sends.filter(s=>s.type==='pubsub:replicate');
   const {am,sends,clock}=mk({neighbors:[NEAR1,NEAR2],bridge:BRIDGE});
   const role=am._becomeRoot(TOPIC);
   role.cache.push({msgId:'m1',publishTs:100,json:'{}',seq:1,bytes:80}); role.cacheIds.add('m1');
-  am._replicateRoots();                                   // establishes NEAR1/NEAR2 as replicas
+  am._replicateRoots(); await settle();                                   // establishes NEAR1/NEAR2 as replicas
   ok('precondition: replicas established', role.replicas.size===2);
   sends.length=0;
   am._applyKill(role, TOPIC, {msgId:'m1', killTs:200, signer:'aa', seq:2});

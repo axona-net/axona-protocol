@@ -143,11 +143,15 @@ export const syncEngineMethods = {
   // ── PUSH side: move a role's full state to one peer ─────────────────────
   // The only REPLICATE / HANDOFF emission site. `full:false` sends an empty
   // KEEPALIVE (refreshes the backup's lastReplicaAt; empty ingest is a no-op).
+  // RETURNS the dispatch promise (Q2/C4). Every caller here is free to ignore it
+  // — HANDOFF and the repair-plane retries remain fire-and-forget — but the one
+  // caller that writes a durability ledger (_replicateRole) must be able to see
+  // whether the send actually went anywhere.
   _syncPush(targetBig, topicBig, role, policyName, { full = true } = {}) {
     const { msgs, dels } = full ? this._syncSnapshot(role) : { msgs: [], dels: [] };
     const payload = { topicId: idHex(topicBig), from: idHex(this.nodeId), msgs, dels };
-    if (policyName === 'HANDOFF') this._route(targetBig, T.HANDOFF, payload);
-    else this._route(targetBig, T.REPLICATE, payload);
+    if (policyName === 'HANDOFF') return this._route(targetBig, T.HANDOFF, payload);
+    return this._route(targetBig, T.REPLICATE, payload);
   },
 
   // ── INGEST side: the ONE receiver composition ───────────────────────────
