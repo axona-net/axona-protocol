@@ -80,11 +80,20 @@ const ENVELOPE = { msgId: 'm1', ts: 1, message: { text: 'hi' } };
 
 console.log('pull outcome — a read must say WHICH kind of nothing it got\n');
 
+// AMENDED after Aster's Q1 review (council 2026-07-31). The 'empty' case was
+// `{}` — an OMITTED json — which no conforming responder ever emits: _onPull
+// (wireHandlers.js:779) always sets the field, `json: hit ? hit.json : null`.
+// So the fence was certifying a wire shape the protocol does not produce, and
+// the REAL no-hit path was untested. json:null is the genuine negative; an
+// omitted field and the string 'null' are malformed messages that must not be
+// allowed to impersonate one.
 const got = {
-  answered : await pullOutcome({ json: JSON.stringify(ENVELOPE) }),
-  empty    : await pullOutcome({}),                       // responder replied, holds nothing
-  timedOut : await pullOutcome(null),                     // nobody answered
-  malformed: await pullOutcome({ json: '{not json' }),    // reply arrived, unparseable
+  answered  : await pullOutcome({ json: JSON.stringify(ENVELOPE) }),
+  empty     : await pullOutcome({ json: null }),           // THE REAL no-hit shape
+  omitted   : await pullOutcome({}),                       // no conforming responder emits this
+  stringNull: await pullOutcome({ json: 'null' }),         // parses to null — must NOT read as a no-hit
+  timedOut  : await pullOutcome(null),                     // nobody answered
+  malformed : await pullOutcome({ json: '{not json' }),    // reply arrived, unparseable
 };
 for (const [k, v] of Object.entries(got)) {
   console.log(`     ${k.padEnd(10)} -> ${JSON.stringify(v)?.slice(0, 90)}`);
@@ -107,11 +116,23 @@ ok('1c. no answer at all is kind:"timeout" — never an empty response',
 ok('1d. an unparseable reply is kind:"invalid-response" — never an empty response',
   got.malformed?.kind === 'invalid-response', JSON.stringify(got.malformed));
 
+// 1e/1f are Aster's finding. Both are malformed messages that LOOK like a no-hit
+// if you are careless, and treating either as one hands a caller a fabricated
+// authoritative negative — the whole defect Q1 exists to remove.
+ok('1e. an OMITTED json is kind:"invalid-response", NOT an empty response — ' +
+   'the responder at wireHandlers.js:779 always sets the field',
+  got.omitted?.kind === 'invalid-response', JSON.stringify(got.omitted));
+
+ok('1f. the STRING "null" is kind:"invalid-response" — it parses to null and ' +
+   'would otherwise impersonate a genuine no-hit',
+  got.stringNull?.kind === 'invalid-response', JSON.stringify(got.stringNull));
+
 // ── 2. THE POINT: the four are mutually distinguishable ────────────────────
 // This is the assertion the old contract could not satisfy at any timeout value,
 // which is why raising budgets was never going to be the fix.
 {
-  const kinds = [got.answered?.kind, got.empty?.kind, got.timedOut?.kind, got.malformed?.kind];
+  const kinds = [got.answered?.kind, got.empty?.kind, got.timedOut?.kind, got.malformed?.kind,
+                 got.omitted?.kind, got.stringNull?.kind];
   ok('2a. all four outcomes carry a kind', kinds.every(k => typeof k === 'string'),
     JSON.stringify(kinds));
   ok('2b. timeout, empty-response and invalid-response are THREE distinct kinds',

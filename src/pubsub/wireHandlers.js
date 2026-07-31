@@ -336,7 +336,21 @@ export const wireHandlersMethods = {
     // Cohort-less nodes (rootReplicas 0 / solo network) confirm immediately.
     if (role.isRoot && this._rootReplicas) {
       const bridge = (typeof this.dht.bridgeId === 'function') ? this.dht.bridgeId() : null;
-      await this._replicateRole(role.topicId, role, bridge, this._now()).catch(() => {});
+      // Q2/C4: the outcome is READ, not discarded. `.catch(() => {})` here used to
+      // swallow the only evidence available and confirm regardless, so a publish
+      // whose every replication push exhausted still reported durable.
+      const rep = await this._replicateRole(role.topicId, role, bridge, this._now())
+        .catch((e) => ({ attempted: 1, verified: 0, unreported: 0, failed: 1, reason: String(e?.message || e) }));
+      // Refuse the confirm ONLY on positive evidence of total failure: pushes were
+      // attempted and every one came back explicitly failed. attempted === 0 is the
+      // singleton/no-cohort case below — deliberately still confirms — and any
+      // 'unreported' means we do not know, which is not grounds to fail a publish.
+      if (rep.attempted > 0 && rep.verified === 0 && rep.unreported === 0) {
+        this._log('warn', 'pubsub:replicate-all-failed', {
+          topic: idHex(role.topicId).slice(0, 12), attempted: rep.attempted, failed: rep.failed,
+        });
+        return;                       // leave pending → the publisher keeps retrying
+      }
       // Honesty signal (#362): the eager replicate could recruit NOBODY — this
       // node is a SINGLETON root and the confirm below asserts only "I, one
       // process, hold it" (field case: an in-region burst publisher self-rooted
@@ -651,9 +665,20 @@ export const wireHandlersMethods = {
       // eager replicate dispatch, so a kill→leave() publisher holds until the tombstone left.
       if (role.isRoot && this._rootReplicas) {
         const bridge = (typeof this.dht.bridgeId === 'function') ? this.dht.bridgeId() : null;
+        // Q2/C4: same gate as the publish path — a kill is a publish plus a side
+        // effect, so a tombstone whose every replication push failed must not
+        // report durable either.
         this._replicateRole(topicBig, role, bridge, this._now())
-          .catch(() => {})
-          .then(() => this._confirmPending(topicBig, target));
+          .catch((e) => ({ attempted: 1, verified: 0, unreported: 0, failed: 1, reason: String(e?.message || e) }))
+          .then((rep) => {
+            if (rep.attempted > 0 && rep.verified === 0 && rep.unreported === 0) {
+              this._log('warn', 'pubsub:kill-replicate-all-failed', {
+                topic: idHex(topicBig).slice(0, 12), attempted: rep.attempted, failed: rep.failed,
+              });
+              return;                 // leave pending → the killer keeps retrying
+            }
+            this._confirmPending(topicBig, target);
+          });
         this._deliverKillToApp(topicBig, target, killTs, seq);
         return;
       }
@@ -769,12 +794,33 @@ export const wireHandlersMethods = {
     // The middle one is a RESPONDER's negative — this node says it holds nothing.
     // That is not proof the network holds nothing, it is not a timeout, and a caller
     // must be able to tell all three apart. (Aster, council 2026-07-31.)
+    //
+    // WHAT COUNTS AS A NO-HIT (Aster's Q1 review, and he was right — my first cut
+    // was wrong). The ONE responder is `_onPull` at :779, and it ALWAYS sets the
+    // field: `json: hit ? hit.json : null`. So a genuine responder negative is
+    // `json === null`, exactly. An OMITTED json is not a polite way of saying
+    // "nothing" — no conforming responder emits it — and neither is the STRING
+    // 'null', which would parse to null and impersonate a no-hit. Accepting either
+    // as an empty response would re-introduce the exact confusion Q1 exists to
+    // remove, one layer further in: a malformed or foreign message read as an
+    // authoritative "I do not have it".
     let outcome;
-    if (payload.json === undefined || payload.json === null) {
-      outcome = { kind: 'response', envelope: null };
+    if (payload.json === null) {
+      outcome = { kind: 'response', envelope: null };            // the real no-hit
+    } else if (typeof payload.json !== 'string') {
+      outcome = { kind: 'invalid-response', reason: payload.json === undefined
+        ? 'PULLRESP omitted json (a conforming responder always sets it)'
+        : `PULLRESP json was ${typeof payload.json}, expected string or null` };
     } else {
-      try { outcome = { kind: 'response', envelope: JSON.parse(payload.json) ?? null }; }
-      catch (e) { outcome = { kind: 'invalid-response', reason: String((e && e.message) || e) }; }
+      let parsed, bad = null;
+      try { parsed = JSON.parse(payload.json); }
+      catch (e) { bad = String((e && e.message) || e); }
+      if (bad !== null) outcome = { kind: 'invalid-response', reason: bad };
+      else if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+        // Parsed fine and is still not an envelope. 'null' lands here rather than
+        // masquerading as a no-hit; so do bare scalars and arrays.
+        outcome = { kind: 'invalid-response', reason: 'PULLRESP json did not parse to an envelope object' };
+      } else outcome = { kind: 'response', envelope: parsed };
     }
     // Resolve the FULL envelope (msgId/ts/signer/message …) — the same shape a
     // sub() callback delivers, and what peer.pull has always documented. The

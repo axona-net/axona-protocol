@@ -2332,14 +2332,6 @@ export class AxonaPeer extends DHT {
   }
 
   /**
-   * Resolve an author's self-declared class from its Author ID alone. Pulls the
-   * author's owner-only profile topic and verifies the attestation. Returns
-   * `{ class:'agent'|'human'|'service'|'bridge'|'relay'|'unstated', operator, operatorVerified, label, ts }`;
-   * any missing/invalid/unparseable attestation resolves to `'unstated'` (never a
-   * default class). `operatorVerified` is true only for a valid v1.1 countersignature.
-   * @param {string} authorId 64-hex Author ID
-   */
-  /**
    * Like pull(), but returns the TAGGED outcome instead of collapsing it:
    *   { kind:'response', envelope }       a responder answered and holds this
    *   { kind:'response', envelope:null }  a responder answered and holds nothing
@@ -2351,12 +2343,29 @@ export class AxonaPeer extends DHT {
    * NOTE: envelope:null is ONE RESPONDER's negative, not proof the network is empty.
    */
   async pullOutcome(msgId, { topic, timeoutMs = 1000 } = {}) {
+    // Mirrors pull()'s validation (Aster, Q1 review). Two public entry points onto
+    // the same read must not disagree about what a valid msgId is — the lenient one
+    // becomes the way callers accidentally bypass the check.
+    const wantsLatestEarly = msgId === null || msgId === undefined;
+    if (!wantsLatestEarly && (typeof msgId !== 'string' || msgId.length !== 64)) {
+      throw new PullError(ErrorCodes.PULL_INVALID_MSGID,
+        'peer.pullOutcome: msgId must be a 64-char hex string, or null/omitted for the latest message',
+        { context: { msgId } });
+    }
     const am = this._requireAxonaManager('pullOutcome');
     const desc = await this._resolveReadTopic(topic, 'pullOutcome');
     const wantsLatest = msgId === null || msgId === undefined;
     return am.requestPull(desc.topicIdBig, wantsLatest ? null : msgId, { timeoutMs });
   }
 
+  /**
+   * Resolve an author's self-declared class from its Author ID alone. Pulls the
+   * author's owner-only profile topic and verifies the attestation. Returns
+   * `{ class:'agent'|'human'|'service'|'bridge'|'relay'|'unstated', operator, operatorVerified, label, ts }`;
+   * any missing/invalid/unparseable attestation resolves to `'unstated'` (never a
+   * default class). `operatorVerified` is true only for a valid v1.1 countersignature.
+   * @param {string} authorId 64-hex Author ID
+   */
   async getAuthorClass(authorId, { timeoutMs = 1000 } = {}) {
     if (typeof authorId !== 'string' || authorId.length !== 64) {
       throw new PullError(ErrorCodes.PULL_INVALID_MSGID,
