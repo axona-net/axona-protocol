@@ -2285,7 +2285,11 @@ export class AxonaPeer extends DHT {
     }
     const desc       = await this._resolveReadTopic(topic, 'pull');
     const topicIdBig = desc.topicIdBig;
-    const result = await am.requestPull(topicIdBig, wantsLatest ? null : msgId, { timeoutMs });
+    const outcome = await am.requestPull(topicIdBig, wantsLatest ? null : msgId, { timeoutMs });
+    // requestPull is TAGGED as of Q1. peer.pull keeps its documented envelope|null
+    // shape so existing callers are unaffected; peer.pullOutcome() exposes the full
+    // outcome for callers that must distinguish timeout from empty from invalid.
+    const result = outcome && outcome.kind === 'response' ? outcome.envelope : null;
     if (!result) return null;
 
     // requestPull returns the parsed payload — which is the JSON we
@@ -2335,6 +2339,24 @@ export class AxonaPeer extends DHT {
    * default class). `operatorVerified` is true only for a valid v1.1 countersignature.
    * @param {string} authorId 64-hex Author ID
    */
+  /**
+   * Like pull(), but returns the TAGGED outcome instead of collapsing it:
+   *   { kind:'response', envelope }       a responder answered and holds this
+   *   { kind:'response', envelope:null }  a responder answered and holds nothing
+   *   { kind:'timeout', timeoutMs }       nobody answered in time
+   *   { kind:'invalid-response', reason } a reply arrived and would not parse
+   *
+   * pull() cannot express the difference and never could — it returns null for the
+   * last three. Callers that must not treat silence as absence should use this.
+   * NOTE: envelope:null is ONE RESPONDER's negative, not proof the network is empty.
+   */
+  async pullOutcome(msgId, { topic, timeoutMs = 1000 } = {}) {
+    const am = this._requireAxonaManager('pullOutcome');
+    const desc = await this._resolveReadTopic(topic, 'pullOutcome');
+    const wantsLatest = msgId === null || msgId === undefined;
+    return am.requestPull(desc.topicIdBig, wantsLatest ? null : msgId, { timeoutMs });
+  }
+
   async getAuthorClass(authorId, { timeoutMs = 1000 } = {}) {
     if (typeof authorId !== 'string' || authorId.length !== 64) {
       throw new PullError(ErrorCodes.PULL_INVALID_MSGID,

@@ -795,7 +795,11 @@ export class AxonaManager {
     // holds it. The hint seeds the walk at the topic-closest node it can serve. v4.10.1.
     const hint = this._rootHint_(topicId);
     return new Promise((resolve) => {
-      const timer = setTimeout(() => { this._pending.delete(corrId); resolve(null); }, timeoutMs);
+      // Q1: a read must say WHICH kind of nothing it got. Resolving null here made
+      // a timeout indistinguishable from a responder that holds nothing and from an
+      // unparseable reply — three facts, one value — and every consumer above then
+      // manufactured a confident negative from it. See test/fence_pull_outcome.mjs.
+      const timer = setTimeout(() => { this._pending.delete(corrId); resolve({ kind: 'timeout', timeoutMs }); }, timeoutMs);
       if (typeof timer.unref === 'function') timer.unref();
       this._pending.set(corrId, { resolve, timer });
       this._send(T.PULL, { topicId: idHex(topicId), via: hint ? [hint] : [], corrId, postHash: postHash || null, requesterId: idHex(this.nodeId) });

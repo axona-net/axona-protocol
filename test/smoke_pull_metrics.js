@@ -65,17 +65,20 @@ class MockAxonaManager {
 
   async requestPull(topicId, postHash, { timeoutMs = 1000 } = {}) {
     const cache = this._replay.get(topicId);
-    if (!cache) return null;
+    // Q1: this fake models the REAL requestPull contract — a tagged outcome, not a
+    // bare envelope. Updating it is the point: a stub speaking an obsolete contract
+    // silently stops testing the thing it claims to test.
+    if (!cache) return { kind: 'response', envelope: null };
     for (let i = cache.length - 1; i >= 0; i--) {
       if (cache[i].postHash === postHash) {
         // Bump pull_count.
         const ctr = this._counters.get(topicId)?.get(postHash);
         if (ctr) ctr.pull_count++;
-        try { return JSON.parse(cache[i].json); }
-        catch { return null; }
+        try { return { kind: 'response', envelope: JSON.parse(cache[i].json) }; }
+        catch (e) { return { kind: 'invalid-response', reason: String((e && e.message) || e) }; }
       }
     }
-    return null;
+    return { kind: 'response', envelope: null };   // answered; holds no such post
   }
   async requestMetrics(topicId, _postHashes, { timeoutMs = 500 } = {}) {
     const byHash = this._counters.get(topicId);

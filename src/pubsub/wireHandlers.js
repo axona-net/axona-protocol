@@ -762,15 +762,27 @@ export const wireHandlersMethods = {
     if (!p) return 'consumed';
     clearTimeout(p.timer);
     this._pending.delete(payload.corrId);
-    let parsed = null;
-    if (payload.json) { try { parsed = JSON.parse(payload.json); } catch { parsed = null; } }
+    // Q1 TAGGED OUTCOME. These three cases were all collapsed to null:
+    //   a reply carrying an envelope   -> { kind:'response', envelope }
+    //   a reply carrying nothing       -> { kind:'response', envelope:null }
+    //   a reply that will not parse    -> { kind:'invalid-response', reason }
+    // The middle one is a RESPONDER's negative — this node says it holds nothing.
+    // That is not proof the network holds nothing, it is not a timeout, and a caller
+    // must be able to tell all three apart. (Aster, council 2026-07-31.)
+    let outcome;
+    if (payload.json === undefined || payload.json === null) {
+      outcome = { kind: 'response', envelope: null };
+    } else {
+      try { outcome = { kind: 'response', envelope: JSON.parse(payload.json) ?? null }; }
+      catch (e) { outcome = { kind: 'invalid-response', reason: String((e && e.message) || e) }; }
+    }
     // Resolve the FULL envelope (msgId/ts/signer/message …) — the same shape a
     // sub() callback delivers, and what peer.pull has always documented. The
     // previous `parsed.message ?? parsed` unwrap discarded the identity at the
     // last step (task #355): publish-confirm loops comparing env.msgId could
     // never succeed, and pull-then-act (kill/reply/verify by msgId) was
     // impossible even though the wire carried everything.
-    p.resolve(parsed ?? null);
+    p.resolve(outcome);
     return 'consumed';
   },
 
