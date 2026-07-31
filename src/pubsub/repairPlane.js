@@ -624,9 +624,30 @@ export const repairPlaneMethods = {
       }
       budget.left--;
     }
+    // C4 (partial — the half both reviewers agree on regardless of how the
+    // completion CONTRACT resolves): credit a cohort member only if the push
+    // was actually dispatched. Crediting a target whose _syncPush threw made the
+    // role believe it held a backup that had never received one byte.
+    //
+    // I first wrote here that the false credit also SUPPRESSED THE RETRY, since
+    // `full` re-arms on `want.some(hex => !role.replicas.has(hex))` above. The
+    // fence does not show that: with the pre-fix code and every push throwing,
+    // pushes still continued on later ticks (fence_replica_ledger 2a passes both
+    // ways), because the signature check and the ROOT_REPLICATE_FULL_MS backstop
+    // re-arm independently. Whether the FULL-vs-keepalive distinction is starved
+    // is untested and remains a hypothesis, not a finding. What is demonstrated
+    // is narrower and sufficient: the ledger claimed replicas that do not exist.
+    //
+    // NOTE ON THE NAME: `replicas` still overclaims. A non-throwing _syncPush
+    // proves LOCAL DISPATCH, not remote possession — Aster's three-way split of
+    // selection / dispatch / receipt. Renaming it (and deciding what discharges
+    // the ROOT obligation) is the open C4 decision; this change deliberately
+    // does not pre-empt it, and lastFullAt below is untouched for that reason.
     for (const hex of want) {
-      try { this._syncPush(idBig(hex), t, role, 'COHORT_REPLICATE', { full }); } catch { /* best-effort */ }
-      role.replicas.set(hex, { at: now });
+      let dispatched = true;
+      try { this._syncPush(idBig(hex), t, role, 'COHORT_REPLICATE', { full }); }
+      catch { dispatched = false; }                 // best-effort send, honest ledger
+      if (dispatched) role.replicas.set(hex, { at: now });
     }
     if (full) { role.sync.sig = sig; role.sync.lastFullAt = now; }
   },

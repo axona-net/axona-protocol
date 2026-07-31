@@ -18,6 +18,11 @@
   "generated": "2026-07-29 \u2014 classes MEASURED by running every test against kernel 4.49.0, not inferred. 11 never-wired tests passed and were promoted; 24 failed against removed internals and were retired with the missing symbol named in each reason.",
   "tests": [
     {
+      "file": "fence_replica_ledger.mjs",
+      "class": "default",
+      "note": "C4 (partial) \u2014 a root must not record a cohort member in role.replicas when the push to it threw. Verified RED against the pre-fix code (1b/2b fail, replicas=2). Pins the LEDGER only; what discharges the ROOT obligation is the open C4 decision and sync.lastFullAt is deliberately not asserted."
+    },
+    {
       "file": "fence_service_pressure.mjs",
       "class": "default",
       "note": "D0/M4 \u2014 capacity metric must report its own failure; fails against pre-D0 code"
