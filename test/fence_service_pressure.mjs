@@ -253,7 +253,7 @@ console.log('service pressure — the capacity metric can report its own failure
     `pressure=${c.servicePressure} worst=${c.worstObligation}`);
 }
 {
-  // 6f. C1/C2 — pubsubPeerDied writes lastRenewSent = 0 to force an immediate
+  // 6f. C1/C2 — pubsubPeerDied writes lastRenewSent = null to force an immediate
   // re-emit. Read as a time, that made the subscription permanently exempt.
   // createdAt is the activation stamp, so debt accrues from birth even at 0.
   const { am, clock } = mk();
@@ -263,7 +263,7 @@ console.log('service pressure — the capacity metric can report its own failure
   sub.lastRenewSent = null;                                       // exactly what pubsubPeerDied does (null, not 0)
   clock.t += Math.ceil(SATURATION_PRESSURE * DROP_MS) + 5_000;
   const c = am.inspectCapacity();
-  ok('6f. a subscription reset to lastRenewSent=0 accrues debt from createdAt, not forever-innocent',
+  ok('6f. a subscription reset to lastRenewSent=null accrues debt from createdAt, not forever-innocent',
     c.servicePressure >= SATURATION_PRESSURE && c.worstObligation === 'APP_SUB',
     `pressure=${c.servicePressure} worst=${c.worstObligation} unserviced=${c.unserviced}`);
   ok('6g. …and is reported as never-discharged, not merely late', c.unserviced >= 1);

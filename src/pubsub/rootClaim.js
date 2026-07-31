@@ -63,7 +63,7 @@ export function makeRole(topicId, isRoot, createdAt = null) {
     createdAt,                       // _now() when this role was admitted (D0 / M4).
                                      // Needed because "never discharged" is only innocent for a role
                                      // that is NEW. A role held for longer than its obligation's
-                                     // deadline with a zero stamp has never been serviced at all,
+                                     // deadline and no stamp at all (null) has never been serviced,
                                      // which is the WORST case, not an exempt one — capacity measures
                                      // age from birth until the first discharge, then from the stamp.
                                      // Caught by smoke_role_admission.mjs, which builds 96 roles that

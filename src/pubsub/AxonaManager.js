@@ -318,25 +318,26 @@ export class AxonaManager {
     let worstRatio = 0, worstAgeMs = 0, worstKind = null, overdue = 0, unserviced = 0;
     let obligations = 0;                             // the DENOMINATOR: rows evaluated, not roles held
     // `since` is the stamp when the obligation has been discharged at least once,
-    // and the role's BIRTH when it never has. A zero stamp is innocent only while
+    // and the role's BIRTH when it never has. A MISSING stamp (null) is innocent only while
     // the role is younger than its own deadline: past that, it has never been
     // serviced at all, which is the worst case rather than an exempt one. Treating
     // "never discharged" as unconditionally not-debt was a false negative of the
     // same shape as the bug D0 exists to fix — caught by smoke_role_admission.mjs,
     // which builds 96 never-serviced roles and rightly expects saturation.
     //
-    // C2: 0 is a SENTINEL here, never a real clock value, and the two cases must
-    // not share a test. `pubsubPeerDied` deliberately writes lastRenewSent = 0 to
-    // force an immediate re-emit; read as a time that made the subscription
-    // permanently exempt from pressure — the exact false negative D0 removes —
-    // because `at || bornAt` cannot tell "reset to renew now" from "unknown".
-    // Presence is asked explicitly, of each field separately.
+    // C2: null is the SENTINEL; 0 is a REAL instant. `pubsubPeerDied` writes
+    // lastRenewSent = null to force an immediate re-emit, and that must not be
+    // readable as a time — `at || bornAt` could not tell "renew now" from
+    // "unknown", so a subscription whose first re-emit never landed stayed
+    // permanently exempt from pressure, the same false negative D0 exists to
+    // remove. Presence is asked explicitly, of each field separately, and no
+    // timestamp is tested for truthiness anywhere in this path.
     //
-    // The sentinel is null, NOT zero. `t > 0` would have made an injected clock
-    // that starts at 0 permanently unknown — production Date.now never does that,
+    // Zero WAS the sentinel until v4.52.0, and `t > 0` made an injected clock
+    // starting at 0 permanently unknown — production Date.now never yields 0,
     // but `now` is a public injection point and simulations routinely start at 0,
-    // so the metric would have been silently blind under exactly the harness we
-    // use to test it. 0 is a valid instant; absence is null. (Aster, 8fbb1a9 P2.)
+    // so the metric was blind under exactly the harness we use to test it.
+    // (Aster, 8fbb1a9 P2.)
     const stamped = (t) => typeof t === 'number' && Number.isFinite(t);
     const consider = (kind, at, deadline, bornAt = 0) => {
       obligations++;                                 // counted even when unmeasurable — see overdueFrac
@@ -673,9 +674,9 @@ export class AxonaManager {
     // across renewals (re-delivery is deduped); cleared by a later non-latest sub.
     this.mySubscriptions.set(topicId, {
       // C1: createdAt is the ACTIVATION time and is never rewritten. lastRenewSent
-      // is reset to 0 by pubsubPeerDied to force an immediate re-emit, so it cannot
-      // double as the birth time — without this, a subscription whose first re-emit
-      // after upstream death never lands reads as pressure 0 forever.
+      // is reset to null by pubsubPeerDied to force an immediate re-emit, so it
+      // cannot double as the birth time — without this, a subscription whose first
+      // re-emit after upstream death never lands reads as pressure 0 forever.
       createdAt: this._now(),
       since, lastRenewSent: this._now(), interval: this.renewFastMs,
       replayLatest: !!opts.replayLatest,
