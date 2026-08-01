@@ -51,6 +51,10 @@ function mk({ pushThrows }) {
   const clock = { t: 1_000_000 };
   const pushed = [];
   const dht = {
+    // v4.58.0: capability is DECLARED. This fence stubs _syncPush out entirely, so
+    // it never reaches _route — but the ledger now demands a verdict, and a stub
+    // that returns nothing is a contract violation, not a silent success.
+    verdictsSupported: true,
     getSelfId: () => SELF,
     onRoutedMessage: () => {},
     routeMessage: () => {},
@@ -65,6 +69,7 @@ function mk({ pushThrows }) {
   am._syncPush = (target, t, role, policy, opts) => {
     pushed.push(String(policy));
     if (pushThrows) throw new Error('transport down');
+    return { consumed: true };            // v4.58.0: a working push REPORTS
   };
   return { am, clock, pushed };
 }

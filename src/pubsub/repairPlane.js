@@ -39,12 +39,27 @@ import { makeRole } from './rootClaim.js';
 // the length of a sends[] array), and reading an unrecognised value as failure is
 // the same confident-false-negative as Q1, pointed the other way. Silence and
 // gibberish both mean "I do not know", never "it failed".
-const dispatchVerdict = (r) => {
+// v4.58.0 — classify what the TRANSPORT said. CAPABILITY IS DECLARED, NEVER
+// INFERRED. This replaces a v4.57.0 classifier that read a void return as
+// 'unreported' and CREDITED it, which let test doubles set a production
+// durability semantic. Aster and Orion both rejected the inference itself
+// (council 2026-08-01).
+//
+//   {consumed:true} / 'consumed'   → 'consumed'      verified dispatch
+//   {consumed:false}               → 'failed'        a routing verdict: it did not
+//   adapter declares NO verdicts   → 'unsupported'   honest; credits nothing
+//   adapter CLAIMS verdicts, void  → 'violation'     contract breach; LOUD; fails closed
+//
+// Only 'consumed' ever credits role.replicas. The other three are recorded for
+// inspection and discharge nothing — there is deliberately no degraded mode,
+// because a mode that clears an obligation without evidence is the exact thing
+// this version exists to remove.
+const dispatchVerdict = (r, verdictsSupported) => {
   if (r && typeof r === 'object' && typeof r.consumed === 'boolean') {
     return r.consumed ? 'consumed' : 'failed';
   }
   if (r === 'consumed') return 'consumed';
-  return 'unreported';
+  return verdictsSupported === false ? 'unsupported' : 'violation';
 };
 
 export const repairPlaneMethods = {
@@ -683,25 +698,40 @@ export const repairPlaneMethods = {
     // Pushes are issued together and classified afterwards. Serialising them would
     // put one routing round-trip per cohort member on the publish confirm path,
     // which wireHandlers awaits.
+    const declares = this.dht?.verdictsSupported;
     const sent = want.map((hex) => {
       let p;
       try { p = this._syncPush(idBig(hex), t, role, 'COHORT_REPLICATE', { full }); }
-      catch { return Promise.resolve({ hex, verdict: 'failed' }); }   // sync throw
+      catch { return { hex, verdict: 'failed' }; }                  // sync throw
       return Promise.resolve(p).then(
-        (r) => ({ hex, verdict: dispatchVerdict(r) }),
-        () => ({ hex, verdict: 'failed' }),                            // async reject
+        (r) => ({ hex, verdict: dispatchVerdict(r, declares) }),
+        () => ({ hex, verdict: 'failed' }),                          // async reject
       );
     });
-    const out = { attempted: want.length, verified: 0, unreported: 0, failed: 0 };
+    const out = { attempted: want.length, verified: 0, failed: 0, unsupported: 0, violation: 0 };
+    // role.attempted is a BOUNDED DIAGNOSTICS RECORD, deliberately outside
+    // role.replicas and outside every repair, confirm and handoff decision path.
+    // It exists so the difference between "no evidence" and "evidence of failure"
+    // is inspectable rather than inferred. Nothing reads it to decide anything.
+    role.attempted ??= new Map();
     for (const { hex, verdict } of await Promise.all(sent)) {
-      if (verdict === 'failed') { out.failed++; continue; }
-      if (verdict === 'consumed') out.verified++; else out.unreported++;
-      role.replicas.set(hex, { at: now, via: verdict });
+      if (verdict === 'consumed') {
+        out.verified++;
+        role.replicas.set(hex, { at: now, via: 'consumed' });        // the ONLY crediting path
+        continue;
+      }
+      out[verdict]++;
+      role.attempted.set(hex, { at: now, via: verdict });
+      if (verdict === 'violation') {
+        this._log('error', 'pubsub:dispatch-contract-violation', {
+          topic: idHex(t).slice(0, 12), peer: hex.slice(0, 12),
+          detail: 'adapter declares verdictsSupported but returned no verdict',
+        });
+      }
     }
-    // A prior credit is NOT deleted when this tick's push fails. That entry
-    // records what was true at its own `at` — a member that took delivery ten
-    // minutes ago most likely still holds the state, and erasing it would replace
-    // a past fact with a present one. Age is preserved for callers that care.
+    // A prior credit is NOT deleted when this tick fails: that entry records what
+    // was true at its own `at`, and erasing it would replace a past fact with a
+    // present one.
     if (full) { role.sync.sig = sig; role.sync.lastFullAt = now; }
     return out;
   },
@@ -1007,8 +1037,13 @@ export const repairPlaneMethods = {
           // No REPLICATE ack exists, so the evidence available is dispatch: an
           // explicit failure keeps `j` in unacked() for the next round; a silent
           // (unreporting) adapter is treated as sent, exactly as before.
+          // v4.58.0: EXPLICIT verified-success. This was `dispatchVerdict(r) !== 'failed'`
+          // — a negative test, which is precisely how 'unknown' sneaks into a success
+          // path (Aster named this line). A departing holder now earns its permanent
+          // retry exemption ONLY from a verified dispatch.
+          const decl = this.dht?.verdictsSupported;
           const dispatched = (p) => Promise.resolve(p).then(
-            (r) => dispatchVerdict(r) !== 'failed',   // unreported counts as sent
+            (r) => dispatchVerdict(r, decl) === 'consumed',
             () => false,
           );
           const sends = [dispatched(this._syncPush(j.heir, j.t, j.role, 'REPLICATE'))];

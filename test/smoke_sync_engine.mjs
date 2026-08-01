@@ -28,8 +28,9 @@ const idHex = (b) => b.toString(16).padStart(66, '0');
 function mk({ selfBig, neighbors = [], kClosest = null, replicas = 2 } = {}) {
   const sends = [];
   const dht = {
+    verdictsSupported: true,   // v4.58.0: declared, never inferred
     getSelfId: () => selfBig, onRoutedMessage: () => {},
-    routeMessage: (target, type, payload) => sends.push({ target, type, payload }),
+    routeMessage: (target, type, payload) => (sends.push({ target, type, payload }), { consumed: true }),
     neighbors: () => neighbors,
     bridgeId: () => null,
   };

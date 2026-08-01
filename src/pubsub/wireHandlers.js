@@ -341,11 +341,13 @@ export const wireHandlersMethods = {
       // whose every replication push exhausted still reported durable.
       const rep = await this._replicateRole(role.topicId, role, bridge, this._now())
         .catch((e) => ({ attempted: 1, verified: 0, unreported: 0, failed: 1, reason: String(e?.message || e) }));
-      // Refuse the confirm ONLY on positive evidence of total failure: pushes were
-      // attempted and every one came back explicitly failed. attempted === 0 is the
-      // singleton/no-cohort case below — deliberately still confirms — and any
-      // 'unreported' means we do not know, which is not grounds to fail a publish.
-      if (rep.attempted > 0 && rep.verified === 0 && rep.unreported === 0) {
+      // v4.58.0 FAIL-CLOSED. Confirm requires POSITIVE evidence: attempted > 0
+      // demands verified > 0. The previous gate also required unreported === 0,
+      // which meant a publish with no dispatch evidence at all still confirmed —
+      // it fired only when every push had EXPLICITLY failed. Absence of a failure
+      // report is not a success report. attempted === 0 is the singleton/no-cohort
+      // case and still confirms, deliberately and unchanged.
+      if (rep.attempted > 0 && rep.verified === 0) {
         this._log('warn', 'pubsub:replicate-all-failed', {
           topic: idHex(role.topicId).slice(0, 12), attempted: rep.attempted, failed: rep.failed,
         });
@@ -671,7 +673,7 @@ export const wireHandlersMethods = {
         this._replicateRole(topicBig, role, bridge, this._now())
           .catch((e) => ({ attempted: 1, verified: 0, unreported: 0, failed: 1, reason: String(e?.message || e) }))
           .then((rep) => {
-            if (rep.attempted > 0 && rep.verified === 0 && rep.unreported === 0) {
+            if (rep.attempted > 0 && rep.verified === 0) {
               this._log('warn', 'pubsub:kill-replicate-all-failed', {
                 topic: idHex(topicBig).slice(0, 12), attempted: rep.attempted, failed: rep.failed,
               });

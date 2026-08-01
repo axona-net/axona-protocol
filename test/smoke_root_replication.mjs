@@ -21,7 +21,10 @@ const SELF=REG|0x011n, TOPIC=REG|0xabcn;
 const NEAR1=REG|0xab0n, NEAR2=REG|0xabfn, FAR=REG|0xf00n, BRIDGE=REG|0x002n;
 function mk({neighbors=[],bridge=null,replicas=2}={}){
   const sends=[]; const clock={t:1_000_000};
-  const dht={ getSelfId:()=>SELF, onRoutedMessage:()=>{}, routeMessage:(target,type,payload)=>sends.push({target,type,payload}),
+  const dht={
+    verdictsSupported: true,   // v4.58.0: declared, never inferred
+    getSelfId:()=>SELF, onRoutedMessage:()=>{},
+    routeMessage:(target,type,payload)=>(sends.push({target,type,payload}), { consumed: true }),
     neighbors:()=>neighbors, bridgeId:()=>bridge };
   const am=new AxonaManager({dht, now:()=>clock.t, rootReplicas:replicas}); am.nodeId=SELF;
   return {am,sends,clock};

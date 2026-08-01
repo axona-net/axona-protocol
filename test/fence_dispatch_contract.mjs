@@ -52,10 +52,12 @@ const NB1 = idHex(REG | 0xaa0n), NB2 = idHex(REG | 0xaafn);
 const TICK = 5_000;
 
 // `report` is what the TRANSPORT says. Everything above it is production code.
-function mk(report) {
+function mk(report, { verdictsSupported = true } = {}) {
   const clock = { t: 1_000_000 };
   const routed = [];
   const dht = {
+    // v4.58.0: capability is DECLARED, never inferred from a return value.
+    verdictsSupported,
     getSelfId: () => SELF,
     onRoutedMessage: () => {},
     routeMessage: async (target, type) => { routed.push(type); return report(); },
@@ -123,17 +125,31 @@ console.log('dispatch contract — a root records the evidence it has, not the h
     JSON.stringify([...role.replicas.values()]));
 }
 
-// ── 3. NO REPORT IS NOT A FAILURE REPORT ───────────────────────────────────
-// Sim and test adapters return undefined. Their silence must not be read as
-// exhaustion — that would be the Q1 mistake pointed the other way.
+// ── 3. A VOID RETURN NEVER CREDITS (v4.58.0 — REWRITTEN) ──────────────────
+// THIS SECTION PREVIOUSLY ASSERTED THE OPPOSITE, and had to be rewritten rather
+// than kept. It pinned "an adapter that reports NOTHING still records the cohort
+// … via:'unreported'" — which made the suite DEFEND the bug: a silent adapter
+// earned a replica it had no evidence for, and I had let test doubles set a
+// production durability semantic.
+//
+// Aster and Orion both rejected the INFERENCE itself (council 2026-08-01):
+// capability is DECLARED, never guessed. A void return from an adapter that
+// CLAIMS to report verdicts is a CONTRACT VIOLATION — loud, classified FAILED.
+// An adapter that declares it cannot report credits nothing. Neither is a
+// creditable unknown, and there is no degraded mode.
 {
-  const { am, clock } = mk(SILENT);
+  const { am, clock } = mk(SILENT, { verdictsSupported: true });
   const role = await rootWithState(am, clock, REG | 0x5001n);
-  ok('3a. an adapter that reports NOTHING still records the cohort',
-    role.replicas.size > 0, `replicas=${role.replicas.size}`);
-  ok('3b. …but marked via:"unreported" — never conflated with verified dispatch',
-    [...role.replicas.values()].every(v => v && v.via === 'unreported'),
-    JSON.stringify([...role.replicas.values()]));
+  ok('3a. declared-reporting adapter returning VOID = contract violation, NO ' +
+     'replica credited (this is the exact inverse of the assertion it replaced)',
+    role.replicas.size === 0, `replicas=${role.replicas.size}`);
+}
+{
+  const { am, clock } = mk(SILENT, { verdictsSupported: false });
+  const role = await rootWithState(am, clock, REG | 0x5101n);
+  ok('3b. declared-NON-reporting adapter credits nothing either — an honest ' +
+     'admission of no evidence is still no evidence',
+    role.replicas.size === 0, `replicas=${role.replicas.size}`);
 }
 
 // ── 4. THE CALLER CAN GATE ON IT ───────────────────────────────────────────
