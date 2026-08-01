@@ -977,7 +977,16 @@ export const repairPlaneMethods = {
       }
       for (const j of unacked()) {
         try {
-          if (j.role.isRoot) { this._syncPush(j.heir, j.t, j.role, 'HANDOFF'); continue; }
+          // Q2 FOLLOW-UP (Aster, council 2026-07-31). _syncPush RETURNS the dispatch
+          // promise as of v4.57.0; it previously returned undefined. A caller that drops
+          // it now creates an UNHANDLED REJECTION, and Node >=15 TERMINATES the process
+          // on those — a crash I introduced, on the leave path, in shipped code.
+          // ACK/no-claim semantics deliberately unchanged: this HANDOFF is retried via
+          // unacked() and makes no ledger claim. Only the rejection is absorbed.
+          if (j.role.isRoot) {
+            Promise.resolve(this._syncPush(j.heir, j.t, j.role, 'HANDOFF')).catch(() => {});
+            continue;
+          }
           // A departing NON-ROOT holder must not mint a root at the receiver.
           // HANDOFF makes the heir ADOPT; multiple departing backups each
           // handing off (possibly to different mid-churn heirs) minted
@@ -1067,7 +1076,11 @@ export const repairPlaneMethods = {
       const topicRegion = lc(idHex(j.t)).slice(0, 2);
       let targetRegion = null; try { targetRegion = lc(idHex(target)).slice(0, 2); } catch { /* */ }
       const policy = targetRegion === topicRegion ? 'HANDOFF' : 'REPLICATE';
-      try { this._syncPush(target, j.t, j.role, policy); } catch { /* best-effort */ }
+      // Same unhandled-rejection absorption. This last-gasp fallback makes no claim
+      // on the result — nothing follows it — so semantics are unchanged.
+      try {
+        Promise.resolve(this._syncPush(target, j.t, j.role, policy)).catch(() => {});
+      } catch { /* best-effort */ }
     }
   },
 

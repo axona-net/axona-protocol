@@ -28,6 +28,11 @@
       "note": "Q2/C4 — a root's replica ledger records dispatch EVIDENCE, not a call that failed to throw. routeMessage reports failure by RESOLVING {consumed:false}, so consumed:false and async rejection must never credit a replica, while an adapter that returns no verdict at all is 'unreported' and still credits. Verified RED (exhausted/terminal/rejection all recorded 2 replicas). Drives the real _syncPush/_route chain; only the transport's answer varies."
     },
     {
+      "file": "fence_syncpush_rejection.mjs",
+      "class": "default",
+      "note": "CRASH SAFETY, not durability. v4.57.0 made _syncPush/_route return the transport promise; 13 fire-and-forget callers plus _send dropped it, and Node >=15 terminates on an unhandled rejection. Drives pubsubLeaveHandoff with a rejecting transport at both the root HANDOFF and last-gasp sites, asserts zero unhandledRejection and unchanged ACK/no-claim semantics. Includes a control that the harness itself detects an unhandled rejection. Requested by Aster+Orion (council 2026-07-31); found the exposure was the whole call graph, not the two sites diagnosed."
+    },
+    {
       "file": "fence_replica_ledger.mjs",
       "class": "default",
       "note": "C4 (partial) — a root must not record a cohort member in role.replicas when the push to it threw. Verified RED against the pre-fix code (1b/2b fail, replicas=2). Pins the LEDGER only; what discharges the ROOT obligation is the open C4 decision and sync.lastFullAt is deliberately not asserted."

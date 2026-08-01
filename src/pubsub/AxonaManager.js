@@ -195,15 +195,41 @@ export class AxonaManager {
   _send(type, payload) {
     const via = Array.isArray(payload.via) ? payload.via : [];
     const target = via.length ? idBig(via[0]) : idBig(payload.topicId);
-    this.dht.routeMessage(target, type, payload, { fromId: idHex(this.nodeId), viaHopBudget: VIA_HOP_BUDGET });
+    // Delegates to _route rather than calling the transport directly, so it
+    // inherits the never-rejects containment documented there. This was a second,
+    // separate crash surface: _send had its own copy of the routeMessage call and
+    // so was untouched when _route was hardened. Two copies of an emission path
+    // means two places to remember, and I had already forgotten one.
+    return this._route(target, type, payload);
   }
-  // RETURNS the routeMessage result (Q2/C4). Production routing reports failure
-  // by RESOLVING {consumed:false, exhausted:true} — it does not throw — so a
-  // caller that discards this promise cannot distinguish delivery from silence,
-  // and no try/catch around it ever will. Callers that need the outcome await it;
-  // the many fire-and-forget callers are unaffected by a returned value.
+  // RETURNS the routeMessage result (Q2/C4), as a promise that NEVER REJECTS.
+  //
+  // Production routing reports failure by RESOLVING {consumed:false, exhausted:true}
+  // — it does not throw — so a caller that discards the promise cannot distinguish
+  // delivery from silence, and no try/catch around it ever will. That is why this
+  // returns a value at all.
+  //
+  // THE NON-REJECTING PART IS LOAD-BEARING AND WAS LEARNED THE HARD WAY. Before
+  // v4.57.0 this returned undefined, so the 13 fire-and-forget callers had nothing
+  // to drop. Making it return the promise turned EVERY ONE of them into a potential
+  // process kill, because Node >=15 terminates on an unhandled rejection. Aster
+  // spotted two of those sites; the regression he asked for (fence_syncpush_rejection)
+  // then failed with SEVEN unhandled rejections, proving the exposure was the whole
+  // call graph rather than those two.
+  //
+  // Patching 13 call sites would leave the 14th to be written next month. So the
+  // containment is here, once: a transport error becomes a FAILURE VERDICT of the
+  // same shape routing already uses, which dispatchVerdict() classifies as 'failed'.
+  // A caller that ignores the result is safe; a caller that reads it gets the truth.
   _route(targetBig, type, payload) {
-    return this.dht.routeMessage(targetBig, type, payload, { fromId: idHex(this.nodeId), viaHopBudget: VIA_HOP_BUDGET });
+    const fail = (e) => ({ consumed: false, error: String((e && e.message) || e), transportError: true });
+    try {
+      return Promise.resolve(
+        this.dht.routeMessage(targetBig, type, payload, { fromId: idHex(this.nodeId), viaHopBudget: VIA_HOP_BUDGET }),
+      ).catch(fail);
+    } catch (e) {
+      return Promise.resolve(fail(e));   // synchronous throw out of routeMessage
+    }
   }
   // Pop a dead waypoint and keep routing. When the via chain empties, _send
   // falls through to the TOPIC ID — that is deliberate and load-bearing: it is
