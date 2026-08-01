@@ -41,7 +41,7 @@ class MockNet {
     return {
       getSelfId: () => selfId,
       onRoutedMessage: () => {}, onDirectMessage: (t, h) => direct.set(t, h),
-      onEvent: () => () => {}, routeMessage: async () => {}, findKClosest: async () => [],
+      onEvent: () => () => {}, verdictsSupported: false, routeMessage: async () => {}, findKClosest: async () => [],
       sendDirect: async (target, type, payload) => {
         const m = net.mgrs.get(target); if (!m) return false;
         const h = m._dht._direct.get(type);

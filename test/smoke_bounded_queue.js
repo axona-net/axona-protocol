@@ -26,7 +26,7 @@ function check(label, cond) {
 function stubDht() {
   return {
     getSelfId: () => 1n, onRoutedMessage: () => {}, onDirectMessage: () => {},
-    onEvent: () => () => {}, sendDirect: async () => true, routeMessage: async () => {},
+    onEvent: () => () => {}, sendDirect: async () => true, verdictsSupported: false, routeMessage: async () => {},
   };
 }
 const am = new AxonaManager({ dht: stubDht(), now: () => 1_700_000_000_000 });
@@ -116,7 +116,7 @@ async function testMetricsResponseShape() {
   let sent = null;
   const dht = {
     getSelfId: () => 1n, onRoutedMessage: () => {}, onDirectMessage: () => {},
-    onEvent: () => () => {}, routeMessage: async () => {},
+    onEvent: () => () => {}, verdictsSupported: false, routeMessage: async () => {},
     sendDirect: async (_to, _type, payload) => { sent = payload; return true; },
   };
   const now = 1_700_000_000_000;

@@ -46,6 +46,7 @@ function mkManager({ neverRoot = true } = {}) {
   const sent = [];
   const dht = {
     getSelfId: () => SELF,
+    verdictsSupported: false,   // audited: returns a push-count / undefined, never a verdict
     routeMessage: (target, type, payload) => { sent.push({ target, type, payload }); },
     findKClosest: () => [],
     lookup: async () => null,

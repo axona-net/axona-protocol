@@ -30,6 +30,7 @@ function mk({ neighbours }) {
   const dht = {
     getSelfId: () => SELF,
     onRoutedMessage: () => {},
+    verdictsSupported: false,   // audited: returns a push-count / undefined, never a verdict
     routeMessage: (_target, type, _payload) => { if (type === T_PUB) pubs.push(1); },
     neighbors: () => nbrs,
     bridgeId: () => null,

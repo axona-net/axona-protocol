@@ -25,6 +25,7 @@ function mk({ seedCache = true } = {}) {
   const dht = {
     getSelfId: () => SELF,
     onRoutedMessage: () => {},
+    verdictsSupported: false,   // audited: returns a push-count / undefined, never a verdict
     routeMessage: (target, type, payload) => { sent.push({ target, type, payload }); },
     neighbors: () => [], bridgeId: () => null, findKClosest: async () => [],
   };

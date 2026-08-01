@@ -87,6 +87,7 @@ function makeManager(selfBig, { neverRoot = false, meshed = true, ...opts } = {}
     neighbors: () => (meshed ? [selfBig ^ 0xABCn] : []),
     bridgeId: () => null,
     findKClosest: async () => [selfBig ^ 0xFFn],
+    verdictsSupported: false,   // audited: returns a push-count / undefined, never a verdict
     routeMessage: () => {},
   };
   const am = new AxonaManager({

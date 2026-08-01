@@ -51,6 +51,7 @@ class Fabric {
     const dht = {
       getSelfId: () => idBig,
       onRoutedMessage: (type, h) => handlers.set(type, h),
+      verdictsSupported: false,   // audited: returns a push-count / undefined, never a verdict
       routeMessage: (target, type, payload) => {
         const dest = self._closestAlive(target);
         if (dest === null) return;
@@ -119,6 +120,7 @@ async function main() {
     const dht = {
       getSelfId: () => self,
       onRoutedMessage: () => {},
+      verdictsSupported: false,   // audited: returns a push-count / undefined, never a verdict
       routeMessage: (target, type, payload) => { sent.push({ target, type, payloadStr: JSON.stringify(payload ?? {}) }); },
       findKClosest: async () => [outHeir, heir],   // out-of-region candidate listed CLOSER
       neighbors: () => [idHex(rootAlive), idHex(heir)],   // rootAlive IS a live neighbour; rootDead is NOT

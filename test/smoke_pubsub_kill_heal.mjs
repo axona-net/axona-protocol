@@ -25,6 +25,7 @@ function mkManager({ closest }) {
   const dht = {
     getSelfId: () => selfId,
     onRoutedMessage: () => {},
+    verdictsSupported: false,   // audited: returns a push-count / undefined, never a verdict
     routeMessage: (target, type, payload) => { sends.push({ target, type, payload }); },
     neighbors: () => [],
     async findKClosest() { return closest != null ? [closest] : []; },

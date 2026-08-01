@@ -52,6 +52,7 @@ class Sweep {
       getSelfId: () => me,
       neighbors: () => [...(self.adj.get(me) || [])],
       onRoutedMessage: (type, h) => handlers.set(type, h),
+      verdictsSupported: false,   // audited: returns a push-count / undefined, never a verdict
       routeMessage: (target, type, payload, meta = {}) => {
         if (self.sent++ > self.BUDGET) { self.stormed = true; return; }   // MAX_HOPS-exhaustion analogue
         if (type === 'pubsub:rootbeacon') self.beaconPkts++;

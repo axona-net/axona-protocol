@@ -35,6 +35,7 @@ function mk() {
     getSelfId: () => 1n,
     onRoutedMessage: () => {}, onDirectMessage: () => {}, onEvent: () => () => {},
     sendDirect: async (target, type, payload) => { sent.push({ target, type, payload }); return true; },
+    verdictsSupported: false,   // audited: returns a push-count / undefined, never a verdict
     routeMessage: async () => {},
     findKClosest: undefined,
   };

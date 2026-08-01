@@ -39,6 +39,7 @@ function makeManager() {
     getSelfId:        () => big(ROOT),
     onRoutedMessage:  () => {},
     onDirectMessage:  () => {},
+    verdictsSupported: false,   // audited: returns a push-count / undefined, never a verdict
     routeMessage:     () => {},
     sendDirect:       async (to, type, body) => { sent.push({ to, type, body }); return true; },
     findKClosest:     undefined,
@@ -176,6 +177,7 @@ function makeManagerK(kClosestFor) {
     getSelfId:       () => big(ROOT),
     onRoutedMessage: () => {},
     onDirectMessage: () => {},
+    verdictsSupported: false,   // audited: returns a push-count / undefined, never a verdict
     routeMessage:    () => {},
     sendDirect:      async (to, type, body) => { sent.push({ to, type, body }); return true; },
     findKClosest:    async (topicId, K) => kClosestFor(topicId).slice(0, K),
@@ -257,6 +259,7 @@ async function testAdoptRespectsMaxDirectSubs() {
   const sent = [];
   const dht = {
     getSelfId: () => big(ROOT), onRoutedMessage: () => {}, onDirectMessage: () => {},
+    verdictsSupported: false,   // audited: returns a push-count / undefined, never a verdict
     routeMessage: async () => {}, sendDirect: async (to, t, b) => { sent.push({ to }); return true; },
     findKClosest: undefined,
   };

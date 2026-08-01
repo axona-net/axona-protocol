@@ -31,6 +31,7 @@ function makeManager({ selfBig, findKClosest, lookup, onRoute }) {
   const dht = {
     getSelfId: () => selfBig,
     onRoutedMessage: (t, h) => handlers.set(t, h),
+    verdictsSupported: false,   // audited: returns a push-count / undefined, never a verdict
     routeMessage: (target, type, payload) => onRoute?.(target, type, payload),
     neighbors: () => [],
     bridgeId: () => null,

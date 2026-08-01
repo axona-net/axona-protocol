@@ -45,6 +45,7 @@ function makeManager(selfBig) {
     neighbors: () => [],
     bridgeId: () => null,
     findKClosest: async () => [selfBig ^ 0xFFn],
+    verdictsSupported: false,   // audited: returns a push-count / undefined, never a verdict
     routeMessage: (target, type, payload) => sent.push({ type, payload }),
   };
   const am = new AxonaManager({ dht, renewMs: 60_000, renewFastMs: 5_000, dropMs: 180_000 });

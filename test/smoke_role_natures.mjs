@@ -29,6 +29,7 @@ function mk({ neighbors = [], bridge = null, replicas = 2 } = {}) {
   const sends = []; const logs = []; const clock = { t: 1_000_000 };
   const dht = {
     getSelfId: () => SELF, onRoutedMessage: () => {},
+    verdictsSupported: false,   // audited: returns a push-count / undefined, never a verdict
     routeMessage: (target, type, payload) => sends.push({ target, type, payload }),
     neighbors: () => neighbors, bridgeId: () => bridge,
   };

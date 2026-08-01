@@ -36,7 +36,7 @@ function makeManager() {
   const sent = [];
   const dht = {
     getSelfId:       () => big(ROOT),
-    onRoutedMessage: () => {}, onDirectMessage: () => {}, routeMessage: () => {},
+    onRoutedMessage: () => {}, onDirectMessage: () => {}, verdictsSupported: false, routeMessage: () => {},
     sendDirect:      async (to, type, body) => { sent.push({ to, type, body }); return true; },
   };
   return { am: new AxonaManager({ dht }), sent };

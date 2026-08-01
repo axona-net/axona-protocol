@@ -45,6 +45,7 @@ function makeManager({ selfBig, ackDelayFor }) {
     neighbors: () => [],
     bridgeId: () => null,
     findKClosest: async () => [selfBig, selfBig ^ 0xFFn, selfBig ^ 0xFF00n],   // local table read
+    verdictsSupported: false,   // audited: returns a push-count / undefined, never a verdict
     routeMessage: (target, type, payload) => {
       if (type !== 'pubsub:handoff') return;
       state.sent++;

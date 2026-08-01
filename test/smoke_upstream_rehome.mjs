@@ -24,6 +24,7 @@ function makeManager({ selfBig }) {
   const dht = {
     getSelfId: () => selfBig,
     onRoutedMessage: () => {},
+    verdictsSupported: false,   // audited: returns a push-count / undefined, never a verdict
     routeMessage: (target, type, payload) => routed.push({ target, type, payload }),
     neighbors: () => [],
     bridgeId: () => null,

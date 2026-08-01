@@ -39,6 +39,7 @@ function mk() {
   const dht = {
     getSelfId: () => SELF,
     onRoutedMessage: () => {},
+    verdictsSupported: false,   // audited: returns a push-count / undefined, never a verdict
     routeMessage: (target, type, payload) => sends.push({ target, type, payload }),
     neighbors: () => [idHex(REG | 0xaa0n), idHex(REG | 0xaafn)],
     bridgeId: () => null,

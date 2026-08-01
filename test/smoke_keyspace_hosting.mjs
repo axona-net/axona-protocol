@@ -23,6 +23,7 @@ const check = (label, cond) => { if (cond) { console.log(`  ✓ ${label}`); pass
 function makeMgr(selfId) {
   const dht = {
     getSelfId: () => selfId,
+    verdictsSupported: false,   // audited: returns a push-count / undefined, never a verdict
     routeMessage: async () => {},
     onRoutedMessage: () => {},
     onDirectMessage: () => {},

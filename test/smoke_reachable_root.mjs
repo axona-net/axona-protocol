@@ -39,6 +39,7 @@ function mkManager({ neighbors = [], bridge = null, closest = GHOST } = {}) {
   const dht = {
     getSelfId: () => SELF,
     onRoutedMessage: () => {},
+    verdictsSupported: false,   // audited: returns a push-count / undefined, never a verdict
     routeMessage: () => {},                 // black hole → no adoption, ever
     neighbors: () => neighbors,
     bridgeId: () => bridge,

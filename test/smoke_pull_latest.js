@@ -28,7 +28,7 @@ function setup(clockRef) {
   const sent = [];
   const dht = {
     getSelfId: () => 1n, onRoutedMessage: () => {}, onDirectMessage: () => {},
-    onEvent: () => () => {}, routeMessage: async () => {},
+    onEvent: () => () => {}, verdictsSupported: false, routeMessage: async () => {},
     sendDirect: async (to, type, payload) => { sent.push({ to, type, payload }); return true; },
   };
   const am = new AxonaManager({ dht, now: () => clockRef.t });

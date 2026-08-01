@@ -56,6 +56,7 @@ class MockNet {
       onDirectMessage: (t, h) => direct.set(t, h),
       onEvent: () => () => {},
       findKClosest: async (target, K) => net.kclosest(target, K),
+      verdictsSupported: false,   // audited: returns a push-count / undefined, never a verdict
       routeMessage: async (target, type, payload) => { net.sends.push({ from: toHex(selfId), target: 'routed', type, payload }); },
       sendDirect: async (target, type, payload) => {
         net.sends.push({ from: toHex(selfId), target: toHex(target), type, payload });

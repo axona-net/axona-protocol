@@ -34,6 +34,7 @@ function newAM() {
   const dht = {
     getSelfId: () => SELF,
     onRoutedMessage: () => {},
+    verdictsSupported: false,   // audited: returns a push-count / undefined, never a verdict
     routeMessage: (_t, type, payload) => sent.push({ type, payload }),
     neighbors: () => [], bridgeId: () => null, findKClosest: async () => [],
   };

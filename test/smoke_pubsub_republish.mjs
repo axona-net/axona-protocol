@@ -31,6 +31,7 @@ async function makePeer(network) {
   const dht = {
     getSelfId:       () => peer.getNodeId(),
     findKClosest:    (...a) => peer.findKClosest(...a),
+    verdictsSupported: true,   // audited: resolves a routing verdict ({consumed:…})
     routeMessage:    (...a) => peer.routeMessage(...a),
     sendDirect:      async (pid, t, p) => {
       if (pid === peer.getNodeId()) {

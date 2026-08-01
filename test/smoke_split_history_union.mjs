@@ -56,6 +56,7 @@ class DivergentFabric {
     const dht = {
       getSelfId: () => idBig,
       onRoutedMessage: (type, h) => handlers.set(type, h),
+      verdictsSupported: false,   // audited: returns a push-count / undefined, never a verdict
       routeMessage: (target, type, payload) => self._walk(idBig, target, type, payload),
       neighbors: () => [...rec.neighbors].filter((n) => self.nodes.get(n)?.alive).map((n) => idHex(n)),
       bridgeId: () => null,

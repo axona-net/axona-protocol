@@ -38,7 +38,7 @@ const CEIL_MS = 48 * 60 * 60 * 1000;
 function stubDht() {
   return {
     getSelfId: () => 1n, onRoutedMessage: () => {}, onDirectMessage: () => {},
-    onEvent: () => () => {}, sendDirect: async () => true, routeMessage: async () => {},
+    onEvent: () => () => {}, sendDirect: async () => true, verdictsSupported: false, routeMessage: async () => {},
   };
 }
 function mkManager() { return new AxonaManager({ dht: stubDht(), now: () => T }); }

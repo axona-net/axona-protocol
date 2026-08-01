@@ -24,7 +24,7 @@ const REG = 0x87n << 248n, idHex = (b) => b.toString(16).padStart(66, '0');
 const SELF = REG | 0x11n, OPEN = REG | 0xa1n, OWNED = REG | 0xb2n, EMPTY = REG | 0xc3n, NOTROOT = REG | 0xd4n;
 
 function mk() {
-  const dht = { getSelfId: () => SELF, onRoutedMessage: () => {}, routeMessage: () => {}, neighbors: () => [], bridgeId: () => null };
+  const dht = { getSelfId: () => SELF, onRoutedMessage: () => {}, verdictsSupported: false, routeMessage: () => {}, neighbors: () => [], bridgeId: () => null };
   const am = new AxonaManager({ dht, now: () => 1_700_000_000_000 }); am.nodeId = SELF;
   return am;
 }

@@ -74,6 +74,7 @@ class Fab {
   add(idBig){ const h=new Map(); const self=this; const me=idBig;
     const dht={ getSelfId:()=>me, neighbors:()=>[...(self.adj.get(me)||[])],
       onRoutedMessage:(t,fn)=>h.set(t,fn),
+      verdictsSupported: false,   // audited: returns a push-count / undefined, never a verdict
       routeMessage:(tg,t,p,m={})=>{ if(self.sent++>2_000_000) return; const d=self._term(me,tg); if(d===null) return;
         self.queue.push({dest:d,type:t,payload:p,meta:{targetId:tg,isTerminal:true,hopCount:1,fromId:m.fromId??idHex(me)}}); } };
     const am=new AxonaManager({dht,now:()=>self.clock,renewMs:60000,renewFastMs:5000,dropMs:180000,beaconFanout:0,beaconLayers:1});

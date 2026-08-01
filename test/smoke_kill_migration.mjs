@@ -16,7 +16,7 @@ const SELF=REG|0x011n, TOPIC=REG|0xabcn, HEIR=REG|0xab0n, PARENT=REG|0xab1n;
 
 function mk({neighbors=[]}={}){
   const sends=[]; const clock={t:1_000_000};
-  const dht={ getSelfId:()=>SELF, onRoutedMessage:()=>{}, routeMessage:(target,type,payload)=>sends.push({target,type,payload}),
+  const dht={ getSelfId:()=>SELF, onRoutedMessage:()=>{}, verdictsSupported: false, routeMessage:(target,type,payload)=>sends.push({target,type,payload}),
     neighbors:()=>neighbors, bridgeId:()=>null, async findKClosest(){ return [idHex(HEIR)]; } };
   const am=new AxonaManager({dht, now:()=>clock.t}); am.nodeId=SELF;
   return {am,sends,clock};

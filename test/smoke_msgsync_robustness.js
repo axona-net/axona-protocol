@@ -48,6 +48,7 @@ function mockMgr() {
     onDirectMessage: (t, h) => handlers.set(t, h),
     onEvent: () => () => {},
     findKClosest: async () => [SELF],
+    verdictsSupported: false,   // audited: returns a push-count / undefined, never a verdict
     routeMessage: async () => {},
     sendDirect: async (t, type, p) => { sent.push({ t, type, p }); return true; },
   };

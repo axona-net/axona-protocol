@@ -52,6 +52,7 @@ class Fabric {
     const dht = {
       getSelfId: () => idBig,
       onRoutedMessage: (t, h) => handlers.set(t, h),
+      verdictsSupported: false,   // audited: returns a push-count / undefined, never a verdict
       routeMessage: (target, type, payload) => {
         const dest = self._closestAlive(target);
         if (dest === null) return;

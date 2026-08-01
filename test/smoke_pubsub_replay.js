@@ -34,6 +34,7 @@ function makeManager() {
     getSelfId:       () => big(SELF),
     onRoutedMessage: () => {},
     onDirectMessage: () => {},
+    verdictsSupported: false,   // audited: returns a push-count / undefined, never a verdict
     routeMessage:    () => {},
     sendDirect:      async () => true,
     findKClosest:    undefined,

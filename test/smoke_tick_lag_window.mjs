@@ -45,7 +45,7 @@ const TICK = 5_000;
 function mk() {
   const clock = { t: 1_000_000 };
   const dht = {
-    getSelfId: () => SELF, onRoutedMessage: () => {}, routeMessage: () => {},
+    getSelfId: () => SELF, onRoutedMessage: () => {}, verdictsSupported: false, routeMessage: () => {},
     neighbors: () => [PEER], bridgeId: () => null, findKClosest: async () => [PEER],
   };
   const am = new AxonaManager({ dht, now: () => clock.t, refreshIntervalMs: TICK });

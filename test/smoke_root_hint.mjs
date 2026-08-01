@@ -28,6 +28,7 @@ function mkManager({ closest, findKClosestCalls, lookupCalls }) {
   const dht = {
     getSelfId: () => selfId,
     onRoutedMessage: () => {},
+    verdictsSupported: false,   // audited: returns a push-count / undefined, never a verdict
     routeMessage: () => {},
     neighbors: () => [],
     async findKClosest(target, K) { findKClosestCalls.push({ target, K }); return closest != null ? [closest] : []; },

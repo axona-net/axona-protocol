@@ -34,6 +34,7 @@ const sends = [];
 const CLOSER = (0x42n << 248n) | 0x800n;   // ^TOPIC = 0x2bc  <  self ^TOPIC = 0xabc
 const dht = {
   getSelfId: () => SELF,
+  verdictsSupported: false,   // audited: returns a push-count / undefined, never a verdict
   routeMessage: (target, type, payload) => { sends.push({ type, payload }); },
   onRoutedMessage: () => {},
   neighbors: () => [CLOSER],

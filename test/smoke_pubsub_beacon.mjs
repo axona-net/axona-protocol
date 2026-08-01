@@ -42,6 +42,7 @@ class GappyFabric {
       // while routing itself still uses self.adj. Undefined → kernel skips beacons.
       ...(self.beacons ? { neighbors: () => [...(self.adj.get(me) || [])] } : {}),
       onRoutedMessage: (type, h) => handlers.set(type, h),
+      verdictsSupported: false,   // audited: returns a push-count / undefined, never a verdict
       routeMessage: (target, type, payload, meta = {}) => {
         const dest = self._greedyTerminus(me, target);
         if (dest === null) return;

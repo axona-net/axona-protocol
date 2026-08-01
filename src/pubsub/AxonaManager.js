@@ -108,23 +108,37 @@ export class AxonaManager {
         || typeof dht.onRoutedMessage !== 'function') {
       throw new TypeError('AxonaManager: dht with routeMessage + getSelfId + onRoutedMessage required');
     }
-    // CAPABILITY DECLARATION — NOT YET ENFORCED AT CONSTRUCTION.
+    // CAPABILITY IS DECLARED AT CONSTRUCTION — once, loudly, or not at all.
     //
-    // Aster is right that a missing `dht.verdictsSupported` should be a
-    // once-loud BUILD error, not a per-send 'violation' that logs forever while
-    // silently crediting nothing. I implemented the constructor throw and
-    // MEASURED it: 45 of 127 test files fail, because their dht doubles do not
-    // declare. That is not mechanical churn — a double whose routeMessage
-    // returns something other than a verdict must declare FALSE, and blanket-
-    // declaring true would turn its sends into violations and mask exactly the
-    // regressions those tests exist to catch. It is the "make the doubles pass"
-    // mistake with the sign flipped.
+    // v4.58.0 first made a missing declaration a per-send 'violation'. That is
+    // fail-closed but it is NOT the contract the council approved: an adapter
+    // that never declares would emit one ERROR per message forever and still be
+    // silently uncreditable — a log storm standing in for a build error. Aster,
+    // council 2026-08-01: "not the once-loud declared-capability contract we
+    // approved." A declaration missing at build time is a build failure.
     //
-    // So it ships as its own commit, with every double audited for what it
-    // actually returns. Until then a missing declaration is still FAIL-CLOSED
-    // (dispatch.js classifies it 'violation' → credits nothing, unpins nothing)
-    // and the production adapter DOES declare (AxonaPeer.js). The remaining gap
-    // is loudness, not safety.
+    // Turning this on required auditing all 82 test doubles, because the whole
+    // hazard is that blanket-declaring `true` to silence a throw would convert
+    // every send from a non-reporting double into a violation and mask the very
+    // regressions those tests exist to catch — the "make the doubles pass"
+    // mistake with the sign flipped. Audited per file by what routeMessage
+    // actually RESOLVES: two report verdicts (one returns {consumed:true}, one
+    // delegates to the real AxonaPeer.routeMessage) and declare true; every
+    // other returns a push-count or undefined and declares false, which is the
+    // honest answer and costs them nothing — a non-reporting adapter simply
+    // never credits a replica and never unpins a waypoint.
+    if (typeof dht.verdictsSupported !== 'boolean') {
+      throw new TypeError(
+        'AxonaManager: dht.verdictsSupported must be declared as a boolean.\n' +
+        '  true  — routeMessage resolves a routing verdict ({consumed:boolean,…}).\n' +
+        '  false — this adapter cannot report outcomes; it will never credit a\n' +
+        '          replica and never unpin a waypoint, and that is honest.\n' +
+        'Capability is DECLARED, never inferred from what the adapter happens to\n' +
+        'return — inferring it let test doubles set a production durability\n' +
+        'semantic. Do NOT declare true to silence this: if routeMessage does not\n' +
+        'resolve a verdict, true turns every send into a contract violation.\n' +
+        'See src/pubsub/dispatch.js.');
+    }
     this.dht    = dht;
     this.nodeId = dht.getSelfId();          // bigint, 264-bit
     this._now   = now;

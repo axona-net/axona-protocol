@@ -23,7 +23,7 @@ const T  = 1_700_000_000_000;
 function stubDht() {
   return {
     getSelfId: () => 1n, onRoutedMessage: () => {}, onDirectMessage: () => {},
-    onEvent: () => () => {}, sendDirect: async () => true, routeMessage: async () => {},
+    onEvent: () => () => {}, sendDirect: async () => true, verdictsSupported: false, routeMessage: async () => {},
   };
 }
 function entry(seq, ts) {

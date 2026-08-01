@@ -57,6 +57,7 @@ function mk({ reject = true } = {}) {
   const dht = {
     getSelfId: () => SELF,
     onRoutedMessage: () => {},
+    verdictsSupported: true,   // audited: resolves a routing verdict ({consumed:…})
     routeMessage: async (target, type) => {
       routed.push(type);
       if (reject) throw new Error('transport rejected');

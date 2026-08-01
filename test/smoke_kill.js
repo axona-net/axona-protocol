@@ -35,6 +35,7 @@ function stubDht() {
     onDirectMessage: () => {},
     onEvent:         () => () => {},
     sendDirect:      async () => true,
+    verdictsSupported: false,   // audited: returns a push-count / undefined, never a verdict
     routeMessage:    async () => {},
   };
 }
