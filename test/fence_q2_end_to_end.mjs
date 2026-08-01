@@ -173,7 +173,10 @@ async function killCase(label, report, declares, stillPending) {
   const kill = await buildKill({ topicId: idHex(topicId), msgId: env.msgId, ts: clock.t, seq: 2, identity: author });
   if (!am._pendingKill) am._pendingKill = new Map();
   am._pendingKill.set(env.msgId, { topicBig: topicId, kill, at: clock.t, tries: 0 });
-  await am._onKill({ topicId: idHex(topicId), kill }, { targetId: am.nodeId });
+  // isTerminal is REQUIRED: _topicDecision returns 'forward' without it and
+  // _onKill returns before reaching the gate — which is how 2d/2v were passing
+  // vacuously against code that never ran.
+  await am._onKill({ topicId: idHex(topicId), kill }, { targetId: am.nodeId, isTerminal: true });
   await new Promise(r => setImmediate(r));               // the confirm rides a .then()
   await new Promise(r => setImmediate(r));
   ok(`2${label[0]}. [${label}] the kill ${stillPending ? 'stays PENDING' : 'CONFIRMS'}`,
@@ -184,7 +187,20 @@ await killCase('consumed', CONSUMED, true, false);              // CONTROL
 await killCase('declared-false', VOID, false, true);
 await killCase('void-violation', VOID, true, true);
 
-// ── 3. LEAVE-HANDOFF EXEMPTION ─────────────────────────────────────────────
+// ── 3. LEAVE-HANDOFF EXEMPTION — FAIL-CLOSED HALF ONLY ────────────────────
+// HONEST LIMIT, MEASURED. _handoffAcked is populated by _onHandoffAck: a wire
+// ACK sent back BY THE HEIR. A single-node harness has no heir process, so the
+// consumed control cannot fire here no matter what the transport says — I
+// instrumented it and watched three pubsub:handoff messages dispatch and resolve
+// {consumed:true} while the set stayed empty, because the ack never comes from
+// anywhere. The dispatched()/REPLICATE path this section was written against is
+// only the LAST-GASP fallback, not the primary handoff.
+//
+// So the two fail-closed checks below are real but WEAKER than they look: they
+// prove the set stays empty, which it would also do if nothing ran. Proving the
+// exemption is EARNED requires a two-node harness where a real heir acks. Until
+// that exists this section is not evidence, and the file stays quarantined.
+//// ── 3. LEAVE-HANDOFF EXEMPTION ─────────────────────────────────────────────
 // A departing holder earns a PERMANENT retry exemption by being added to
 // _handoffAcked. There is no REPLICATE ack on this path, so dispatch is the only
 // evidence — which is exactly why it must be a VERIFIED dispatch. Until v4.58.0
