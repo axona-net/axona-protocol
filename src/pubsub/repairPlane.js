@@ -30,9 +30,10 @@ import { dispatchVerdict } from './dispatch.js';
 
 // Q2/C4 — classify what the TRANSPORT said about one send.
 //
-//   {consumed:true}  / 'consumed'  → 'consumed'    a routing verdict: delivered
-//   {consumed:false}              → 'failed'      a routing verdict: it did not
-//   anything else                 → 'unreported'  NOT a verdict at all
+//   {consumed:true}  / 'consumed'  → 'consumed'      a routing verdict: delivered
+//   {consumed:false}              → 'failed'        a routing verdict: it did not
+//   declared non-reporting        → 'unsupported'   honest; no evidence either way
+//   claims reporting, returns void→ 'violation'     contract breach; LOUD
 //
 // The third case is the one that matters and the one I got wrong first. A verdict
 // is recognised BY SHAPE — an object carrying a boolean `consumed`. Adapters
@@ -586,11 +587,15 @@ export const repairPlaneMethods = {
   // heartbeat + anti-entropy: co-hosting roots converge to the union of cache+tombstones,
   // and tombstones keep killed bodies suppressed. Called every tick AND eagerly the
   // instant a message is stamped or a kill lands, so no holder lags the cohort.
-  // Returns {attempted, verified, unreported, failed, reason?} — ALWAYS, including
-  // on every early return, so a caller gating a durability confirm on the shape
-  // does not crash on the paths that are hit most and matter least.
+  // Returns {attempted, verified, failed, unsupported, violation, reason?} —
+  // ALWAYS, and with EVERY key present, including on every early return, so a
+  // caller gating a durability confirm on the shape does not crash on the paths
+  // that are hit most and matter least. The early return previously carried a
+  // dead `unreported` key (a v4.57.0 leftover) and omitted unsupported/violation,
+  // so those read `undefined` on exactly the quiet paths.
   async _replicateRole(t, role, bridge, now, budget = null, idx = -1) {
-    const nil = (reason) => ({ attempted: 0, verified: 0, unreported: 0, failed: 0, reason });
+    const nil = (reason) =>
+      ({ attempted: 0, verified: 0, failed: 0, unsupported: 0, violation: 0, reason });
     if (!this._rootReplicas || !role || !role.isRoot) return nil('not-a-replicating-root');
     if (role.cache.length === 0 && role.tombstones.size === 0) return nil('nothing-to-preserve');
     let want;
@@ -620,7 +625,22 @@ export const repairPlaneMethods = {
     }
     const wantSet = new Set(want);
     for (const hex of [...role.replicas.keys()]) if (!wantSet.has(hex)) role.replicas.delete(hex);   // retire those no longer in the cohort
-    if (want.length === 0) return nil('no-cohort-available');
+    // role.attempted is pruned to the SAME cohort, for the same reason and on the
+    // same tick. It was described as "bounded" and was not: every failed,
+    // unsupported or violating target stayed forever, so a long-lived root under
+    // churn accumulated one entry per peer it had ever tried — a leak wearing a
+    // log's clothing (Aster, council 2026-08-01). A diagnostic that outgrows the
+    // thing it describes stops being a diagnostic.
+    if (role.attempted) {
+      for (const hex of [...role.attempted.keys()]) if (!wantSet.has(hex)) role.attempted.delete(hex);
+    }
+    if (want.length === 0) {
+      // No cohort: nothing is outstanding, so nothing may be remembered as
+      // outstanding. Returning early WITHOUT this left the last cohort's failures
+      // pinned for the lifetime of the role.
+      role.attempted?.clear();
+      return nil('no-cohort-available');
+    }
     // Delta gate (v4.24.1, #333): push the FULL state only when it changed, a
     // new cohort member needs seeding, or the anti-entropy backstop elapsed —
     // otherwise this tick's push is an empty KEEPALIVE (refreshes the backup's
@@ -667,15 +687,17 @@ export const repairPlaneMethods = {
     // The ledger records the EVIDENCE, per Aster's selection / dispatch / receipt
     // split. routeMessage reports failure by RESOLVING {consumed:false,...} rather
     // than throwing, so the verdict comes from the resolved value:
-    //   consumed:true    → recorded via:'consumed'    — verified dispatch
-    //   consumed:false   → NOT recorded               — explicit failure
-    //   rejection        → NOT recorded               — explicit failure
-    //   no report at all → recorded via:'unreported'  — honest ignorance
+    //   consumed:true    → role.replicas   via:'consumed'     — verified dispatch
+    //   consumed:false   → role.attempted  via:'failed'       — explicit failure
+    //   rejection        → role.attempted  via:'failed'       — explicit failure
+    //   declared none    → role.attempted  via:'unsupported'  — honest, no evidence
+    //   claimed, void    → role.attempted  via:'violation'    — contract breach, LOUD
     //
-    // 'unreported' is deliberate. Sim and test adapters return undefined; reading
-    // their silence as failure would fabricate a negative in the other direction,
-    // which is the Q1 mistake wearing a different hat. It is recorded, and it is
-    // never counted as verified.
+    // ONLY 'consumed' CREDITS. An earlier version of this comment — and of the
+    // code — recorded a void return as 'unreported' and credited it as a replica,
+    // which let test doubles set a production durability semantic. Both reviewers
+    // rejected the inference itself: capability is DECLARED, never guessed
+    // (v4.58.0). See dispatch.js.
     //
     // Pushes are issued together and classified afterwards. Serialising them would
     // put one routing round-trip per cohort member on the publish confirm path,

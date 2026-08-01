@@ -108,6 +108,23 @@ export class AxonaManager {
         || typeof dht.onRoutedMessage !== 'function') {
       throw new TypeError('AxonaManager: dht with routeMessage + getSelfId + onRoutedMessage required');
     }
+    // CAPABILITY DECLARATION — NOT YET ENFORCED AT CONSTRUCTION.
+    //
+    // Aster is right that a missing `dht.verdictsSupported` should be a
+    // once-loud BUILD error, not a per-send 'violation' that logs forever while
+    // silently crediting nothing. I implemented the constructor throw and
+    // MEASURED it: 45 of 127 test files fail, because their dht doubles do not
+    // declare. That is not mechanical churn — a double whose routeMessage
+    // returns something other than a verdict must declare FALSE, and blanket-
+    // declaring true would turn its sends into violations and mask exactly the
+    // regressions those tests exist to catch. It is the "make the doubles pass"
+    // mistake with the sign flipped.
+    //
+    // So it ships as its own commit, with every double audited for what it
+    // actually returns. Until then a missing declaration is still FAIL-CLOSED
+    // (dispatch.js classifies it 'violation' → credits nothing, unpins nothing)
+    // and the production adapter DOES declare (AxonaPeer.js). The remaining gap
+    // is loudness, not safety.
     this.dht    = dht;
     this.nodeId = dht.getSelfId();          // bigint, 264-bit
     this._now   = now;
@@ -697,6 +714,15 @@ export class AxonaManager {
       this._upstream.delete(topicBig);
       const s = this.mySubscriptions.get(topicBig);
       if (s) { s.interval = this.renewFastMs; s.lastRenewSent = null; }  // null = 'renew now', NOT a time (C2)
+      // THE ROLE STAMP TOO. _emitSubscribe stamps role.sync.lastRenewAt for every
+      // role, and OBLIGATIONS reads that stamp for CHILD, BACKUP and HOLDER — so
+      // resetting only the app subscription left every RELAY role reading
+      // DISCHARGED after a renewal that reached nobody. That is this file's own
+      // stated defect, left standing in the other half of the same funnel because
+      // I scoped it out as "keep it minimal" (Aster, council seq 110). Same
+      // sentinel, same meaning: null is 'renew now', never a time (C2).
+      const role = this.axonRoles.get(topicBig);
+      if (role?.sync) role.sync.lastRenewAt = null;
       this._log('info', 'pubsub:upstream-unpinned', {
         topic: idHex(topicBig).slice(0, 12), was: deadHex.slice(0, 12),
         detail: 'renewal did not reach its pinned waypoint — re-homing unpinned',

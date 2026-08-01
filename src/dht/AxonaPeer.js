@@ -2912,6 +2912,14 @@ export class AxonaPeer extends DHT {
     const selfId = peer.getNodeId();
 
     const dht = {
+      // CAPABILITY DECLARATION (v4.58.0). routeMessage below is async and reports
+      // its outcome by RESOLVING {consumed:true|false,...} — it never throws to
+      // signal a routing failure. Saying so explicitly is the contract: the
+      // pub/sub planes credit a replica, and unpin a dead waypoint, only on a
+      // verdict, and they will not INFER that this adapter reports one from the
+      // fact that it happens to. Undeclared is a construction error, not a
+      // degraded mode. See src/pubsub/dispatch.js.
+      verdictsSupported: true,
       getSelfId:    () => peer.getNodeId(),
       // Locally-known mesh neighbors (authenticated bound peers; synaptome as
       // fallback for transports without a bound list). Used by the root-beacon

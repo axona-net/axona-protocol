@@ -137,6 +137,64 @@ console.log('subscribe unpin — a renewal that reached nobody must not keep its
     s && s.interval === am.renewFastMs, String(s && s.interval));
 }
 
+// ── 2b. THE ROLE STAMP — THE HALF I LEFT UNDONE ────────────────────────────
+// Aster, council seq 110. _emitSubscribe stamps role.sync.lastRenewAt for EVERY
+// role (AxonaManager.js), and OBLIGATIONS reads that stamp for CHILD, BACKUP and
+// HOLDER. _unpinIfWaypointDead reset only sub.lastRenewSent — so a RELAY role
+// whose pinned renewal reached nobody still read DISCHARGED to the D0 pressure
+// system. That is the exact tried-vs-landed defect this file exists to fix, left
+// standing in the other half of the same funnel because I scoped it out as
+// "keep it minimal".
+//
+// Driven through a real non-app role: pubsubHost() with NO app subscription, so
+// mySubscriptions is empty and only the role stamp can carry the obligation.
+// refreshTick renews hosted topics through the same _sendSubscribe funnel.
+// A BACKUP is used because it is the non-app role the tick demonstrably renews:
+// repairPlane's _backupTopics loop calls the same _sendSubscribe funnel, and it
+// requires a role to exist (it deletes the topic otherwise). Both transitions
+// below are production methods on RootClaim — adoptChild is what forms a non-root
+// relay and writes the _upstream pin; becomeBackup is what syncEngine calls on a
+// REPLICATE ingest. Nothing here poke internals directly.
+function backupPinned(am, T, principal) {
+  const role = am._rootClaim.adoptChild(T, principal);   // non-root role + pin
+  am._rootClaim.becomeBackup(T, role, principal);        // → _backupTopics, tick renews it
+  role.cache.push({ msgId: 'm1', ts: am._now(), json: '{}' });
+  return role;
+}
+{
+  const T = REG | 0x2201n;
+  const { am, clock } = mk(EXHAUSTED);
+  const role = backupPinned(am, T, DEAD);
+  ok('2b-i. precondition — a real non-app BACKUP role, no app subscription',
+    !!role && !role.isRoot && am._backupTopics.has(T) && !am.mySubscriptions.has(T));
+  ok('2b-ii. precondition — pinned to the (about to be dead) principal',
+    (am._upstream.get(T) || [])[0] === DEAD, JSON.stringify(am._upstream.get(T)));
+
+  clock.t += TICK; await am.refreshTick();
+  await new Promise(r => setImmediate(r));
+  ok('2b-iii. the renewal stamped the ROLE (this is the obligation D0 reads)',
+    role.sync.lastRenewAt !== undefined, JSON.stringify(role.sync.lastRenewAt));
+  ok('2b-iv. the role stamp is reset to the null "renew now" sentinel — a ' +
+     'renewal that reached nobody must not read as discharged',
+    role.sync.lastRenewAt === null, JSON.stringify(role.sync.lastRenewAt));
+  ok('2b-v. …and the pin is dropped on the role path too',
+    !am._upstream.has(T), JSON.stringify(am._upstream.get(T)));
+  ok('2b-vi. the role is RETAINED and retryable — we re-home, we do not resign',
+    am.axonRoles.has(T) && am._backupTopics.has(T));
+}
+{
+  // CONTROL for the role path. Without it, "always null the role stamp" passes.
+  const T = REG | 0x2301n;
+  const { am, clock } = mk(CONSUMED);
+  const role = backupPinned(am, T, DEAD);
+  clock.t += TICK; await am.refreshTick();
+  await new Promise(r => setImmediate(r));
+  ok('2b-vii. CONTROL — a role renewal that WAS consumed keeps its stamp',
+    typeof role.sync.lastRenewAt === 'number', JSON.stringify(role.sync.lastRenewAt));
+  ok('2b-viii. CONTROL — …and keeps its pin',
+    (am._upstream.get(T) || [])[0] === DEAD, JSON.stringify(am._upstream.get(T)));
+}
+
 // ── 3. CAPABILITY IS DECLARED, NEVER INFERRED ──────────────────────────────
 // The v4.58.0 rule, applied to the read path. An adapter that does not report
 // verdicts must not have its silence read as "the pin is dead" — that would
@@ -149,6 +207,20 @@ console.log('subscribe unpin — a renewal that reached nobody must not keep its
   clock.t += TICK; await am.refreshTick();
   await new Promise(r => setImmediate(r));
   ok('3a. a declared-NON-reporting adapter never unpins — silence is not a death',
+    (am._upstream.get(T) || [])[0] === DEAD, JSON.stringify(am._upstream.get(T)));
+}
+{
+  // The OTHER no-evidence case, which section 3a did not cover: an adapter that
+  // CLAIMS to report verdicts and returns nothing. That is a contract violation
+  // — loud — but it is still not evidence the waypoint is dead, so it must keep
+  // the pin exactly as declared-non-reporting does. Requested by Aster.
+  const T = REG | 0x3101n;
+  const { am, clock } = mk(SILENT, { verdictsSupported: true });
+  subscribePinned(am, T);
+  clock.t += TICK; await am.refreshTick();
+  await new Promise(r => setImmediate(r));
+  ok('3b. a declared-REPORTING adapter returning VOID keeps the pin too — a ' +
+     'contract breach is loud, but it is not evidence of a dead waypoint',
     (am._upstream.get(T) || [])[0] === DEAD, JSON.stringify(am._upstream.get(T)));
 }
 {
@@ -179,10 +251,31 @@ console.log('subscribe unpin — a renewal that reached nobody must not keep its
     clock.t += TICK; await am.refreshTick();
     await new Promise(r => setImmediate(r));
   }
-  ok('4a. ten failing ticks emit O(ticks) subscribes, not a storm',
-    subs.length <= 20, `subs=${subs.length} over 10 ticks`);
+  // Aster: "<= 20" was loose enough to pass a real regression — a doubling to two
+  // sends per tick sits comfortably under it. The bound that is actually
+  // falsifiable is ONE SEND PER TICK: any re-entry, any retry-on-failure, any
+  // unpin that re-enters _sendSubscribe, immediately exceeds it.
+  //
+  // I first asserted EXACTLY ten and measured three, then instrumented rather
+  // than loosening it. The explanation is in repairPlane's renew loop: once
+  // unpinned the subscriber is unattached, and an unattached subscriber that is
+  // the closest reachable node CLAIMS THE ROOT (claimReachable) and stops
+  // renewing — correctly, since a root has no upstream to renew toward. In this
+  // single-node fence SELF is trivially closest, so it self-roots on tick 2.
+  // That is the designed re-home terminus, not a stall, and 4c pins it so the
+  // low number is explained rather than merely tolerated.
+  ok('4a. ten failing ticks never exceed ONE subscribe per tick — the bound a ' +
+     'spin or a retry-on-failure would break immediately',
+    subs.length <= 10, `subs=${subs.length} over 10 ticks (max 10)`);
   ok('4b. the pin stays absent — a failed UNPINNED renewal cannot unpin again',
     !am._upstream.has(T), JSON.stringify(am._upstream.get(T)));
+  // Pins WHY 4a is small, so the number is explained rather than tolerated. If a
+  // future change stops the re-home terminating here, 4a's count will climb and
+  // this check will say which assumption broke.
+  const role = am.axonRoles.get(T);
+  ok('4c. the re-home TERMINATED: unpinned and closest-reachable, the subscriber ' +
+     'claimed the root and correctly stopped renewing toward an upstream',
+    !!role && role.isRoot, JSON.stringify({ role: !!role, isRoot: role?.isRoot }));
 }
 
 console.log(`\n${fail ? `✗ ${fail} of ${n} failed` : `✓ all ${n} checks passed`}`);

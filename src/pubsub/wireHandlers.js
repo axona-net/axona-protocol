@@ -340,7 +340,7 @@ export const wireHandlersMethods = {
       // swallow the only evidence available and confirm regardless, so a publish
       // whose every replication push exhausted still reported durable.
       const rep = await this._replicateRole(role.topicId, role, bridge, this._now())
-        .catch((e) => ({ attempted: 1, verified: 0, unreported: 0, failed: 1, reason: String(e?.message || e) }));
+        .catch((e) => ({ attempted: 1, verified: 0, failed: 1, unsupported: 0, violation: 0, reason: String(e?.message || e) }));
       // v4.58.0 FAIL-CLOSED. Confirm requires POSITIVE evidence: attempted > 0
       // demands verified > 0. The previous gate also required unreported === 0,
       // which meant a publish with no dispatch evidence at all still confirmed —
@@ -671,7 +671,7 @@ export const wireHandlersMethods = {
         // effect, so a tombstone whose every replication push failed must not
         // report durable either.
         this._replicateRole(topicBig, role, bridge, this._now())
-          .catch((e) => ({ attempted: 1, verified: 0, unreported: 0, failed: 1, reason: String(e?.message || e) }))
+          .catch((e) => ({ attempted: 1, verified: 0, failed: 1, unsupported: 0, violation: 0, reason: String(e?.message || e) }))
           .then((rep) => {
             if (rep.attempted > 0 && rep.verified === 0) {
               this._log('warn', 'pubsub:kill-replicate-all-failed', {

@@ -185,5 +185,95 @@ console.log('dispatch contract — a root records the evidence it has, not the h
     r && typeof r === 'object' && typeof r.verified === 'number', JSON.stringify(r));
 }
 
+// ── 5. role.attempted IS BOUNDED (v4.58.0 amendment) ───────────────────────
+// It was CALLED bounded and was not. Every failed / unsupported / violating
+// target stayed in the map forever, so a long-lived root under churn accumulated
+// one entry per peer it had ever tried — a leak wearing a log's clothing
+// (Aster, council 2026-08-01). Now pruned to the CURRENT cohort on the same tick
+// role.replicas is, and cleared when there is no cohort at all.
+//
+// Driven by CHURNING the cohort: findKClosest returns a different pair each
+// call, so without pruning the map grows by two per tick without limit.
+{
+  const clock = { t: 1_000_000 };
+  let gen = 0;
+  const dht = {
+    verdictsSupported: true,
+    getSelfId: () => SELF,
+    onRoutedMessage: () => {},
+    routeMessage: async () => EXHAUSTED(),          // every push fails → all land in `attempted`
+    // A fresh, disjoint cohort every call — the churn case.
+    findKClosest: async () => { gen++; return [idHex(REG | BigInt(0x1000 + gen * 2)),
+                                               idHex(REG | BigInt(0x1001 + gen * 2))]; },
+    neighbors: () => [NB1, NB2],
+    bridgeId: () => null,
+  };
+  const am = new AxonaManager({ dht, now: () => clock.t, rootReplicas: 2 });
+  am.nodeId = SELF; am.setLogSink(() => {});
+  const T = REG | 0x9001n;
+  am.pubsubSubscribe(T); am._becomeRoot(T);
+  am.axonRoles.get(T).cache.push({ msgId: 'm1', ts: clock.t, json: '{}' });
+
+  for (let i = 0; i < 12; i++) { clock.t += TICK; await am.refreshTick(); }
+  const role = am.axonRoles.get(T);
+  ok('5a. after 12 ticks with a fully-churning cohort, attempted holds at most ' +
+     'the cohort size — it does not accumulate one entry per peer ever tried',
+    role.attempted.size <= 2, `attempted=${role.attempted.size} after 12 churned ticks`);
+  ok('5b. …and what it holds is the CURRENT cohort, not history',
+    [...role.attempted.keys()].every(h => h.endsWith((0x1000 + gen * 2).toString(16)) ||
+                                          h.endsWith((0x1001 + gen * 2).toString(16))),
+    JSON.stringify([...role.attempted.keys()].map(h => h.slice(-4))));
+}
+{
+  // No cohort at all: nothing is outstanding, so nothing may be REMEMBERED as
+  // outstanding. The early return used to leave the last cohort's failures
+  // pinned for the lifetime of the role.
+  const clock = { t: 1_000_000 };
+  let empty = false;
+  const dht = {
+    verdictsSupported: true,
+    getSelfId: () => SELF,
+    onRoutedMessage: () => {},
+    routeMessage: async () => EXHAUSTED(),
+    findKClosest: async () => (empty ? [] : [NB1, NB2]),
+    neighbors: () => [],
+    bridgeId: () => null,
+  };
+  const am = new AxonaManager({ dht, now: () => clock.t, rootReplicas: 2 });
+  am.nodeId = SELF; am.setLogSink(() => {});
+  const T = REG | 0x9101n;
+  am.pubsubSubscribe(T); am._becomeRoot(T);
+  am.axonRoles.get(T).cache.push({ msgId: 'm1', ts: clock.t, json: '{}' });
+  // Driven through _replicateRole directly rather than the tick: replication is
+  // PACED, so a fixed number of ticks does not reliably reach the push and the
+  // precondition would be establishing nothing. Section 4 uses the same handle.
+  const role = am.axonRoles.get(T);
+  await am._replicateRole(T, role, null, clock.t += TICK);
+  ok('5c. precondition — failures were recorded while a cohort existed',
+    role.attempted.size > 0, `attempted=${role.attempted.size}`);
+  empty = true;
+  await am._replicateRole(T, role, null, clock.t += TICK);
+  ok('5d. the cohort empties → attempted is CLEARED, not left pinned for the ' +
+     'lifetime of the role',
+    role.attempted.size === 0, `attempted=${role.attempted.size}`);
+}
+
+// ── 6. EVERY RETURN CARRIES EVERY KEY ──────────────────────────────────────
+// The early return used to emit a dead `unreported` (a v4.57.0 leftover) and
+// OMIT unsupported/violation, so a caller reading those got undefined on exactly
+// the quiet paths. Undefined is not zero, and `undefined > 0` is false — the
+// kind of silent asymmetry this whole version exists to remove.
+{
+  const { am, clock } = mk(CONSUMED);
+  const T = REG | 0x9201n;
+  am.pubsubSubscribe(T); am._becomeRoot(T);                    // root holding nothing
+  const r = await am._replicateRole(T, am.axonRoles.get(T), null, clock.t);
+  const keys = ['attempted', 'verified', 'failed', 'unsupported', 'violation'];
+  ok('6a. the early return carries every counter as a number',
+    keys.every(k => typeof r[k] === 'number'), JSON.stringify(r));
+  ok('6b. …and carries no dead `unreported` key',
+    !('unreported' in r), JSON.stringify(Object.keys(r)));
+}
+
 console.log(`\n${fail ? `✗ ${fail} of ${n} failed` : `✓ all ${n} checks passed`}`);
 process.exit(fail ? 1 : 0);
