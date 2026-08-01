@@ -319,7 +319,25 @@ export const wireHandlersMethods = {
     const msg = { json, publishTs: ts, msgId: env.msgId, seq };
     this._cachePush(role, { msgId: env.msgId, publishTs: ts, json, seq });
     this._fanout(role, msg, null);                                       // to subscribers
-    this._deliverToApp(role.topicId, json, env.msgId, ts, seq);          // local app (if subscribed)
+    // local app (if subscribed)
+    //
+    // KNOWN DEFECT, NOT YET FIXED — found by test/fence_q2_end_to_end.mjs.
+    // _deliverToApp CONFIRMS the pending entry (seeing your own message is the
+    // implicit ack, I-9), and it runs HERE, before the durability gate below. So
+    // a publisher subscribed to its own topic — the only way to verify a publish,
+    // since there is deliberately no publish-ack — confirms regardless of whether
+    // one byte reached the cohort. The v4.58.0 fail-closed gate is present,
+    // correct, counted, and BYPASSED on the most common path.
+    //
+    // The obvious fix (pass {confirm:false} here and let the single post-gate
+    // confirm below do it) was implemented and REVERTED: it turns every publish
+    // on a NON-REPORTING adapter into a permanent pending entry, and the tick's
+    // retry pump then re-sends the body forever — smoke_pubsub_kill caught it
+    // re-delivering a KILLED message to a late subscriber. Withholding a confirm
+    // is not free; it changes what the retry pump does. The real fix has to
+    // reconcile the durability gate with the retry pump and is design work, not
+    // a one-line change.
+    this._deliverToApp(role.topicId, json, env.msgId, ts, seq);
     // EAGER cohort distribution: push the freshly-stamped message to the K-closest the
     // instant it's stamped — a kill is just a publish with a side effect, so a publish
     // must reach the whole cohort exactly as a kill must, else a subscriber landing on a
