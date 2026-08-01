@@ -26,6 +26,7 @@ import {
 } from './constants.js';
 import { idHex, idBig, lc, isHexId } from './ids.js';
 import { makeRole } from './rootClaim.js';
+import { dispatchVerdict } from './dispatch.js';
 
 // Q2/C4 — classify what the TRANSPORT said about one send.
 //
@@ -39,28 +40,9 @@ import { makeRole } from './rootClaim.js';
 // the length of a sends[] array), and reading an unrecognised value as failure is
 // the same confident-false-negative as Q1, pointed the other way. Silence and
 // gibberish both mean "I do not know", never "it failed".
-// v4.58.0 — classify what the TRANSPORT said. CAPABILITY IS DECLARED, NEVER
-// INFERRED. This replaces a v4.57.0 classifier that read a void return as
-// 'unreported' and CREDITED it, which let test doubles set a production
-// durability semantic. Aster and Orion both rejected the inference itself
-// (council 2026-08-01).
-//
-//   {consumed:true} / 'consumed'   → 'consumed'      verified dispatch
-//   {consumed:false}               → 'failed'        a routing verdict: it did not
-//   adapter declares NO verdicts   → 'unsupported'   honest; credits nothing
-//   adapter CLAIMS verdicts, void  → 'violation'     contract breach; LOUD; fails closed
-//
-// Only 'consumed' ever credits role.replicas. The other three are recorded for
-// inspection and discharge nothing — there is deliberately no degraded mode,
-// because a mode that clears an obligation without evidence is the exact thing
-// this version exists to remove.
-const dispatchVerdict = (r, verdictsSupported) => {
-  if (r && typeof r === 'object' && typeof r.consumed === 'boolean') {
-    return r.consumed ? 'consumed' : 'failed';
-  }
-  if (r === 'consumed') return 'consumed';
-  return verdictsSupported === false ? 'unsupported' : 'violation';
-};
+// The classifier itself now lives in dispatch.js — the read path needs it too
+// (v4.58.0 subscribe unpin), and a second copy would be two semantics under one
+// name. Its header explains why 'consumed' credits here and 'failed' unpins there.
 
 export const repairPlaneMethods = {
   async refreshTick() {

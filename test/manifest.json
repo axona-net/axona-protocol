@@ -25,12 +25,17 @@
     {
       "file": "fence_dispatch_contract.mjs",
       "class": "default",
-      "note": "Q2/C4 — a root's replica ledger records dispatch EVIDENCE, not a call that failed to throw. routeMessage reports failure by RESOLVING {consumed:false}, so consumed:false and async rejection must never credit a replica, while an adapter that returns no verdict at all is 'unreported' and still credits. Verified RED (exhausted/terminal/rejection all recorded 2 replicas). Drives the real _syncPush/_route chain; only the transport's answer varies."
+      "note": "Q2/C4 — a root's replica ledger records dispatch EVIDENCE, not a call that failed to throw. routeMessage reports failure by RESOLVING {consumed:false}, so consumed:false and async rejection must never credit a replica. v4.58.0 REWROTE section 3 to the inverse of what it first asserted: an adapter that returns no verdict credits NOTHING, whether it declared verdictsSupported (contract violation, loud) or declared it cannot report (honest, still no evidence). Capability is declared, never inferred — the original 'unreported still credits' let test doubles set a production durability semantic, and both reviewers rejected the inference itself. Verified RED. Drives the real _syncPush/_route chain; only the transport's answer varies."
     },
     {
       "file": "fence_syncpush_rejection.mjs",
       "class": "default",
       "note": "CRASH SAFETY, not durability. v4.57.0 made _syncPush/_route return the transport promise; 13 fire-and-forget callers plus _send dropped it, and Node >=15 terminates on an unhandled rejection. Drives pubsubLeaveHandoff with a rejecting transport at both the root HANDOFF and last-gasp sites, asserts zero unhandledRejection and unchanged ACK/no-claim semantics. Includes a control that the harness itself detects an unhandled rejection. Requested by Aster+Orion (council 2026-07-31); found the exposure was the whole call graph, not the two sites diagnosed."
+    },
+    {
+      "file": "fence_subscribe_unpin.mjs",
+      "class": "default",
+      "note": "READ PATH, same defect family as Q2 — an obligation discharged on DISPATCH rather than arrival. _upstream pins a subscriber to the relay it renews toward, and until v4.58.0 only pubsubPeerDied (which needs a direct CHANNEL to the dead peer) or role teardown could drop it. A relay reached through routing could die unseen: the SUB exhausted in the mesh, _emitSubscribe stamped lastRenewSent anyway, and the pin outlived its target forever — worse, `attached` stayed true so the adaptive interval BACKED OFF toward RENEW_MS while reaching nobody. Only a reload recovered it (fresh peer, empty _upstream). Diagnosed by David from a wedged axona.chat window, 2026-08-01. Pins that an explicit routing failure — and ONLY an explicit routing failure, never a non-reporting adapter's silence — drops the pin and resets the renewal clock exactly as pubsubPeerDied does. Verified RED (pin survived, next SUB still carried the dead waypoint). Section 4 bounds the re-home against the unbounded-spin class that took the east bridge down on 2026-07-27."
     },
     {
       "file": "fence_replica_ledger.mjs",

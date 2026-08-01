@@ -48,6 +48,7 @@
 import { extractS2Prefix }   from '../utils/hexid.js';
 import { RootClaim, roleNature } from './rootClaim.js';
 import { idHex, idBig, lc, isHexId } from './ids.js';
+import { dispatchVerdict } from './dispatch.js';
 import { isRegionLockEnforced as _regionLock,
          T, RENEW_MS, RENEW_FAST_MS, DROP_MS, ROOT_REPLICAS, CACHE_MAX,
          CACHE_BYTES, MAX_DIRECT, MAX_VIA, VIA_HOP_BUDGET, BEACON_MS,
@@ -640,13 +641,76 @@ export class AxonaManager {
     const pinned = this._upstream.get(topicBig) || [];
     let via = pinned;
     if (!via.length) { const hint = this._rootHint_(topicBig); via = hint ? [hint] : []; }
-    this._emitSubscribe(topicBig, via.slice(0, MAX_VIA));
+    const sent = this._emitSubscribe(topicBig, via.slice(0, MAX_VIA));
+    // Only a PINNED renewal can teach us the pin is dead. An unpinned SUB routes
+    // toward the topic id itself, and its failure says the mesh is unreachable,
+    // not that a waypoint is stale — there is nothing to drop.
+    if (pinned.length) this._unpinIfWaypointDead(topicBig, pinned[0], sent);
+  }
+
+  // A subscriber must not renew forever toward a corpse.
+  //
+  // _upstream is the pin — the relay we renew toward, written by _onDeliver from
+  // the DELIVER `from`. Until v4.58.0 exactly two things dropped it:
+  // pubsubPeerDied (fires only for a peer we hold a CHANNEL to) and role
+  // teardown. A relay reached through ROUTING can die with neither firing: no
+  // channel closes, so pubsubPeerDied is silent, and _emitSubscribe stamps the
+  // renewal obligation discharged the moment the send is on the wire. The pin
+  // then outlives its target and nothing in the process can learn otherwise —
+  // worse, `attached` stays true, so the adaptive interval BACKS OFF toward
+  // RENEW_MS while reaching nobody. Only a reload recovered it, because a fresh
+  // peer starts with an empty _upstream (David, 2026-08-01, wedged axona.chat
+  // window; fence_subscribe_unpin).
+  //
+  // The assumption this corrects is stated in pubsubPeerDied's own header: "the
+  // next renewal routed toward it is popped at the live terminal ('reroute') and
+  // re-seats at the true root". True only when the via chain REACHES a live
+  // node. When the pinned relay is simply gone the SUB exhausts in the mesh, no
+  // terminal is reached, and nobody pops anything.
+  //
+  // Recovery is deliberately IDENTICAL to pubsubPeerDied's — drop the pin, snap
+  // the interval to the floor, null the stamp — so remote death heals exactly
+  // the way local death already does, on a path that has been in production
+  // since 2026-07-13 rather than a second one invented here.
+  //
+  // This is only expressible now: _route discarded routeMessage's promise until
+  // v4.57.0 and did not classify it until v4.58.0. Before this week a failed
+  // renewal returned undefined and there was nothing to check.
+  _unpinIfWaypointDead(topicBig, deadHex, sent) {
+    const declares = this.dht?.verdictsSupported;
+    Promise.resolve(sent).then((r) => {
+      const v = dispatchVerdict(r, declares);
+      if (v === 'violation') {
+        this._log('error', 'pubsub:dispatch-contract-violation', {
+          topic: idHex(topicBig).slice(0, 12), peer: deadHex.slice(0, 12),
+          detail: 'adapter declares verdictsSupported but returned no verdict on SUB',
+        });
+      }
+      // ONLY an explicit routing verdict of failure unpins. 'unsupported' and
+      // 'violation' mean "no evidence", and unpinning on no evidence would
+      // re-home every healthy subscriber on every non-reporting adapter on its
+      // very first renewal. See dispatch.js on why that is the same fail-closed
+      // rule that makes 'consumed' the only thing which credits a replica.
+      if (v !== 'failed') return;
+      const up = this._upstream.get(topicBig);
+      if (!up || up[0] !== deadHex) return;   // a DELIVER re-homed us mid-flight
+      this._upstream.delete(topicBig);
+      const s = this.mySubscriptions.get(topicBig);
+      if (s) { s.interval = this.renewFastMs; s.lastRenewSent = null; }  // null = 'renew now', NOT a time (C2)
+      this._log('info', 'pubsub:upstream-unpinned', {
+        topic: idHex(topicBig).slice(0, 12), was: deadHex.slice(0, 12),
+        detail: 'renewal did not reach its pinned waypoint — re-homing unpinned',
+      });
+    }).catch(() => {});   // _route cannot reject (v4.57.1); belt and braces
   }
   _emitSubscribe(topicBig, via) {
     const role = this.axonRoles.get(topicBig);
     const sub  = this.mySubscriptions.get(topicBig);
     const latest = !!(sub && sub.replayLatest);   // since:'latest' — newest entry rides this DELIVER, regardless of age
-    this._send(T.SUB, {
+    // The dispatch outcome is RETURNED, not discarded: _sendSubscribe is the only
+    // caller that knows whether the via it handed us came from the _upstream pin,
+    // so it is the only one that can act on a failure. See _unpinIfWaypointDead.
+    const sent = this._send(T.SUB, {
       topicId: idHex(topicBig), via, subscriberId: idHex(this.nodeId),
       since: this._sinceFor(topicBig),
       hw: role ? this._highWater(role) : 0,   // a cache-bearing relay advertises its history (§6)
@@ -664,6 +728,7 @@ export class AxonaManager {
     // One-shot: 'latest' delivers the current value once at subscribe, not on
     // every renewal — clear the flag after this first emit.
     if (latest) sub.replayLatest = false;
+    return sent;
   }
 
   // ── public API (contract surface) ────────────────────────────────────
