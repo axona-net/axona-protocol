@@ -195,40 +195,20 @@ await killCase('consumed', CONSUMED, true, false);              // CONTROL
 await killCase('declared-false', VOID, false, true);
 await killCase('void-violation', VOID, true, true);
 
-// ── 3. LEAVE-HANDOFF EXEMPTION — FAIL-CLOSED HALF ONLY ────────────────────
-// HONEST LIMIT, MEASURED. _handoffAcked is populated by _onHandoffAck: a wire
-// ACK sent back BY THE HEIR. A single-node harness has no heir process, so the
-// consumed control cannot fire here no matter what the transport says — I
-// instrumented it and watched three pubsub:handoff messages dispatch and resolve
-// {consumed:true} while the set stayed empty, because the ack never comes from
-// anywhere. The dispatched()/REPLICATE path this section was written against is
-// only the LAST-GASP fallback, not the primary handoff.
+// ── 3. LEAVE-HANDOFF EXEMPTION — MOVED, not deleted ───────────────────────
+// This section used to assert Aster's fourth requirement from a SINGLE node and
+// its consumed control could never fire: _handoffAcked is populated by
+// _onHandoffAck, a wire ACK sent back BY THE HEIR, and there was no heir process
+// to send one. I measured it — three pubsub:handoff messages dispatched and
+// resolved {consumed:true} with the set still empty. Its fail-closed halves
+// therefore proved less than they looked like, because "the set stays empty" is
+// also what happens when nothing runs.
 //
-// So the two fail-closed checks below are real but WEAKER than they look: they
-// prove the set stays empty, which it would also do if nothing ran. Proving the
-// exemption is EARNED requires a two-node harness where a real heir acks. Until
-// that exists this section is not evidence, and the file stays quarantined.
-//// ── 3. LEAVE-HANDOFF EXEMPTION ─────────────────────────────────────────────
-// A departing holder earns a PERMANENT retry exemption by being added to
-// _handoffAcked. There is no REPLICATE ack on this path, so dispatch is the only
-// evidence — which is exactly why it must be a VERIFIED dispatch. Until v4.58.0
-// the test was `dispatchVerdict(r) !== 'failed'`, a negative that let 'unknown'
-// into a success path (Aster named this line).
-async function handoffCase(label, report, declares, expectAcked) {
-  const author = await createAuthorIdentity();
-  const desc = DESC(`q2-handoff-${label}`);
-  const { am, clock, topicId, role } = await rootFor(desc, report, declares);
-  const env = await buildEnvelope({ topic: desc, message: { k: 1 }, seq: 1, identity: author, ts: clock.t });
-  await am._ingestPublish(role, JSON.stringify(env));    // history worth handing off
-  await am.pubsubLeaveHandoff();
-  ok(`3${label[0]}. [${label}] _handoffAcked ${expectAcked ? 'records the exemption' : 'stays EMPTY'}` +
-     (expectAcked ? '' : ' — no verified dispatch, no permanent exemption'),
-    (am._handoffAcked.size > 0) === expectAcked,
-    `acked=${am._handoffAcked.size}, want ${expectAcked ? '>0' : '0'}`);
-}
-await handoffCase('consumed', CONSUMED, true, true);            // CONTROL
-await handoffCase('declared-false', VOID, false, false);
-await handoffCase('void-violation', VOID, true, false);
+// It now lives in test/fence_handoff_two_node.mjs, which stands up two real
+// managers and a real routing fabric so the ack actually comes back. Deleting
+// the checks rather than leaving them here is deliberate: a section that cannot
+// distinguish correctly-withheld from never-ran is not evidence, and keeping it
+// green would misrepresent this file's coverage.
 
 // ── 5. THE TWO STATE MACHINES (Aster, council seq 123) ────────────────────
 // His spec, taken as the acceptance criteria:
