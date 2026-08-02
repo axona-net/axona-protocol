@@ -144,7 +144,19 @@ export class RootClaim {
     if (b.root === lc(idHex(m.nodeId))) return null;
     let rb; try { rb = idBig(b.root); } catch { return null; }
     if ((rb ^ topicBig) >= (m.nodeId ^ topicBig)) return null;   // never defer to a farther node (I-2)
-    if (b.verified) return b.root;             // network-confirmed via iterative lookup
+    // A verified record used to return HERE unconditionally — no liveness test,
+    // no freshness cut, bounded only by exp (2×ROOT_VERIFY_MS = 90s, 3× the
+    // remote-beacon window). Verification proves the root WAS the terminus at
+    // lookup time, not that it is alive now, and during the 2026-08-02 outage
+    // one such record steered every SUB and PUB into a dead relay for its full
+    // life (fence_pub_defers_to_corpse §3; council seq 146/147, option B).
+    // The same 1.5×BEACON_MS cut the loose clause has applies now. Safe for
+    // live roots: their plain beacons overwrite this record within ≤20s anyway
+    // (rootElection.js:63 sets unconditionally) — only a DEAD root leaves a
+    // verified record standing long enough to go stale. A stale record still
+    // falls through to the reachability test rather than to null: a root that
+    // is a live neighbour deserves the defer regardless of the record's age.
+    if (b.verified && (m._now() - b.at) < this._beaconMs * 1.5) return b.root;
     if (m._isReachableId(b.root)) return b.root;                 // channel-verified live neighbour
     if (!requireReachable && (m._now() - b.at) < this._beaconMs * 1.5) return b.root;
     return null;

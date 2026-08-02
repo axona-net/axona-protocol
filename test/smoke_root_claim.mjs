@@ -60,8 +60,16 @@ async function main() {
       rc.liveCloserRoot(T, { requireReachable: false }) === idHex(NEAR));
     check('…but the strict gate still refuses (channel evidence required)',
       rc.liveCloserRoot(T) === null);
+    // v4.59.0 (council 2026-08-02, option B): a verified record no longer beats
+    // reachability FOREVER — verification proves the root WAS the terminus at
+    // lookup time, not that it is alive now. During the 2026-08-02 prod outage
+    // one such record steered every SUB and PUB into a dead relay for its full
+    // 90s life. Fresh (< 1.5×BEACON_MS) still steers without channel evidence;
+    // stale falls through to the reachability test like everything else.
+    am._rootBeacons.set(T, { root: idHex(NEAR), at: now, exp: now + 90_000, verified: true });
+    check('FRESH verified pointer beats reachability (network-confirmed)', rc.liveCloserRoot(T) === idHex(NEAR));
     am._rootBeacons.set(T, { root: idHex(NEAR), at: now - 60_000, exp: now + 20_000, verified: true });
-    check('verified pointer beats reachability (network-confirmed)', rc.liveCloserRoot(T) === idHex(NEAR));
+    check('STALE verified pointer steers nobody (fence_pub_defers_to_corpse §3)', rc.liveCloserRoot(T) === null);
   }
 
   // ── become / promote / demote round-trip (I-1) ────────────────────────

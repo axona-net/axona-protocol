@@ -630,9 +630,74 @@ export class AxonaManager {
   // Defer a stranded terminal message to the beaconed root: demote any spurious
   // root claim I hold (and re-home under the true root so my subtree keeps
   // receiving), then forward the payload via-pinned to it.
+  //
+  // REMAINING CALLER: the SUB path only. Its gate (_liveCloserRoot with
+  // requireReachable defaulting true) admits only channel-verified neighbours
+  // or fresh verified records, so the demote here is evidence-based at defer
+  // time. PUB and KILL moved to _forwardToRoot (v4.59.0) — their looser gate
+  // means the named root may be a guess, and a guess must not move state.
   _deferToRoot(topicBig, type, payload, rootHex) {
     this._rootClaim.demote(topicBig, rootHex, 'defer-terminal');
     this._send(type, { ...payload, via: [rootHex] });
+  }
+
+  // Forward a one-shot message (PUB/KILL) to the beaconed root and let the
+  // VERDICT drive state — the C+D unified transition (council 2026-08-02, seq
+  // 146/147, + the atNode amendment). Until v4.59.0 this path was _deferToRoot,
+  // which demoted our role and re-pinned _upstream to the named root BEFORE the
+  // send: one publish handed to a dead relay both vanished ("consumed") and
+  // converted a working read path into a starved one (fence_pub_defers_to_corpse
+  // §1/§2/§4; the 2026-08-02 prod write outage). The contract now:
+  //
+  //   consumed AND atNode === the named root → the one piece of evidence that
+  //       justifies demote + re-home (the multi-hop live root that made a
+  //       strict-reachability gate wrong). Demote does the re-home.
+  //   consumed at ANOTHER node / atNode absent → NO mutation. The message is
+  //       safe with whoever took it; that node's own DELIVER re-homes us
+  //       organically via _onDeliver. Pinning toward a root that never touched
+  //       the message would re-create the corpse-pin this replaces.
+  //   failed → invalidate ONLY the matching beacon record (same root, same
+  //       `at` stamp — a late verdict must not erase a newer beacon). No
+  //       demote, no pin. The invalidation lands sub-second, inside the
+  //       publisher's early-resend pump window, so the SAME message's retries
+  //       arrive at a node that will now root and ingest properly. "First
+  //       lost, second saved" is the floor, not the expectation.
+  //   unsupported / violation → NO state transition (violation logs loudly).
+  //       Silence is never evidence, in either direction — the same fail-closed
+  //       rule as _unpinIfWaypointDead and the replica ledger.
+  _forwardToRoot(topicBig, type, payload, rootHex) {
+    const declares = this.dht?.verdictsSupported;
+    const rec = this._rootBeacons.get(topicBig);           // capture identity + at BEFORE the send
+    const sent = this._send(type, { ...payload, via: [rootHex] });
+    Promise.resolve(sent).then((r) => {
+      const v = dispatchVerdict(r, declares);
+      if (v === 'violation') {
+        this._log('error', 'pubsub:dispatch-contract-violation', {
+          topic: idHex(topicBig).slice(0, 12), peer: String(rootHex).slice(0, 12),
+          detail: `adapter declares verdictsSupported but returned no verdict on ${type}`,
+        });
+        return;
+      }
+      if (v === 'consumed') {
+        let atNode = null;
+        try {
+          const a = (r && typeof r === 'object') ? r.atNode : null;
+          if (a != null) atNode = lc(typeof a === 'bigint' ? idHex(a) : String(a));
+        } catch { /* malformed atNode = no evidence */ }
+        if (atNode !== lc(rootHex)) return;                // consumed elsewhere or unknown → fail closed
+        this._rootClaim.demote(topicBig, rootHex, 'defer-confirmed');
+        return;
+      }
+      if (v !== 'failed') return;                          // unsupported → no evidence → nothing moves
+      const cur = this._rootBeacons.get(topicBig);
+      if (cur && cur.root === lc(String(rootHex)) && (!rec || cur.at === rec.at)) {
+        this._rootBeacons.delete(topicBig);
+        this._log('info', 'pubsub:beacon-invalidated', {
+          topic: idHex(topicBig).slice(0, 12), was: String(rootHex).slice(0, 12),
+          detail: `${type} forwarded toward the beaconed root reached nobody — pointer dropped`,
+        });
+      }
+    }).catch(() => {});   // _route cannot reject (v4.57.1); belt and braces
   }
 
   _becomeRoot(topicBig, why = 'terminal') {

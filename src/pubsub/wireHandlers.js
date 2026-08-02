@@ -268,7 +268,11 @@ export const wireHandlersMethods = {
     // peer can arrive here via-pinned to me — the correction must still re-home it.
     {
       const closer = this._liveCloserRoot(topicBig, { requireReachable: false });
-      if (closer) { this._deferToRoot(topicBig, T.PUB, payload, closer); return 'consumed'; }
+      // _forwardToRoot, NOT _deferToRoot (v4.59.0): the loose gate means
+      // `closer` may be a guess, and the guess is tested by the forward itself
+      // — the verdict demotes us only on confirmed consumption at that root,
+      // and a failed forward invalidates the pointer instead of our state.
+      if (closer) { this._forwardToRoot(topicBig, T.PUB, payload, closer); return 'consumed'; }
     }
     let role = this.axonRoles.get(topicBig) || this._becomeRoot(topicBig, 'pub-terminal');
     // Admission refused (bridge fence): a declined PUB must be FORWARDED, never
@@ -752,7 +756,11 @@ export const wireHandlersMethods = {
     // competing root that the rest of the tree never consults.
     if (!this.axonRoles.has(topicBig)) {
       const closer = this._liveCloserRoot(topicBig, { requireReachable: false });
-      if (closer) { this._deferToRoot(topicBig, T.KILL, payload, closer); return 'consumed'; }
+      // _forwardToRoot, NOT _deferToRoot (v4.59.0) — same verdict-driven
+      // transition as PUB. A tombstone fed to a corpse is the kill-leak class
+      // all over again, with the extra sting that nothing ever retries a kill
+      // the app believes it already sent.
+      if (closer) { this._forwardToRoot(topicBig, T.KILL, payload, closer); return 'consumed'; }
     }
     const role = this.axonRoles.get(topicBig) || this._becomeRoot(topicBig, 'kill-terminal');
     if (!role) {

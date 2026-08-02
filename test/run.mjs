@@ -147,6 +147,13 @@ function runGuard(manifest) {
     if ((t.class === 'retired' || t.class === 'quarantined') && !t.reason) {
       problems.push(`${t.file}: class "${t.class}" requires a \`reason\``);
     }
+    // `hold` marks a quarantined fence that RUNS AND FAILS against a known,
+    // unfixed defect — quarantined only so the commit gate stays green while
+    // the fix is decided. It is meaningless on any other class: a default test
+    // that fails already reddens the gate, and a retired test is a decision.
+    if (t.hold && t.class !== 'quarantined') {
+      problems.push(`${t.file}: \`hold\` is only valid on class "quarantined" (found on "${t.class}")`);
+    }
   }
 
   const orphaned = [...disk].filter((f) => !declared.has(f));
@@ -167,6 +174,10 @@ function runGuard(manifest) {
     // Loud on every run, by design. Quarantine is a debt; a debt you stop
     // seeing is a debt you stop paying.
     console.log(`\n  ${byClass.quarantined} test(s) QUARANTINED — unrun, awaiting triage. Not a resting state.`);
+  }
+  const holds = manifest.tests.filter((t) => t.hold);
+  for (const t of holds) {
+    console.log(`\n  ⛔ RELEASE HOLD: ${t.file} — ${t.hold}`);
   }
 
   if (problems.length) {
@@ -311,6 +322,39 @@ if (!guardOk) {
   console.log('\n  ✗ manifest guard failed (see above) — disk and manifest disagree');
 }
 
-const ok = complete && guardOk && !failed.length && !timedOut.length;
-console.log(`\n${ok ? 'PASS' : 'FAIL'} — ${passed.length}/${tests.length} passed\n`);
+// ─────────────────────────── release holds ───────────────────────────
+// A held fence is quarantined-but-KNOWN-RED: it pins a live defect whose fix is
+// not yet approved. The suite above staying green is deliberate (commit gate);
+// what is NOT acceptable is the summary reading as releasable — "PASS 134/134"
+// with a known write-loss defect behind it is the same confident-false-negative
+// shape as the defects this suite exists to catch (Aster, council seq 146).
+//
+// So every held fence is RUN here, and its actual state is enforced:
+//   still RED  → the hold is confirmed and stamped into the final line.
+//   now GREEN  → the manifest is lying about the world. That FAILS the run:
+//                the fence must be promoted to `default` and the hold cleared,
+//                and the runner refuses to let the hold rot into a stale flag.
+// Exit code stays 0 on a confirmed hold — the hold gates RELEASE, not commits —
+// but the final line always carries it, so no reading of the output is clean.
+const held = manifest.tests.filter((t) => t.class === 'quarantined' && t.hold);
+let holdViolations = 0;
+const holdLines = [];
+if (held.length) {
+  console.log('\n──────── release holds ────────');
+  for (const t of held) {
+    const r = await runOne(t.file);
+    if (r.verdict === 'PASS') {
+      holdViolations++;
+      console.log(`  ✗ ${t.file} is GREEN but held — the defect it pins is fixed.`);
+      console.log(`    Promote it to class "default" and remove \`hold\`; a stale hold is a lie in the other direction.`);
+    } else {
+      holdLines.push(`${t.file} still RED`);
+      console.log(`  ⛔ ${t.file} still RED (${r.verdict.toLowerCase()}) — ${t.hold}`);
+    }
+  }
+}
+
+const ok = complete && guardOk && !failed.length && !timedOut.length && !holdViolations;
+const holdSuffix = holdLines.length ? `  ·  ⛔ RELEASE HOLD: ${holdLines.join('; ')}` : '';
+console.log(`\n${ok ? 'PASS' : 'FAIL'} — ${passed.length}/${tests.length} passed${holdSuffix}\n`);
 process.exit(ok ? 0 : 1);
