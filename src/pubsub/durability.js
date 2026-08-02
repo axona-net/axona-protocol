@@ -74,12 +74,40 @@ export class DurabilityLedger {
   // unreachable, and the attempt budget below was decoration. Aster caught that
   // the module documented a lifecycle it did not run (council 2026-08-01).
   //
-  // Topic-level is the RIGHT granularity, not a shortcut: _syncPush sends the
-  // role's whole snapshot, so one verified cohort push covers every message this
-  // root currently holds for the topic. A per-message verdict does not exist on
-  // the wire and inventing one would be the same overclaim in a new place.
-  recordTopic(topicBig, { verified = 0, attempted = 0 } = {}) {
-    const out = { verified: 0, expired: 0, pending: 0 };
+  // TOPIC-LEVEL IS THE RIGHT GRANULARITY *ONLY FOR A FULL SNAPSHOT*. My v4.58.1
+  // justification said "_syncPush sends the role's whole snapshot, so one
+  // verified cohort push covers every message this root holds" — true of a full
+  // push, and I wrote it unconditionally. It is false for the keepalive, and
+  // Aster found both ends of that:
+  //
+  //   · dispatched:false — a deferral (`deferred-no-budget`) sends NOTHING and
+  //     reports attempted:0, which record() reads as "no cohort exists" and
+  //     retires to EXPIRED. A message whose snapshot never reached the wire was
+  //     being declared permanently undurable because the tick was busy.
+  //   · snapshot:false — an empty keepalive still resolves consumed and still
+  //     counts verified>0, so it marked every pending message on the topic
+  //     durable while carrying none of them. Reachable in ordinary operation:
+  //     a new message whose eager full push fails, on a topic with a previously
+  //     credited replica, meets a keepalive on the very next tick.
+  //
+  // So this is FAIL-CLOSED ON THE EVIDENCE FLAGS, and deliberately at the ledger
+  // rather than the caller: _replicateRoots is not the only thing that could
+  // ever call this, and a rule enforced at one call site is a rule that lasts
+  // until the second call site. Anything that is not a dispatched full snapshot
+  // is not evidence about a message, in EITHER direction — it must not verify,
+  // and it must not burn an attempt. Silence still never advances anything.
+  recordTopic(topicBig, rep = {}) {
+    const { verified = 0, attempted = 0, dispatched = false, snapshot = false } = rep;
+    const out = { verified: 0, expired: 0, pending: 0, ignored: null };
+    // No dispatch, or a payload that carried no state → NO-OP. Counting the
+    // pending entries is still useful to the caller; changing them is not.
+    if (!dispatched || !snapshot) {
+      out.ignored = !dispatched ? 'no-dispatch' : 'no-snapshot';
+      for (const e of this._m.values()) {
+        if (e.state === 'pending' && e.topicBig === topicBig) out.pending++;
+      }
+      return out;
+    }
     for (const [msgId, e] of this._m) {
       if (e.state !== 'pending' || e.topicBig !== topicBig) continue;
       const st = this.record(msgId, { verified, attempted });

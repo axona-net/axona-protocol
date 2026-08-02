@@ -600,8 +600,29 @@ export const repairPlaneMethods = {
   // dead `unreported` key (a v4.57.0 leftover) and omitted unsupported/violation,
   // so those read `undefined` on exactly the quiet paths.
   async _replicateRole(t, role, bridge, now, budget = null, idx = -1) {
+    // `dispatched` and `snapshot` are the DURABILITY EVIDENCE FLAGS (Aster,
+    // council 2026-08-01). The counters alone cannot carry the distinction the
+    // ledger needs, and v4.58.1 proved it by getting both halves wrong:
+    //
+    //   dispatched:false — nothing was sent. A deferral is not a failed attempt.
+    //     nil() returns attempted:0, and DurabilityLedger.record reads
+    //     attempted===0 as "no cohort exists" → EXPIRED. So a message whose
+    //     snapshot was never put on the wire went TERMINAL-UNDURABLE purely
+    //     because the tick ran out of budget. That inverts fail-closed: absence
+    //     of evidence became evidence of failure.
+    //
+    //   snapshot:false — an empty KEEPALIVE went out. It still resolves
+    //     consumed, so it still counts verified>0 — and recordTopic then marked
+    //     every pending message on the topic durable although the payload
+    //     carried none of them. A keepalive proves a cohort member is reachable.
+    //     It cannot prove a body arrived that it did not contain.
+    //
+    // Both are the week's one defect again: an outcome that is not evidence,
+    // read as evidence. The flags exist so the ledger can refuse rather than
+    // infer — see DurabilityLedger.recordTopic, which is fail-closed on them.
     const nil = (reason) =>
-      ({ attempted: 0, verified: 0, failed: 0, unsupported: 0, violation: 0, reason });
+      ({ attempted: 0, verified: 0, failed: 0, unsupported: 0, violation: 0,
+         reason, dispatched: false, snapshot: false });
     if (!this._rootReplicas || !role || !role.isRoot) return nil('not-a-replicating-root');
     if (role.cache.length === 0 && role.tombstones.size === 0) return nil('nothing-to-preserve');
     let want;
@@ -718,7 +739,11 @@ export const repairPlaneMethods = {
         () => ({ hex, verdict: 'failed' }),                          // async reject
       );
     });
-    const out = { attempted: want.length, verified: 0, failed: 0, unsupported: 0, violation: 0 };
+    // dispatched:true — these pushes really went out, so the outcome IS evidence.
+    // snapshot carries whether the payload contained the role's state: only a
+    // FULL push can testify about a message. See the nil() header above.
+    const out = { attempted: want.length, verified: 0, failed: 0, unsupported: 0, violation: 0,
+                  dispatched: true, snapshot: !!full };
     // role.attempted is a BOUNDED DIAGNOSTICS RECORD, deliberately outside
     // role.replicas and outside every repair, confirm and handoff decision path.
     // It exists so the difference between "no evidence" and "evidence of failure"

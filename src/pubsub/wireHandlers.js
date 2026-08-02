@@ -366,7 +366,8 @@ export const wireHandlersMethods = {
       // swallow the only evidence available and confirm regardless, so a publish
       // whose every replication push exhausted still reported durable.
       const rep = await this._replicateRole(role.topicId, role, bridge, this._now())
-        .catch((e) => ({ attempted: 1, verified: 0, failed: 1, unsupported: 0, violation: 0, reason: String(e?.message || e) }));
+        .catch((e) => ({ attempted: 1, verified: 0, failed: 1, unsupported: 0, violation: 0,
+                         dispatched: true, snapshot: true, reason: String(e?.message || e) }));
       // v4.58.0 FAIL-CLOSED. Confirm requires POSITIVE evidence: attempted > 0
       // demands verified > 0. The previous gate also required unreported === 0,
       // which meant a publish with no dispatch evidence at all still confirmed —
@@ -377,7 +378,18 @@ export const wireHandlersMethods = {
       // what the cohort said. verified === 0 is not final — the tick replicates
       // again until the attempt budget runs out and the entry turns 'expired',
       // which is an honest terminal answer rather than a silent confirm.
-      this._durability.record(env.msgId, { verified: rep.verified, attempted: rep.attempted });
+      // SAME EVIDENCE RULE AS THE PERIODIC PATH (Aster, council 2026-08-01), applied
+      // here explicitly rather than assumed. Measured, so the reasoning is on record:
+      // this call site passes NO budget, so `deferred-no-budget` cannot fire and
+      // dispatched is always true here — but that is a property of this caller, not
+      // of the ledger, and it is exactly the kind of local truth I have twice written
+      // down as if it were global. The `snapshot` half is NOT unreachable, so the
+      // guard is real: only a dispatched FULL push may move a message's state.
+      // attempted === 0 with a real dispatch is still the singleton/no-cohort case
+      // and still terminal, deliberately and unchanged.
+      if (rep.dispatched !== false && rep.snapshot !== false) {
+        this._durability.record(env.msgId, { verified: rep.verified, attempted: rep.attempted });
+      }
       if (rep.attempted > 0 && rep.verified === 0) {
         this._log('warn', 'pubsub:replicate-all-failed', {
           topic: idHex(role.topicId).slice(0, 12), attempted: rep.attempted, failed: rep.failed,
