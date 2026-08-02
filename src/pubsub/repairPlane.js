@@ -633,11 +633,27 @@ export const repairPlaneMethods = {
          reason, dispatched: false, snapshot: false, noCohort: false, ...extra });
     if (!this._rootReplicas || !role || !role.isRoot) return nil('not-a-replicating-root');
     if (role.cache.length === 0 && role.tombstones.size === 0) return nil('nothing-to-preserve');
+    // WHY `want` IS EMPTY MATTERS (Aster, council 2026-08-01, on v4.58.3). I
+    // added the no-cohort TERMINAL last commit without asking how the cohort
+    // list becomes empty. There are four ways, and they are not one fact:
+    //
+    //   1. discovery answered, nobody eligible          → genuinely no cohort
+    //   2. discovery REJECTED, swallowed to []          → UNKNOWN, not "nobody"
+    //   3. no findKClosest; neighbours table empty      → genuinely no cohort
+    //   4. no findKClosest; neighbours() threw          → UNKNOWN, not "nobody"
+    //
+    // Cases 2 and 4 are a temporary failure to ASK. Reporting them as "the
+    // network has nobody" retires the message to permanently-undurable on the
+    // strength of a lookup that never returned — the same category error as the
+    // deferral and the keepalive, one layer further down, and this time in the
+    // branch I had just written. `discoveryFailed` keeps them retryable.
     let want;
+    let discoveryFailed = false;
     if (typeof this.dht.findKClosest === 'function') {
       let arr = [];
       // Over-fetch so region filtering has candidates to choose from.
-      try { arr = await this.dht.findKClosest(t, (this._rootReplicas + 1) * 2); } catch { arr = []; }
+      try { arr = await this.dht.findKClosest(t, (this._rootReplicas + 1) * 2); }
+      catch { arr = []; discoveryFailed = true; }
       const seen = new Set(); const inRegion = []; const outRegion = [];
       const topicRegion = lc(idHex(t)).slice(0, 2);
       for (const id of (Array.isArray(arr) ? arr : [])) {
@@ -656,7 +672,11 @@ export const repairPlaneMethods = {
       // place copy still beats no copy for eventual reconciliation.
       want = inRegion.concat(outRegion).slice(0, this._rootReplicas);
     } else {
-      want = this._nearestReachable(t, this._rootReplicas, bridge);            // sim/fallback: neighbour-based
+      // Case 4: neighbours() throwing used to propagate out of a function that
+      // catches everywhere else. Caught here so it lands as UNKNOWN rather than
+      // as a rejection some caller has to re-interpret.
+      try { want = this._nearestReachable(t, this._rootReplicas, bridge); }     // sim/fallback: neighbour-based
+      catch { want = []; discoveryFailed = true; }
     }
     const wantSet = new Set(want);
     for (const hex of [...role.replicas.keys()]) if (!wantSet.has(hex)) role.replicas.delete(hex);   // retire those no longer in the cohort
@@ -674,10 +694,15 @@ export const repairPlaneMethods = {
       // outstanding. Returning early WITHOUT this left the last cohort's failures
       // pinned for the lifetime of the role.
       role.attempted?.clear();
-      // TERMINAL, not "ask again": there is no cohort to dispatch to, so no
-      // future tick can produce evidence either. The ledger expires these as
-      // UNDURABLE — a true statement (this node holds the only copy) and the
-      // one leave() must be able to see.
+      // A FAILED LOOKUP IS NOT AN EMPTY NETWORK. noCohort:false keeps this a
+      // retryable no-dispatch: pending stays pending, no attempt is burned, and
+      // the next tick asks again. Only a lookup that ANSWERED may declare the
+      // terminal below.
+      if (discoveryFailed) return nil('cohort-lookup-failed');
+      // TERMINAL, not "ask again": discovery answered and there is nobody to
+      // dispatch to, so no future tick can produce evidence either. The ledger
+      // expires these as UNDURABLE — a true statement (this node holds the only
+      // copy) and the one leave() must be able to see.
       return nil('no-cohort-available', { noCohort: true });
     }
     // Delta gate (v4.24.1, #333): push the FULL state only when it changed, a

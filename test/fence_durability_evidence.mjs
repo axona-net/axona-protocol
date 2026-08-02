@@ -331,5 +331,133 @@ console.log('durability evidence — a deferral is not a failure, a keepalive is
     L2.recordOne('m6', { verified: 1, attempted: 1, dispatched: true, snapshot: true }) === 'verified');
 }
 
+// ── 6. A FAILED LOOKUP IS NOT AN EMPTY NETWORK ────────────────────────────
+// ASTER, ROUND 3 (on v4.58.3). I added the no-cohort TERMINAL last commit
+// without asking how the cohort list becomes empty. _replicateRole swallows a
+// findKClosest rejection into `arr = []`, so a temporary discovery failure
+// arrived at the same branch as "the network genuinely has nobody" and retired
+// the message to permanently-undurable. Same category error as the deferral and
+// the keepalive — unavailable discovery promoted to a terminal network fact —
+// this time inside the branch I had just written to fix the previous one.
+//
+// THE ENUMERATION, which is what I told council I would start doing instead of
+// reasoning about the class. `want` ends up empty in four ways:
+//   1. discovery answered, nobody eligible       → genuinely no cohort  (6c)
+//   2. discovery REJECTED, swallowed to []       → UNKNOWN, retryable   (6a/6b)
+//   3. no findKClosest, neighbours table empty   → genuinely no cohort  (6d)
+//   4. no findKClosest, neighbours() threw       → UNKNOWN, retryable   (6e)
+// Aster named case 2. Cases 3 and 4 came out of writing the list; 4 was also an
+// uncaught throw escaping a function that catches everywhere else.
+{
+  const mk = async (name, dhtOverrides) => {
+    const desc = DESC(name);
+    const topicId = await deriveTopicIdBig(desc);
+    const region = topicId >> 256n;
+    const selfId = (region << 256n) | 0x5eedn;
+    const clock = { t: 1_700_000_000_000 };
+    const dht = {
+      verdictsSupported: true,
+      getSelfId: () => selfId,
+      onRoutedMessage: () => {},
+      routeMessage: async () => PASS(),
+      findKClosest: async () => [],
+      neighbors: () => [],
+      bridgeId: () => null,
+      ...dhtOverrides,
+    };
+    const am = new AxonaManager({ dht, now: () => clock.t, rootReplicas: 1 });
+    am.nodeId = selfId; am.setLogSink(() => {});
+    am.pubsubSubscribe(topicId);
+    const role = am._becomeRoot(topicId);
+    const author = await createAuthorIdentity();
+    const env = await buildEnvelope({ topic: desc, message: { k: 1 }, seq: 1, identity: author, ts: clock.t });
+    await am._ingestPublish(role, JSON.stringify(env));
+    return { am, clock, env };
+  };
+
+  // Case 4 needs the throw armed AFTER root election, so the fixture is built
+  // separately rather than bent through mk()'s overrides.
+  const mkThrowingNeighbours = async (name, armed) => {
+    const desc = DESC(name);
+    const topicId = await deriveTopicIdBig(desc);
+    const region = topicId >> 256n;
+    const selfId = (region << 256n) | 0x5eedn;
+    const clock = { t: 1_700_000_000_000 };
+    const dht = {
+      verdictsSupported: true,
+      getSelfId: () => selfId,
+      onRoutedMessage: () => {},
+      routeMessage: async () => PASS(),
+      neighbors: () => { if (armed.on) throw new Error('table unavailable'); return []; },
+      bridgeId: () => null,
+    };                                            // no findKClosest → neighbours fallback
+    const am = new AxonaManager({ dht, now: () => clock.t, rootReplicas: 1 });
+    am.nodeId = selfId; am.setLogSink(() => {});
+    am.pubsubSubscribe(topicId);
+    const role = am._becomeRoot(topicId);
+    armed.on = true;                              // now the table goes unavailable
+    const author = await createAuthorIdentity();
+    const env = await buildEnvelope({ topic: desc, message: { k: 1 }, seq: 1, identity: author, ts: clock.t });
+    await am._ingestPublish(role, JSON.stringify(env));
+    return { am, clock, env };
+  };
+
+  // CASE 2 — the one Aster reproduced, through real ingress.
+  {
+    const { am, clock, env } = await mk('de-lookupfail', {
+      findKClosest: async () => { throw new Error('temporary lookup failure'); },
+    });
+    const e = am._durability.get(env.msgId);
+    ok('6a. a findKClosest REJECTION leaves the message PENDING — a lookup that ' +
+       'never returned is not evidence that the network is empty. This is the ' +
+       'check that fails on 5e23a1b.',
+      e?.state === 'pending', `state=${e?.state} reason=${e?.reason}`);
+    ok('6b. …and burns no attempt, and is not reported as undurable',
+      (e?.attempts ?? -1) === 0 && am.durabilityUndurable() === 0 && am.durabilityPending() === 1,
+      `attempts=${e?.attempts} undurable=${am.durabilityUndurable()} pending=${am.durabilityPending()}`);
+    await tick(am, clock, 4);
+    ok('6c. …and it stays retryable across ticks while the lookup keeps failing ' +
+       '— pending, not quietly retired',
+      am._durability.state(env.msgId) === 'pending' && am.durabilityUndurable() === 0,
+      `state=${am._durability.state(env.msgId)} undurable=${am.durabilityUndurable()}`);
+  }
+
+  // CASE 1 — POSITIVE CONTROL, required by Aster. Discovery ANSWERS and yields
+  // nobody: still the honest terminal. Without this, "everything stays pending"
+  // would pass and the no-cohort policy would be silently dead.
+  {
+    const { am, env } = await mk('de-answered-empty', { findKClosest: async () => [] });
+    const e = am._durability.get(env.msgId);
+    ok('6d. CONTROL — a lookup that ANSWERS with nobody still reaches the ' +
+       'terminal, so the fix narrows the branch rather than deleting it',
+      e?.state === 'expired' && e?.reason === 'no-cohort-available',
+      `state=${e?.state} reason=${e?.reason}`);
+  }
+
+  // CASES 3 and 4 — the neighbours fallback, found by writing the list out.
+  {
+    const { am, env } = await mk('de-neigh-empty', { findKClosest: undefined, neighbors: () => [] });
+    ok('6e. no findKClosest + an EMPTY neighbours table is also an answered ' +
+       'lookup — terminal',
+      am._durability.get(env.msgId)?.reason === 'no-cohort-available',
+      String(am._durability.get(env.msgId)?.reason));
+  }
+  {
+    // The throw is ARMED only for the replicate call. My first draft threw
+    // unconditionally and the fixture died in _becomeRoot → _emitRootBeacons,
+    // before reaching the path under test — worth recording, because it says a
+    // globally unavailable neighbours table takes down root election too, and
+    // that is a different (already loud) failure, not this silent one.
+    const armed = { on: false };
+    const { am, env } = await mkThrowingNeighbours('de-neigh-throw', armed);
+    ok('6f. no findKClosest + neighbours() THROWING is UNKNOWN, not empty — ' +
+       'pending, no attempt burned. This throw also used to escape a function ' +
+       'that catches everywhere else.',
+      am._durability.state(env.msgId) === 'pending' &&
+      (am._durability.get(env.msgId)?.attempts ?? -1) === 0,
+      `state=${am._durability.state(env.msgId)} attempts=${am._durability.get(env.msgId)?.attempts}`);
+  }
+}
+
 console.log(`\n${fail ? `✗ ${fail} of ${n} failed` : `✓ all ${n} checks passed`}`);
 process.exit(fail ? 1 : 0);
