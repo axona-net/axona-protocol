@@ -98,10 +98,19 @@ const SUBER = REG | 0x7000n;                 // a REMOTE subscriber (not us — 
 // via-pinned to a dead target exhausts; anything else is consumed at its
 // target — unless `consumeAt` overrides WHO consumed (the reroute-elsewhere
 // case the atNode amendment exists for).
-function mk({ neighbors = [NB, ALIVE], deadVia = [DEAD], consumeAt = null } = {}) {
+// atNodeShape: 'hex' (test-double convention) | 'bigint' (production adapters
+// report an id VALUE) | 'garbage' (malformed — must be read as no evidence).
+// holdVerdicts: routeMessage's promises stay pending until release() — the
+// only way to stage a beacon-generation race against an in-flight dispatch.
+function mk({ neighbors = [NB, ALIVE], deadVia = [DEAD], consumeAt = null,
+              atNodeShape = 'hex', holdVerdicts = false } = {}) {
   const clock = { t: 1_000_000 };
   const sends = [];
+  const pending = [];
   const dead = new Set(deadVia.map((d) => lc(idHex(d))));
+  const shape = (big) => atNodeShape === 'bigint' ? big
+    : atNodeShape === 'garbage' ? { not: 'an id' }
+    : lc(idHex(big));
   const dht = {
     verdictsSupported: true,
     getSelfId: () => SELF,
@@ -109,12 +118,17 @@ function mk({ neighbors = [NB, ALIVE], deadVia = [DEAD], consumeAt = null } = {}
     routeMessage: async (target, type, payload) => {
       const via = [...(payload.via || [])];
       sends.push({ type, via, topicId: payload.topicId });
+      let result;
       if (via.length && dead.has(lc(via[0]))) {
-        if (consumeAt != null) return { consumed: true, hops: 3, atNode: lc(idHex(consumeAt)) };
-        return { consumed: false, exhausted: true, hops: 4 };
+        result = (consumeAt != null)
+          ? { consumed: true, hops: 3, atNode: shape(consumeAt) }
+          : { consumed: false, exhausted: true, hops: 4 };
+      } else {
+        const tBig = typeof target === 'bigint' ? target : BigInt(`0x${String(target)}`);
+        result = { consumed: true, hops: 1, atNode: shape(via.length ? BigInt(`0x${via[0]}`) : tBig) };
       }
-      const tHex = lc(typeof target === 'bigint' ? idHex(target) : String(target));
-      return { consumed: true, hops: 1, atNode: via.length ? lc(via[0]) : tHex };
+      if (!holdVerdicts) return result;
+      return new Promise((res) => pending.push(() => res(result)));
     },
     neighbors: () => neighbors,
     bridgeId: () => null,
@@ -124,7 +138,8 @@ function mk({ neighbors = [NB, ALIVE], deadVia = [DEAD], consumeAt = null } = {}
   const am = new AxonaManager({ dht, now: () => clock.t, rootReplicas: 2 });
   am.nodeId = SELF;
   am.setLogSink(() => {});
-  return { am, clock, sends, dht };
+  const release = () => { while (pending.length) pending.shift()(); };
+  return { am, clock, sends, dht, release };
 }
 
 // Install beacons through the PRODUCTION receiver — a fence that installs its
@@ -348,6 +363,55 @@ console.log('pub defers to corpse — a forward may probe, but only evidence mov
   await settle();
   ok('6c. THE CONTRACT — the retried KILL is not fed to the corpse',
     sentTo(sends.slice(beforeRetry), DEAD, T.KILL).length === 0, JSON.stringify(sends.slice(beforeRetry)));
+}
+
+// ── 7. ASTER'S CONSTRAINTS (council seq 149/150) ───────────────────────────
+// Attribution is by id VALUE through the shared predicate, never a raw string
+// compare at the call site; malformed attribution is no evidence; and a
+// verdict from generation A must never erase generation B.
+{
+  // 7a. production adapters report atNode as a BIGINT — attribution must hold.
+  const { am, sends } = mk({ consumeAt: DEAD, atNodeShape: 'bigint' });
+  beacon(am, DEAD);
+  am._onSub(subPayload(), TERMINAL);
+  await am._onPub(pubPayload(), TERMINAL);
+  await settle();
+  ok('7a. bigint atNode attributes correctly — confirmed consumption re-homes us',
+    am.axonRoles.get(TOPIC)?.isRoot !== true &&
+    lc((am._upstream.get(TOPIC) || [])[0] || '') === lc(idHex(DEAD)),
+    JSON.stringify({ isRoot: am.axonRoles.get(TOPIC)?.isRoot, upstream: am._upstream.get(TOPIC) }));
+  void sends;
+}
+{
+  // 7b. MALFORMED atNode is no evidence — nothing may move.
+  const { am } = mk({ consumeAt: DEAD, atNodeShape: 'garbage' });
+  beacon(am, DEAD);
+  am._onSub(subPayload(), TERMINAL);
+  await am._onPub(pubPayload(), TERMINAL);
+  await settle();
+  ok('7b. malformed atNode moves NO state: role kept, no pin, no throw',
+    am.axonRoles.get(TOPIC)?.isRoot === true &&
+    lc((am._upstream.get(TOPIC) || [])[0] || '') !== lc(idHex(DEAD)),
+    JSON.stringify({ isRoot: am.axonRoles.get(TOPIC)?.isRoot, upstream: am._upstream.get(TOPIC) }));
+}
+{
+  // 7c. GENERATION RACE — while dispatch toward generation A is in flight, a
+  // NEWER beacon (generation B, same root, later `at`) arrives. A's failed
+  // verdict must invalidate only A; B survives. Without the `at` guard this
+  // deletes B and the freshly-relearned pointer with it.
+  const { am, clock, release } = mk({ holdVerdicts: true });
+  beacon(am, DEAD);                                    // generation A, at = t0
+  const genA = am._rootBeacons.get(TOPIC)?.at;
+  const inflight = am._onPub(pubPayload(), TERMINAL);  // dispatch held open
+  clock.t += 1_000;
+  beacon(am, DEAD, TOPIC, 1);                          // generation B, at = t0+1000
+  const genB = am._rootBeacons.get(TOPIC)?.at;
+  ok('7c-pre. generation B replaced A in the record while A was in flight',
+    genB === clock.t && genB !== genA);
+  release(); await inflight; await settle();
+  ok('7c. RACE — A\'s failed verdict does NOT erase generation B',
+    am._rootBeacons.get(TOPIC)?.at === genB,
+    JSON.stringify(am._rootBeacons.get(TOPIC)));
 }
 
 console.log(`\n${fail ? `FAIL ${fail}/${n + fail}` : `PASS ${n}/${n}`}`);

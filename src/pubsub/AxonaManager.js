@@ -48,7 +48,7 @@
 import { extractS2Prefix }   from '../utils/hexid.js';
 import { RootClaim, roleNature } from './rootClaim.js';
 import { idHex, idBig, lc, isHexId } from './ids.js';
-import { dispatchVerdict } from './dispatch.js';
+import { dispatchVerdict, dispatchAttributedTo } from './dispatch.js';
 import { DurabilityLedger } from './durability.js';
 import { isRegionLockEnforced as _regionLock,
          T, RENEW_MS, RENEW_FAST_MS, DROP_MS, ROOT_REPLICAS, CACHE_MAX,
@@ -649,13 +649,21 @@ export class AxonaManager {
   // converted a working read path into a starved one (fence_pub_defers_to_corpse
   // §1/§2/§4; the 2026-08-02 prod write outage). The contract now:
   //
-  //   consumed AND atNode === the named root → the one piece of evidence that
-  //       justifies demote + re-home (the multi-hop live root that made a
-  //       strict-reachability gate wrong). Demote does the re-home.
+  //   consumed AND attributed to the named root → the one piece of evidence
+  //       that justifies demote + re-home (the multi-hop live root that made a
+  //       strict-reachability gate wrong). Demote does the re-home. Attribution
+  //       is decided by dispatchAttributedTo — the shared predicate, not a
+  //       call-site comparison (Aster, council seq 149): atNode arrives as a
+  //       bigint from production adapters and hex from doubles, and a padding
+  //       or type mismatch must never masquerade as "different node".
   //   consumed at ANOTHER node / atNode absent → NO mutation. The message is
-  //       safe with whoever took it; that node's own DELIVER re-homes us
-  //       organically via _onDeliver. Pinning toward a root that never touched
-  //       the message would re-create the corpse-pin this replaces.
+  //       safe with whoever took it, and OUR state is coherent on its own
+  //       terms: we keep whatever role we hold and keep serving it. We do NOT
+  //       presume a DELIVER will arrive to re-home us (seq 149 — a
+  //       non-subscribing root may never receive one); if a genuinely closer
+  //       live root exists, its own beacons demote us at receipt, which is the
+  //       standing evidence-of-life path. Pinning toward a root that never
+  //       touched the message would re-create the corpse-pin this replaces.
   //   failed → invalidate ONLY the matching beacon record (same root, same
   //       `at` stamp — a late verdict must not erase a newer beacon). No
   //       demote, no pin. The invalidation lands sub-second, inside the
@@ -679,12 +687,7 @@ export class AxonaManager {
         return;
       }
       if (v === 'consumed') {
-        let atNode = null;
-        try {
-          const a = (r && typeof r === 'object') ? r.atNode : null;
-          if (a != null) atNode = lc(typeof a === 'bigint' ? idHex(a) : String(a));
-        } catch { /* malformed atNode = no evidence */ }
-        if (atNode !== lc(rootHex)) return;                // consumed elsewhere or unknown → fail closed
+        if (!dispatchAttributedTo(r, rootHex)) return;     // consumed elsewhere / unattributed → fail closed
         this._rootClaim.demote(topicBig, rootHex, 'defer-confirmed');
         return;
       }
