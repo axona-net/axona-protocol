@@ -85,12 +85,17 @@ async function main() {
   await c.peer.pub(TOPIC, 'm-c', { signWith: author });   // forces the lazy manager to exist
   const cam = c.peer._axonaManager;
   // simulate an unconfirmable in-flight publish (implicit ack never arrives)
-  cam._pendingPub.set('deadbeef', { at: Date.now(), tries: 0, topicBig: 1n, json: '{}' });
+  // v4.58.0: the drain consults DURABILITY, not _pendingPub. _pendingPub is the
+  // DELIVERY leg and clears when this node observes its own message — which
+  // proves the root holds it and nothing more. The behaviour under test (bound
+  // the wait; let progress reset the stall clock) is unchanged; only the signal
+  // the drain reads has moved, so the fixture injects the new one.
+  cam._durability.open('deadbeef', 1n);
   const t1 = Date.now();
   await c.peer.leave({ timeoutMs: 700 });
   const boundedMs = Date.now() - t1;
   check('stuck pending: leave() drained ~the bound then exited', boundedMs >= 600 && boundedMs < 4500, `${boundedMs}ms`);
-  check('stuck pending cleared on departure', (cam._pendingPub?.size ?? 0) === 0);
+  check('stuck pending cleared on departure', cam.durabilityPending() === 0);
   check('tick cleared on bounded-drain path too', cam._timer == null);
 
   // ── 3b: the alert-bot pin — a STALLED pending at the DEFAULT 5s timeout must
@@ -100,12 +105,12 @@ async function main() {
   const e = await makePeer(net);
   await e.peer.pub(TOPIC, 'm-e', { signWith: author });
   const eam = e.peer._axonaManager;
-  for (let i = 0; i < 90; i++) eam._pendingPub.set('stuck' + i, { at: Date.now(), tries: 0, topicBig: 1n, json: '{}' });
+  for (let i = 0; i < 90; i++) eam._durability.open('stuck' + i, 1n);
   const t2 = Date.now();
   await e.peer.leave();                        // DEFAULT timeoutMs 5000
   const stalledMs = Date.now() - t2;
   check('alert-bot pin: stalled pending exits ~STALL_MS, not the 5s window (<2800ms)', stalledMs < 2800, `${stalledMs}ms`);
-  check('stalled pending cleared on departure', (eam._pendingPub?.size ?? 0) === 0);
+  check('stalled pending cleared on departure', eam.durabilityPending() === 0);
 
   // ── 3c: while confirmations ARE arriving (pending SHRINKS) the drain keeps
   // waiting past STALL_MS — progress resets the stall clock, so a genuinely
@@ -113,11 +118,17 @@ async function main() {
   const f = await makePeer(net);
   await f.peer.pub(TOPIC, 'm-f', { signWith: author });
   const fam = f.peer._axonaManager;
-  for (let i = 0; i < 40; i++) fam._pendingPub.set('drain' + i, { at: Date.now(), tries: 0, topicBig: 1n, json: '{}' });
+  for (let i = 0; i < 40; i++) fam._durability.open('drain' + i, 1n);
   // delete one entry every 250ms → steady progress well past STALL_MS (1.5s)
+  // progress = a pending obligation reaching a TERMINAL state. 'verified' is the
+  // happy one and the only one a cohort verdict can produce.
   const drainTimer = setInterval(() => {
-    const k = [...fam._pendingPub.keys()].find(x => x.startsWith('drain'));
-    if (k) fam._pendingPub.delete(k);
+    for (let i = 0; i < 40; i++) {
+      if (fam._durability.state('drain' + i) === 'pending') {
+        fam._durability.record('drain' + i, { verified: 1, attempted: 1 });
+        break;
+      }
+    }
   }, 250);
   if (typeof drainTimer.unref === 'function') drainTimer.unref();
   const t3 = Date.now();

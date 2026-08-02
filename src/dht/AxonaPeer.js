@@ -761,6 +761,7 @@ export class AxonaPeer extends DHT {
     if (this._axonaManager) {
       try { this._axonaManager.stop?.(); } catch { /* */ }
       try { this._axonaManager._pendingPub?.clear?.(); } catch { /* */ }
+      try { this._axonaManager._durability?.clear?.(); } catch { /* */ }
       try { this._axonaManager._pendingKill?.clear?.(); } catch { /* */ }
       try { this._axonaManager._verifyInflight?.clear?.(); } catch { /* */ }
     }
@@ -1058,7 +1059,16 @@ export class AxonaPeer extends DHT {
       // time to land. Any confirmation still in flight resets the stall clock,
       // so a genuinely-draining publisher is unaffected.
       const STALL_MS = 1500;
-      const pending = () => (am._pendingPub?.size ?? 0) + (am._pendingKill?.size ?? 0);
+      // DRAIN ON DURABILITY, NOT LOCAL DELIVERY (Aster, council 2026-08-01).
+      // _pendingPub is the DELIVERY leg: it clears when this node observes its
+      // own message, which proves the ROOT holds it and nothing more. Leaving on
+      // that alone is how an ephemeral publisher exited with history no one else
+      // had. durabilityPending() is the obligation that actually matters here —
+      // and its terminal states (verified/expired/cancelled) are all DONE, so an
+      // undurable message does not stall the drain waiting for a verdict that is
+      // never coming.
+      const pending = () => (am.durabilityPending?.() ?? 0)
+                          + (am._pendingKill?.size ?? 0);
       let prev = Infinity, lastProgressAt = Date.now();
       while (Date.now() < deadline) {
         const size = pending();
@@ -1146,6 +1156,7 @@ export class AxonaPeer extends DHT {
     if (am) {
       try { am.stop?.(); } catch { /* */ }
       try { am._pendingPub?.clear?.(); } catch { /* */ }
+      try { am._durability?.clear?.(); } catch { /* */ }
       try { am._pendingKill?.clear?.(); } catch { /* */ }
       try { am._verifyInflight?.clear?.(); } catch { /* */ }
     }

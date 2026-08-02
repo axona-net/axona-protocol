@@ -49,6 +49,7 @@ import { extractS2Prefix }   from '../utils/hexid.js';
 import { RootClaim, roleNature } from './rootClaim.js';
 import { idHex, idBig, lc, isHexId } from './ids.js';
 import { dispatchVerdict } from './dispatch.js';
+import { DurabilityLedger } from './durability.js';
 import { isRegionLockEnforced as _regionLock,
          T, RENEW_MS, RENEW_FAST_MS, DROP_MS, ROOT_REPLICAS, CACHE_MAX,
          CACHE_BYTES, MAX_DIRECT, MAX_VIA, VIA_HOP_BUDGET, BEACON_MS,
@@ -170,6 +171,13 @@ export class AxonaManager {
     // the latch findable in the first place.
     this._tickLagPeak = 0;
     this._logSink = (typeof emitLog === 'function') ? emitLog : null;
+
+    // DURABILITY — the second state machine (Aster, council 2026-08-01). Kept in
+    // its own module with its own vocabulary because the defect it replaces was
+    // one flag carrying two facts: _deliverToApp confirmed the pending entry, so
+    // observing DELIVERY discharged DURABILITY. Nothing on the delivery path can
+    // reach 'verified' — there is deliberately no function here for it to call.
+    this._durability = new DurabilityLedger({ now });
 
     this.renewMs     = renewMs;          // adaptive ceiling
     this.renewFastMs = renewFastMs;      // adaptive floor
@@ -772,6 +780,19 @@ export class AxonaManager {
   }
 
   // ── public API (contract surface) ────────────────────────────────────
+
+  // Outstanding durability obligations: messages this node stamped whose cohort
+  // dispatch has not yet been verified. leave() drains on THIS, never on local
+  // delivery — seeing your own message says the root has it, not that anyone
+  // else does.
+  durabilityPending() { return this._durability.pending(); }
+
+  // FINISHED and not durable: the attempt budget ran out, or there was no cohort
+  // at all (a singleton root holding the only copy). Terminal, so leave() does
+  // not wait on it — but an operator should see it, because it is the honest
+  // count of history this node alone is carrying.
+  durabilityUndurable() { return this._durability.undurable(); }
+
   // Route the UN-stamped publish toward the topic's root; root stamps it. Sent
   // SYNCHRONOUSLY and immediately: via the warm true-root hint if we have one (so
   // publisher + subscribers converge on the same root), else greedy ([]) toward the

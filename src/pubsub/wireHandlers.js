@@ -318,6 +318,10 @@ export const wireHandlersMethods = {
     const seq = ++role.seq;                                              // dense per-topic counter (gap detection)
     const msg = { json, publishTs: ts, msgId: env.msgId, seq };
     this._cachePush(role, { msgId: env.msgId, publishTs: ts, json, seq });
+    // The DURABILITY obligation opens at the stamp and can only be discharged
+    // by a cohort verdict below. The DELIVERY leg is _pendingPub and moves
+    // independently — that separation is the whole point (Aster, seq 123).
+    this._durability.open(env.msgId, role.topicId);
     this._fanout(role, msg, null);                                       // to subscribers
     // local app (if subscribed)
     //
@@ -365,11 +369,16 @@ export const wireHandlersMethods = {
       // it fired only when every push had EXPLICITLY failed. Absence of a failure
       // report is not a success report. attempted === 0 is the singleton/no-cohort
       // case and still confirms, deliberately and unchanged.
+      // THE ONLY PATH TO 'verified'. The ledger decides; this site just reports
+      // what the cohort said. verified === 0 is not final — the tick replicates
+      // again until the attempt budget runs out and the entry turns 'expired',
+      // which is an honest terminal answer rather than a silent confirm.
+      this._durability.record(env.msgId, { verified: rep.verified, attempted: rep.attempted });
       if (rep.attempted > 0 && rep.verified === 0) {
         this._log('warn', 'pubsub:replicate-all-failed', {
           topic: idHex(role.topicId).slice(0, 12), attempted: rep.attempted, failed: rep.failed,
         });
-        return;                       // leave pending → the publisher keeps retrying
+        return;                       // durability stays pending → the tick retries
       }
       // Honesty signal (#362): the eager replicate could recruit NOBODY — this
       // node is a SINGLETON root and the confirm below asserts only "I, one
@@ -666,6 +675,10 @@ export const wireHandlersMethods = {
   // first time we see the kill (tombstone-gated).
   _applyKill(role, topicBig, m) {
     const target = m.msgId;
+    // A retracted message has no durability obligation left. Cancel it BEFORE
+    // the tombstone/fan-out work below, so no retry can outlive the retraction
+    // (Aster: the kill must cancel atomically and preserve the tombstone).
+    this._durability?.cancel(target);
     const killTs = m.killTs ?? this._now();
     const seq = m.seq;                                 // root-assigned dense counter for this kill
     if (role && Number.isFinite(seq) && seq > role.seq) role.seq = seq;   // recover counter (kill occupied a slot)

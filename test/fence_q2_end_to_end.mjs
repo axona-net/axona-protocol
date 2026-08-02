@@ -47,6 +47,8 @@ const ok = (m, c, extra = '') => {
 };
 
 const idHex = (b) => b.toString(16).padStart(66, '0');
+// The ledger entry holds a BigInt topic id, which JSON.stringify refuses.
+const dur = (am, id) => String(am._durability?.get(id)?.state ?? 'MISSING');
 const TICK = 6_000;
 
 const CONSUMED = () => ({ consumed: true,  hops: 2 });
@@ -124,9 +126,15 @@ async function publishCase(label, report, declares, expect) {
   ok(`1${expect.tag}a. [${label}] precondition — the publish is PENDING before ingest`,
     am._pendingPub.has(env.msgId), JSON.stringify([...am._pendingPub.keys()]));
   await am._ingestPublish(role, json);
-  ok(`1${expect.tag}b. [${label}] ${expect.pub}`,
-    am._pendingPub.has(env.msgId) === expect.stillPending,
-    `stillPending=${am._pendingPub.has(env.msgId)}, want ${expect.stillPending}`);
+  // SUPERSEDED ASSERTION, kept deliberately as a record. This used to demand the
+  // publish stay in _pendingPub without a verdict. Under Aster's two-machine
+  // design that is WRONG: self-delivery MAY satisfy local delivery, and forcing
+  // it to withhold is exactly what made the retry pump re-send a killed body.
+  // The fail-closed property now lives on the DURABILITY leg, asserted in
+  // section 5. What section 1 still proves is the diagnostic classification.
+  ok(`1${expect.tag}b. [${label}] local delivery resolved (the root holds it); the ` +
+     `durability leg is asserted separately in section 5`,
+    !am._pendingPub.has(env.msgId), `stillPending=${am._pendingPub.has(env.msgId)}`);
   return { am, role };
 }
 {
@@ -221,6 +229,86 @@ async function handoffCase(label, report, declares, expectAcked) {
 await handoffCase('consumed', CONSUMED, true, true);            // CONTROL
 await handoffCase('declared-false', VOID, false, false);
 await handoffCase('void-violation', VOID, true, false);
+
+// ── 5. THE TWO STATE MACHINES (Aster, council seq 123) ────────────────────
+// His spec, taken as the acceptance criteria:
+//
+//   Local delivery: pending → delivered | cancelled.
+//     I-9 self-delivery satisfies ONLY this. Once delivered it stops payload
+//     redelivery, and a KILL must CANCEL it before any retry reaches a late
+//     subscriber.
+//   Durability:     pending → verified | expired | cancelled.
+//     Only a cohort CONSUMED verdict reaches verified. Local delivery must
+//     NEVER call the durability confirmation path. leave() consults DURABILITY.
+//
+// The whole point is that one flag cannot carry two facts. Section 1 proved the
+// old single flag let self-delivery discharge durability; these prove the two
+// legs now move independently.
+async function twoMachines(label, report, declares) {
+  const author = await createAuthorIdentity();
+  const desc = DESC(`q2-sm-${label}`);
+  const { am, clock, topicId, role } = await rootFor(desc, report, declares);
+  const env = await buildEnvelope({ topic: desc, message: { k: 1 }, seq: 1, identity: author, ts: clock.t });
+  const json = JSON.stringify(env);
+  am.pubsubPublish(topicId, json);
+  await am._ingestPublish(role, json);
+  return { am, clock, topicId, role, env, author, desc };
+}
+{
+  // REQUIREMENT 1 — self-subscribed + non-reporting: delivers locally, but the
+  // durability leg stays PENDING. This is the exact case that used to confirm.
+  const { am, env } = await twoMachines('unsupported', VOID, false);
+  ok('5a. local delivery reached the app (the root is subscribed to its own topic)',
+    am._appDelivered.size > 0, `appDelivered=${am._appDelivered.size}`);
+  ok('5b. …and the DURABILITY leg is a separate, still-PENDING state — not ' +
+     'discharged by self-delivery',
+    am._durability?.get(env.msgId)?.state === 'pending',
+    dur(am, env.msgId));
+}
+{
+  // REQUIREMENT 2 — a consumed control reaches VERIFIED. Without this the whole
+  // machine could be "never verify" and every other check would still pass.
+  const { am, env } = await twoMachines('consumed', CONSUMED, true);
+  ok('5c. CONTROL — a cohort CONSUMED verdict drives durability to VERIFIED',
+    am._durability?.get(env.msgId)?.state === 'verified',
+    dur(am, env.msgId));
+}
+{
+  // REQUIREMENT 4 (local half) — leave() must consult DURABILITY, not local
+  // delivery. Exposed as a count so the drain has something to read.
+  const { am } = await twoMachines('drain', VOID, false);
+  ok('5d. durabilityPending() reports the outstanding obligation leave() drains ' +
+     '— distinct from durabilityUndurable(), which counts FINISHED-and-not-durable',
+    typeof am.durabilityPending === 'function' && am.durabilityPending() === 1 &&
+    am.durabilityUndurable() === 0,
+    `pending=${am.durabilityPending?.() ?? 'MISSING'} undurable=${am.durabilityUndurable?.() ?? 'MISSING'}`);
+}
+{
+  // REQUIREMENT 3 — a KILL atomically cancels the outstanding publish so no
+  // retry can carry the body to a late subscriber, and the tombstone stands.
+  // This is the rule that closes the regression my reverted fix caused.
+  const { am, clock, topicId, role, env, author } = await twoMachines('kill', VOID, false);
+  ok('5e. precondition — the publish is outstanding on BOTH legs before the kill',
+    am._pendingPub.has(env.msgId) === false || am._durability?.get(env.msgId)?.state === 'pending',
+    JSON.stringify({ pend: am._pendingPub.has(env.msgId), dur: am._durability?.get(env.msgId)?.state }));
+
+  const kill = await buildKill({ topicId: idHex(topicId), msgId: env.msgId, ts: clock.t + 1, seq: 3, identity: author });
+  await am._onKill({ topicId: idHex(topicId), kill }, { targetId: am.nodeId, isTerminal: true });
+  await new Promise(r => setImmediate(r));
+
+  ok('5f. the kill CANCELS the durability leg — no retry may keep chasing a ' +
+     'message that has been retracted',
+    am._durability?.get(env.msgId)?.state === 'cancelled',
+    dur(am, env.msgId));
+  ok('5g. …and cancels the delivery retry, so the pump cannot re-send the body ' +
+     'to a late subscriber (the regression that broke smoke_pubsub_kill)',
+    !am._pendingPub.has(env.msgId), JSON.stringify([...am._pendingPub.keys()]));
+  ok('5h. …with the TOMBSTONE preserved — cancelling the retry must not ' +
+     'cancel the retraction',
+    role.tombstones.has(env.msgId), JSON.stringify([...role.tombstones.keys()]));
+  ok('5i. …and the body is gone from cache, so a replay cannot serve it',
+    !role.cacheIds.has(env.msgId), `cache=${role.cache.length}`);
+}
 
 console.log(`\n${fail ? `✗ ${fail} of ${n} failed` : `✓ all ${n} checks passed`}`);
 process.exit(fail ? 1 : 0);
