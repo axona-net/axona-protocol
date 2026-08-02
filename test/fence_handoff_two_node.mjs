@@ -1,5 +1,15 @@
-// fence_handoff_two_node.mjs — Aster's fourth requirement: a non-root handoff
-// cannot gain its retry exemption without evidence.
+// fence_handoff_two_node.mjs — a departing ROOT's retry exemption must be earned.
+//
+// SCOPE CORRECTION (Aster, council 2026-08-01). This file previously called
+// itself the "non-root handoff" fence and claimed Aster's fourth requirement. It
+// does not: pair() calls leaver._becomeRoot(), so every case here drives the ROOT
+// path — HANDOFF out, HANDOFFACK back. The NON-ROOT holder path is a different
+// branch (repairPlane's REPLICATE leg, where _handoffAcked is set from a consumed
+// dispatch promise) and nothing here touched it. Overstated coverage is worse
+// than absent coverage, because it stops anyone looking.
+//
+// The non-root branch now has its own file: fence_handoff_nonroot.mjs. What
+// follows is the ROOT path, which is real and worth pinning on its own terms.
 //
 // WHY THIS FILE EXISTS AT ALL. fence_q2_end_to_end asserted the same property
 // from a SINGLE node and its consumed control could never fire — I measured it:
@@ -113,7 +123,7 @@ async function pair(name, { heirAdmits = true } = {}) {
   return { net, leaver, heir, topicId, role, env, desc };
 }
 
-console.log('two-node handoff — the retry exemption must be EARNED, not assumed\n');
+console.log('two-node handoff (ROOT path) — the exemption must be EARNED, not assumed\n');
 
 // ── 0. THE FABRIC IS REAL ──────────────────────────────────────────────────
 {

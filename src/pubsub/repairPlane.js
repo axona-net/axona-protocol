@@ -387,7 +387,13 @@ export const repairPlaneMethods = {
       const idx = (start + i) % keys.length;
       const role = this.axonRoles.get(keys[idx]);
       if (!role || !role.isRoot) continue;
-      this._replicateRole(keys[idx], role, bridge, now, budget, idx).catch(() => {});   // async (findKClosest); fire-and-forget
+      // The result is no longer discarded: it drives the DURABILITY ledger, which
+      // is how a pending entry ever reaches verified or expired. Fire-and-forget
+      // was the gap Aster found — record() ran only at ingress, so the lifecycle
+      // this module documents was never actually executed.
+      this._replicateRole(keys[idx], role, bridge, now, budget, idx)
+        .then((rep) => { if (rep) this._durability.recordTopic(keys[idx], rep); })
+        .catch(() => {});   // async (findKClosest); never rejects into the tick
     }
     // The first role the budget defers sets this._replicateCursor to its own
     // index (inside _replicateRole — the decision happens after an await, so a

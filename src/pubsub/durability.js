@@ -68,6 +68,43 @@ export class DurabilityLedger {
     return e.state;
   }
 
+  // TOPIC-LEVEL transition, driven by the PERIODIC replication. This is the leg
+  // that was missing: record() was called once at ingress and nowhere else, so
+  // an entry that started verified:0 stayed pending forever, `expired` was
+  // unreachable, and the attempt budget below was decoration. Aster caught that
+  // the module documented a lifecycle it did not run (council 2026-08-01).
+  //
+  // Topic-level is the RIGHT granularity, not a shortcut: _syncPush sends the
+  // role's whole snapshot, so one verified cohort push covers every message this
+  // root currently holds for the topic. A per-message verdict does not exist on
+  // the wire and inventing one would be the same overclaim in a new place.
+  recordTopic(topicBig, { verified = 0, attempted = 0 } = {}) {
+    const out = { verified: 0, expired: 0, pending: 0 };
+    for (const [msgId, e] of this._m) {
+      if (e.state !== 'pending' || e.topicBig !== topicBig) continue;
+      const st = this.record(msgId, { verified, attempted });
+      if (st === 'verified') out.verified++;
+      else if (st === 'expired') out.expired++;
+      else out.pending++;
+    }
+    return out;
+  }
+
+  // NO COHORT IS CONFIGURED (rootReplicas = 0). An explicitly CHOSEN terminal
+  // state, not one that falls out of the code: this node will never attempt
+  // cohort replication, so the message can never become durable-by-cohort and
+  // there is nothing to wait for. 'expired' is the honest label — finished, and
+  // the answer is no — and it puts the message in durabilityUndurable(), which
+  // is exactly the count an operator needs: history this node alone carries.
+  // Leaving it 'pending' (the behaviour Aster found) makes leave() wait out its
+  // stall clock for a verdict that cannot arrive, then clear the entry, which
+  // reads as success and is not.
+  noCohortConfigured(msgId) {
+    const e = this._m.get(msgId);
+    if (!e || e.state !== 'pending') return;
+    e.state = 'expired'; e.reason = 'no-replication-configured'; e.at = this._now();
+  }
+
   // A kill retracts the message. Cancel the outstanding durability obligation —
   // chasing durability for a body that has been retracted is work that can only
   // do harm. The TOMBSTONE is not this module's business and is untouched.

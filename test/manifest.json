@@ -705,6 +705,21 @@
     {
       "file": "smoke_upstream_rehome.mjs",
       "class": "default"
+    },
+    {
+      "file": "fence_durability_lifecycle.mjs",
+      "class": "default",
+      "note": "Aster CHANGES-REQUIRED on df41e05 (council 2026-08-01): durability.js shipped an attempt budget, an `expired` terminal and a module comment describing a lifecycle that DID NOT RUN. record() was called at exactly one site — the eager replicate inside the `role.isRoot && this._rootReplicas` gate — and _replicateRoots was fire-and-forget, so no periodic result reached the ledger: an entry that started verified:0 stayed pending forever, `expired` was unreachable, and rootReplicas:0 never recorded at all. I had written the intent as though it were the implementation. This file asserts the lifecycle by EXECUTION: rootReplicas:0 reaches an explicitly chosen terminal (expired / 'no-replication-configured'); initially-failed-then-consumed reaches VERIFIED via the periodic path; repeated failure reaches EXPIRED exactly at DURABILITY_ATTEMPTS (asserted against the exported constant, not a magic number); leave() observes terminal state with the undurable count retained rather than clearing a stall."
+    },
+    {
+      "file": "fence_handoff_nonroot.mjs",
+      "class": "default",
+      "note": "Aster's fourth Q2 requirement, on the branch that implements it — fence_handoff_two_node claimed this and tested the ROOT path instead (its pair() calls _becomeRoot). Drives repairPlane's leave-handoff REPLICATE leg, where there is NO ack and the dispatch verdict is the only evidence, so a wrong answer is least visible and most expensive: a departing holder that exempts itself stops retrying and the last copy leaves with it (#340). Exemption is GRANTED only on explicit consumed; REFUSED for explicit failure, rejection, declared-false/void and declared-true/void. Verified RED against the pre-fix negative test (dispatchVerdict !== 'failed'): the two void cases flip to exempt. Section 0c pins the liveness gate and states why every case hides the root — my first draft left the principal in neighbors(), the holder correctly skipped the handoff, and all four refusals were VACUOUS at sent=[]; section 2a exists to catch exactly that."
+    },
+    {
+      "file": "fence_kill_late_subscriber.mjs",
+      "class": "default",
+      "note": "Aster's third required control: an ACTUAL late-subscriber/retry regression for the killed unverified body, not cache/map assertions. fence_q2_end_to_end 5f-5i assert on _pendingPub/tombstones/cacheIds — right invariants, one layer above what matters — so this asks at the app callback of a REAL second node. Section 1 is the control (no kill, the late subscriber DOES receive it), without which 'received nothing' is also what a broken fabric produces. Section 4 records a correction to what I first wrote: I injected the reverted fix's regression (removed _pendingPub.delete from _confirmPending) and sections 2-3 stayed GREEN — the pump fired (6 pubsub:pub across 3 ticks) and tombstone-gated ingest refused every one. So section 4 disables the cancellation deliberately and requires the tombstone to hold alone. Verified RED: with the ingest tombstone gate off, the killed body is re-ingested (cache:1) and DELIVERED to the late subscriber, while sections 2-3 stay green."
     }
   ]
 }

@@ -322,6 +322,10 @@ export const wireHandlersMethods = {
     // by a cohort verdict below. The DELIVERY leg is _pendingPub and moves
     // independently — that separation is the whole point (Aster, seq 123).
     this._durability.open(env.msgId, role.topicId);
+    // rootReplicas = 0 means cohort replication is NOT configured, so the gate
+    // below never runs and nothing could ever discharge this entry. Choose the
+    // terminal state explicitly rather than leaving it pending forever.
+    if (!this._rootReplicas) this._durability.noCohortConfigured(env.msgId);
     this._fanout(role, msg, null);                                       // to subscribers
     // local app (if subscribed)
     //
