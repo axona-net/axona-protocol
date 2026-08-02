@@ -414,5 +414,26 @@ console.log('pub defers to corpse — a forward may probe, but only evidence mov
     JSON.stringify(am._rootBeacons.get(TOPIC)));
 }
 
+{
+  // 7d. NO CAPTURED RECORD = NO DELETION AUTHORITY (both reviewers, fb77b70).
+  // The guard's first draft read `(!rec || cur.at === rec.at)`: a forward that
+  // captured NO beacon record could, on its failed verdict, delete whatever
+  // matching-root beacon existed by then — the newer-generation erasure the
+  // guard exists to prevent, reachable through one conditional. _onPub cannot
+  // produce this state (its `closer` implies a record), so this drives the
+  // method boundary directly: forward with the record map EMPTY, install a
+  // fresh beacon while the dispatch is in flight, and require it to survive.
+  const { am, release } = mk({ holdVerdicts: true });
+  ok('7d-pre. no beacon record exists at forward time',
+    !am._rootBeacons.has(TOPIC));
+  am._forwardToRoot(TOPIC, T.PUB, pubPayload(), lc(idHex(DEAD)));   // rec captured = undefined
+  beacon(am, DEAD);                                    // fresh knowledge arrives mid-flight
+  const fresh = am._rootBeacons.get(TOPIC)?.at;
+  release(); await settle();
+  ok('7d. a verdict with NO captured record deletes NOTHING — fresh beacon survives',
+    am._rootBeacons.get(TOPIC)?.at === fresh,
+    JSON.stringify(am._rootBeacons.get(TOPIC)));
+}
+
 console.log(`\n${fail ? `FAIL ${fail}/${n + fail}` : `PASS ${n}/${n}`}`);
 process.exit(fail ? 1 : 0);

@@ -692,8 +692,15 @@ export class AxonaManager {
         return;
       }
       if (v !== 'failed') return;                          // unsupported → no evidence → nothing moves
+      // STRICT generation guard (v4.59.2, both reviewers on fb77b70): deletion
+      // requires the CAPTURED record — same root, same `at` — with no fallback.
+      // The first draft allowed `!rec ||`, meaning a send with nothing captured
+      // could delete whatever matching-root beacon existed by verdict time —
+      // exactly the newer-generation erasure the guard exists to prevent, one
+      // conditional away. No captured record = no deletion authority: this
+      // verdict describes a probe of a pointer we never held.
       const cur = this._rootBeacons.get(topicBig);
-      if (cur && cur.root === lc(String(rootHex)) && (!rec || cur.at === rec.at)) {
+      if (rec && cur && cur.root === rec.root && cur.at === rec.at) {
         this._rootBeacons.delete(topicBig);
         this._log('info', 'pubsub:beacon-invalidated', {
           topic: idHex(topicBig).slice(0, 12), was: String(rootHex).slice(0, 12),
