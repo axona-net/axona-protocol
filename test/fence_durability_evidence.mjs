@@ -118,7 +118,7 @@ console.log('durability evidence — a deferral is not a failure, a keepalive is
      'not evidence in either direction',
     L.state('m1') === 'pending', String(L.state('m1')));
   ok('1b. …and says so, rather than silently doing nothing',
-    deferred.ignored === 'no-dispatch' && deferred.pending === 1, JSON.stringify(deferred));
+    deferred.kind === 'no-dispatch' && deferred.pending === 1, JSON.stringify(deferred));
   ok('1c. …and does NOT burn an attempt against the budget',
     (L.get('m1')?.attempts ?? -1) === 0, String(L.get('m1')?.attempts));
 
@@ -126,8 +126,8 @@ console.log('durability evidence — a deferral is not a failure, a keepalive is
   ok('1d. a consumed EMPTY KEEPALIVE does NOT verify — it proves a peer is ' +
      'reachable, not that a body it never carried arrived',
     L.state('m1') === 'pending', String(L.state('m1')));
-  ok('1e. …and is reported as ignored-for-lack-of-snapshot',
-    keepalive.ignored === 'no-snapshot' && keepalive.verified === 0, JSON.stringify(keepalive));
+  ok('1e. …and is reported as refused-for-lack-of-snapshot',
+    keepalive.kind === 'no-snapshot' && keepalive.verified === 0, JSON.stringify(keepalive));
 
   ok('1f. CONTROL — a dispatched FULL snapshot with a consumed verdict DOES ' +
      'verify. Without this the rule could be "never verify" and 1a-1e would ' +
@@ -235,6 +235,100 @@ console.log('durability evidence — a deferral is not a failure, a keepalive is
      '"only a full snapshot counts", not "nothing counts".',
     am._durability.state(second.msgId) === 'verified',
     String(am._durability.state(second.msgId)));
+}
+
+// ── 4. "NOTHING WAS SENT" IS NOT ONE THING ────────────────────────────────
+// ASTER, ROUND 2 (on v4.58.2). My fail-closed guard was too broad: it folded
+// `no-cohort-available` — rootReplicas configured, but the search found NOBODY —
+// into the same no-op as a budget deferral. Those are opposites. A deferral means
+// "not yet, ask again"; an empty cohort means "there is nobody, and this node
+// holds the only copy", which no future tick can improve. v4.58.1 got that right
+// by accident (attempted:0 → expired) and I regressed it into pending-forever,
+// so a solo or sparse network never reached ANY terminal state and leave() had
+// nothing to observe. The lesson is the mirror of the one that produced the bug
+// I was fixing: I generalised a correct rule one step past where it was true.
+{
+  // Same shape as section 2/3 but with findKClosest returning nobody, which is
+  // exactly an ordinary solo/sparse network.
+  const desc = DESC('de-nocohort');
+  const topicId = await deriveTopicIdBig(desc);
+  const region = topicId >> 256n;
+  const selfId = (region << 256n) | 0x5eedn;
+  const clock = { t: 1_700_000_000_000 };
+  const dht = {
+    verdictsSupported: true,
+    getSelfId: () => selfId,
+    onRoutedMessage: () => {},
+    routeMessage: async () => PASS(),
+    findKClosest: async () => [],          // nobody in range
+    neighbors: () => [],
+    bridgeId: () => null,
+  };
+  const am = new AxonaManager({ dht, now: () => clock.t, rootReplicas: 1 });
+  am.nodeId = selfId; am.setLogSink(() => {});
+  am.pubsubSubscribe(topicId);
+  const role = am._becomeRoot(topicId);
+  const author = await createAuthorIdentity();
+  const env = await buildEnvelope({ topic: desc, message: { k: 1 }, seq: 1, identity: author, ts: clock.t });
+  await am._ingestPublish(role, JSON.stringify(env));
+
+  const e = am._durability.get(env.msgId);
+  ok('4a. rootReplicas:1 with NO cohort found reaches a TERMINAL state at ' +
+     'ingress — not pending-forever. This is the check that fails on 78745ac.',
+    e?.state === 'expired', `state=${e?.state} attempts=${e?.attempts}`);
+  ok('4b. …and the reason distinguishes "I asked and the network had nobody" ' +
+     'from "I never asked for replicas" — different facts, different reports',
+    e?.reason === 'no-cohort-available', String(e?.reason));
+  ok('4c. …counted as UNDURABLE, which is the honest answer and the one leave() ' +
+     'must be able to see',
+    am.durabilityUndurable() === 1 && am.durabilityPending() === 0,
+    `undurable=${am.durabilityUndurable()} pending=${am.durabilityPending()}`);
+
+  await tick(am, clock, 8);
+  ok('4d. …and eight periodic ticks do not un-terminate it',
+    am._durability.state(env.msgId) === 'expired' && am.durabilityPending() === 0,
+    `state=${am._durability.state(env.msgId)} pending=${am.durabilityPending()}`);
+}
+
+// ── 5. THE CONTRACT IS `=== true`, AND A REJECTION FABRICATES NOTHING ──────
+// Aster's second point on v4.58.2, and the more embarrassing of the two. My
+// eager-site guard read `rep.dispatched !== false && rep.snapshot !== false`, so
+// a MISSING flag passed it — inference by default, written one commit after I
+// argued that capability is declared and never inferred. And the rejection catch
+// asserted dispatched:true, snapshot:true, inventing evidence for a call that
+// threw. Both now go through the ledger's own classifier.
+{
+  const L = new DurabilityLedger({ now: () => 1 });
+  L.open('m5', 9n);
+  ok('5a. a result with NO flags at all is treated as no-dispatch — a missing ' +
+     'flag is not a true one',
+    L._classify({ verified: 1, attempted: 1 }) === 'no-dispatch',
+    L._classify({ verified: 1, attempted: 1 }));
+  ok('5b. …so it cannot verify, and cannot burn an attempt',
+    L.recordOne('m5', { verified: 1, attempted: 1 }) === 'pending' &&
+    (L.get('m5')?.attempts ?? -1) === 0,
+    `state=${L.state('m5')} attempts=${L.get('m5')?.attempts}`);
+  ok('5c. truthy-but-not-true is also refused — the contract is === true, not ' +
+     'whatever coerces',
+    L._classify({ dispatched: 1, snapshot: 'yes' }) === 'no-dispatch');
+  ok('5d. the four kinds are distinct and exhaustive',
+    L._classify({ noCohort: true }) === 'no-cohort' &&
+    L._classify({ dispatched: true, snapshot: false }) === 'no-snapshot' &&
+    L._classify({ dispatched: true, snapshot: true }) === 'evidence');
+
+  // The rejection shape the eager site now produces.
+  const L2 = new DurabilityLedger({ now: () => 1 });
+  L2.open('m6', 9n);
+  const rejected = { attempted: 1, verified: 0, failed: 1, dispatched: false, snapshot: false,
+                     noCohort: false, reason: 'boom' };
+  ok('5e. a _replicateRole REJECTION shows no dispatch and no snapshot, so it ' +
+     'leaves the message PENDING and burns no attempt — the publish still does ' +
+     'not confirm, but a throw is not a demonstrated attempt',
+    L2.recordOne('m6', rejected) === 'pending' && (L2.get('m6')?.attempts ?? -1) === 0,
+    `state=${L2.state('m6')} attempts=${L2.get('m6')?.attempts}`);
+  ok('5f. CONTROL — the same ledger still advances on real evidence, so 5a-5e ' +
+     'are not "recordOne never does anything"',
+    L2.recordOne('m6', { verified: 1, attempted: 1, dispatched: true, snapshot: true }) === 'verified');
 }
 
 console.log(`\n${fail ? `✗ ${fail} of ${n} failed` : `✓ all ${n} checks passed`}`);

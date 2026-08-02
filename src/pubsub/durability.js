@@ -96,13 +96,49 @@ export class DurabilityLedger {
   // until the second call site. Anything that is not a dispatched full snapshot
   // is not evidence about a message, in EITHER direction — it must not verify,
   // and it must not burn an attempt. Silence still never advances anything.
+  // THE ONE CLASSIFIER. Every replication outcome is exactly one of four kinds,
+  // and both call sites — the periodic sweep and the eager ingress — go through
+  // it. Aster's v4.58.2 finding was that my first attempt had THREE kinds and
+  // needed four: I folded "no cohort exists" into the same no-op as "the tick
+  // was busy", so a singleton root's message stayed pending forever instead of
+  // reaching the honest undurable terminal it had before.
+  //
+  //   'no-cohort'   nobody to send to. TERMINAL and undurable — no future tick
+  //                 can produce evidence, and this node holds the only copy.
+  //   'no-dispatch' nothing was sent THIS TIME (budget deferral, or a caller
+  //                 that could not run). Retryable. No state change, no attempt.
+  //   'no-snapshot' an empty keepalive went out. Proves a peer is reachable,
+  //                 proves nothing about a body it did not carry. Same no-op.
+  //   'evidence'    a dispatched FULL snapshot. The only kind that may move a
+  //                 message in either direction.
+  //
+  // STRICT === true, deliberately (Aster again): a missing flag is not a true
+  // one. Defaulting the other way is inference, which is the exact habit this
+  // module exists to break — and I had written `!== false` at the eager site one
+  // commit after writing "capability is DECLARED, never inferred".
+  _classify(rep = {}) {
+    if (rep.noCohort === true) return 'no-cohort';
+    if (rep.dispatched !== true) return 'no-dispatch';
+    if (rep.snapshot !== true) return 'no-snapshot';
+    return 'evidence';
+  }
+
+  // PER-MESSAGE, for the eager ingress replicate. Shares _classify with the
+  // topic-level path so the two callers cannot drift — the whole point of
+  // putting the rule here rather than at either call site.
+  recordOne(msgId, rep = {}) {
+    const kind = this._classify(rep);
+    if (kind === 'no-cohort')  { this.noCohortAvailable(msgId); return this.state(msgId); }
+    if (kind !== 'evidence')   return this.state(msgId);            // retryable, no change
+    return this.record(msgId, { verified: rep.verified ?? 0, attempted: rep.attempted ?? 0 });
+  }
+
   recordTopic(topicBig, rep = {}) {
-    const { verified = 0, attempted = 0, dispatched = false, snapshot = false } = rep;
-    const out = { verified: 0, expired: 0, pending: 0, ignored: null };
-    // No dispatch, or a payload that carried no state → NO-OP. Counting the
-    // pending entries is still useful to the caller; changing them is not.
-    if (!dispatched || !snapshot) {
-      out.ignored = !dispatched ? 'no-dispatch' : 'no-snapshot';
+    const kind = this._classify(rep);
+    const out = { verified: 0, expired: 0, pending: 0, kind };
+    if (kind === 'no-dispatch' || kind === 'no-snapshot') {
+      // Counting the pending entries is still useful to the caller; changing
+      // them is not.
       for (const e of this._m.values()) {
         if (e.state === 'pending' && e.topicBig === topicBig) out.pending++;
       }
@@ -110,7 +146,8 @@ export class DurabilityLedger {
     }
     for (const [msgId, e] of this._m) {
       if (e.state !== 'pending' || e.topicBig !== topicBig) continue;
-      const st = this.record(msgId, { verified, attempted });
+      if (kind === 'no-cohort') { this.noCohortAvailable(msgId); out.expired++; continue; }
+      const st = this.record(msgId, { verified: rep.verified ?? 0, attempted: rep.attempted ?? 0 });
       if (st === 'verified') out.verified++;
       else if (st === 'expired') out.expired++;
       else out.pending++;
@@ -127,10 +164,20 @@ export class DurabilityLedger {
   // Leaving it 'pending' (the behaviour Aster found) makes leave() wait out its
   // stall clock for a verdict that cannot arrive, then clear the entry, which
   // reads as success and is not.
-  noCohortConfigured(msgId) {
+  noCohortConfigured(msgId) { this._expire(msgId, 'no-replication-configured'); }
+
+  // NO COHORT WAS FOUND (rootReplicas > 0, but the search returned nobody). A
+  // different fact from the one above — replication is configured, there is
+  // simply no one in range — and the same honest terminal: this node holds the
+  // only copy. Distinguished in the reason so an operator can tell "I never
+  // asked for replicas" from "I asked and the network had none", which are very
+  // different things to see in a report.
+  noCohortAvailable(msgId) { this._expire(msgId, 'no-cohort-available'); }
+
+  _expire(msgId, reason) {
     const e = this._m.get(msgId);
     if (!e || e.state !== 'pending') return;
-    e.state = 'expired'; e.reason = 'no-replication-configured'; e.at = this._now();
+    e.state = 'expired'; e.reason = reason; e.at = this._now();
   }
 
   // A kill retracts the message. Cancel the outstanding durability obligation —

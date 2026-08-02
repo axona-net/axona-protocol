@@ -620,9 +620,17 @@ export const repairPlaneMethods = {
     // Both are the week's one defect again: an outcome that is not evidence,
     // read as evidence. The flags exist so the ledger can refuse rather than
     // infer — see DurabilityLedger.recordTopic, which is fail-closed on them.
-    const nil = (reason) =>
+    // NO-DISPATCH IS NOT ONE THING (Aster, council 2026-08-01, on v4.58.2). My
+    // fail-closed guard collapsed every "nothing was sent" into a single no-op,
+    // and that swallowed a case which is genuinely TERMINAL: no cohort exists to
+    // send to. A budget deferral is "not yet, ask again"; an empty cohort is
+    // "there is nobody, and this node holds the only copy" — which is the honest
+    // singleton answer the ledger already had, and which I regressed into
+    // pending-forever. `noCohort` restores the distinction explicitly rather
+    // than letting it fall out of attempted===0.
+    const nil = (reason, extra = {}) =>
       ({ attempted: 0, verified: 0, failed: 0, unsupported: 0, violation: 0,
-         reason, dispatched: false, snapshot: false });
+         reason, dispatched: false, snapshot: false, noCohort: false, ...extra });
     if (!this._rootReplicas || !role || !role.isRoot) return nil('not-a-replicating-root');
     if (role.cache.length === 0 && role.tombstones.size === 0) return nil('nothing-to-preserve');
     let want;
@@ -666,7 +674,11 @@ export const repairPlaneMethods = {
       // outstanding. Returning early WITHOUT this left the last cohort's failures
       // pinned for the lifetime of the role.
       role.attempted?.clear();
-      return nil('no-cohort-available');
+      // TERMINAL, not "ask again": there is no cohort to dispatch to, so no
+      // future tick can produce evidence either. The ledger expires these as
+      // UNDURABLE — a true statement (this node holds the only copy) and the
+      // one leave() must be able to see.
+      return nil('no-cohort-available', { noCohort: true });
     }
     // Delta gate (v4.24.1, #333): push the FULL state only when it changed, a
     // new cohort member needs seeding, or the anti-entropy backstop elapsed —

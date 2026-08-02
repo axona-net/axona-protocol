@@ -366,8 +366,17 @@ export const wireHandlersMethods = {
       // swallow the only evidence available and confirm regardless, so a publish
       // whose every replication push exhausted still reported durable.
       const rep = await this._replicateRole(role.topicId, role, bridge, this._now())
+        // A REJECTION FABRICATES NOTHING (Aster, on v4.58.2). I had this catch
+        // asserting dispatched:true, snapshot:true — inventing evidence flags for a
+        // call that threw, in the middle of a change whose entire purpose is that
+        // evidence must be demonstrated. An unexpected _replicateRole rejection shows
+        // no dispatch and no snapshot, so it must not burn a ledger attempt. The warn
+        // and the withheld confirm below still fire: the publish does NOT confirm, and
+        // the periodic path retries. Nothing is silently swallowed; it is simply not
+        // counted as an attempt that happened.
         .catch((e) => ({ attempted: 1, verified: 0, failed: 1, unsupported: 0, violation: 0,
-                         dispatched: true, snapshot: true, reason: String(e?.message || e) }));
+                         dispatched: false, snapshot: false, noCohort: false,
+                         reason: String(e?.message || e) }));
       // v4.58.0 FAIL-CLOSED. Confirm requires POSITIVE evidence: attempted > 0
       // demands verified > 0. The previous gate also required unreported === 0,
       // which meant a publish with no dispatch evidence at all still confirmed —
@@ -378,18 +387,13 @@ export const wireHandlersMethods = {
       // what the cohort said. verified === 0 is not final — the tick replicates
       // again until the attempt budget runs out and the entry turns 'expired',
       // which is an honest terminal answer rather than a silent confirm.
-      // SAME EVIDENCE RULE AS THE PERIODIC PATH (Aster, council 2026-08-01), applied
-      // here explicitly rather than assumed. Measured, so the reasoning is on record:
-      // this call site passes NO budget, so `deferred-no-budget` cannot fire and
-      // dispatched is always true here — but that is a property of this caller, not
-      // of the ledger, and it is exactly the kind of local truth I have twice written
-      // down as if it were global. The `snapshot` half is NOT unreachable, so the
-      // guard is real: only a dispatched FULL push may move a message's state.
-      // attempted === 0 with a real dispatch is still the singleton/no-cohort case
-      // and still terminal, deliberately and unchanged.
-      if (rep.dispatched !== false && rep.snapshot !== false) {
-        this._durability.record(env.msgId, { verified: rep.verified, attempted: rep.attempted });
-      }
+      // ONE RULE, IN THE LEDGER (Aster, on v4.58.2). My previous version hand-rolled
+      // the guard here as `rep.dispatched !== false && rep.snapshot !== false`, which
+      // is not the contract: a MISSING flag passed it. That is inference by default —
+      // written by me one commit after "capability is DECLARED, never inferred", which
+      // is how deeply the habit runs. recordOne shares _classify with the periodic
+      // path, so the two callers cannot drift and neither can restate the rule wrong.
+      this._durability.recordOne(env.msgId, rep);
       if (rep.attempted > 0 && rep.verified === 0) {
         this._log('warn', 'pubsub:replicate-all-failed', {
           topic: idHex(role.topicId).slice(0, 12), attempted: rep.attempted, failed: rep.failed,
