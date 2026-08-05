@@ -1,24 +1,38 @@
-# Kernel Invariants
+# Kernel Invariants — test index
 
-The behavioral contract the pub/sub kernel must uphold, distilled from the
-incidents that taught us each rule. **Every entry names the regression test
-that enforces it** — a change that breaks one of these must fail a test, not a
-production network. This file is the Phase 0 output of the refactor program
-(`axona-docs/architecture/Kernel-Refactor-Analysis-v0.1.md`); Phases 1–4 must
-preserve every invariant below with the suite passing identically.
+> **The invariants themselves are `Axona-Architecture.tex` §XII in the
+> axona-docs repo, and nowhere else.** That section is normative and carries
+> all eighteen (`I-1…I-18`) plus the six structural rules. This file is the
+> in-repo **test index**: for each invariant, which tests in `test/` cover it,
+> so you can run them without leaving the checkout. When the two disagree, the
+> document is right and this file is stale — fix it here.
+>
+> Two things this file used to get wrong, recorded so they are not
+> reintroduced. Its `I-1` claimed a topic has *exactly* one root; the system
+> guarantees convergence, not exclusivity, and there is no distributed lock
+> that would forbid a duplicate. And it ran out at `I-11` while a second
+> `INVARIANTS.md` in axona-docs carried a disjoint `S1–S6`/`B1–B13` scheme —
+> a reader could not tell whether `B3` and `I-2` were two rules or one. Both
+> are resolved by §XII; the axona-docs file is now a pointer.
 
 How to read an entry: **the rule**, the incident that paid for it, and the
 enforcing test(s) in `test/`.
 
 ---
 
-## I-1. A topic has exactly one root, and a wrong claim converges without flapping
+## I-1. A topic converges to a single root, and a wrong claim converges without flapping
 
 The root is emergent (the live node XOR-closest to the topic id), never
 elected by ballot. Any node that wrongly claims root-ness — a stranded
 terminal SUB, a near-miss relay after churn, a backup that promoted — must
 converge to the true root and must not re-take the claim on the next stranded
 message (the ~20s prod root-flap of 2026-07-07).
+
+This is liveness, not mutual exclusion. Duplicate roots are an expected
+transient. Reconciliation reaches only `rootReplicas` (2), so a second root
+outside that reach persists until churn removes it; under partition each side
+stamps its own dense sequence and the merge on heal is a union, not an
+ordering. See §XII for the full statement.
 
 - `smoke_root_reconcile.mjs` — divergent-view fabric: migration, strand-no-reroot,
   churn safety, shadowed-corner self-verify, alone-in-the-dark (18 checks)
@@ -162,6 +176,29 @@ bulk ingest → missed heartbeats → mass eviction → `state=stale` mesh death
 - `_ingestStampedBatch` (wireHandlers) — macrotask yield every 16 messages on
   the REPLAYUP/HANDOFF/REPLICATE ingest paths
 - Full mesh re-bootstrap after mass eviction remains open (task #332)
+
+## I-12 through I-18 — index not yet written
+
+Seven invariants exist in §XII that this index does not cover. Stated here in
+one line each so nobody concludes from their absence that they do not exist;
+the full statements and the reasoning are in the document.
+
+| # | Rule | Covering tests |
+|---|---|---|
+| I-12 | A write is never handed to a root without live evidence, and the read path passes the same gate | read side: `smoke_ghost_read.mjs`. Write side **UNFENCED** — issue #422 |
+| I-13 | Durable bookkeeping is written from receipts, never from sends | **UNFENCED** |
+| I-14 | A negative result names its kind — timeout, answered-empty, and unparseable are three facts | **UNFENCED** — issue #418 is a live instance |
+| I-15 | Transport identity is ephemeral; author identity is durable | `smoke_persistence_wiring.js`, `smoke_snapshot.js`, `fence_transport_identity.mjs` (was `I-ID`) |
+| I-16 | Region is an optimization, never a wall | `smoke_region_lock.mjs` covers the dormant path only; nothing asserts the default stays off (was `B1`) |
+| I-17 | A bridge holds no topic role, at any load, with no floor exception | `smoke_role_admission.mjs`; nothing asserts a bridge ends bring-up with `axonRoles` empty (was `B12`) |
+| I-18 | Capacity is measured, never counted | `smoke_role_admission.mjs` (was `B13`) |
+
+Also folded into §XII from the retired axona-docs file: the six structural
+rules `S1–S6` (`smoke_root_claim`, `smoke_role_natures`, `smoke_sync_engine`,
+`smoke_emission_sites`, `smoke_handoff_scaling`; `S4` and `S6` are UNFENCED),
+and the behavioural entries that merged into invariants above — `B2`/`B4`/`B9`
+into I-1, `B3` into I-2, `B5`/`B6`/`B11` into I-4, `B7`/`B8` into I-8, `B10`
+into I-10.
 
 ---
 
