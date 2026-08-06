@@ -420,6 +420,11 @@ export function webTransport({
             try { mesh.setTurnConfig(frame.turn ?? null); }
             catch (err) { log('turn-config-failed', { err: err.message }); }
           }
+          // Re-dial before this credential's TTL lapses so a long-lived or
+          // graduated node never strands itself with an expired TURN credential
+          // (2026-08-06 prod: expired creds → relay allocations refused →
+          // replicate-all-failed). No-op if the welcome carried no TURN config.
+          scheduleTurnRefresh(frame.turn ?? null);
           // Capture welcome for observability (consumers read it via
           // transport.bridgeInfo + onWelcome) — connId, the bridge's
           // package version, and its kernel version for the UI's
@@ -562,6 +567,7 @@ export function webTransport({
   let stopped          = false;  // composite.stop() sets this — suppresses reconnect
   let graduated        = false;  // released by the bridge while meshed — no reconnect
   let graduationTimer  = null;   // watchdog: re-dial if the mesh thins post-graduation
+  let turnRefreshTimer = null;   // re-dial before the TURN credential's TTL lapses
   const stateHandlers   = new Set();
   const welcomeHandlers = new Set();
 
@@ -645,6 +651,62 @@ export function webTransport({
   }
   function stopGraduationWatch() {
     if (graduationTimer != null) { clearInterval(graduationTimer); graduationTimer = null; }
+  }
+
+  // ── TURN credential refresh ─────────────────────────────────────────
+  //
+  // The bridge mints TURN credentials with a fixed TTL (2h today) and hands
+  // them over ONLY in the welcome frame; the sole refresh path is a fresh
+  // welcome, which only follows a (re)connect. A meshed node that graduates off
+  // the bridge, or holds one socket longer than the TTL, therefore ends up
+  // carrying an EXPIRED credential: every new relay allocation it attempts —
+  // cohort replication, a fresh relayed edge — is refused by the TURN server,
+  // and nothing re-dials the bridge to refresh it, because the reconnect trigger
+  // is meshed-peer-count, not credential age. Prod 2026-08-06: coturn's log was
+  // ~100% `check_stun_auth: Cannot find credentials`, the usernames' expiry
+  // prefixes hours in the past, and roots logged pubsub:replicate-all-failed.
+  // So drive a refresh from the credential's OWN expiry, independent of mesh
+  // health.
+  //
+  // Expiry is read from the REST username's leading `<expiry-unix-seconds>:`
+  // field — what coturn actually validates against. A credential with no
+  // parseable expiry is left alone (no worse than before this fix).
+  const TURN_REFRESH_SAFETY_MS = 5 * 60 * 1000;   // refresh this long before expiry
+  function turnExpiryMs(turn) {
+    const user = turn && typeof turn.username === 'string' ? turn.username : null;
+    if (!user) return 0;
+    const secs = Number.parseInt(user.split(':', 1)[0], 10);
+    return Number.isFinite(secs) && secs > 0 ? secs * 1000 : 0;
+  }
+  function scheduleTurnRefresh(turn) {
+    stopTurnRefresh();
+    const expiryMs = turnExpiryMs(turn);
+    if (!expiryMs) return;                          // no parseable expiry — leave as-is
+    const fireIn = Math.max(1000, expiryMs - Date.now() - TURN_REFRESH_SAFETY_MS);
+    turnRefreshTimer = setTimeout(() => {
+      turnRefreshTimer = null;
+      if (stopped) return;
+      // Force a bridge round-trip so a fresh welcome re-mints the credential,
+      // regardless of mesh health. Graduated / disconnected: re-open the socket
+      // (same path a mesh-thin re-dial takes). Held-open: close it so the
+      // reconnect branch re-welcomes — the WebRTC mesh is independent of the
+      // bridge socket, so this does not disturb established peer channels.
+      log('turn-cred-refresh', { graduated, socketOpen });
+      if (!socketOpen) {
+        if (reconnect && autoHandshake) {
+          graduated = false;
+          stopGraduationWatch();
+          setBridgeState('connecting');
+          openSocket();
+        }
+      } else {
+        try { if (socket) socket.close(1000, 'turn-cred-refresh'); } catch { /* ignore */ }
+      }
+    }, fireIn);
+    if (typeof turnRefreshTimer?.unref === 'function') turnRefreshTimer.unref();
+  }
+  function stopTurnRefresh() {
+    if (turnRefreshTimer != null) { clearTimeout(turnRefreshTimer); turnRefreshTimer = null; }
   }
 
   function scheduleReconnect() {
@@ -820,6 +882,7 @@ export function webTransport({
     if (reconnectTimer != null) { clearTimeout(reconnectTimer); reconnectTimer = null; }
     stopStaleChecker();
     stopGraduationWatch();
+    stopTurnRefresh();
     stopBridgePingLoop();
     await origStop();
     if (socket) {
