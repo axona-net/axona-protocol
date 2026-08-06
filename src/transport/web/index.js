@@ -448,6 +448,13 @@ export function webTransport({
             turn:    !!frame.turn,
           });
           return;
+        case 'turn':
+          // In-band credential refresh: the bridge's reply to a turn-refresh
+          // request (see requestTurnRefreshInBand). Install the fresh credential
+          // and reschedule — no socket or mesh change. Distinct from `welcome`
+          // so it never re-runs welcome's connId/nonce/handshake bookkeeping.
+          applyTurnFrame(frame.turn ?? null);
+          return;
         case 'peer-list':
           if (typeof mesh.onPeerList === 'function') {
             return mesh.onPeerList(Array.isArray(frame.peers) ? frame.peers : []);
@@ -567,7 +574,8 @@ export function webTransport({
   let stopped          = false;  // composite.stop() sets this — suppresses reconnect
   let graduated        = false;  // released by the bridge while meshed — no reconnect
   let graduationTimer  = null;   // watchdog: re-dial if the mesh thins post-graduation
-  let turnRefreshTimer = null;   // re-dial before the TURN credential's TTL lapses
+  let turnRefreshTimer = null;   // fires before the TURN credential's TTL lapses
+  let turnRefreshReplyTimer = null;  // awaits the bridge's in-band `turn` reply
   const stateHandlers   = new Set();
   const welcomeHandlers = new Set();
 
@@ -669,14 +677,22 @@ export function webTransport({
   // health.
   //
   // Expiry is read from the REST username's leading `<expiry-unix-seconds>:`
-  // field — what coturn actually validates against. A credential with no
-  // parseable expiry is left alone (no worse than before this fix).
-  const TURN_REFRESH_SAFETY_MS = 5 * 60 * 1000;   // refresh this long before expiry
+  // field — what coturn actually validates against. Parsing is STRICT: the
+  // leading field must be all digits (a partial-numeric prefix like `12ab` is
+  // rejected, not silently truncated — council review, Aster). A credential
+  // with no parseable expiry is left alone (no worse than before this fix).
+  const TURN_REFRESH_SAFETY_MS   = 5 * 60 * 1000;  // refresh this long before expiry
+  // How long to wait for the bridge's in-band `turn` reply before falling back
+  // to a re-dial. Generous: the refresh fires SAFETY_MS (5min) before the
+  // credential actually lapses, so a slow bridge still has minutes of runway.
+  const TURN_REFRESH_REPLY_MS    = 60 * 1000;
   function turnExpiryMs(turn) {
     const user = turn && typeof turn.username === 'string' ? turn.username : null;
     if (!user) return 0;
-    const secs = Number.parseInt(user.split(':', 1)[0], 10);
-    return Number.isFinite(secs) && secs > 0 ? secs * 1000 : 0;
+    const head = user.split(':')[0];
+    if (!/^\d+$/.test(head)) return 0;              // strict: leading field must be all digits
+    const secs = Number(head);
+    return Number.isSafeInteger(secs) && secs > 0 ? secs * 1000 : 0;
   }
   function scheduleTurnRefresh(turn) {
     stopTurnRefresh();
@@ -686,27 +702,58 @@ export function webTransport({
     turnRefreshTimer = setTimeout(() => {
       turnRefreshTimer = null;
       if (stopped) return;
-      // Force a bridge round-trip so a fresh welcome re-mints the credential,
-      // regardless of mesh health. Graduated / disconnected: re-open the socket
-      // (same path a mesh-thin re-dial takes). Held-open: close it so the
-      // reconnect branch re-welcomes — the WebRTC mesh is independent of the
-      // bridge socket, so this does not disturb established peer channels.
       log('turn-cred-refresh', { graduated, socketOpen });
-      if (!socketOpen) {
-        if (reconnect && autoHandshake) {
-          graduated = false;
-          stopGraduationWatch();
-          setBridgeState('connecting');
-          openSocket();
-        }
-      } else {
-        try { if (socket) socket.close(1000, 'turn-cred-refresh'); } catch { /* ignore */ }
+      if (socketOpen) {
+        // Held open: refresh IN-BAND over the live socket. A bare close would
+        // reject in-flight bridge requests (bridge.handleConnClosed) and drop
+        // bootstrap connectivity before a new credential is secured — the
+        // single-point-of-failure the council flagged (Orion, Aster). Instead
+        // ask the bridge to re-mint; it answers with a `turn` frame that the
+        // dispatch handler applies, touching neither the socket nor the mesh.
+        requestTurnRefreshInBand();
+      } else if (reconnect && autoHandshake) {
+        // Graduated / disconnected: no live socket to preserve and no in-flight
+        // bridge work to lose, so a re-dial is the safe path (same one a
+        // mesh-thin graduation re-dial takes). This is the case that heals the
+        // backbone relays behind the prod flood.
+        graduated = false;
+        stopGraduationWatch();
+        setBridgeState('connecting');
+        openSocket();
       }
     }, fireIn);
     if (typeof turnRefreshTimer?.unref === 'function') turnRefreshTimer.unref();
   }
+  // Ask the bridge for a fresh credential without disturbing the connection.
+  // The bridge replies `{type:'turn', turn}` → applyTurnFrame(). If it does not
+  // (a bridge predating this RPC, during a rollout), fall back to a re-dial once
+  // the reply window lapses — still minutes before the credential expires.
+  function requestTurnRefreshInBand() {
+    try { sendToBridge({ type: 'turn-refresh' }); }
+    catch (err) { log('turn-refresh-send-failed', { err: err.message }); return; }
+    if (turnRefreshReplyTimer != null) clearTimeout(turnRefreshReplyTimer);
+    turnRefreshReplyTimer = setTimeout(() => {
+      turnRefreshReplyTimer = null;
+      if (stopped || !socketOpen) return;
+      log('turn-refresh-no-reply-redial', {});
+      try { if (socket) socket.close(1000, 'turn-refresh-fallback'); } catch { /* ignore */ }
+    }, TURN_REFRESH_REPLY_MS);
+    if (typeof turnRefreshReplyTimer?.unref === 'function') turnRefreshReplyTimer.unref();
+  }
+  // Apply an in-band `turn` frame (the bridge's reply to turn-refresh): install
+  // the fresh credential and schedule the next refresh. No socket/mesh change.
+  function applyTurnFrame(turn) {
+    if (turnRefreshReplyTimer != null) { clearTimeout(turnRefreshReplyTimer); turnRefreshReplyTimer = null; }
+    if (turn && typeof mesh.setTurnConfig === 'function') {
+      try { mesh.setTurnConfig(turn); }
+      catch (err) { log('turn-config-failed', { err: err.message }); }
+    }
+    scheduleTurnRefresh(turn ?? null);
+    log('turn-refreshed-inband', { turn: !!turn });
+  }
   function stopTurnRefresh() {
     if (turnRefreshTimer != null) { clearTimeout(turnRefreshTimer); turnRefreshTimer = null; }
+    if (turnRefreshReplyTimer != null) { clearTimeout(turnRefreshReplyTimer); turnRefreshReplyTimer = null; }
   }
 
   function scheduleReconnect() {
