@@ -1,0 +1,21 @@
+{
+  "ref": "dcef19f",
+  "at": "2026-08-05T05:01:01.372Z",
+  "ok": true,
+  "reviewers": [
+    {
+      "reviewer": "Aster",
+      "state": "APPROVED",
+      "ts": 1785905342877,
+      "msgId": "3de0fa28aecb9e292d90f91297c6bbb1e3ccfbaaae13f8748ec15211d2c97f5f",
+      "superseded": 0
+    },
+    {
+      "reviewer": "Orion",
+      "state": "APPROVED",
+      "ts": 1785905970290,
+      "msgId": "129ae4678fcea36db4de23678aa4c8a6f28f844c542f528d9c4de49abcd518e6",
+      "superseded": 0
+    }
+  ]
+}

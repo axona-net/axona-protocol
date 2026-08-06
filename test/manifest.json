@@ -699,6 +699,11 @@
       "reason": "Passes on 4.49.0. Fences the #343 TURN REST username encoding."
     },
     {
+      "file": "smoke_turn_cred_refresh.mjs",
+      "class": "default",
+      "reason": "4.60.0. Fences #44 TURN credential refresh before TTL lapse: in-band held-open refresh, graduated re-dial, strict expiry parse."
+    },
+    {
       "file": "smoke_unpub.js",
       "class": "retired",
       "reason": "Retired 2026-07-29. unpub.js was DELETED in refactor-1 (task #389). Calls am._handleUnpub. The feature is gone by decision. Its envelope-level assertions (build/verify/tamper) still pass, which is why it fails late rather than on import."
