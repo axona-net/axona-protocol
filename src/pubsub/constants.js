@@ -351,6 +351,13 @@ export const T = {
   REPLAYUP: 'pubsub:replayup',  // a relay's stamped cache delta, routed UP to a behind parent
   HANDOFF:  'pubsub:handoff',   // graceful-leave: a departing root pushes its cache to its heir
   KILL:     'pubsub:kill',      // retract a message (thin; TODO Phase 4)
+  INGESTACK: 'pubsub:ingestack', // root -> forwarder: correlated proof of INGEST (Dead-Root Eviction v0.3).
+                                //   {topicId, msgId, epoch, op:'pub'|'kill'} emitted AFTER topic-store
+                                //   ingest, never at routing. One hop back to meta.fromId — the
+                                //   FORWARDER, deliberately not the origin publisher (no publish-ack:
+                                //   acking the publisher would disclose its location). The E3 write
+                                //   flight treats this as the ONLY terminal success; a routing
+                                //   'consumed' verdict is hop-local evidence and never completes a write.
   UNPUB:    'pubsub:unpub',     // RESERVED — removed v4.3.0 (no handler/sender); wire string kept so legacy frames are ignored, not misrouted
   TOUCH:    'pubsub:touch',     // extend TTL (thin; TODO Phase 4)
   PULL:     'pubsub:pull',      // on-demand fetch request — routed toward topic id

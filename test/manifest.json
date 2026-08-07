@@ -68,6 +68,11 @@
       "note": "Dead-Root Eviction v0.3 phase E1 \u2014 root incarnation plumbing. Every entry to ROOT mints epoch = _knownEpoch(topic)+1 (both sites: rootClaim.become born-as-root and rootClaim._set promotion flip); beacons carry `epochs` index-aligned with `topics`; receivers store it as a HIGH-WATER MARK on the beacon record (lower later epochs never regress it, garbage reads as 0); a beacon without the field interoperates as epoch 0 both directions. Epoch ORDERS claims for a seat \u2014 no placement behavior changes in E1; comparison semantics land with epoch reconciliation (E4) and eviction tombstones join _knownEpoch's max in E3."
     },
     {
+      "file": "smoke_ingest_ack.mjs",
+      "class": "default",
+      "note": "Dead-Root Eviction v0.3 phase E2 \u2014 the typed INGEST-ack. A root emits {topicId, msgId, epoch, op} ONE HOP back to the forwarder (meta.fromId) after topic-store ingest, never at routing and never to the origin publisher (no publish-ack: location privacy; the E3 write flight lives at the deferral sites). PUB completes on ingest, KILL completes separately on tombstone ingest with the TARGET msgId bound; duplicates ack again (idempotent-retry success \u2014 an ack is what stops the flight from probing a root doing its job); verification drops (tampered signature, unparseable body) ack NOTHING. _ingestPublish now returns typed {ok, msgId, reason} \u2014 the replicate-all-failed path still acks ok (ingest happened; durability is the cohort's job and the tick retries it independently, v0.3 'death immediately after ingest-ack'). Receiver side (_onIngestAck) records correlations in a 512-bounded insertion-ordered store for the E3 flight; malformed ops record nothing. Real Ed25519 envelopes through the real ingress, fence_q2 harness discipline."
+    },
+    {
       "file": "fence_replica_ledger.mjs",
       "class": "default",
       "note": "C4 (partial) \u2014 a root must not record a cohort member in role.replicas when the push to it threw. Verified RED against the pre-fix code (1b/2b fail, replicas=2). Pins the LEDGER only; what discharges the ROOT obligation is the open C4 decision and sync.lastFullAt is deliberately not asserted."
