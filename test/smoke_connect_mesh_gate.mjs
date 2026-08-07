@@ -1,35 +1,40 @@
 // =====================================================================
 // smoke_connect_mesh_gate.mjs — connect() fails hard when it forms no LIVE
-// WebRTC mesh, with an easy bridge-only override (GH #46, David 2026-08-06).
+// WebRTC mesh, judged against ONE shared deadline (GH #46 + GH #48).
 //
 // Howard (#46): if a node forms no WebRTC connection to any peer, connect()
-// still succeeds and nothing is logged — the only tell was status.peers on some
-// surfaces. A silent bridge-only success tells an app it will work when for its
-// user it won't.
+// still succeeds and nothing is logged. David's call: fail hard, with an easy
+// override (allowBridgeOnly) — bridge-only is genuinely the only path for some
+// users (WebRTC blocked, carrier NAT).
 //
-// David's call: fail hard, with an easy override — bridge-only is genuinely the
-// only path for some users (WebRTC blocked, carrier NAT).
+// GH #48 (prod outage, 2026-08-07): the 4.61.0 gate judged live channels at
+// the instant ready() resolved — but ready({minPeers}) resolves off the
+// SYNAPTOME, which bridge announcements seed instantly, so every minPeers
+// caller threw MESH_UNREACHABLE at 0ms while its channels were still binding.
+// Council (Aster + Orion, 2026-08-07): the contract is atomic — when mesh is
+// required, connect() resolves only after the live-mesh predicate holds
+// within the caller's own single monotonic deadline (ready.timeoutMs). No
+// grace period; no silent extension; allowBridgeOnly is the only bypass.
 //
-// Council (Aster + Orion, 2026-08-06): gate on the count of LIVE authenticated
-// WebRTC channels (transport.meshBoundCount()), NOT node.synaptome.size, which
-// can hold un-evicted stale entries during churn and mask a dead mesh.
+// The contract this pins (council regression set, replacing old case E):
+//   A  0 live peers, none bind by deadline → throws MeshUnreachableError at
+//      ~deadline (not at 0ms), and tears down (no leaked socket)
+//   B  0 live peers + allowBridgeOnly → resolves immediately (bypass — no
+//      admission wait); status.initialBridgeOnly true
+//   C  ready:false (opted out) → no gate (nothing measured), no throw
+//   D  already bound at gate time, EMPTY synaptome → immediate pass. Proof the
+//      gate reads LIVE channels, never node.synaptome.size.
+//   E  synaptome seeded instantly (the outage shape), channel binds INSIDE the
+//      deadline → PASSES, resolving on the bind event (not the full deadline)
+//   F  synaptome seeded, NO bind by deadline → throws; context carries
+//      synapses>0 / peers===0 (the stale-table distinction)
+//   G  no leak: after both resolve and throw paths, the stub holds ZERO
+//      registered bind listeners, and a bind that fires AFTER the deadline
+//      finds no listener and does nothing (no crash, no late resolve)
 //
-// The contract this pins:
-//   A  0 live peers + default        → throws MeshUnreachableError, and tears
-//                                        down (no leaked transport socket)
-//   B  0 live peers + allowBridgeOnly → resolves; status.initialBridgeOnly true
-//   C  ready:false (opted out)        → no gate (nothing measured), no throw
-//   D  live channels present, EMPTY synaptome → no throw. Direct proof the gate
-//      reads LIVE channels and NOT node.synaptome.size: the pass decision is
-//      taken with an empty routing table.
-//   E  the churn inverse (Aster): a NON-EMPTY synaptome but ZERO live channels →
-//      STILL throws. synaptome.size would have masked the dead mesh;
-//      meshBoundCount does not. This is the regression the change prevents.
-//      (Post-connect liveness — a mesh that dies AFTER a healthy start — is the
-//      runtime monitor's job, GH #438, not connect()'s.)
-//
-// A stub transport stands in for the web stack: meshBoundCount() is settable so
-// the "live channel" count is controlled independently of the routing table.
+// A stub transport stands in for the web stack: meshBound is settable, and
+// bindAfterMs schedules meshBound=1 plus a fire of every registered
+// onPeerBound listener — modelling the real DTLS/ICE completion.
 //
 // Run: node test/smoke_connect_mesh_gate.mjs
 // =====================================================================
@@ -43,18 +48,17 @@ const check = (label, cond) => {
   else      { console.log(`  ✗ ${label}`); failed++; }
 };
 
-// A complete-enough Transport stub: satisfies AxonaPeer.start()'s handler
-// registrations. `meshBound` controls the LIVE authenticated-channel count that
-// connect()'s gate reads via meshBoundCount() — independent of the synaptome.
-// `seedPeerAfterMs`: if set, fire the peer's onPeerBound callback that many ms
-// after registration with a synthetic BigInt id. That drives the REAL kernel
-// path (_seedSynaptomeWithSponsor) to add a synapse to node.synaptome mid-ready,
-// WITHOUT changing meshBound — modelling a routing-table entry with no live
-// channel behind it (the churn/stale case).
-function stubTransport({ meshBound = 0, seedPeerAfterMs = null } = {}) {
+// Transport stub. `seedPeerAfterMs` fires listeners with a synthetic BigInt id
+// WITHOUT touching meshBound (routing-table entry, no live channel — the churn
+// /stale shape). `bindAfterMs` sets meshBound=1 and fires listeners (a real
+// channel bind). `listeners` is inspectable for the leak check (case G).
+function stubTransport({ meshBound = 0, seedPeerAfterMs = null, bindAfterMs = null, seedAtRegistration = false } = {}) {
   const t = {
     stopped: 0,
     meshBound,
+    seedAtRegistration,
+    _seeded: false,
+    listeners: new Set(),
     meshBoundCount() { return t.meshBound; },
     async start() {},
     async stop() { t.stopped++; },
@@ -68,37 +72,56 @@ function stubTransport({ meshBound = 0, seedPeerAfterMs = null } = {}) {
     async notify() {},
     onRequest() {}, onNotification() {}, onPeerDied() {},
     onPeerBound(cb) {
-      if (seedPeerAfterMs != null) setTimeout(() => { try { cb(0x9999n); } catch {} }, seedPeerAfterMs);
-      return () => {};
+      t.listeners.add(cb);
+      // seedAtRegistration: fire synchronously on the FIRST registration
+      // (AxonaPeer's, during start(), before ready() begins) so the synapse
+      // exists before any wait starts. A setTimeout seed raced the ready
+      // window under full-suite parallel load and made case F flake — the
+      // snapshot in status.peers was taken before the starved timer fired.
+      if (t.seedAtRegistration && !t._seeded) {
+        t._seeded = true;
+        try { cb(0x9999n); } catch { /* smoke */ }
+      }
+      return () => t.listeners.delete(cb);
+    },
+    fireBound(id = 0x9999n) {
+      for (const cb of [...t.listeners]) { try { cb(id); } catch { /* smoke */ } }
     },
     deliverMeshSignal() {},
   };
+  if (seedPeerAfterMs != null) setTimeout(() => t.fireBound(), seedPeerAfterMs);
+  if (bindAfterMs != null) setTimeout(() => { t.meshBound = 1; t.fireBound(0x8888n); }, bindAfterMs);
   return t;
 }
 
 const LOC = { lat: 40.71, lng: -74.0 };
-const FAST_READY = { minPeers: 1, timeoutMs: 300, stableMs: 100, pollMs: 50 };
+const FAST_READY = { minPeers: 1, timeoutMs: 400, stableMs: 100, pollMs: 25 };
 
 async function main() {
-  console.log('connect() — mesh-reachability gate (live channels, fail hard, bridge-only override)\n');
+  console.log('connect() — mesh gate: one deadline, live-channel admission, bridge-only override\n');
 
-  // ── A. default: 0 live peers → throws + tears down ──────────────────
+  // ── A. default: nothing ever binds → throws at ~deadline, tears down ─
   {
     const tr = stubTransport({ meshBound: 0 });
+    const t0 = Date.now();
     let threw = null;
     try {
       await connect({ location: LOC, author: false, transport: tr, ready: FAST_READY });
     } catch (e) { threw = e; }
+    const elapsed = Date.now() - t0;
     check('A: threw when no live WebRTC peers formed', !!threw);
     check('A: error is MeshUnreachableError', threw instanceof MeshUnreachableError);
     check('A: code is MESH_UNREACHABLE', threw?.code === 'MESH_UNREACHABLE');
     check('A: context reports peers:0 (live)', threw?.context?.peers === 0);
+    check('A: waited the deadline out, not 0ms (GH #48 regression)',
+      threw?.context?.ms >= FAST_READY.timeoutMs - 50 && elapsed >= FAST_READY.timeoutMs - 50);
     check('A: tore down the transport (no leaked socket)', tr.stopped >= 1);
   }
 
-  // ── B. allowBridgeOnly: 0 live peers → resolves, flagged bridge-only ─
+  // ── B. allowBridgeOnly: bypass — resolves without the admission wait ─
   {
     const tr = stubTransport({ meshBound: 0 });
+    const t0 = Date.now();
     let res = null, threw = null;
     try {
       res = await connect({
@@ -108,6 +131,8 @@ async function main() {
     } catch (e) { threw = e; }
     check('B: did NOT throw under allowBridgeOnly', !threw);
     check('B: status.initialBridgeOnly === true', res?.status?.initialBridgeOnly === true);
+    check('B: bypass did not sit out the admission deadline',
+      Date.now() - t0 < FAST_READY.timeoutMs + 400);
     check('B: did NOT tear down (peer is usable)', tr.stopped === 0);
     await res?.disconnect?.();
   }
@@ -124,10 +149,7 @@ async function main() {
     await res?.disconnect?.();
   }
 
-  // ── D. live channel present + EMPTY synaptome → no throw ────────────
-  // The gate reads LIVE channels (meshBoundCount), so the pass decision is taken
-  // even though the routing table is empty. That is exactly why a stale/lingering
-  // synapse can never mask a dead mesh: the gate never consults synaptome.size.
+  // ── D. already bound + EMPTY synaptome → immediate pass ─────────────
   {
     const tr = stubTransport({ meshBound: 1 });
     let res = null, threw = null;
@@ -141,21 +163,56 @@ async function main() {
     await res?.disconnect?.();
   }
 
-  // ── E. churn inverse: NON-EMPTY synaptome, ZERO live channels → throws ─
-  // A synapse is seeded into the routing table mid-ready (via the real
-  // onPeerBound path) while meshBoundCount stays 0. synaptome.size would say
-  // "1 peer" and pass; the live-channel gate correctly throws.
+  // ── E. THE OUTAGE SHAPE: synaptome seeded instantly, bind lands inside
+  //       the deadline → PASSES, resolving on the bind event ────────────
   {
-    const tr = stubTransport({ meshBound: 0, seedPeerAfterMs: 5 });
+    const tr = stubTransport({ meshBound: 0, seedPeerAfterMs: 1, bindAfterMs: 120 });
+    const t0 = Date.now();
+    let res = null, threw = null;
+    try {
+      res = await connect({ location: LOC, author: false, transport: tr, ready: FAST_READY });
+    } catch (e) { threw = e; }
+    const elapsed = Date.now() - t0;
+    check('E: PASSES when the channel binds inside the deadline (4.61.0 threw here)', !threw);
+    check('E: resolved on the bind event, well before the deadline expired',
+      elapsed < FAST_READY.timeoutMs + 200);
+    check('E: status.initialBridgeOnly === false', res?.status?.initialBridgeOnly === false);
+    await res?.disconnect?.();
+  }
+
+  // ── F. stale-table shape: synaptome seeded, NO bind by deadline → throws
+  {
+    const tr = stubTransport({ meshBound: 0, seedAtRegistration: true });
     let threw = null;
     try {
       await connect({ location: LOC, author: false, transport: tr, ready: FAST_READY });
     } catch (e) { threw = e; }
-    check('E: throws when live channels are 0 despite a non-empty synaptome',
+    check('F: throws when live channels stay 0 despite a non-empty synaptome',
       threw instanceof MeshUnreachableError);
-    check('E: context proves the distinction — synapses>0 but live peers===0',
+    check('F: context proves the distinction — synapses>0 but live peers===0',
       threw?.context?.synapses >= 1 && threw?.context?.peers === 0);
-    check('E: and it tore down (no leaked socket)', tr.stopped >= 1);
+    check('F: and it tore down (no leaked socket)', tr.stopped >= 1);
+  }
+
+  // ── G. no leak: listeners cleaned on BOTH paths; a late bind is inert ─
+  {
+    // Throw path: after connect() threw (case-F shape), every gate/peer
+    // listener must be gone, and a bind arriving late must do nothing.
+    const tr = stubTransport({ meshBound: 0 });
+    let threw = null;
+    try {
+      await connect({ location: LOC, author: false, transport: tr, ready: FAST_READY });
+    } catch (e) { threw = e; }
+    check('G: throw path released every bind listener', threw && tr.listeners.size === 0);
+    let lateCrash = false;
+    try { tr.meshBound = 1; tr.fireBound(0x7777n); } catch { lateCrash = true; }
+    check('G: a bind AFTER the deadline finds no listener and does nothing', !lateCrash);
+
+    // Resolve path: after a clean connect + disconnect, listeners are gone too.
+    const tr2 = stubTransport({ meshBound: 1 });
+    const res2 = await connect({ location: LOC, author: false, transport: tr2, ready: FAST_READY });
+    await res2.disconnect();
+    check('G: resolve+disconnect path released every bind listener', tr2.listeners.size === 0);
   }
 
   console.log(`\nResult: ${passed} passed, ${failed} failed`);
