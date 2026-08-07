@@ -1,25 +1,33 @@
 // =====================================================================
-// smoke_connect_mesh_gate.mjs — connect() fails hard when it forms no
+// smoke_connect_mesh_gate.mjs — connect() fails hard when it forms no LIVE
 // WebRTC mesh, with an easy bridge-only override (GH #46, David 2026-08-06).
 //
-// Howard (#46): if a node fails to connect via WebRTC to ANY peer, connect()
-// still succeeds and nothing is logged — the only tell is status.peers on some
-// surfaces. David's call: fail hard, because a silent bridge-only success tells
-// an app it will work when for its user it won't. But bridge-only is genuinely
-// the only option for some users (WebRTC blocked, carrier NAT), so there must be
-// an easy override.
+// Howard (#46): if a node forms no WebRTC connection to any peer, connect()
+// still succeeds and nothing is logged — the only tell was status.peers on some
+// surfaces. A silent bridge-only success tells an app it will work when for its
+// user it won't.
+//
+// David's call: fail hard, with an easy override — bridge-only is genuinely the
+// only path for some users (WebRTC blocked, carrier NAT).
+//
+// Council (Aster + Orion, 2026-08-06): gate on the count of LIVE authenticated
+// WebRTC channels (transport.meshBoundCount()), NOT node.synaptome.size, which
+// can hold un-evicted stale entries during churn and mask a dead mesh.
 //
 // The contract this pins:
-//   A  0 mesh peers + default        → throws MeshUnreachableError, and tears
+//   A  0 live peers + default        → throws MeshUnreachableError, and tears
 //                                        down (no leaked transport socket)
-//   B  0 mesh peers + allowBridgeOnly → resolves; status.bridgeOnly === true
+//   B  0 live peers + allowBridgeOnly → resolves; status.initialBridgeOnly true
 //   C  ready:false (opted out)        → no gate (nothing measured), no throw
-//   D  a populated synaptome          → the gated signal (ready().peers) is > 0,
-//                                        so the gate does NOT fire
+//   D  live channels present, EMPTY synaptome → no throw. This is the direct
+//      proof the gate reads LIVE channels and NOT node.synaptome.size: the pass
+//      decision is taken with an empty routing table, so a stale/lingering
+//      synapse could never mask a dead mesh (the churn case Aster + Orion raised).
+//      (Post-connect liveness — a mesh that dies AFTER a healthy start — is the
+//      runtime monitor's job, GH #438, not connect()'s.)
 //
-// A minimal stub transport stands in for the web stack: it completes start()
-// and never forms a mesh peer, so the synaptome stays empty — exactly the
-// "reached the bridge and nothing else" state.
+// A stub transport stands in for the web stack: meshBoundCount() is settable so
+// the "live channel" count is controlled independently of the routing table.
 //
 // Run: node test/smoke_connect_mesh_gate.mjs
 // =====================================================================
@@ -34,10 +42,13 @@ const check = (label, cond) => {
 };
 
 // A complete-enough Transport stub: satisfies AxonaPeer.start()'s handler
-// registrations and never forms a mesh peer (synaptome stays empty).
-function stubTransport() {
+// registrations. `meshBound` controls the LIVE authenticated-channel count that
+// connect()'s gate reads via meshBoundCount() — independent of the synaptome.
+function stubTransport({ meshBound = 0 } = {}) {
   const t = {
     stopped: 0,
+    meshBound,
+    meshBoundCount() { return t.meshBound; },
     async start() {},
     async stop() { t.stopped++; },
     openConnection: async () => false,
@@ -55,29 +66,28 @@ function stubTransport() {
 }
 
 const LOC = { lat: 40.71, lng: -74.0 };
-// A ready() window that resolves fast on an empty synaptome (timeout → peers:0).
 const FAST_READY = { minPeers: 1, timeoutMs: 300, stableMs: 100, pollMs: 50 };
 
 async function main() {
-  console.log('connect() — mesh-reachability gate (fail hard, bridge-only override)\n');
+  console.log('connect() — mesh-reachability gate (live channels, fail hard, bridge-only override)\n');
 
-  // ── A. default: 0 mesh peers → throws + tears down ──────────────────
+  // ── A. default: 0 live peers → throws + tears down ──────────────────
   {
-    const tr = stubTransport();
+    const tr = stubTransport({ meshBound: 0 });
     let threw = null;
     try {
       await connect({ location: LOC, author: false, transport: tr, ready: FAST_READY });
     } catch (e) { threw = e; }
-    check('A: threw when no WebRTC peers formed', !!threw);
+    check('A: threw when no live WebRTC peers formed', !!threw);
     check('A: error is MeshUnreachableError', threw instanceof MeshUnreachableError);
     check('A: code is MESH_UNREACHABLE', threw?.code === 'MESH_UNREACHABLE');
-    check('A: context reports peers:0', threw?.context?.peers === 0);
+    check('A: context reports peers:0 (live)', threw?.context?.peers === 0);
     check('A: tore down the transport (no leaked socket)', tr.stopped >= 1);
   }
 
-  // ── B. allowBridgeOnly: 0 mesh peers → resolves, flagged bridge-only ─
+  // ── B. allowBridgeOnly: 0 live peers → resolves, flagged bridge-only ─
   {
-    const tr = stubTransport();
+    const tr = stubTransport({ meshBound: 0 });
     let res = null, threw = null;
     try {
       res = await connect({
@@ -86,15 +96,14 @@ async function main() {
       });
     } catch (e) { threw = e; }
     check('B: did NOT throw under allowBridgeOnly', !threw);
-    check('B: status.bridgeOnly === true', res?.status?.bridgeOnly === true);
-    check('B: status.peers === 0 (honest about the mesh)', res?.status?.peers === 0);
+    check('B: status.initialBridgeOnly === true', res?.status?.initialBridgeOnly === true);
     check('B: did NOT tear down (peer is usable)', tr.stopped === 0);
     await res?.disconnect?.();
   }
 
   // ── C. ready:false → no measurement, no gate, no throw ──────────────
   {
-    const tr = stubTransport();
+    const tr = stubTransport({ meshBound: 0 });
     let res = null, threw = null;
     try {
       res = await connect({ location: LOC, author: false, transport: tr, ready: false });
@@ -104,18 +113,21 @@ async function main() {
     await res?.disconnect?.();
   }
 
-  // ── D. a populated synaptome → the gated signal is > 0 ───────────────
-  // Bring a peer up without the gate (ready:false), seed one synapse, then run
-  // the very check connect() gates on: ready() must report peers > 0, so the
-  // gate's positive branch (no throw, bridgeOnly:false) is the one taken.
+  // ── D. live channel present + EMPTY synaptome → no throw ────────────
+  // The gate reads LIVE channels (meshBoundCount), so the pass decision is taken
+  // even though the routing table is empty. That is exactly why a stale/lingering
+  // synapse can never mask a dead mesh: the gate never consults synaptome.size.
   {
-    const tr = stubTransport();
-    const res = await connect({ location: LOC, author: false, transport: tr, ready: false });
-    res.peer._node.synaptome.set(123n, { peerId: 123n, stratum: 0 });
-    const st = await res.peer.ready({ minPeers: 1, timeoutMs: 500, stableMs: 100, pollMs: 50 });
-    check('D: ready() reports peers > 0 when the synaptome is populated', st.peers >= 1);
-    check('D: so the gate condition (peers === 0) is false', st.peers !== 0);
-    await res.disconnect?.();
+    const tr = stubTransport({ meshBound: 1 });
+    let res = null, threw = null;
+    try {
+      res = await connect({ location: LOC, author: false, transport: tr, ready: FAST_READY });
+    } catch (e) { threw = e; }
+    check('D: did NOT throw with a live channel present', !threw);
+    check('D: decision was taken with an EMPTY synaptome (gate reads live, not routing table)',
+      res?.peer?._node?.synaptome?.size === 0);
+    check('D: status.initialBridgeOnly === false', res?.status?.initialBridgeOnly === false);
+    await res?.disconnect?.();
   }
 
   console.log(`\nResult: ${passed} passed, ${failed} failed`);
