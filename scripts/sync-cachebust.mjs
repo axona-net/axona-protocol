@@ -25,6 +25,21 @@ const ROOT    = dirname(dirname(fileURLToPath(import.meta.url)));
 const VERSION = JSON.parse(readFileSync(join(ROOT, 'package.json'), 'utf8')).version;
 const CHECK   = process.argv.includes('--check');
 
+// The runtime constant must match the manifest — always, in both modes.
+// v4.61.1 shipped with KERNEL_VERSION still reading 4.61.0 (a version bump
+// edited a path that did not exist and failed silently); only the bridge's
+// check_kernel_pin caught it, one repo downstream. Fail HERE, in the gate
+// npm test runs first, so a mismatched constant can never leave this repo.
+{
+  const handshake = readFileSync(join(ROOT, 'src/transport/handshake.js'), 'utf8');
+  const kv = handshake.match(/KERNEL_VERSION\s*=\s*'([^']+)'/)?.[1] ?? null;
+  if (kv !== VERSION) {
+    console.error(`✗ KERNEL_VERSION mismatch: handshake.js says ${kv}, package.json says ${VERSION}. ` +
+      `Fix src/transport/handshake.js — the constant is a runtime surface (healthz, hello, fleet banners).`);
+    process.exit(1);
+  }
+}
+
 // Everything served to a browser. Add new deployed directories HERE — a surface
 // missing from this list is a surface that will rot, which is how examples/ got
 // to 4.24.0 while nobody was looking.
