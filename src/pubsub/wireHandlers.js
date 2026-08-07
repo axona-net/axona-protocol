@@ -38,6 +38,8 @@ export const wireHandlersMethods = {
     on(T.REPLICATE, this._onReplicate);
     on(T.KILL,     this._onKill);
     on(T.INGESTACK, this._onIngestAck);
+    on(T.RECEIPTPROBE, this._onReceiptProbe);
+    on(T.RECEIPTNACK, this._onReceiptNack);
     on(T.TOUCH,    this._onTouch);   // no-op (peer.touch deprecated v4.3.0); kept for wire compat
     on(T.PULL,     this._onPull);
     on(T.PULLRESP, this._onPullResp);
@@ -442,7 +444,7 @@ export const wireHandlersMethods = {
     this._route(fromBig, T.INGESTACK, {
       topicId: idHex(role.topicId), msgId, epoch: role.epoch ?? 0, op,
     });
-    this._log('debug', 'pubsub:ingest-ack-sent', { topic: idHex(role.topicId).slice(0, 12), op });
+    this._log('debug', 'ingest-ack-sent', { topic: idHex(role.topicId).slice(0, 12), op });
   },
 
   // Receive an INGEST-ack: record the correlation for the write flight (E3).
@@ -460,7 +462,8 @@ export const wireHandlersMethods = {
       const oldest = this._ingestAcks.keys().next().value;
       this._ingestAcks.delete(oldest);
     }
-    this._log('debug', 'pubsub:ingest-ack', { key: key.slice(0, 24), epoch });
+    this._log('debug', 'ingest-ack', { key: key.slice(0, 24), epoch });
+    this._flightComplete(payload.topicId, payload.msgId, op);   // the ONLY terminal write success (E3)
     return 'consumed';
   },
 

@@ -40,6 +40,8 @@ export const rootElectionMethods = {
     if (r && Number.isInteger(r.epoch) && r.epoch > e) e = r.epoch;
     const b = this._rootBeacons.get(tBig);
     if (b && Number.isInteger(b.epoch) && b.epoch > e) e = b.epoch;
+    const t = this._rootTombstones?.get(tBig);              // E3: a conviction is seat history too
+    if (t && Number.isInteger(t.epoch) && t.epoch > e) e = t.epoch;
     return e;
   },
 

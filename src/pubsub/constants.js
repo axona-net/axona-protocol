@@ -351,6 +351,11 @@ export const T = {
   REPLAYUP: 'pubsub:replayup',  // a relay's stamped cache delta, routed UP to a behind parent
   HANDOFF:  'pubsub:handoff',   // graceful-leave: a departing root pushes its cache to its heir
   KILL:     'pubsub:kill',      // retract a message (thin; TODO Phase 4)
+  RECEIPTPROBE: 'pubsub:receiptprobe', // flight -> suspect root: prove the correlated receipt for
+                                //   {topicId, msgId, op} or state the inability. Reachability is not
+                                //   an answer (Aster seq 427) — only INGESTACK or RECEIPTNACK is.
+  RECEIPTNACK: 'pubsub:receiptnack', // root -> flight: explicit not-held. Honest once (earns one direct
+                                //   retry of the write); a nack after the retry convicts.
   INGESTACK: 'pubsub:ingestack', // root -> forwarder: correlated proof of INGEST (Dead-Root Eviction v0.3).
                                 //   {topicId, msgId, epoch, op:'pub'|'kill'} emitted AFTER topic-store
                                 //   ingest, never at routing. One hop back to meta.fromId — the

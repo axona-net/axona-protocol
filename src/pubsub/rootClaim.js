@@ -149,6 +149,10 @@ export class RootClaim {
     if (b.root === lc(idHex(m.nodeId))) return null;
     let rb; try { rb = idBig(b.root); } catch { return null; }
     if ((rb ^ topicBig) >= (m.nodeId ^ topicBig)) return null;   // never defer to a farther node (I-2)
+    // E3 tombstone: a convicted incarnation's beacon is the corpse's ghost.
+    // Epoch-bounded — a HIGHER epoch from the same node is a legitimate
+    // rebirth and passes (the E4 adopt path mints it).
+    if (m._rootTombstoned?.(topicBig, b.root, b.epoch)) return null;
     // A verified record used to return HERE unconditionally — no liveness test,
     // no freshness cut, bounded only by exp (2×ROOT_VERIFY_MS = 90s, 3× the
     // remote-beacon window). Verification proves the root WAS the terminus at
