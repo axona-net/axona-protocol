@@ -28,6 +28,21 @@ export const rootElectionMethods = {
   // neighbors (the topics' convergence basin, since the root ≈ the topic ids),
   // aggregated into one beacon, recursive BEACON_LAYERS deep. No-op without a
   // neighbors() adapter (sim/fabric that don't model topology simply skip it).
+  // Highest incarnation this node has EVIDENCE of for a topic's root seat:
+  // its own role's epoch and the cached beacon record's epoch. The beacon
+  // record is consulted regardless of freshness/exp — an epoch is a fact about
+  // the seat's history, not a liveness claim, and reading a stale one merely
+  // makes the next mint strictly larger. (Eviction tombstones join this max in
+  // the E3 phase.) Missing evidence → 0, so a cold node mints epoch 1.
+  _knownEpoch(tBig) {
+    let e = 0;
+    const r = this.axonRoles.get(tBig);
+    if (r && Number.isInteger(r.epoch) && r.epoch > e) e = r.epoch;
+    const b = this._rootBeacons.get(tBig);
+    if (b && Number.isInteger(b.epoch) && b.epoch > e) e = b.epoch;
+    return e;
+  },
+
   _emitRootBeacons() {
     if (typeof this.dht.neighbors !== 'function') return;
     const rooted = [];
@@ -39,6 +54,9 @@ export const rootElectionMethods = {
     const payload = {
       root: lc(idHex(this.nodeId)),
       topics: rooted.map(idHex),
+      // Incarnations, index-aligned with `topics` (v0.3). Receivers without
+      // this field, and senders without it, interoperate: absent → epoch 0.
+      epochs: rooted.map((t) => { const r = this.axonRoles.get(t); return (r && Number.isInteger(r.epoch)) ? r.epoch : 0; }),
       beaconId: `${idHex(this.nodeId).slice(0, 10)}-${this._now()}-${this._beaconSeq++}`,
       layer: this._beaconLayers,
     };
@@ -56,11 +74,20 @@ export const rootElectionMethods = {
     this._beaconSeen.set(payload.beaconId, this._now() + BEACON_SEEN_MS);
     let rootBig; try { if (!isHexId(lc(payload.root))) return; rootBig = idBig(payload.root); } catch { return; }
     const now = this._now();
-    for (const tHex of payload.topics.slice(0, 256)) {
+    const topics = payload.topics.slice(0, 256);
+    for (let i = 0; i < topics.length; i++) {
+      const tHex = topics[i];
       let tBig; try { if (!isHexId(lc(tHex))) continue; tBig = idBig(tHex); } catch { continue; }
       const mine = this._bestKnownClosest(tBig);                           // local-only
       if (mine != null && (rootBig ^ tBig) > (mine ^ tBig)) continue;       // verify-don't-trust
-      this._rootBeacons.set(tBig, { root: lc(payload.root), at: now, exp: now + BEACON_TTL_MS });
+      // Incarnation (v0.3): index-aligned with topics; absent/malformed → 0.
+      // The record keeps the HIGHEST epoch it has ever seen for the seat even
+      // when the named root changes — _knownEpoch is a high-water mark.
+      const rawE = Array.isArray(payload.epochs) ? payload.epochs[i] : 0;
+      const epoch = (Number.isInteger(rawE) && rawE >= 0) ? Math.min(rawE, Number.MAX_SAFE_INTEGER) : 0;
+      const prev = this._rootBeacons.get(tBig);
+      this._rootBeacons.set(tBig, { root: lc(payload.root), at: now, exp: now + BEACON_TTL_MS,
+        epoch: Math.max(epoch, (prev && Number.isInteger(prev.epoch)) ? prev.epoch : 0) });
       // If I'd wrongly become this topic's root but the beacon proves a strictly
       // closer root exists, yield NOW — rootClaim.demote demotes, re-homes, and
       // sends the confirming subscribe (the new root must ADOPT us or our
