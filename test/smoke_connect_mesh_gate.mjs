@@ -19,10 +19,12 @@
 //                                        down (no leaked transport socket)
 //   B  0 live peers + allowBridgeOnly → resolves; status.initialBridgeOnly true
 //   C  ready:false (opted out)        → no gate (nothing measured), no throw
-//   D  live channels present, EMPTY synaptome → no throw. This is the direct
-//      proof the gate reads LIVE channels and NOT node.synaptome.size: the pass
-//      decision is taken with an empty routing table, so a stale/lingering
-//      synapse could never mask a dead mesh (the churn case Aster + Orion raised).
+//   D  live channels present, EMPTY synaptome → no throw. Direct proof the gate
+//      reads LIVE channels and NOT node.synaptome.size: the pass decision is
+//      taken with an empty routing table.
+//   E  the churn inverse (Aster): a NON-EMPTY synaptome but ZERO live channels →
+//      STILL throws. synaptome.size would have masked the dead mesh;
+//      meshBoundCount does not. This is the regression the change prevents.
 //      (Post-connect liveness — a mesh that dies AFTER a healthy start — is the
 //      runtime monitor's job, GH #438, not connect()'s.)
 //
@@ -44,7 +46,12 @@ const check = (label, cond) => {
 // A complete-enough Transport stub: satisfies AxonaPeer.start()'s handler
 // registrations. `meshBound` controls the LIVE authenticated-channel count that
 // connect()'s gate reads via meshBoundCount() — independent of the synaptome.
-function stubTransport({ meshBound = 0 } = {}) {
+// `seedPeerAfterMs`: if set, fire the peer's onPeerBound callback that many ms
+// after registration with a synthetic BigInt id. That drives the REAL kernel
+// path (_seedSynaptomeWithSponsor) to add a synapse to node.synaptome mid-ready,
+// WITHOUT changing meshBound — modelling a routing-table entry with no live
+// channel behind it (the churn/stale case).
+function stubTransport({ meshBound = 0, seedPeerAfterMs = null } = {}) {
   const t = {
     stopped: 0,
     meshBound,
@@ -59,7 +66,11 @@ function stubTransport({ meshBound = 0 } = {}) {
     nodeIdFor: () => null,
     async send() { return null; },
     async notify() {},
-    onRequest() {}, onNotification() {}, onPeerBound() {}, onPeerDied() {},
+    onRequest() {}, onNotification() {}, onPeerDied() {},
+    onPeerBound(cb) {
+      if (seedPeerAfterMs != null) setTimeout(() => { try { cb(0x9999n); } catch {} }, seedPeerAfterMs);
+      return () => {};
+    },
     deliverMeshSignal() {},
   };
   return t;
@@ -128,6 +139,23 @@ async function main() {
       res?.peer?._node?.synaptome?.size === 0);
     check('D: status.initialBridgeOnly === false', res?.status?.initialBridgeOnly === false);
     await res?.disconnect?.();
+  }
+
+  // ── E. churn inverse: NON-EMPTY synaptome, ZERO live channels → throws ─
+  // A synapse is seeded into the routing table mid-ready (via the real
+  // onPeerBound path) while meshBoundCount stays 0. synaptome.size would say
+  // "1 peer" and pass; the live-channel gate correctly throws.
+  {
+    const tr = stubTransport({ meshBound: 0, seedPeerAfterMs: 5 });
+    let threw = null;
+    try {
+      await connect({ location: LOC, author: false, transport: tr, ready: FAST_READY });
+    } catch (e) { threw = e; }
+    check('E: throws when live channels are 0 despite a non-empty synaptome',
+      threw instanceof MeshUnreachableError);
+    check('E: context proves the distinction — synapses>0 but live peers===0',
+      threw?.context?.synapses >= 1 && threw?.context?.peers === 0);
+    check('E: and it tore down (no leaked socket)', tr.stopped >= 1);
   }
 
   console.log(`\nResult: ${passed} passed, ${failed} failed`);
