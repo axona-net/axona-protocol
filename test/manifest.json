@@ -145,6 +145,11 @@
       "class": "default"
     },
     {
+      "file": "smoke_connect_mesh_gate.mjs",
+      "class": "default",
+      "note": "GH #46 (David 2026-08-06): connect() fails hard (MeshUnreachableError) when it forms 0 WebRTC mesh peers — a silent bridge-only success lies to the app about whether it will work. allowBridgeOnly:true opts into bridge-only (status.bridgeOnly:true); ready:false skips the gate (nothing measured). Stub transport keeps the synaptome empty to hit the exact 'reached the bridge and nothing else' state."
+    },
+    {
       "file": "smoke_decline_paths.mjs",
       "class": "default"
     },
