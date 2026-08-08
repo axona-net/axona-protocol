@@ -72,12 +72,32 @@ export const writeFlightMethods = {
   },
 
   // Called from _onIngestAck: a correlated receipt terminates the entry, and
-  // an empty flight closes. The ack is the ONLY terminal success (v0.3 §1).
-  _flightComplete(topicHex, msgId, op) {
+  // an empty flight closes. The ack is the ONLY terminal success (v0.3 §1) —
+  // and it must BIND (Aster seq 439): the sender must be the flight's suspect
+  // root and the epoch must match the intended incarnation. A valid ack from
+  // a DIFFERENT holder, or the wrong epoch, proves nothing about THIS seat
+  // and leaves the flight open to run its receipt-bound recovery. An
+  // UNVERSIONED flight (epoch 0 — opened without a beacon record, the
+  // post-eviction promotion case) carries no incarnation expectation and
+  // accepts the right node's first ack at any epoch. An honestly re-minted
+  // root whose current epoch outruns a strict flight self-corrects in one
+  // extra round: its old incarnation is tombstoned epoch-bounded, its live
+  // one is untouched, and the promotion re-flight binds to it cleanly.
+  _flightComplete(topicHex, msgId, op, fromId, ackEpoch) {
     if (!this._writeFlights) return;
     const ck = corrKey(topicHex, msgId, op);
+    let fromHex = null; try { fromHex = lc(idHex(idBig(fromId))); } catch { /* unattributable ack binds nothing */ }
     for (const [key, f] of this._writeFlights) {
-      if (!f.entries.delete(ck)) continue;
+      if (!f.entries.has(ck)) continue;
+      if (fromHex !== f.rootHex) {
+        this._log('info', 'write-flight-ack-unbound', { key: key.slice(0, 20), from: String(fromHex).slice(0, 12), want: f.rootHex.slice(0, 12) });
+        continue;
+      }
+      if (f.epoch !== 0 && ackEpoch !== f.epoch) {
+        this._log('info', 'write-flight-ack-epoch-mismatch', { key: key.slice(0, 20), got: ackEpoch, want: f.epoch });
+        continue;
+      }
+      f.entries.delete(ck);
       if (f.entries.size === 0) this._writeFlights.delete(key);
       this._log('debug', 'write-flight-complete', { key: key.slice(0, 20), via: 'ingest-ack' });
     }

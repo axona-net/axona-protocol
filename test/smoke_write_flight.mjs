@@ -214,5 +214,24 @@ const sendsOf = (sends, type) => sends.filter((s) => s.type === type);
     sendsOf(sends, T.PUB).some((s) => s.payload.via?.[0] === lc(idHex(HEIR))));
 }
 
+// ── 9. THE ACK MUST BIND (Aster seq 439): sender + epoch, or nothing moves ──
+{
+  const { am, clock, sends } = mk();
+  beaconFlapper(am, 4);
+  await am._onPub(PUBP('m-bind'), { fromId: idHex(NB), isTerminal: true });
+  ok('9a flight open against the flapper at epoch 4', am._writeFlights.size === 1);
+  am._onIngestAck({ topicId: idHex(TOPIC), msgId: 'm-bind', epoch: 4, op: 'pub' }, { fromId: idHex(HEIR) });
+  ok('9b a valid ack from a DIFFERENT holder does not settle the suspect\'s flight',
+    am._writeFlights.size === 1);
+  am._onIngestAck({ topicId: idHex(TOPIC), msgId: 'm-bind', epoch: 9, op: 'pub' }, { fromId: idHex(FLAPPER) });
+  ok('9c the right node at the WRONG epoch does not settle it either',
+    am._writeFlights.size === 1);
+  clock.t += INGEST_ACK_MS + 1; am._flightSweep();
+  ok('9d the flight proceeded to its receipt-bound recovery regardless',
+    sendsOf(sends, T.RECEIPTPROBE).length === 1);
+  am._onIngestAck({ topicId: idHex(TOPIC), msgId: 'm-bind', epoch: 4, op: 'pub' }, { fromId: idHex(FLAPPER) });
+  ok('9e the BOUND ack — right node, right incarnation — settles it', am._writeFlights.size === 0);
+}
+
 console.log(fail === 0 ? `\nsmoke_write_flight: ${n}/${n} ok` : `\nsmoke_write_flight: ${fail} FAILED of ${n}`);
 process.exit(fail === 0 ? 0 : 1);

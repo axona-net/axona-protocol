@@ -463,7 +463,10 @@ export const wireHandlersMethods = {
       this._ingestAcks.delete(oldest);
     }
     this._log('debug', 'ingest-ack', { key: key.slice(0, 24), epoch });
-    this._flightComplete(payload.topicId, payload.msgId, op);   // the ONLY terminal write success (E3)
+    // The ONLY terminal write success (E3) — and it must bind: sender +
+    // epoch are enforced inside (Aster seq 439), so a stray holder's ack or
+    // a stale incarnation never settles a flight against the suspect.
+    this._flightComplete(payload.topicId, payload.msgId, op, meta?.fromId, epoch);
     return 'consumed';
   },
 
