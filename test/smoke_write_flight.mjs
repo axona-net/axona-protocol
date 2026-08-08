@@ -179,5 +179,40 @@ const sendsOf = (sends, type) => sends.filter((s) => s.type === type);
     am._rootClaim.liveCloserRoot(TOPIC, { requireReachable: false }) === lc(idHex(FLAPPER)));
 }
 
+// ── 7. KILL rides the same flight, completing separately on its own ack ─────
+{
+  const { am, clock, sends } = mk();
+  beaconFlapper(am, 5);
+  await am._onKill({ topicId: idHex(TOPIC), kill: { msgId: 'k-target' } }, { fromId: idHex(NB), isTerminal: true });
+  const f = [...(am._writeFlights?.values() ?? [])][0];
+  ok('7a a forwarded KILL opens a flight with op:kill bound to the TARGET msgId',
+    !!f && [...f.entries.values()][0].op === 'kill' && [...f.entries.values()][0].msgId === 'k-target');
+  am._onIngestAck({ topicId: idHex(TOPIC), msgId: 'k-target', epoch: 5, op: 'pub' }, { fromId: idHex(FLAPPER) });
+  ok('7b a PUB ack does NOT complete a KILL entry — ops are separate completions',
+    am._writeFlights.size === 1);
+  am._onIngestAck({ topicId: idHex(TOPIC), msgId: 'k-target', epoch: 5, op: 'kill' }, { fromId: idHex(FLAPPER) });
+  ok('7c the KILL ack completes it', am._writeFlights.size === 0);
+  void sends; void clock;
+}
+
+// ── 8. Death immediately AFTER the ack: no stale state, next write recovers ─
+{
+  const { am, clock, sends } = mk();
+  beaconFlapper(am, 6);
+  await am._onPub(PUBP('m-first'), { fromId: idHex(NB), isTerminal: true });
+  am._onIngestAck({ topicId: idHex(TOPIC), msgId: 'm-first', epoch: 6, op: 'pub' }, { fromId: idHex(FLAPPER) });
+  ok('8a first write settled honestly — the ack was true when given', am._writeFlights.size === 0);
+  // The root dies now (silently). The NEXT write runs the whole flight fresh.
+  await am._onPub(PUBP('m-second'), { fromId: idHex(NB), isTerminal: true });
+  clock.t += INGEST_ACK_MS + 1; am._flightSweep();
+  clock.t += FLIGHT_PROBE_MS + 1; am._flightSweep();
+  clock.t += FLIGHT_PROBE_MS + 1; am._flightSweep();
+  clock.t += FLIGHT_PROBE_MS + 1; am._flightSweep();
+  ok('8b the corpse is convicted by the SECOND write\'s own flight — no false failure on the first',
+    am._rootTombstones?.get(TOPIC)?.epoch === 6);
+  ok('8c the second write promoted onward',
+    sendsOf(sends, T.PUB).some((s) => s.payload.via?.[0] === lc(idHex(HEIR))));
+}
+
 console.log(fail === 0 ? `\nsmoke_write_flight: ${n}/${n} ok` : `\nsmoke_write_flight: ${fail} FAILED of ${n}`);
 process.exit(fail === 0 ? 0 : 1);
