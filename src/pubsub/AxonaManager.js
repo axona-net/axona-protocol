@@ -680,6 +680,35 @@ export class AxonaManager {
   //   unsupported / violation → NO state transition (violation logs loudly).
   //       Silence is never evidence, in either direction — the same fail-closed
   //       rule as _unpinIfWaypointDead and the replica ledger.
+  // D0 (Write-Flight Ack Routing): pick the topic-closest ADJACENT peer that has
+  // attested `write-flight-ack-v1` capability (R13), so an API-origin publisher
+  // can delegate flight ownership to a 4.62.2-capable relay instead of owning a
+  // carried flight itself. Returns the peer's hex id, or null → the D0
+  // observation-only fallback (R14).
+  //
+  // Capability is read from the transport adapter's per-channel flag
+  // (`dht.isCapable(peerHex)`), which the transport sets ONLY from a verified
+  // CAP_ATTEST (capAttest.js). FAIL-CLOSED: an adapter with no `isCapable`
+  // (sim doubles, pre-4.62.2 transports) yields null for everyone, so nothing is
+  // treated as capable and the publisher takes the fallback — never a false
+  // delegate. A capability-attested bridge is a valid delegate: it is a
+  // known-capable ingress (R13/R14), so it is NOT excluded here.
+  pickCapableAdjacent(topicBig) {
+    if (typeof this.dht?.isCapable !== 'function' || typeof this.dht?.neighbors !== 'function') return null;
+    let best = null, bestD = null;
+    for (const n of (this.dht.neighbors() || [])) {
+      let nb; try { nb = idBig(n); } catch { continue; }
+      if (nb === this.nodeId) continue;
+      const hex = lc(idHex(nb));
+      let capable = false;
+      try { capable = !!this.dht.isCapable(hex); } catch { capable = false; }
+      if (!capable) continue;
+      const d = nb ^ topicBig;
+      if (bestD === null || d < bestD) { bestD = d; best = nb; }
+    }
+    return best === null ? null : lc(idHex(best));
+  }
+
   _forwardToRoot(topicBig, type, payload, rootHex) {
     const declares = this.dht?.verdictsSupported;
     const rec = this._rootBeacons.get(topicBig);           // capture identity + at BEFORE the send
