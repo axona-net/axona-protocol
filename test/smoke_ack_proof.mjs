@@ -94,6 +94,22 @@ ok('short attemptId rejected on width', shortAttempt.ok === false && shortAttemp
 const badPub = await verifyAckProof({ ...frame1, rootPub: 'ab' });
 ok('short rootPub rejected on width', badPub.ok === false && badPub.reason === 'bad_rootpub', badPub.reason);
 
+// ── D1 conformance blocker (Aster council seq 538 item 2) ─────────────
+// Before this fix buildTranscript accepted topicId/ackTo at ANY non-empty hex
+// width and ANY Number.isInteger epoch (u64be silently truncated above 2^64).
+// These vectors pin the closed behavior: exact profile id width (33 bytes / 66
+// hex in prod) for topicId/ackTo, and the truncation-free u64 domain for epoch.
+const shortTopic = await verifyAckProof({ ...frame1, topicId: 'aa' });
+ok('short topicId rejected on width', shortTopic.ok === false && shortTopic.reason === 'bad_topic', shortTopic.reason);
+const longTopic = await verifyAckProof({ ...frame1, topicId: 'a'.repeat(68) });
+ok('over-width topicId rejected', longTopic.ok === false && longTopic.reason === 'bad_topic', longTopic.reason);
+const shortAck = await verifyAckProof({ ...frame1, ackTo: 'cc' });
+ok('short ackTo rejected on width', shortAck.ok === false && shortAck.reason === 'bad_ackto', shortAck.reason);
+ok('builder throws bad_topic on wrong-width topicId', (() => { try { buildTranscript({ ...baseFields, topicId: 'a'.repeat(64) }); return false; } catch (e) { return e.code === 'bad_topic'; } })());
+ok('builder throws bad_ackto on wrong-width ackTo', (() => { try { buildTranscript({ ...baseFields, ackTo: 'c'.repeat(64) }); return false; } catch (e) { return e.code === 'bad_ackto'; } })());
+ok('epoch at 2^53 (unsafe) refused by builder', (() => { try { buildTranscript({ ...baseFields, epoch: 2 ** 53 }); return false; } catch (e) { return e.code === 'bad_epoch'; } })());
+ok('non-integer epoch refused by builder', (() => { try { buildTranscript({ ...baseFields, epoch: 1.5 }); return false; } catch (e) { return e.code === 'bad_epoch'; } })());
+
 // ── wrong key: valid signature under a DIFFERENT identity ──────────────
 // Sign with secret B but claim rootPub A → the signature does not verify under A.
 const SECRET_B = new Uint8Array(32).fill(9);

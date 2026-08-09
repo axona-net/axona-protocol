@@ -88,5 +88,14 @@ ok('nodeId mismatch (frame is not this channel peer) → rejected', (await verif
 ok('wrong capId → rejected', (await verifyCapAttest({ ...f1, capId: 'other-cap' }, { peerKey, expectedNodeId: nodeId, cbvString: cbv })).reason === 'bad_capid');
 ok('missing peerKey → fail-closed', (await verifyCapAttest(f1, { expectedNodeId: nodeId, cbvString: cbv })).reason === 'no_peer_key');
 
+// ── conformance blocker (Aster council seq 538 item 2): the module boundary
+// enforces the fixed profile nodeId width (33 bytes / 66 hex in prod). Before
+// this fix buildCapTranscript accepted any non-empty hex width.
+ok('builder throws bad_nodeid on short nodeId', (() => { try { buildCapTranscript('aa', digest); return false; } catch (e) { return e.code === 'bad_nodeid'; } })());
+ok('builder throws bad_nodeid on over-width nodeId', (() => { try { buildCapTranscript('a'.repeat(68), digest); return false; } catch (e) { return e.code === 'bad_nodeid'; } })());
+await signCapAttest(signFn, { nodeId: 'aa', cbvString: cbv }).then(
+  () => ok('signCapAttest rejects wrong-width nodeId', false),
+  (e) => ok('signCapAttest rejects wrong-width nodeId', e.code === 'bad_nodeid', e.code));
+
 console.log(`\n${fail === 0 ? 'PASS' : 'FAIL'} — ${n} assertions, ${fail} failed`);
 process.exit(fail === 0 ? 0 : 1);
