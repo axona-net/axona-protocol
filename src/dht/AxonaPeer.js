@@ -3103,6 +3103,7 @@ export class AxonaPeer extends DHT {
 
     const am = new AxonaManager({
       dht,
+      identity: this._identity || null,   // transport keypair — signs D1 INGEST-ACK proofs
       ...(this._rootReplicas != null ? { rootReplicas: this._rootReplicas } : {}),
     });
     // ARM the periodic refreshTick (kernel v4.9.1). Earlier this was deliberately

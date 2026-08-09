@@ -104,6 +104,7 @@ export class AxonaManager {
     roleGraceMs = ROLE_GRACE_MS,   // refuse role MANAGEMENT this long after join (still transports)
     roleAdmitPerTick = ROLE_ADMIT_PER_TICK,  // paced admission: new roles per refresh tick
     neverRoot = false,             // HARD refusal: a bridge is a bridge (transport + introduction only)
+    identity = null,               // node TRANSPORT identity {pubkey, sign} — signs D1 INGEST-ACK proofs
     ..._legacy   // accepted-and-ignored clean-break tunables (pickRelayPeer, rootSetSize, …)
   } = {}) {
     if (!dht || typeof dht.routeMessage !== 'function' || typeof dht.getSelfId !== 'function'
@@ -150,6 +151,11 @@ export class AxonaManager {
     this._roleGraceMs      = roleGraceMs;
     this._roleAdmitPerTick = roleAdmitPerTick;
     this._neverRoot        = !!neverRoot;
+    // Node TRANSPORT identity {pubkey, sign} — the root signs D1 INGEST-ACK
+    // proofs with it (Write-Flight Ack Routing). Absent on sim/test doubles that
+    // never carry one; every signed path degrades to the 4.62.1 unsigned one-hop
+    // ack, so the write path is correct with or without it.
+    this._nodeIdentity     = (identity && typeof identity.sign === 'function' && identity.pubkey) ? identity : null;
     this._joinedAt         = now();     // grace runs from construction
     this._admitTickAt      = 0;         // window start for paced admission
     this._admitTickCount   = 0;         // roles admitted in the current window
@@ -680,8 +686,20 @@ export class AxonaManager {
     // E3 (v0.3): a WRITE completes only on its INGEST-ack. The flight opens at
     // dispatch; every routing verdict below stays hop-local evidence — consumed
     // (anywhere, including at the named root) no longer ends the write's story.
-    if (type === T.PUB || type === T.KILL) this._flightOpen(topicBig, rootHex, type, payload);
-    const sent = this._send(type, { ...payload, via: [rootHex] });
+    // D1 (Write-Flight Ack Routing): opening the flight returns its ack-routing
+    // tuple {ackTo, flightNonce, attemptId}; stamp it on the forwarded write so
+    // the root can route a SIGNED ingest proof straight back to the flight owner
+    // (ackTo) across any number of hops — the deaf-flight fix. If the payload
+    // already carries an attemptId (D2 mints it at the API boundary), it is
+    // threaded through _flightOpen so retries/promotions stay one attempt.
+    let ackRoute = null;
+    if (type === T.PUB || type === T.KILL) {
+      ackRoute = this._flightOpen(topicBig, rootHex, type, payload, payload?.attemptId ?? null);
+    }
+    const outPayload = ackRoute
+      ? { ...payload, via: [rootHex], ackTo: ackRoute.ackTo, flightNonce: ackRoute.flightNonce, attemptId: ackRoute.attemptId }
+      : { ...payload, via: [rootHex] };
+    const sent = this._send(type, outPayload);
     Promise.resolve(sent).then((r) => {
       const v = dispatchVerdict(r, declares);
       if (v === 'violation') {
