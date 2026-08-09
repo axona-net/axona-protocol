@@ -40,8 +40,7 @@
 // and keys the resulting boolean to the live channel (cleared on channel loss,
 // never persisted). pickCapableAdjacent (D0) reads only that per-channel flag.
 import { verify } from './ed25519.js';
-import { hexToBytes, bytesToHex } from './ackProof.js';
-import { HEX_CHARS } from '../utils/hexid.js';
+import { hexToBytes, bytesToHex, ID_BYTES } from './ackProof.js';
 
 const _enc = new TextEncoder();
 
@@ -78,13 +77,12 @@ export async function cbvDigest(cbvString) {
 // The one transcript builder, shared verbatim by signer and verifier. `nodeId`
 // is the ATTESTER's id (hex); `digest` is a 32-byte Uint8Array derived LOCALLY.
 export function buildCapTranscript(nodeId, digest) {
-  // nodeId MUST decode to EXACTLY the keyspace profile's id width (HEX_CHARS/2 —
-  // 33 in prod). A wrong-width id is refused before signing (Aster conformance
-  // blocker, council seq 538 item 2): the module boundary enforces the documented
-  // fixed NODE_ID width rather than accepting any non-empty hex.
-  const idBytes = HEX_CHARS >> 1;
-  const nodeB = (nodeId instanceof Uint8Array) ? nodeId : hexToBytes(String(nodeId), idBytes);
-  if (!nodeB || nodeB.length !== idBytes) throw new CapAttestError('bad_nodeid', `nodeId must be ${idBytes} bytes`);
+  // nodeId MUST decode to EXACTLY ID_BYTES (33) — the canonical width idHex()
+  // always emits, in every profile (Aster conformance blocker, council seq 538
+  // item 2). The module boundary enforces the fixed wire width, not a
+  // profile-derived one, matching the D1 serializer.
+  const nodeB = (nodeId instanceof Uint8Array) ? nodeId : hexToBytes(String(nodeId), ID_BYTES);
+  if (!nodeB || nodeB.length !== ID_BYTES) throw new CapAttestError('bad_nodeid', `nodeId must be ${ID_BYTES} bytes`);
   if (!(digest instanceof Uint8Array) || digest.length !== CBV_DIGEST_BYTES) {
     throw new CapAttestError('bad_digest', `cbvDigest must be ${CBV_DIGEST_BYTES} bytes`);
   }

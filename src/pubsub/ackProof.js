@@ -42,7 +42,7 @@
 // frame classes are three separate signed objects, not one transcript with an
 // unsigned type field.
 import { verify } from './ed25519.js';
-import { HASH_MASK, HEX_CHARS } from '../utils/hexid.js';
+import { HASH_MASK } from '../utils/hexid.js';
 
 const _enc = new TextEncoder();
 
@@ -51,6 +51,13 @@ export const MSG_ID_BYTES = 32;          // SHA-256 content hash — profile-ind
 export const ATTEMPT_ID_BYTES = 16;
 export const FLIGHT_NONCE_BYTES = 16;
 export const ROOT_PUB_BYTES = 32;
+// Canonical id width for topicId/ackTo: the D1 wire serializer idHex()
+// (ids.js) pads EVERY id to 66 hex — 33 bytes — unconditionally, regardless of
+// the keyspace profile (a shrunk sim id is the same 33 bytes, zero-extended).
+// So proof ids are a FIXED 33 bytes, not a profile-derived width; enforcing
+// HEX_CHARS/2 (Aster fixed-slice review) wrongly rejected the real signed path
+// under a shrunk profile, where HEX_CHARS shrinks but idHex still emits 33.
+export const ID_BYTES = 33;
 
 export const PURPOSE = Object.freeze({ INGEST_ACK: 0x01, RECEIPT_NACK: 0x02, RECEIPT_PROBE_ACK: 0x03 });
 export const OP      = Object.freeze({ pub: 0x01, kill: 0x02 });
@@ -102,11 +109,11 @@ function concat(chunks) {
 // The ONE builder shared verbatim by signer and verifier. Returns the exact
 // bytes to sign/verify, or throws AckProofError with a machine code so the
 // caller can log the precise refusal. `topicId`/`ackTo` are node/topic ids and
-// MUST decode to EXACTLY the keyspace profile's id width (HEX_CHARS/2 bytes — 33
-// in prod, the shrunk width under a sim profile). A wrong-width id — a sim id
-// where a prod id is expected, a truncated field — is refused before signing
-// (Aster conformance blocker, council seq 538 item 2). The remaining widths are
-// fixed constants.
+// MUST decode to EXACTLY ID_BYTES (33) — the canonical width the D1 serializer
+// idHex() always emits, in every profile. A wrong-width id — a truncated field,
+// or a raw shrunk-profile id that never went through idHex — is refused before
+// signing (Aster conformance blocker, council seq 538 item 2). All widths in the
+// transcript are fixed constants, so the transcript is a fixed-length string.
 export class AckProofError extends Error {
   constructor(code, msg) { super(msg || code); this.name = 'AckProofError'; this.code = code; }
 }
@@ -116,9 +123,8 @@ export function buildTranscript(fields) {
   if (!_isPurpose(purpose)) throw new AckProofError('bad_purpose', `purpose ${purpose} outside closed set`);
   if (!_isOp(op))           throw new AckProofError('bad_op', `op ${op} outside closed set`);
 
-  const idBytes = HEX_CHARS >> 1;   // profile id width in bytes (prod 33)
-  const topicB = (topicId instanceof Uint8Array) ? topicId : hexToBytes(String(topicId), idBytes);
-  if (!topicB || topicB.length !== idBytes) throw new AckProofError('bad_topic', `topicId must be ${idBytes} bytes`);
+  const topicB = (topicId instanceof Uint8Array) ? topicId : hexToBytes(String(topicId), ID_BYTES);
+  if (!topicB || topicB.length !== ID_BYTES) throw new AckProofError('bad_topic', `topicId must be ${ID_BYTES} bytes`);
 
   const msgB = (msgId instanceof Uint8Array) ? msgId : hexToBytes(String(msgId), MSG_ID_BYTES);
   if (!msgB || msgB.length !== MSG_ID_BYTES) throw new AckProofError('bad_msgid', `msgId must be ${MSG_ID_BYTES} bytes`);
@@ -133,8 +139,8 @@ export function buildTranscript(fields) {
   const attB = (attemptId instanceof Uint8Array) ? attemptId : hexToBytes(String(attemptId), ATTEMPT_ID_BYTES);
   if (!attB || attB.length !== ATTEMPT_ID_BYTES) throw new AckProofError('bad_attempt', `attemptId must be ${ATTEMPT_ID_BYTES} bytes`);
 
-  const ackB = (ackTo instanceof Uint8Array) ? ackTo : hexToBytes(String(ackTo), idBytes);
-  if (!ackB || ackB.length !== idBytes) throw new AckProofError('bad_ackto', `ackTo must be ${idBytes} bytes`);
+  const ackB = (ackTo instanceof Uint8Array) ? ackTo : hexToBytes(String(ackTo), ID_BYTES);
+  if (!ackB || ackB.length !== ID_BYTES) throw new AckProofError('bad_ackto', `ackTo must be ${ID_BYTES} bytes`);
 
   const nonceB = (flightNonce instanceof Uint8Array) ? flightNonce : hexToBytes(String(flightNonce), FLIGHT_NONCE_BYTES);
   if (!nonceB || nonceB.length !== FLIGHT_NONCE_BYTES) throw new AckProofError('bad_nonce', `flightNonce must be ${FLIGHT_NONCE_BYTES} bytes`);
