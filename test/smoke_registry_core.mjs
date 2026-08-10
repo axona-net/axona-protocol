@@ -10,9 +10,9 @@
 // Run: node test/smoke_registry_core.mjs
 import { pathToFileURL } from 'node:url';
 import { fileURLToPath } from 'node:url';
-import { defineRow, FrameKind, EvidenceLevel, Proves, CorrelationSubjectKind, FactType, ShadowRegistry, setShadowEnabled } from '../src/pubsub/registry/index.js';
-import * as publicSurface from '../src/pubsub/registry/index.js';
-import { certify, isCertified, kindOf } from '../src/pubsub/registry/snapshotMint.js';
+import { defineRow, FrameKind, EvidenceLevel, Proves, CorrelationSubjectKind, FactType, ShadowRegistry, setShadowEnabled } from '../src/registry/index.js';
+import * as publicSurface from '../src/registry/index.js';
+import { certify, isCertified, kindOf } from '../src/registry/snapshotMint.js';
 
 let n = 0, fail = 0;
 const ok = (m, c, extra = '') => { if (c) console.log(`  ok ${++n} - ${m}`); else { console.log(`  ✗  ${m} ${extra}`); fail++; } };
@@ -35,10 +35,10 @@ const mk = (sink, extra = {}) => { const r = new ShadowRegistry({ boundary: 'tes
 {
   ok('0a public registry export has no certify/snapshot', publicSurface.certify === undefined && publicSurface.snapshot === undefined);
   let subpathBlocked = false;
-  try { await import('@axona/protocol/pubsub/registry/snapshotMint.js'); } catch { subpathBlocked = true; }
+  try { await import('@axona/protocol/registry/snapshotMint.js'); } catch { subpathBlocked = true; }
   ok('0b package subpath is blocked (hygiene)', subpathBlocked);
   // ...but the file is reachable by URL. That is expected: security must NOT rely on unreachability.
-  const fileUrl = pathToFileURL(fileURLToPath(new URL('../src/pubsub/registry/snapshotMint.js', import.meta.url))).href;
+  const fileUrl = pathToFileURL(fileURLToPath(new URL('../src/registry/snapshotMint.js', import.meta.url))).href;
   const viaUrl = await import(fileUrl);
   ok('0c mint IS reachable by file URL — encapsulation is not the security boundary', typeof viaUrl.certify === 'function');
   // reachable, but text-in + construction-time classification means it still cannot mint an unsafe graph

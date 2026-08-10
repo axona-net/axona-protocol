@@ -2,6 +2,14 @@
 // Shadow-mode only in Phase 1: validate + trace beside the handlers, change no
 // acceptance behavior. See types.js (the row shape) and shadowRegistry.js (the
 // wrapper + flag).
+//
+// LOCATION (S2.0a): this module lives at src/registry/, NOT src/pubsub/registry/.
+// The certified-snapshot mint, construction tags, safe leaf reader/classifier,
+// and observation budgets are boundary-NEUTRAL: all four boundary registries
+// (pub/sub+DHT, transport/auth, WebRTC signalling, bridge admin) consume this one
+// implementation. Relocated out of src/pubsub so no boundary keeps a local copy
+// (Phase-1 post-mortem F1; Aster seq 664, Orion seq 670). The 48-gate suite is
+// the shared conformance gate every boundary re-runs unchanged.
 export { defineRow, FrameKind, EvidenceLevel, CorrelationSubjectKind, Proves, FactType } from './types.js';
 export { ShadowRegistry, shadowEnabled, setShadowEnabled } from './shadowRegistry.js';
 // NOTE: the snapshot mint (certify) is deliberately NOT re-exported, and its
