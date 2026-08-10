@@ -1,25 +1,28 @@
 // registry/types.js — the per-boundary frame CONTRACT ROW (refactor Phase 1,
-// REF-1.1; S1d re-cut around a DECLARATIVE, side-effect-free observation
-// boundary per Aster's S1c disposition). A row is declarative data — no handler
-// business logic (§4.2). Phase 1 runs rows in SHADOW MODE only (§4.3).
+// REF-1.1; S1e re-cut per Aster's S1d disposition). A row is DECLARATIVE DATA.
+// It carries NO executable code: the S1d escape was that schema / correlation /
+// idempotencyKey were still functions the dispatcher ran, so freezing their
+// arguments did not make them pure. S1e removes them.
 //
-// The observation boundary is declarative by construction (S1d):
-//   - `projection` names dotted LEAF PATHS the shadow layer may read from a
-//     frame. The dispatcher walks them reading ONLY own DATA-property
-//     descriptors (accessors are never invoked); scalars come back EXACT within
-//     the declared byte budget (oversized → a budget fault, never a truncated
-//     value treated as canonical), and arrays / byte sequences / objects come
-//     back as bounded STRUCTURAL FACTS. Nothing dynamic is executed on live
-//     dispatch input.
-//   - `variantBy` is a DECLARATIVE discriminator over the projection (a path +
-//     presence/case map), never a function on live args.
-//   - Rows are branded via a module-private WeakSet (isRow); register accepts
-//     nothing else.
+// A row now declares, as pure data interpreted by a fixed vetted evaluator
+// (shadowRegistry.js), only:
+//   - `projection` : dotted LEAF PATHS the shadow layer may read (own DATA
+//     descriptors only; accessors never invoked). Path segments __proto__ /
+//     prototype / constructor are rejected.
+//   - `schema`     : { require:[paths], forbid:[paths], types:{path:TypeName} }
+//     over projected facts. No function accepted.
+//   - `correlation`: { kind, requires:[paths] } — subject present iff all
+//     `requires` paths are present. No function accepted.
+//   - `idempotency`: { from:[paths] } — inputs present iff all `from` present.
+//     No function accepted (the old `idempotencyKey` callback is rejected).
 //
-// defineRow REJECTS (never silently normalizes) malformed rows: over-limit
-// projection lists, non-object budget/capability/projection, oversized or
-// non-finite capability values, non-string notes, evidence/proof
-// contradictions, and correlationFields not answerable from the projection.
+// defineRow REJECTS (never normalizes): functions where a spec is required;
+// over-limit projection / capability-key / variant-case / errorContract /
+// traceField / schema lists; non-object budget / capability / projection /
+// spec; oversized or non-finite capability values; non-string notes; evidence/
+// proof contradictions; and any declared path (projection, schema, correlation,
+// idempotency) not answerable from — or, for the latter three, not present in —
+// the projection.
 
 export const FrameKind = Object.freeze({
   REQUEST_RESPONSE: 'REQUEST_RESPONSE', ONE_WAY: 'ONE_WAY', MULTICAST: 'MULTICAST', UNSOLICITED_EVENT: 'UNSOLICITED_EVENT',
@@ -35,9 +38,7 @@ const EVIDENCE_LEVELS = new Set(Object.values(EvidenceLevel));
 export const Proves = Object.freeze({ ROUTING: 'routing', INGESTION: 'ingestion', RETENTION: 'retention', OBSERVATION: 'observation' });
 const PROVES = new Set(Object.values(Proves));
 
-// The ONLY evidence↔proof pairings that are not a contradiction. A frame may
-// declare one, the other, or a consistent pair; an inconsistent pair is rejected
-// (e.g. OBSERVED paired with proves:routing).
+// The ONLY evidence↔proof pairings that are not a contradiction.
 const EVIDENCE_FOR_PROOF = Object.freeze({
   routing: new Set(['ROUTED']),
   ingestion: new Set(['INGESTED']),
@@ -50,6 +51,13 @@ export const CorrelationSubjectKind = Object.freeze({
 });
 const CORRELATION_KINDS = new Set(Object.values(CorrelationSubjectKind));
 
+// Fact type names a schema spec may assert over a projected leaf.
+export const FactType = Object.freeze({
+  string: 'string', number: 'number', boolean: 'boolean', bigint: 'bigint',
+  arr: 'arr', bytes: 'bytes', obj: 'obj', present: 'present',
+});
+const FACT_TYPES = new Set(Object.values(FactType));
+
 const _minted = new WeakSet();
 export const isRow = (x) => { try { return _minted.has(x); } catch { return false; } };
 
@@ -57,20 +65,30 @@ export const MAX_PROJECTION_FIELDS = 24;
 export const MAX_PATH = 96;
 export const MAX_NOTE = 500;
 export const MAX_CAP_STR = 256;
-const isFn = (x) => typeof x === 'function';
+export const MAX_CAP_KEYS = 16;
+export const MAX_LIST = 16;          // errorContract, traceFields, schema/correlation/idempotency lists
+export const MAX_VARIANT_CASES = 32;
+
 const isStr = (x) => typeof x === 'string' && x.length > 0 && x.length <= 256;
 const isBoundedStr = (x, m) => typeof x === 'string' && x.length > 0 && x.length <= m;
 const isPosInt = (x) => Number.isInteger(x) && x > 0;
 const isPlainObject = (x) => x != null && typeof x === 'object' && !Array.isArray(x) &&
   (Object.getPrototypeOf(x) === Object.prototype || Object.getPrototypeOf(x) === null);
 const fail = (type, msg) => { throw new TypeError(`defineRow(${type ?? '?'}): ${msg}`); };
+const UNSAFE_SEG = new Set(['__proto__', 'prototype', 'constructor']);
 
-function validPaths(type, name, arr) {
+function validPaths(type, name, arr, maxLen = MAX_LIST) {
   if (!Array.isArray(arr)) fail(type, `${name} must be an array`);
-  for (const s of arr) if (!isBoundedStr(s, MAX_PATH)) fail(type, `${name} entries must be non-empty strings <= ${MAX_PATH} chars`);
+  if (arr.length > maxLen) fail(type, `${name} exceeds ${maxLen} entries`);
+  for (const s of arr) {
+    if (!isBoundedStr(s, MAX_PATH)) fail(type, `${name} entries must be non-empty strings <= ${MAX_PATH} chars`);
+    for (const seg of s.split('.')) if (UNSAFE_SEG.has(seg)) fail(type, `${name} path segment "${seg}" is not allowed`);
+  }
   if (new Set(arr).size !== arr.length) fail(type, `${name} entries must be unique`);
   return Object.freeze([...arr]);
 }
+
+const notFn = (type, name, v) => { if (typeof v === 'function') fail(type, `${name} must be a declarative spec object, not a function (S1e: no row code runs in the dispatch thread)`); };
 
 export function defineRow(row) {
   if (!isPlainObject(row)) throw new TypeError('defineRow: a plain row object required');
@@ -88,14 +106,8 @@ export function defineRow(row) {
   for (const p of ['topicProfile', 'eventIdScheme', 'replayCursorType', 'orderingModel', 'producedPolicy', 'requiredPolicy', 'outcome', 'terminalOutcome']) {
     if (row[p] != null && !isStr(row[p])) fail(type, `${p} must be a string or null`);
   }
-  if (row.schema != null && !isFn(row.schema)) fail(type, 'schema must be a function or null');
-  if (row.correlation != null && !isFn(row.correlation)) fail(type, 'correlation must be a function or null');
-  if (row.idempotencyKey != null && !isFn(row.idempotencyKey)) fail(type, 'idempotencyKey must be a function or null');
   if (row.evidence != null && !EVIDENCE_LEVELS.has(row.evidence)) fail(type, `invalid evidence ${String(row.evidence)}`);
   if (row.proves != null && !PROVES.has(row.proves)) fail(type, `invalid proves ${String(row.proves)}`);
-  if (row.subjectShape != null && !CORRELATION_KINDS.has(row.subjectShape)) fail(type, `invalid subjectShape ${String(row.subjectShape)}`);
-
-  // evidence/proof consistency (Aster S1c #5).
   if (row.evidence != null && row.proves != null && !EVIDENCE_FOR_PROOF[row.proves].has(row.evidence)) {
     fail(type, `evidence ${row.evidence} contradicts proves ${row.proves}`);
   }
@@ -103,25 +115,76 @@ export function defineRow(row) {
   // projection — plain object, path arrays, HARD cap (reject, never truncate).
   const proj = row.projection ?? {};
   if (!isPlainObject(proj)) fail(type, 'projection must be a plain object');
-  const pPay = validPaths(type, 'projection.payload', proj.payload ?? []);
-  const pMeta = validPaths(type, 'projection.meta', proj.meta ?? []);
+  const pPay = validPaths(type, 'projection.payload', proj.payload ?? [], MAX_PROJECTION_FIELDS);
+  const pMeta = validPaths(type, 'projection.meta', proj.meta ?? [], MAX_PROJECTION_FIELDS);
   if (pPay.length + pMeta.length > MAX_PROJECTION_FIELDS) fail(type, `projection exceeds ${MAX_PROJECTION_FIELDS} fields (declare fewer; the runtime rejects, it does not truncate)`);
   const projection = Object.freeze({ payload: pPay, meta: pMeta });
   const projSet = new Set([...pPay, ...pMeta]);
+  const inProjection = (p) => projSet.has(p);
 
-  const errorContract = validPaths(type, 'errorContract', row.errorContract ?? []);
-  const traceFields = validPaths(type, 'traceFields', row.traceFields ?? []);
+  const errorContract = validPaths(type, 'errorContract', row.errorContract ?? [], MAX_LIST);
+  const traceFields = validPaths(type, 'traceFields', row.traceFields ?? [], MAX_LIST);
 
-  // budget — plain object, positive ints; maxBytes is the per-scalar byte cap.
+  // schema — DECLARATIVE spec, never a function (S1e).
+  notFn(type, 'schema', row.schema);
+  let schema = Object.freeze({ require: Object.freeze([]), forbid: Object.freeze([]), types: Object.freeze({}) });
+  if (row.schema != null) {
+    if (!isPlainObject(row.schema)) fail(type, 'schema must be a plain spec object');
+    const require_ = validPaths(type, 'schema.require', row.schema.require ?? [], MAX_LIST);
+    const forbid = validPaths(type, 'schema.forbid', row.schema.forbid ?? [], MAX_LIST);
+    const typesIn = row.schema.types ?? {};
+    if (!isPlainObject(typesIn)) fail(type, 'schema.types must be a plain object');
+    const typeKeys = Object.keys(typesIn);
+    if (typeKeys.length > MAX_LIST) fail(type, `schema.types exceeds ${MAX_LIST} entries`);
+    const types = Object.create(null);
+    for (const k of typeKeys) {
+      if (!isBoundedStr(k, MAX_PATH)) fail(type, 'schema.types keys must be bounded path strings');
+      for (const seg of k.split('.')) if (UNSAFE_SEG.has(seg)) fail(type, `schema.types path segment "${seg}" is not allowed`);
+      if (!FACT_TYPES.has(typesIn[k])) fail(type, `schema.types.${k} must be one of ${[...FACT_TYPES].join('|')}`);
+      types[k] = typesIn[k];
+    }
+    for (const p of [...require_, ...forbid, ...Object.keys(types)]) if (!inProjection(p)) fail(type, `schema path ${p} is not in the declared projection`);
+    schema = Object.freeze({ require: require_, forbid, types: Object.freeze(types) });
+  }
+
+  // correlation — DECLARATIVE spec, never a function (S1e).
+  notFn(type, 'correlation', row.correlation);
+  let correlation = null, subjectShape = null;
+  if (row.correlation != null) {
+    if (!isPlainObject(row.correlation)) fail(type, 'correlation must be a plain spec object');
+    if (!CORRELATION_KINDS.has(row.correlation.kind)) fail(type, 'correlation.kind (CorrelationSubjectKind) required');
+    const requires_ = validPaths(type, 'correlation.requires', row.correlation.requires ?? [], MAX_LIST);
+    if (requires_.length === 0) fail(type, 'correlation must declare non-empty requires');
+    for (const p of requires_) if (!inProjection(p)) fail(type, `correlation.requires path ${p} is not in the declared projection`);
+    correlation = Object.freeze({ kind: row.correlation.kind, requires: requires_ });
+    subjectShape = row.correlation.kind;
+  }
+  if (kind === FrameKind.REQUEST_RESPONSE && !correlation) fail(type, 'REQUEST_RESPONSE requires a correlation spec');
+
+  // idempotency — DECLARATIVE spec; the old idempotencyKey callback is gone.
+  if (row.idempotencyKey != null) fail(type, 'idempotencyKey (callback) is removed in S1e; declare idempotency:{ from:[paths] }');
+  notFn(type, 'idempotency', row.idempotency);
+  let idempotency = null;
+  if (row.idempotency != null) {
+    if (!isPlainObject(row.idempotency)) fail(type, 'idempotency must be a plain spec object');
+    const from = validPaths(type, 'idempotency.from', row.idempotency.from ?? [], MAX_LIST);
+    if (from.length === 0) fail(type, 'idempotency must declare non-empty from');
+    for (const p of from) if (!inProjection(p)) fail(type, `idempotency.from path ${p} is not in the declared projection`);
+    idempotency = Object.freeze({ from });
+  }
+
+  // budget — plain object, positive ints.
   const b = row.budget ?? {};
   if (!isPlainObject(b)) fail(type, 'budget must be a plain object');
   if (b.maxBytes != null && !isPosInt(b.maxBytes)) fail(type, 'budget.maxBytes must be a positive integer or null');
   if (b.maxWork != null && !isPosInt(b.maxWork)) fail(type, 'budget.maxWork must be a positive integer or null');
 
-  // capability range — plain object, finite numbers / bounded strings only.
+  // capability range — plain object; cap KEY COUNT (S1e #7) and each value.
   const cap = row.capabilityRange ?? {};
   if (!isPlainObject(cap)) fail(type, 'capabilityRange must be a plain object');
-  for (const k of Object.keys(cap)) {
+  const capKeys = Object.keys(cap);
+  if (capKeys.length > MAX_CAP_KEYS) fail(type, `capabilityRange exceeds ${MAX_CAP_KEYS} keys`);
+  for (const k of capKeys) {
     const v = cap[k];
     if (v == null) continue;
     if (typeof v === 'number') { if (!Number.isFinite(v)) fail(type, `capabilityRange.${k} must be finite`); }
@@ -130,22 +193,7 @@ export function defineRow(row) {
   }
 
   if (row.note != null && !isBoundedStr(row.note, MAX_NOTE)) fail(type, `note must be a string <= ${MAX_NOTE} chars`);
-
-  const hasCorr = row.correlation != null;
-  if (kind === FrameKind.REQUEST_RESPONSE && !hasCorr) fail(type, 'REQUEST_RESPONSE requires a correlation contract');
-  let correlationFields = Object.freeze([]);
-  if (hasCorr) {
-    correlationFields = validPaths(type, 'correlationFields', row.correlationFields ?? []);
-    if (correlationFields.length === 0) fail(type, 'a correlated row must declare non-empty correlationFields');
-    if (!CORRELATION_KINDS.has(row.subjectShape)) fail(type, 'a correlated row must declare subjectShape');
-    // correlationFields must be answerable from the projection (Aster S1c #5).
-    for (const f of correlationFields) if (!projSet.has(f)) fail(type, `correlationField ${f} is not in the declared projection`);
-  } else if (row.correlationFields != null) {
-    correlationFields = validPaths(type, 'correlationFields', row.correlationFields);
-  }
-  if (row.evidence === EvidenceLevel.COMMITTED && !isStr(row.producedPolicy)) {
-    fail(type, 'COMMITTED evidence requires a producedPolicy');
-  }
+  if (row.evidence === EvidenceLevel.COMMITTED && !isStr(row.producedPolicy)) fail(type, 'COMMITTED evidence requires a producedPolicy');
 
   const norm = {
     type, variant: row.variant ?? null,
@@ -155,10 +203,8 @@ export function defineRow(row) {
     topicProfile: row.topicProfile ?? null, eventIdScheme: row.eventIdScheme ?? null,
     replayCursorType: row.replayCursorType ?? null, orderingModel: row.orderingModel ?? null,
     projection,
-    schema: row.schema ?? (() => ({ ok: true })),
-    correlation: row.correlation ?? null,
-    idempotencyKey: row.idempotencyKey ?? null,
-    correlationFields, subjectShape: row.subjectShape ?? null,
+    schema, correlation, idempotency,
+    subjectShape,
     evidence: row.evidence ?? null, producedPolicy: row.producedPolicy ?? null, requiredPolicy: row.requiredPolicy ?? null,
     proves: row.proves ?? null, outcome: row.outcome ?? null, terminalOutcome: row.terminalOutcome ?? null,
     errorContract, traceFields,
