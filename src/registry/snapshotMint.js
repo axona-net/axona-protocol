@@ -53,6 +53,11 @@ const _certified = new WeakSet();
 const _kind = new WeakMap();        // node -> frozen structural tag { k, len? }
 const MAX_DEPTH = 8;
 const MAX_NODES = 4096;
+// Distinguishes a genuinely OMITTED cap argument from an explicitly supplied
+// `undefined`. The public wrappers substitute this via arguments.length so that
+// forwarding a named `maxBytes` parameter cannot erase the distinction (Aster
+// seq 708 finding 3): only an omitted cap defaults; an explicit undefined rejects.
+const OMITTED = Symbol('omittedCap');
 // F7 pre-parse ceiling. The HARD cap is owned and justified by the transport
 // contract (wire.js MAX_FRAME_BYTES) — the frame/envelope guard, sized against
 // the largest legitimate frame per ingress variant. It is NOT the registry's
@@ -94,16 +99,19 @@ function utf8Over(s, cap) {
 function _certify(reviver, serialized, maxBytes) {
   // Input-type normalization: only a string is a valid wire frame.
   if (typeof serialized !== 'string') return null;
-  // F7 ceiling resolution (Aster seq 704, findings 1 & 3):
-  //   - OMITTED (undefined)  → the transport hard cap MAX_FRAME_BYTES. Defaulting
-  //     is legal only when no ceiling was supplied.
-  //   - SUPPLIED             → must be a positive integer that does NOT raise the
-  //     hard cap. Any other supplied value — 0, negative, fractional, NaN,
-  //     Infinity, non-number, null, or a value above MAX_FRAME_BYTES — is
-  //     REJECTED (return null → uncertified → observation no-op), never silently
-  //     defaulted. The hard cap is therefore invariant: it can only be tightened.
+  // F7 ceiling resolution (Aster seq 704 & 708, findings 1 & 3):
+  //   - OMITTED (the caller passed no cap → the wrapper substitutes the OMITTED
+  //     sentinel via arguments.length) → the transport hard cap MAX_FRAME_BYTES.
+  //     Defaulting is legal ONLY on a genuinely omitted argument.
+  //   - SUPPLIED (any value, INCLUDING an explicit `undefined`) → must be a
+  //     positive integer that does NOT raise the hard cap. Every other supplied
+  //     value — undefined, null, 0, negative, fractional, NaN, Infinity,
+  //     non-number, or a value above MAX_FRAME_BYTES — is REJECTED (return null →
+  //     uncertified → observation no-op), never silently defaulted. The hard cap
+  //     is therefore invariant: it can only be tightened, and an explicitly
+  //     supplied undefined does not fall open to the default (seq 708 finding 3).
   let cap;
-  if (maxBytes === undefined) {
+  if (maxBytes === OMITTED) {
     cap = MAX_FRAME_BYTES;
   } else if (Number.isInteger(maxBytes) && maxBytes > 0 && maxBytes <= MAX_FRAME_BYTES) {
     cap = maxBytes;
@@ -125,8 +133,8 @@ function _certify(reviver, serialized, maxBytes) {
 // intrinsics the parse output is a plain graph and a Proxy cannot enter the
 // certified set. Returns the graph, or null on non-string / over-ceiling /
 // malformed input. Internal callers only (the frame decoders).
-export function certifyPlain(serialized, maxBytes)  { return _certify(null, serialized, maxBytes); }
-export function certifyBigint(serialized, maxBytes) { return _certify(bigintReviver, serialized, maxBytes); }
+export function certifyPlain(serialized, maxBytes)  { return _certify(null, serialized, arguments.length < 2 ? OMITTED : maxBytes); }
+export function certifyBigint(serialized, maxBytes) { return _certify(bigintReviver, serialized, arguments.length < 2 ? OMITTED : maxBytes); }
 
 // Back-compat alias: `certify` is the plain variant (the S1i callers + the
 // 48-gate core suite predate the split and use no bigint reviver).

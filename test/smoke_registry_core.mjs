@@ -13,8 +13,8 @@ import { fileURLToPath } from 'node:url';
 import { defineRow, FrameKind, EvidenceLevel, Proves, CorrelationSubjectKind, FactType, ShadowRegistry, setShadowEnabled } from '../src/registry/index.js';
 import * as publicSurface from '../src/registry/index.js';
 import { certify, certifyPlain, certifyBigint, isCertified, kindOf } from '../src/registry/snapshotMint.js';
-import { MAX_FRAME_BYTES } from '../src/transport/wire.js';
-import { MAX_PUBLISH_BYTES } from '../src/pubsub/constants.js';
+import { MAX_FRAME_BYTES, encode } from '../src/transport/wire.js';
+import { MAX_PUBLISH_BYTES, MAX_RELIABLE_PUBLISH_BYTES } from '../src/pubsub/constants.js';
 
 let n = 0, fail = 0;
 const ok = (m, c, extra = '') => { if (c) console.log(`  ok ${++n} - ${m}`); else { console.log(`  ✗  ${m} ${extra}`); fail++; } };
@@ -256,20 +256,30 @@ const mk = (sink, extra = {}) => { const r = new ShadowRegistry({ boundary: 'tes
   ok('10f bypass rejects on both variants', certifyBigint('"ok"', 1e9) === null);
 
   // 10g FINDING 3 — an invalid SUPPLIED cap REJECTS; it never silently falls back
-  // to the default. Only an omitted cap defaults. Every invalid class is a null.
+  // to the default. Every invalid class is a null.
   for (const badCap of [0, -1, 1.5, NaN, Infinity, null, '100'])
     ok('10g invalid supplied cap rejects (' + String(badCap) + ')',
        certifyPlain('"ok"', badCap) === null && certifyBigint('"ok"', badCap) === null);
-  // ...contrast: omitted / explicit-undefined DO default (a valid frame passes).
-  ok('10g omitted cap defaults (valid frame passes)', certifyPlain('"ok"') !== null);
-  ok('10g explicit-undefined is treated as omitted', certifyPlain('"ok"', undefined) !== null);
+  // ARITY (Aster seq 708): the default applies ONLY when the cap is genuinely
+  // OMITTED (arguments.length < 2). An explicitly SUPPLIED `undefined` is a
+  // supplied invalid value and must REJECT — forwarding a named parameter must
+  // not erase that distinction.
+  ok('10g omitted cap defaults (valid frame passes both variants)',
+     certifyPlain('"ok"') !== null && certifyBigint('"ok"') !== null);
+  ok('10g explicit undefined REJECTS on both variants',
+     certifyPlain('"ok"', undefined) === null && certifyBigint('"ok"', undefined) === null);
+  ok('10g certify alias preserves omitted-vs-supplied arity',
+     certify('"ok"') !== null && certify('"ok"', undefined) === null);
 
-  // 10h FINDING 2 — the cap is JUSTIFIED against the largest LEGITIMATE frame,
-  // measured per ingress variant. peer.pub caps an enveloped publish at
-  // MAX_PUBLISH_BYTES CHARS (json.length); a char is up to 3 UTF-8 bytes, so the
-  // worst-case body is 3x that. Build such a frame for node/bridge (outer
-  // {type:'axona'} wrapper) and mesh (bare), and assert MAX_FRAME_BYTES admits it
-  // while the old 64 KiB scalar constant would have WRONGLY rejected legit traffic.
+  // 10h FINDING 2 (OPEN — provisional cap): this fixture is a PUB-FAMILY LOWER
+  // BOUND only. peer.pub caps an enveloped publish at MAX_PUBLISH_BYTES CHARS
+  // (json.length); a char is up to 3 UTF-8 bytes, so the worst-case body is 3x
+  // that. It certifies at the provisional default, and the old 64 KiB scalar
+  // constant would have WRONGLY rejected it — that much is settled. But PUB is
+  // NOT the largest producer on this ingress: REPLICATE/HANDOFF/REPLAYUP carry the
+  // whole role cache (CACHE_BYTES = 16 MiB chars), which EXCEEDS the provisional
+  // 1 MiB cap (§10j documents that gap). The final MAX_FRAME_BYTES is pending the
+  // chunk-vs-ceiling design decision — see the frame-ceiling inventory note.
   const bodyMax = 'あ'.repeat(MAX_PUBLISH_BYTES);   // U+3042 = 3 UTF-8 bytes each
   const enveloped = '{"type":"route_msg","fromId":"' + 'a'.repeat(66) +
     '","targetId":"' + 'b'.repeat(66) + '","hopCount":3,"payload":"' + bodyMax + '"}';
@@ -290,6 +300,24 @@ const mk = (sink, extra = {}) => { const r = new ShadowRegistry({ boundary: 'tes
   const wide = {}; for (let i = 0; i < 4200; i++) wide['o' + i] = {}; wide.zlate = { deep: 1 };
   const gw = certifyPlain(JSON.stringify(wide));
   ok('10i MAX_NODES exhaustion: root branded, late object sibling NOT', isCertified(gw) && !isCertified(gw.zlate));
+
+  // 10j FINDING 2 TRIPWIRE — a LEGITIMATE full-state REPLICATE frame, built the
+  // way syncEngine._syncSnapshot/_syncPush + wire.encode build it, EXCEEDS the
+  // provisional MAX_FRAME_BYTES. This reproduces Aster's seq-708 measurement (70
+  // cache entries, well under CACHE_MAX=1024 / CACHE_BYTES=16 MiB) and records the
+  // OPEN finding as a failing-when-resolved tripwire: when the chunk-vs-ceiling
+  // design lands, this assertion MUST be revisited (a chunked producer or a raised
+  // ceiling flips it). Certifying it today at the provisional cap would drop
+  // legitimate state sync — exactly why S2.0c is not cleared.
+  const cacheEntry = { json: '"' + 'x'.repeat(MAX_RELIABLE_PUBLISH_BYTES - 100) + '"',
+                       publishTs: 1, msgId: 'a'.repeat(64), seq: 1 };
+  const msgs = []; for (let i = 0; i < 70; i++) msgs.push(cacheEntry);
+  const replicatePayload = { topicId: 'b'.repeat(64), from: 'c'.repeat(64), msgs, dels: [] };
+  const routed = { type: 'axona', payload: { type: 'pubsub:replicate', payload: replicatePayload,
+                   fromId: 'c'.repeat(64), targetId: 'd'.repeat(64), hopCount: 1 } };
+  const replicateBytes = Buffer.byteLength(encode(routed), 'utf8');
+  ok('10j legit REPLICATE (70 entries) exceeds the provisional cap [OPEN Finding 2]',
+     replicateBytes > MAX_FRAME_BYTES && certifyPlain(encode(routed)) === null);
 }
 
 _on = false; setShadowEnabled(null);

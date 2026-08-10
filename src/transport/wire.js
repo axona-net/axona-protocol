@@ -55,19 +55,22 @@ export function decode(text) {
 // registry's per-scalar budget cap (registry/types.js MAX_BYTES_CEILING = 64 KiB),
 // which bounds one projected scalar, a different resource.
 //
-// Justification against the largest LEGITIMATE frame, measured per ingress
-// variant (test/smoke_registry_core §10 builds these fixtures):
-//   - peer.pub caps an enveloped publish message at MAX_PUBLISH_BYTES = 256 KiB
-//     measured as json.length — i.e. JS string-length CHARS (AxonaPeer.js:1812).
-//   - The certifier's F7 ceiling counts UTF-8 BYTES (a char is up to 3 bytes for
-//     the BMP; a surrogate pair is 4 bytes per 2 chars = 2 bytes/char), so the
-//     worst-case body is 3 * 262144 = 786432 bytes.
-//   - node WS / web-bridge WS additionally wrap it in {type:'axona', payload:…}
-//     and every variant adds the routed envelope (fromId/targetId/type/hopCount) —
-//     all ASCII hex/enum, well under 4 KiB. Mesh has no outer wrapper, so the mesh
-//     frame is strictly smaller than the node/bridge frame.
-// 1 << 20 (1 MiB) covers 786432 + envelope with headroom while bounding the
-// pre-parse allocation. A registered row / decoder variant MAY pass a TIGHTER
-// ceiling to a certifier, but this hard cap can never be raised past — a supplied
-// ceiling above it is rejected, not honored (see snapshotMint._certify).
-export const MAX_FRAME_BYTES = 1 << 20;   // 1048576
+// *** PROVISIONAL VALUE — REF-1.1 S2.0c Finding 2 is OPEN (Aster seq 708). ***
+// A single decode-site ceiling must admit the LARGEST legitimate frame across
+// EVERY producer sharing the ingress, because the family is unknown before parse.
+// peer.pub (256 KiB-char envelope) is NOT the largest: REPLICATE / HANDOFF /
+// REPLAYUP carry the whole role cache (topicStore CACHE_BYTES = 16 MiB chars,
+// CACHE_MAX = 1024), so a legitimate full-state sync frame reaches ~16 MiB chars
+// (up to ~48 MiB UTF-8 with a multibyte body) — far above this 1 MiB. Aster
+// reproduced a 1,076,365-byte legitimate REPLICATE from 70 cache entries.
+// The final value is a protocol-design FORK (chunk the full-state producers below
+// a small documented ceiling, vs. a ~CACHE_BYTES-scale ceiling) recorded in
+// axona-docs/architecture/REF-1.1-S2.0c-Frame-Ceiling-Inventory.md and pending a
+// council/David scope decision. Until then this constant is NOT wired to any live
+// decode path (flag OFF, S2.1 blocked) and MUST NOT be treated as justified.
+//
+// The invariance and rejection semantics below are settled regardless of value:
+// a registered row / decoder variant MAY pass a TIGHTER ceiling, but the hard cap
+// can never be raised past — a supplied ceiling above it is rejected, not honored
+// (see snapshotMint._certify).
+export const MAX_FRAME_BYTES = 1 << 20;   // 1048576 — PROVISIONAL, see Finding 2
