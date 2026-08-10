@@ -109,5 +109,29 @@ async function proofFor({ ackTo, flightNonce, attemptId, epoch = 0, ident = root
   ok('5b the correct proof then completes it', flightCount(owner) === 0);
 }
 
+// ── 6. wrong DESTINATION: a valid proof addressed to a different same-width
+//      ackTo must NOT settle this owner's flight (D1 destination binding;
+//      Aster REF-0.2 seq-598 #3). This is distinct from the wrong-WIDTH ackTo
+//      rejection in smoke_ack_proof — here the proof is well-formed and validly
+//      signed, but over a DIFFERENT legitimate destination. ──
+{
+  const owner = mkOwner(ownerBig);
+  const meta  = owner._flightOpen(topicBig, rootHex, T.PUB, payload);
+  ok('6a flight ackTo is this owner', meta.ackTo === idHex(ownerBig).toLowerCase(), meta.ackTo);
+  const otherDest = idHex(relayBig);   // well-formed 66-hex destination, NOT the owner
+  ok('6b the mismatched destination is same-width (66) and distinct',
+    otherDest.length === 66 && otherDest.toLowerCase() !== meta.ackTo);
+  // Validly signed over the DIFFERENT ackTo — verifyAckProof passes; only the
+  // flight-owner destination match must reject it.
+  const frame = await proofFor({ ...meta, ackTo: otherDest });
+  await owner._onIngestAck(frame, { fromId: idHex(relayBig) });
+  ok('6c a valid proof addressed to a DIFFERENT destination does NOT complete this flight',
+    flightCount(owner) === 1);
+  // control: the correctly-addressed proof still settles it
+  const good = await proofFor(meta);
+  await owner._onIngestAck(good, { fromId: idHex(relayBig) });
+  ok('6d the correctly-addressed proof then completes it', flightCount(owner) === 0);
+}
+
 console.log(`\n${fail === 0 ? 'PASS' : 'FAIL'} — ${n} assertions, ${fail} failed`);
 process.exit(fail === 0 ? 0 : 1);
