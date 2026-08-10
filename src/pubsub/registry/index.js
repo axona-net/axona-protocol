@@ -3,4 +3,7 @@
 // acceptance behavior. See types.js (the row shape) and shadowRegistry.js (the
 // wrapper + flag).
 export { defineRow, FrameKind, EvidenceLevel, CorrelationSubjectKind, Proves, FactType } from './types.js';
-export { ShadowRegistry, shadowEnabled, setShadowEnabled, snapshot, isSnapshot } from './shadowRegistry.js';
+export { ShadowRegistry, shadowEnabled, setShadowEnabled } from './shadowRegistry.js';
+// NOTE: the snapshot mint (certify) is deliberately NOT exported. Provenance is
+// a decoder-private capability (snapshotMint.js, blocked from package exports),
+// so no public consumer can mint the trusted brand (Aster S1f).

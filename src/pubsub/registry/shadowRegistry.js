@@ -27,6 +27,7 @@
 //     Map on (type, variant) with a Symbol base sentinel — no delimiter, no NUL.
 
 import { isRow, MAX_VARIANT_CASES, MAX_CAP_STR } from './types.js';
+import { isCertified } from './snapshotMint.js';
 
 let _override = null;
 function envFlag() {
@@ -42,22 +43,12 @@ const MAX_REFLECT_OPS = 256;     // fixed hard ceiling on descriptor reads per o
 const MAX_DEPTH = 8;             // leaf-path segment depth cap
 const BASE = Symbol('registry.base');   // inner-map key for the variant-less row — a private Symbol, never a real variant
 
-// ── the snapshot brand. A snapshot is a decoder-produced value the shadow layer
-//    is allowed to read. Membership is checked by object identity (WeakSet.has),
-//    which fires NO Proxy trap — so a hostile Proxy can never be mistaken for a
-//    snapshot, and checking an unbranded arg never executes its traps.
-const _snapshots = new WeakSet();
-
-// snapshot(frame): brand a decoder-produced value so the shadow layer may read
-// it. CONTRACT: `frame` must be produced by the frame decoder (JSON/CBOR parse
-// output or an equivalently plain, Proxy-free structure) — the decoder is the
-// only trusted caller. This function performs NO reflection on `frame`; it only
-// records identity, so it cannot itself trigger a trap. Returns `frame`.
-export function snapshot(frame) {
-  if (frame !== null && typeof frame === 'object') { try { _snapshots.add(frame); } catch { /* frozen/exotic host object — leave unbranded */ } }
-  return frame;
-}
-export function isSnapshot(x) { try { return _snapshots.has(x); } catch { return false; } }
+// Provenance is certified by the decoder-private mint (snapshotMint.js). The
+// shadow layer reflects on a value ONLY if isCertified(value) — a WeakSet
+// identity lookup that fires no Proxy trap. The mint is not publicly importable
+// and brands every reachable node, so a hostile or nested Proxy is never in the
+// set and is never touched. The mint (`certify`) is deliberately NOT re-exported
+// here or by registry/index.js.
 
 // UTF-8 byte length with early stop. A high surrogate counts as a 4-byte pair
 // ONLY when followed by a low surrogate; a lone surrogate is the 3-byte
@@ -87,9 +78,10 @@ function readLeaf(root, path, maxBytes, ops) {
   if (segs.length > MAX_DEPTH) return { fault: 'path-too-deep' };
   for (let i = 0; i < segs.length; i++) {
     if (cur == null || typeof cur !== 'object') return { absent: true };
+    if (!isCertified(cur)) return { fault: 'unbranded' };   // never reflect on an uncertified node (nested Proxy / post-mint insertion)
     if (ops.n >= MAX_REFLECT_OPS) return { fault: 'ops' };
     ops.n++;
-    const d = Object.getOwnPropertyDescriptor(cur, segs[i]);   // safe: snapshot is not a Proxy
+    const d = Object.getOwnPropertyDescriptor(cur, segs[i]);   // safe: certified node is not a Proxy
     if (!d) return { absent: true };
     if (!('value' in d)) return { fault: 'accessor' };
     cur = d.value;
@@ -105,11 +97,14 @@ function represent(v, maxBytes) {
   if (t === 'number') return Number.isFinite(v) ? { value: v } : { fault: 'nonfinite' };
   if (t === 'boolean') return { value: v };
   if (t === 'bigint') return { struct: Object.freeze({ k: 'bigint' }) };   // no toString — no unbounded conversion
+  if (t !== 'object') return { fault: 'unsupported' };   // function / symbol
+  // A structural/length/instanceof read is trap-capable, so reflect ONLY on a
+  // certified node. A nested Proxy or a post-mint insertion is uncertified here.
+  if (!isCertified(v)) return { fault: 'unbranded' };
   if (Array.isArray(v)) return { struct: Object.freeze({ k: 'arr', len: v.length }) };
   if (v instanceof Uint8Array) return { struct: Object.freeze({ k: 'bytes', len: v.byteLength }) };
   if (typeof ArrayBuffer !== 'undefined' && v instanceof ArrayBuffer) return { struct: Object.freeze({ k: 'bytes', len: v.byteLength }) };
-  if (t === 'object') return { struct: Object.freeze({ k: 'obj' }) };   // never enumerate
-  return { fault: 'unsupported' };
+  return { struct: Object.freeze({ k: 'obj' }) };   // never enumerate
 }
 
 // ── fixed, vetted evaluators over frozen facts ──
@@ -177,10 +172,10 @@ export class ShadowRegistry {
       let on; try { on = self._enabled(); } catch { on = false; }
       if (!on) return handler.apply(this, args);
 
-      // Observe ONLY a branded snapshot. Identity check fires no Proxy trap; an
-      // unbranded arg (including any Proxy) is never reflected on — handler runs
+      // Observe ONLY a certified snapshot. Identity check fires no Proxy trap; an
+      // uncertified arg (including any Proxy) is never reflected on — handler runs
       // verbatim. Contained so nothing here can suppress the handler or escape.
-      const payloadIsSnap = isSnapshot(args[0]);
+      const payloadIsSnap = isCertified(args[0]);
       if (!payloadIsSnap) {
         try { self._emitUnbranded(type); } catch { /* never break dispatch */ }
         return handler.apply(this, args);
@@ -198,7 +193,7 @@ export class ShadowRegistry {
         }
         const row = variantFault ? null : self.row(type, variant);
         const unknownVariant = (!variantFault && variant != null && !row);
-        const metaObj = isSnapshot(args[1]) ? args[1] : null;
+        const metaObj = isCertified(args[1]) ? args[1] : null;
         pre = self._observe(row, args[0], metaObj, { variantFault, unknownVariant }, ops);
         pre._t0 = t0;
       } catch { pre = null; }   // an observer fault must never change delivery

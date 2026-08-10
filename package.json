@@ -10,6 +10,7 @@
     "./contracts": "./src/contracts/index.js",
     "./contracts/*.js": "./src/contracts/*.js",
     "./dht/*.js": "./src/dht/*.js",
+    "./pubsub/registry/snapshotMint.js": null,
     "./pubsub/*.js": "./src/pubsub/*.js",
     "./persistence/*.js": "./src/persistence/*.js",
     "./transport/*.js": "./src/transport/*.js",
