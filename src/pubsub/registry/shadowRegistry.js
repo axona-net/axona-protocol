@@ -1,28 +1,32 @@
 // registry/shadowRegistry.js — the SHADOW dispatcher (refactor Phase 1, REF-1.1;
-// S1e re-cut per Aster's S1d disposition). The observation boundary executes NO
-// row-supplied code. A row's schema / correlation / idempotency are declarative
-// specs; a fixed, vetted evaluator in THIS file interprets them over already-
-// projected facts. Nothing dynamic runs in the dispatch thread.
+// S1f re-cut per Aster's S1e disposition). The shadow layer NEVER reflects on a
+// live handler argument: JavaScript reflection (getPrototypeOf,
+// getOwnPropertyDescriptor, Array.isArray+.length) is itself trap-capable, so
+// inspecting a Proxy to decide whether it is "plain" can execute or throw. The
+// only thing the evaluator ever reads is a decoder-produced SNAPSHOT whose
+// provenance is a module-private brand (a WeakSet) — an identity check that
+// fires no trap. Anything unbranded is observed as nothing; the handler runs
+// verbatim.
 //
 // Invariants (each an adversarial gate case in smoke_registry_core.mjs):
-//   * NO row code runs. schema/correlation/idempotency are data; the evaluator
-//     here reads only frozen projected facts. A row cannot mutate dispatch state.
-//   * Projection reads own DATA descriptors only (accessors never invoked) and
-//     NEVER enumerates a live object (no Object.keys → no Proxy ownKeys trap).
-//     The projection source must be a decoder-owned plain record; a non-plain
-//     root yields a fault and is not read.
-//   * Facts are DEEP-frozen and isolated — a structural fact cannot be mutated
-//     between the schema and correlation reads.
-//   * Budgets are enforced: maxWork caps the number of field reads; maxBytes is
-//     a UTF-8 byte cap; bigint is a structural fact (no unbounded conversion).
-//   * variantBy is declarative AND bound to the projection: its path must be a
-//     declared payload field and every result must name a registered variant.
-//   * Return inspection is PRIMITIVE-ONLY (objects are the opaque verdict
-//     'object'; no property on a returned value is read).
+//   * NO reflection on untrusted live args. Only a branded snapshot is read.
+//     A root/nested/array/revoked Proxy is never branded → observation skipped →
+//     handler runs verbatim: no trap fires, no mutation, no suppression, no
+//     observer exception, arguments unchanged.
+//   * schema/correlation/idempotency are DECLARATIVE recipes a fixed evaluator
+//     interprets over frozen facts. No row code runs.
+//   * UTF-8 accounting counts 4 bytes only for a VALID surrogate pair; a lone
+//     surrogate is the 3-byte replacement and does not skip the next unit.
+//   * Budgets: maxLeaves caps projected leaf paths; MAX_REFLECT_OPS is a fixed
+//     hard ceiling on descriptor reads (including the variant discriminator);
+//     maxBytes has a hard global ceiling (enforced in defineRow); bigint is a
+//     structural fact (no unbounded conversion).
+//   * Recipe paths resolve unambiguously — payload/meta collisions are rejected
+//     at defineRow, so a path names exactly one side.
 //   * Telemetry emits FIXED allowlisted codes only. Registry keys are a nested
 //     Map on (type, variant) with a Symbol base sentinel — no delimiter, no NUL.
 
-import { isRow, MAX_VARIANT_CASES } from './types.js';
+import { isRow, MAX_VARIANT_CASES, MAX_CAP_STR } from './types.js';
 
 let _override = null;
 function envFlag() {
@@ -33,42 +37,61 @@ export function shadowEnabled() { return _override === null ? envFlag() : _overr
 export function setShadowEnabled(on) { _override = (on === null || on === undefined) ? null : !!on; }
 
 const DEFAULT_MAX_BYTES = 256;   // per-scalar UTF-8 byte cap when a row declares none
-const DEFAULT_MAX_WORK = 64;     // field-read cap when a row declares none
+const DEFAULT_MAX_LEAVES = 64;   // projected-leaf cap when a row declares none
+const MAX_REFLECT_OPS = 256;     // fixed hard ceiling on descriptor reads per observation (incl. discriminator)
 const MAX_DEPTH = 8;             // leaf-path segment depth cap
-const BASE = Symbol('registry.base');   // inner-map key for the variant-less row — a private Symbol, never a real variant, never a string sentinel
+const BASE = Symbol('registry.base');   // inner-map key for the variant-less row — a private Symbol, never a real variant
 
-const isPlainRecord = (o) => {
-  if (o === null || typeof o !== 'object') return false;
-  const p = Object.getPrototypeOf(o);
-  return p === Object.prototype || p === null;
-};
+// ── the snapshot brand. A snapshot is a decoder-produced value the shadow layer
+//    is allowed to read. Membership is checked by object identity (WeakSet.has),
+//    which fires NO Proxy trap — so a hostile Proxy can never be mistaken for a
+//    snapshot, and checking an unbranded arg never executes its traps.
+const _snapshots = new WeakSet();
 
-// UTF-8 byte length with early stop — never allocates, never exceeds cap+ work.
+// snapshot(frame): brand a decoder-produced value so the shadow layer may read
+// it. CONTRACT: `frame` must be produced by the frame decoder (JSON/CBOR parse
+// output or an equivalently plain, Proxy-free structure) — the decoder is the
+// only trusted caller. This function performs NO reflection on `frame`; it only
+// records identity, so it cannot itself trigger a trap. Returns `frame`.
+export function snapshot(frame) {
+  if (frame !== null && typeof frame === 'object') { try { _snapshots.add(frame); } catch { /* frozen/exotic host object — leave unbranded */ } }
+  return frame;
+}
+export function isSnapshot(x) { try { return _snapshots.has(x); } catch { return false; } }
+
+// UTF-8 byte length with early stop. A high surrogate counts as a 4-byte pair
+// ONLY when followed by a low surrogate; a lone surrogate is the 3-byte
+// replacement sequence and does not consume the next code unit (Aster S1f #3).
 function utf8LenCapped(s, cap) {
   let n = 0;
   for (let i = 0; i < s.length; i++) {
     const c = s.charCodeAt(i);
     if (c < 0x80) n += 1;
     else if (c < 0x800) n += 2;
-    else if (c >= 0xD800 && c <= 0xDBFF) { n += 4; i++; }   // surrogate pair
-    else n += 3;
+    else if (c >= 0xD800 && c <= 0xDBFF) {
+      const d = i + 1 < s.length ? s.charCodeAt(i + 1) : 0;
+      if (d >= 0xDC00 && d <= 0xDFFF) { n += 4; i++; }   // valid pair
+      else n += 3;                                        // lone high surrogate → U+FFFD
+    } else n += 3;                                        // BMP ≥ 0x800, or lone low surrogate → U+FFFD
     if (n > cap) return n;
   }
   return n;
 }
 
-// Read a declared leaf path using ONLY own data-property descriptors — never
-// invokes an accessor, never enumerates. Returns a tagged, bounded, frozen fact.
-function readLeaf(root, path, maxBytes) {
+// Read a declared leaf path from a SNAPSHOT (Proxy-free by construction) using
+// only own data-property descriptors. `ops` counts every descriptor read against
+// the fixed hard ceiling. Never invokes an accessor, never enumerates.
+function readLeaf(root, path, maxBytes, ops) {
   let cur = root;
   const segs = path.split('.');
   if (segs.length > MAX_DEPTH) return { fault: 'path-too-deep' };
   for (let i = 0; i < segs.length; i++) {
     if (cur == null || typeof cur !== 'object') return { absent: true };
-    let d;
-    try { d = Object.getOwnPropertyDescriptor(cur, segs[i]); } catch { return { fault: 'descriptor' }; }
+    if (ops.n >= MAX_REFLECT_OPS) return { fault: 'ops' };
+    ops.n++;
+    const d = Object.getOwnPropertyDescriptor(cur, segs[i]);   // safe: snapshot is not a Proxy
     if (!d) return { absent: true };
-    if (!('value' in d)) return { fault: 'accessor' };   // getter/setter — never invoked
+    if (!('value' in d)) return { fault: 'accessor' };
     cur = d.value;
   }
   return represent(cur, maxBytes);
@@ -81,22 +104,23 @@ function represent(v, maxBytes) {
   if (t === 'string') return utf8LenCapped(v, cap) > cap ? { fault: 'budget' } : { value: v };
   if (t === 'number') return Number.isFinite(v) ? { value: v } : { fault: 'nonfinite' };
   if (t === 'boolean') return { value: v };
-  if (t === 'bigint') return { struct: Object.freeze({ k: 'bigint' }) };   // NO toString — no unbounded conversion
+  if (t === 'bigint') return { struct: Object.freeze({ k: 'bigint' }) };   // no toString — no unbounded conversion
   if (Array.isArray(v)) return { struct: Object.freeze({ k: 'arr', len: v.length }) };
   if (v instanceof Uint8Array) return { struct: Object.freeze({ k: 'bytes', len: v.byteLength }) };
   if (typeof ArrayBuffer !== 'undefined' && v instanceof ArrayBuffer) return { struct: Object.freeze({ k: 'bytes', len: v.byteLength }) };
-  if (t === 'object') return { struct: Object.freeze({ k: 'obj' }) };   // NO Object.keys — never enumerate a live object
-  return { fault: 'unsupported' };   // function/symbol
+  if (t === 'object') return { struct: Object.freeze({ k: 'obj' }) };   // never enumerate
+  return { fault: 'unsupported' };
 }
 
-// ── fixed, vetted evaluators over frozen facts — the ONLY interpretation of a
-//    row's declarative specs. No row code, no live objects. ──
+// ── fixed, vetted evaluators over frozen facts ──
 function typeOfFact(v) {
   if (v === null || v === undefined) return 'absent';
   if (typeof v === 'object' && typeof v.k === 'string') return v.k;
-  return typeof v;   // 'string' | 'number' | 'boolean'
+  return typeof v;
 }
 function factGet(payloadFacts, metaFacts, p) {
+  // A path names exactly one side (payload/meta collisions are rejected at
+  // defineRow), so this lookup is unambiguous.
   if (Object.prototype.hasOwnProperty.call(payloadFacts, p)) return payloadFacts[p];
   if (Object.prototype.hasOwnProperty.call(metaFacts, p)) return metaFacts[p];
   return undefined;
@@ -121,7 +145,7 @@ function evalPresence(paths, payloadFacts, metaFacts) {
 export class ShadowRegistry {
   constructor(opts = {}) {
     this.boundary = opts.boundary || 'unknown';
-    this._byType = new Map();               // type -> Map<variant|BASE, row>   (nested; no delimiter key)
+    this._byType = new Map();
     this._sink = typeof opts.sink === 'function' ? opts.sink : () => {};
     this._enabled = typeof opts.enabled === 'function' ? opts.enabled : shadowEnabled;
     this._now = typeof opts.now === 'function' ? opts.now : defaultNow;
@@ -143,11 +167,6 @@ export class ShadowRegistry {
   row(type, variant = null) { const inner = this._byType.get(type); return inner ? (inner.get(variant == null ? BASE : variant) || null) : null; }
   size() { let n = 0; for (const inner of this._byType.values()) n += inner.size; return n; }
 
-  // wrap(type, handler, { variantBy })
-  //   variantBy (declarative, optional): { path, whenPresent, whenAbsent, cases, default }.
-  //   Validated at construction against the ALREADY-registered rows for `type`:
-  //   path must be a declared payload projection field of every variant, and
-  //   every result must name a registered variant.
   wrap(type, handler, opts = {}) {
     if (typeof type !== 'string' || !type) throw new TypeError('ShadowRegistry.wrap: type (non-empty string) required at construction');
     if (typeof handler !== 'function') throw new TypeError(`ShadowRegistry.wrap(${type}): handler function required`);
@@ -158,49 +177,59 @@ export class ShadowRegistry {
       let on; try { on = self._enabled(); } catch { on = false; }
       if (!on) return handler.apply(this, args);
 
-      const t0 = self._safeNow();
-      let variant = null, variantFault = null;
-      if (variantBy) {
-        const leaf = isPlainRecord(args[0]) ? readLeaf(args[0], variantBy.path, DEFAULT_MAX_BYTES) : { fault: 'source' };
-        const r = pickVariant(variantBy, leaf);
-        variant = r.variant; variantFault = r.fault;
+      // Observe ONLY a branded snapshot. Identity check fires no Proxy trap; an
+      // unbranded arg (including any Proxy) is never reflected on — handler runs
+      // verbatim. Contained so nothing here can suppress the handler or escape.
+      const payloadIsSnap = isSnapshot(args[0]);
+      if (!payloadIsSnap) {
+        try { self._emitUnbranded(type); } catch { /* never break dispatch */ }
+        return handler.apply(this, args);
       }
-      const row = variantFault ? null : self.row(type, variant);
-      const unknownVariant = (!variantFault && variant != null && !row);
-      const pre = self._observe(row, args, { variantFault, unknownVariant });
+
+      let pre = null, variant = null;
+      try {
+        const t0 = self._safeNow();
+        const ops = { n: 0 };
+        let variantFault = null;
+        if (variantBy) {
+          const leaf = readLeaf(args[0], variantBy.path, DEFAULT_MAX_BYTES, ops);
+          const r = pickVariant(variantBy, leaf);
+          variant = r.variant; variantFault = r.fault;
+        }
+        const row = variantFault ? null : self.row(type, variant);
+        const unknownVariant = (!variantFault && variant != null && !row);
+        const metaObj = isSnapshot(args[1]) ? args[1] : null;
+        pre = self._observe(row, args[0], metaObj, { variantFault, unknownVariant }, ops);
+        pre._t0 = t0;
+      } catch { pre = null; }   // an observer fault must never change delivery
 
       let result, threw = false;
       try { result = handler.apply(this, args); } catch (e) { threw = true; result = e; }
-      if (threw) { self._emit(row, type, variant, pre, 'threw', self._safeNow() - t0); throw result; }
-
-      self._emit(row, type, variant, pre, verdictOf(result), self._safeNow() - t0);
+      if (pre) { try { self._emit(type, variant, pre, threw ? 'threw' : verdictOf(result), self._safeNow() - pre._t0); } catch { /* */ } }
+      if (threw) throw result;
       return result;
     };
   }
 
-  _observe(row, args, faults) {
+  _observe(row, payload, metaObj, faults, ops) {
     const out = { registered: !!row, variantFault: faults.variantFault || null, unknownVariant: !!faults.unknownVariant };
     if (!row) return out;
     out.kind = row.kind; out.owningService = row.owningService; out.evidence = row.evidence; out.proves = row.proves; out.subjectShape = row.subjectShape;
 
-    // Build schema-faithful, deep-frozen, null-prototype fact maps from declared
-    // leaf paths, under the row's work + byte budgets. Source must be a plain
-    // decoder record; otherwise no field is read.
     const facts = { payload: Object.create(null), meta: Object.create(null) };
     let projFault = null;
-    const maxWork = row.budget.maxWork ?? DEFAULT_MAX_WORK;
-    let work = 0;
-    const sides = [['payload', args[0]], ['meta', args[1]]];
+    const maxLeaves = row.budget.maxLeaves ?? DEFAULT_MAX_LEAVES;
+    let leaves = 0;
+    const sides = [['payload', payload], ['meta', metaObj]];
     for (const [side, obj] of sides) {
-      const plain = isPlainRecord(obj);
       for (const path of row.projection[side]) {
-        if (work >= maxWork) { projFault = projFault || 'work'; break; }
-        work++;
-        if (!plain) { projFault = projFault || 'source'; continue; }
-        const leaf = readLeaf(obj, path, row.budget.maxBytes);
+        if (obj == null) { continue; }   // unbranded/absent side — no reflection
+        if (leaves >= maxLeaves) { projFault = projFault || 'leaves'; break; }
+        leaves++;
+        const leaf = readLeaf(obj, path, row.budget.maxBytes, ops);
         if (leaf.absent) continue;
         if (leaf.fault) { projFault = projFault || leaf.fault; continue; }
-        facts[side][path] = leaf.value !== undefined ? leaf.value : leaf.struct;   // struct already frozen
+        facts[side][path] = leaf.value !== undefined ? leaf.value : leaf.struct;
       }
       Object.freeze(facts[side]);
     }
@@ -214,7 +243,15 @@ export class ShadowRegistry {
     return out;
   }
 
-  _emit(row, type, variant, pre, verdict, durationMs) {
+  _emitUnbranded(type) {
+    this._seen++;
+    let rec;
+    try { rec = { boundary: this.boundary, type, registered: null, faults: ['unbranded-source'], verdict: 'unobserved', durationMs: null }; }
+    catch { return; }
+    try { this._sink(rec); } catch { /* */ }
+  }
+
+  _emit(type, variant, pre, verdict, durationMs) {
     const isFault = verdict === 'threw' || pre.schemaOk === false || pre.schemaCode
       || pre.variantFault || pre.unknownVariant || pre.projFault || pre.registered === false;
     this._seen++;
@@ -223,17 +260,17 @@ export class ShadowRegistry {
     try {
       rec = {
         boundary: this.boundary,
-        type,                                   // the wrapper's declared type (a fixed string, not frame-controlled)
-        variant: variant == null ? null : variant,   // a declared variant name (from variantBy config), never frame text
+        type,
+        variant: variant == null ? null : variant,
         registered: pre.registered,
         kind: pre.kind ?? null, owningService: pre.owningService ?? null,
         evidence: pre.evidence ?? null, proves: pre.proves ?? null,
-        correlationKind: pre.subjectShape ?? null,    // DECLARED shape only
+        correlationKind: pre.subjectShape ?? null,
         schemaOk: pre.schemaOk ?? null,
-        schemaCode: pre.schemaCode ?? null,     // a FIXED evaluator code, never free text
+        schemaCode: pre.schemaCode ?? null,
         correlationPresent: pre.correlationPresent ?? null,
         idempotencyPresent: pre.idempotencyPresent ?? null,
-        faults: faultCodes(pre),                // fixed code strings only
+        faults: faultCodes(pre),
         verdict,
         durationMs: Number.isFinite(durationMs) ? Math.round(durationMs * 1000) / 1000 : null,
       };
@@ -244,7 +281,6 @@ export class ShadowRegistry {
   _safeNow() { try { const n = this._now(); return Number.isFinite(n) ? n : 0; } catch { return 0; } }
 }
 
-// A fixed-code fault vector — no dynamic text ever leaves here.
 function faultCodes(pre) {
   const f = [];
   if (pre.registered === false) f.push('unregistered');
@@ -267,10 +303,13 @@ function validateVariantBy(type, vb, inner) {
     const caseKeys = Object.keys(vb.cases);
     if (caseKeys.length > MAX_VARIANT_CASES) throw new TypeError(`wrap(${type}): variantBy.cases exceeds ${MAX_VARIANT_CASES} entries`);
     const cases = Object.create(null);
-    for (const k of caseKeys) { if (!isVar(vb.cases[k])) throw new TypeError(`wrap(${type}): variantBy.cases values must be variant names`); cases[k] = vb.cases[k]; }
+    for (const k of caseKeys) {
+      if (k.length > MAX_CAP_STR) throw new TypeError(`wrap(${type}): variantBy.cases key exceeds ${MAX_CAP_STR} chars`);
+      if (!isVar(vb.cases[k])) throw new TypeError(`wrap(${type}): variantBy.cases values must be variant names`);
+      cases[k] = vb.cases[k];
+    }
     out.cases = cases;
   }
-  // Bind to the declared projection + registered variants (S1e #5).
   if (!inner || inner.size === 0) throw new TypeError(`wrap(${type}): variantBy requires rows registered for ${type} before wrapping`);
   for (const row of inner.values()) {
     if (!row.projection.payload.includes(out.path)) throw new TypeError(`wrap(${type}): variantBy.path "${out.path}" is not a declared payload projection field of every registered variant`);
@@ -281,7 +320,6 @@ function validateVariantBy(type, vb, inner) {
   return Object.freeze(out);
 }
 
-// Pure resolution over a single readLeaf fact — no code executed.
 function pickVariant(vb, leaf) {
   if (leaf.fault) return { variant: null, fault: leaf.fault };
   const present = !leaf.absent;
@@ -296,13 +334,12 @@ function pickVariant(vb, leaf) {
 
 function defaultNow() { try { if (typeof performance !== 'undefined' && typeof performance.now === 'function') return performance.now(); } catch { /* */ } return 0; }
 
-// PRIMITIVE-ONLY coarse verdict — never touches a property on a returned object.
 function verdictOf(r) {
   const t = typeof r;
   if (t === 'string') return r === 'consumed' ? 'consumed' : 'other';
   if (r === undefined || r === null || r === false) return 'passed';
   if (t === 'boolean' || t === 'number' || t === 'bigint' || t === 'symbol') return 'other';
-  return 'object';   // object/function — opaque; NOT inspected
+  return 'object';
 }
 
 export default ShadowRegistry;

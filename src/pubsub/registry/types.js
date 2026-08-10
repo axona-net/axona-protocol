@@ -68,6 +68,7 @@ export const MAX_CAP_STR = 256;
 export const MAX_CAP_KEYS = 16;
 export const MAX_LIST = 16;          // errorContract, traceFields, schema/correlation/idempotency lists
 export const MAX_VARIANT_CASES = 32;
+export const MAX_BYTES_CEILING = 1 << 16;   // 65536 — hard global cap on a per-scalar byte budget
 
 const isStr = (x) => typeof x === 'string' && x.length > 0 && x.length <= 256;
 const isBoundedStr = (x, m) => typeof x === 'string' && x.length > 0 && x.length <= m;
@@ -118,6 +119,11 @@ export function defineRow(row) {
   const pPay = validPaths(type, 'projection.payload', proj.payload ?? [], MAX_PROJECTION_FIELDS);
   const pMeta = validPaths(type, 'projection.meta', proj.meta ?? [], MAX_PROJECTION_FIELDS);
   if (pPay.length + pMeta.length > MAX_PROJECTION_FIELDS) fail(type, `projection exceeds ${MAX_PROJECTION_FIELDS} fields (declare fewer; the runtime rejects, it does not truncate)`);
+  // A recipe path is unqualified (schema/correlation/idempotency name a field by
+  // path only); if the same path is declared on BOTH payload and meta, resolution
+  // is ambiguous (Aster S1e #4). Reject the collision so a path names one side.
+  const payloadSet = new Set(pPay);
+  for (const m of pMeta) if (payloadSet.has(m)) fail(type, `projection path ${m} is declared on both payload and meta; recipe resolution would be ambiguous (declare it on one side)`);
   const projection = Object.freeze({ payload: pPay, meta: pMeta });
   const projSet = new Set([...pPay, ...pMeta]);
   const inProjection = (p) => projSet.has(p);
@@ -173,18 +179,25 @@ export function defineRow(row) {
     idempotency = Object.freeze({ from });
   }
 
-  // budget — plain object, positive ints.
+  // budget — plain object, positive ints. maxBytes has a HARD global ceiling
+  // (a count cap alone doesn't bound a dispatch-thread scan — Aster S1f #5).
+  // maxLeaves caps how many projected leaf paths are read (renamed from maxWork,
+  // which mis-implied a per-operation charge; the per-operation ceiling is the
+  // fixed MAX_REFLECT_OPS in shadowRegistry.js — Aster S1f #5).
   const b = row.budget ?? {};
   if (!isPlainObject(b)) fail(type, 'budget must be a plain object');
-  if (b.maxBytes != null && !isPosInt(b.maxBytes)) fail(type, 'budget.maxBytes must be a positive integer or null');
-  if (b.maxWork != null && !isPosInt(b.maxWork)) fail(type, 'budget.maxWork must be a positive integer or null');
+  if (b.maxBytes != null && (!isPosInt(b.maxBytes) || b.maxBytes > MAX_BYTES_CEILING)) fail(type, `budget.maxBytes must be a positive integer <= ${MAX_BYTES_CEILING}`);
+  if (b.maxLeaves != null && !isPosInt(b.maxLeaves)) fail(type, 'budget.maxLeaves must be a positive integer or null');
+  if (b.maxWork != null) fail(type, 'budget.maxWork is renamed to budget.maxLeaves (S1f)');
 
-  // capability range — plain object; cap KEY COUNT (S1e #7) and each value.
+  // capability range — plain object; cap KEY COUNT, key length, and each value
+  // (a retained declaration key must itself be bounded — Aster S1f #5).
   const cap = row.capabilityRange ?? {};
   if (!isPlainObject(cap)) fail(type, 'capabilityRange must be a plain object');
   const capKeys = Object.keys(cap);
   if (capKeys.length > MAX_CAP_KEYS) fail(type, `capabilityRange exceeds ${MAX_CAP_KEYS} keys`);
   for (const k of capKeys) {
+    if (k.length > MAX_CAP_STR) fail(type, `capabilityRange key exceeds ${MAX_CAP_STR} chars`);
     const v = cap[k];
     if (v == null) continue;
     if (typeof v === 'number') { if (!Number.isFinite(v)) fail(type, `capabilityRange.${k} must be finite`); }
@@ -208,7 +221,7 @@ export function defineRow(row) {
     evidence: row.evidence ?? null, producedPolicy: row.producedPolicy ?? null, requiredPolicy: row.requiredPolicy ?? null,
     proves: row.proves ?? null, outcome: row.outcome ?? null, terminalOutcome: row.terminalOutcome ?? null,
     errorContract, traceFields,
-    budget: Object.freeze({ maxBytes: b.maxBytes ?? null, maxWork: b.maxWork ?? null }),
+    budget: Object.freeze({ maxBytes: b.maxBytes ?? null, maxLeaves: b.maxLeaves ?? null }),
     capabilityRange: Object.freeze({ ...cap }),
     note: row.note ?? '',
   };

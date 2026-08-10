@@ -3,4 +3,4 @@
 // acceptance behavior. See types.js (the row shape) and shadowRegistry.js (the
 // wrapper + flag).
 export { defineRow, FrameKind, EvidenceLevel, CorrelationSubjectKind, Proves, FactType } from './types.js';
-export { ShadowRegistry, shadowEnabled, setShadowEnabled } from './shadowRegistry.js';
+export { ShadowRegistry, shadowEnabled, setShadowEnabled, snapshot, isSnapshot } from './shadowRegistry.js';
