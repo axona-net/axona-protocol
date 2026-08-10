@@ -32,27 +32,85 @@
 // assumption above its parse output is a plain graph, and classification never
 // touches a prototype.
 
+// S2.0c — FIXED per-variant certifying decoders (REF-1.1 S2.0b Gate-2 v2 cleared;
+// Aster seq 700 authorized this as a reviewable code tranche). The core exposes
+// TWO fixed string-only decoder variants matching the transport wire decoders:
+//   certifyPlain(text)   — JSON.parse, no reviver           (node WS, web-bridge WS)
+//   certifyBigint(text)  — JSON.parse + the SAME internal   (WebRTC mesh)
+//                          bigintReviver decode() already uses
+// There is NO caller-supplied reviver/callback and NO general object-branding
+// export — an object-accepting mint would recreate the branding capability S1
+// forbids. Each variant NORMALIZES its runtime input type (only a string is a
+// valid wire frame; anything else → null → uncertified → observation no-op) and
+// enforces an F7 pre-parse UTF-8 BYTE ceiling BEFORE JSON.parse, so an oversized
+// frame is rejected before it can allocate a parse graph. `MAX_DEPTH`/`MAX_NODES`
+// bound the brand WALK; F7 bounds the PARSE.
+import { bigintReviver } from '../transport/wire.js';
+
 const _certified = new WeakSet();
 const _kind = new WeakMap();        // node -> frozen structural tag { k, len? }
 const MAX_DEPTH = 8;
 const MAX_NODES = 4096;
+// F7 default per-variant serialized-byte ceiling. Matches the kernel's existing
+// envelope size guard (MAX_BYTES_CEILING). A boundary/type may pass a tighter
+// ceiling; the coupled depth/nodes/breadth acceptance gate (S2.1) is measured
+// against the ACTUAL ceiling a registered row uses, per Aster's disposition.
+const DEFAULT_MAX_BYTES = 65536;
 
 export function isCertified(x) { try { return _certified.has(x); } catch { return false; } }
 // Construction-time structural tag (trap-free WeakMap read). null for a plain
 // object (classified as 'obj' without prototype traversal) or an uncertified value.
 export function kindOf(x) { try { return _kind.get(x) || null; } catch { return null; } }
 
-// certify(serialized): parse a serialized frame and brand every reachable node,
-// tagging its structural kind at construction. Input is text, so under intact
-// realm intrinsics the parse output is a plain graph and a Proxy cannot enter the
-// certified set. Returns the graph, or null on malformed input. Internal callers
-// only (the frame decoder).
-export function certify(serialized) {
+// Return true if the UTF-8 byte length of `s` exceeds `cap`, counted exactly and
+// with an early stop. This is a BYTE ceiling, not a JS string-length ceiling
+// (Aster Gate-2 correction). A valid surrogate pair is 4 bytes; a lone surrogate
+// is the 3-byte replacement. Every UTF-16 code unit contributes >= 1 byte, so
+// `s.length > cap` already implies over-cap — used as an O(1) fast reject before
+// the O(<=cap) exact count.
+function utf8Over(s, cap) {
+  if (s.length > cap) return true;
+  let n = 0;
+  for (let i = 0; i < s.length; i++) {
+    const c = s.charCodeAt(i);
+    if (c < 0x80) n += 1;
+    else if (c < 0x800) n += 2;
+    else if (c >= 0xD800 && c <= 0xDBFF) {
+      const d = i + 1 < s.length ? s.charCodeAt(i + 1) : 0;
+      if (d >= 0xDC00 && d <= 0xDFFF) { n += 4; i++; } else n += 3;
+    } else n += 3;
+    if (n > cap) return true;
+  }
+  return false;
+}
+
+// The shared certifying-decoder core. `reviver` is null (plain) or the fixed
+// internal bigintReviver. Not exported; callers use the two fixed variants.
+function _certify(reviver, serialized, maxBytes) {
+  // Input-type normalization: only a string is a valid wire frame.
   if (typeof serialized !== 'string') return null;
-  let g; try { g = JSON.parse(serialized); } catch { return null; }
+  // F7: pre-parse UTF-8 byte ceiling, enforced BEFORE JSON.parse.
+  const cap = Number.isInteger(maxBytes) && maxBytes > 0 ? maxBytes : DEFAULT_MAX_BYTES;
+  if (utf8Over(serialized, cap)) return null;
+  let g;
+  try { g = reviver ? JSON.parse(serialized, reviver) : JSON.parse(serialized); }
+  catch { return null; }
   brandWalk(g, 0, { n: 0 });
   return g;
 }
+
+// certifyPlain / certifyBigint: parse a serialized frame with the fixed decoder
+// for its transport variant and brand every reachable node, tagging its
+// structural kind at construction. Input is text, so under intact realm
+// intrinsics the parse output is a plain graph and a Proxy cannot enter the
+// certified set. Returns the graph, or null on non-string / over-ceiling /
+// malformed input. Internal callers only (the frame decoders).
+export function certifyPlain(serialized, maxBytes)  { return _certify(null, serialized, maxBytes); }
+export function certifyBigint(serialized, maxBytes) { return _certify(bigintReviver, serialized, maxBytes); }
+
+// Back-compat alias: `certify` is the plain variant (the S1i callers + the
+// 48-gate core suite predate the split and use no bigint reviver).
+export const certify = certifyPlain;
 
 function brandWalk(v, depth, budget) {
   if (v === null || typeof v !== 'object') return;

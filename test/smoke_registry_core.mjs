@@ -12,7 +12,7 @@ import { pathToFileURL } from 'node:url';
 import { fileURLToPath } from 'node:url';
 import { defineRow, FrameKind, EvidenceLevel, Proves, CorrelationSubjectKind, FactType, ShadowRegistry, setShadowEnabled } from '../src/registry/index.js';
 import * as publicSurface from '../src/registry/index.js';
-import { certify, isCertified, kindOf } from '../src/registry/snapshotMint.js';
+import { certify, certifyPlain, certifyBigint, isCertified, kindOf } from '../src/registry/snapshotMint.js';
 
 let n = 0, fail = 0;
 const ok = (m, c, extra = '') => { if (c) console.log(`  ok ${++n} - ${m}`); else { console.log(`  ✗  ${m} ${extra}`); fail++; } };
@@ -215,6 +215,33 @@ const mk = (sink, extra = {}) => { const r = new ShadowRegistry({ boundary: 'tes
   const before = tr.length; reg.wrap('pubsub:pub', () => 'consumed').call({}, S({}), {});
   ok('9b fault bypasses sampling', tr.length === before + 1 && tr[tr.length - 1].schemaOk === false);
   ok('9c FactType export present', FactType && FactType.bigint === 'bigint');
+}
+
+// ── 10. S2.0c — fixed per-variant certified decoders + F7 pre-parse byte ceiling ──
+{
+  // 10a plain variant brands the graph; `certify` is the plain alias.
+  const gp = certifyPlain('{"topicId":"aa","meta":{"x":1}}');
+  ok('10a certifyPlain brands root + nested', isCertified(gp) && isCertified(gp.meta));
+  ok('10a certify === certifyPlain alias', certify === certifyPlain);
+  // 10b bigint variant preserves bigint via the SAME internal reviver; plain does not.
+  const gb = certifyBigint('{"n":"170141183460469231731687303715884105727n"}');
+  ok('10b certifyBigint preserves bigint', typeof gb.n === 'bigint' && gb.n === 170141183460469231731687303715884105727n);
+  ok('10b certifyPlain does NOT bigint-revive', typeof certifyPlain('{"n":"12n"}').n === 'string');
+  // 10c input-type normalization: only a string is a valid wire frame.
+  for (const bad of [123, null, undefined, { a: 1 }, [1], true, 12n])
+    ok('10c non-string rejected (' + String(typeof bad) + ')', certifyPlain(bad) === null && certifyBigint(bad) === null);
+  // 10d F7 is a UTF-8 BYTE ceiling, not a JS string-length ceiling.
+  ok('10d F7 accepts within byte cap', certifyPlain('"12345"', 8) !== null);            // 7 bytes <= 8
+  ok('10d F7 rejects over byte cap (ascii)', certifyPlain('"123456789"', 8) === null);  // 11 bytes > 8
+  ok('10d F7 counts BYTES not length', certifyPlain('"ééé"', 6) === null); // "ééé"=8 bytes>6, len 5
+  // 10e default ceiling rejects an oversized frame before parse.
+  ok('10e F7 default ceiling rejects >64KB', certifyPlain('"' + 'x'.repeat(70000) + '"') === null);
+  // 10f adversarial BREADTH: MAX_NODES exhaustion leaves a late object sibling
+  // unbranded (Aster Gate-2 correction). Safe: an unbranded container is a read
+  // no-op at observation, never a false verdict.
+  const wide = {}; for (let i = 0; i < 4200; i++) wide['o' + i] = {}; wide.zlate = { deep: 1 };
+  const gw = certifyPlain(JSON.stringify(wide));
+  ok('10f MAX_NODES exhaustion: root branded, late object sibling NOT', isCertified(gw) && !isCertified(gw.zlate));
 }
 
 _on = false; setShadowEnabled(null);
