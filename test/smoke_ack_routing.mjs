@@ -133,5 +133,31 @@ async function proofFor({ ackTo, flightNonce, attemptId, epoch = 0, ident = root
   ok('6d the correctly-addressed proof then completes it', flightCount(owner) === 0);
 }
 
+// ── 7. DUPLICATE signed ACK: the SAME valid proof delivered more than once
+//      settles the flight EXACTLY ONCE; every redelivery is an idempotent no-op
+//      that resurrects no flight and grows no correlation state (REF-0.2 v0.4,
+//      Aster REF-0.2-v0.3 disposition — the duplicate signed-ACK-frame coverage
+//      that smoke_ack_proof.mjs does NOT provide: that fixture only re-signs the
+//      same transcript to prove determinism, it never re-DELIVERS a frame). The
+//      correlation store is `_writeFlights`; completion deletes the entry and, on
+//      the last entry, the flight key, so a repeat delivery finds nothing to
+//      complete and mutates nothing. There is no seen-ack accumulator to grow. ──
+{
+  const owner = mkOwner(ownerBig);
+  const meta  = owner._flightOpen(topicBig, rootHex, T.PUB, payload);
+  ok('7a flight registered', flightCount(owner) === 1);
+  const proof = await proofFor(meta);
+  await owner._onIngestAck(proof, { fromId: idHex(relayBig) });
+  ok('7b first delivery settles the flight (exactly once)', flightCount(owner) === 0);
+  // the IDENTICAL frame again — must be an idempotent no-op, not a resurrection
+  await owner._onIngestAck(proof, { fromId: idHex(relayBig) });
+  ok('7c a second delivery of the same proof completes nothing (idempotent)', flightCount(owner) === 0);
+  // and again, to show correlation state stays bounded under repeated redelivery
+  await owner._onIngestAck(proof, { fromId: idHex(relayBig) });
+  await owner._onIngestAck(proof, { fromId: idHex(relayBig) });
+  ok('7d repeated redelivery resurrects no flight and grows no correlation state',
+    flightCount(owner) === 0 && (owner._writeFlights ? owner._writeFlights.size : 0) === 0);
+}
+
 console.log(`\n${fail === 0 ? 'PASS' : 'FAIL'} — ${n} assertions, ${fail} failed`);
 process.exit(fail === 0 ? 0 : 1);
