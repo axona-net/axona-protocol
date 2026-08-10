@@ -7,7 +7,10 @@ export { ShadowRegistry, shadowEnabled, setShadowEnabled } from './shadowRegistr
 // NOTE: the snapshot mint (certify) is deliberately NOT re-exported, and its
 // subpath is blocked in package.json. That is API ENCAPSULATION / hygiene, NOT a
 // security boundary — a consumer can still resolve the file by URL (Aster S1g).
-// The security property does not rely on unreachability: certify takes text and
-// uses a pristine parser, and the dispatcher classifies nodes without touching
-// any prototype or constructor, so even a reachable certify cannot produce a
-// value whose observation fires a trap (under intact realm intrinsics at load).
+// The security property does not rely on unreachability: certify takes text, and
+// the dispatcher classifies nodes without touching any prototype or constructor,
+// so even a reachable certify cannot produce a value whose observation fires a
+// trap. This holds under the module's stated trust boundary — intact realm
+// intrinsics/prototypes for the whole certification-and-dispatch lifetime (see
+// snapshotMint.js). This module does not claim post-load intrinsic-tamper
+// resistance; same-realm intrinsic replacement is out of scope kernel-wide.

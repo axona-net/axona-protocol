@@ -1,34 +1,37 @@
 // registry/snapshotMint.js — the DECODER-PRIVATE snapshot capability (refactor
-// Phase 1, REF-1.1; S1h per Aster's S1g disposition). The shadow layer may
-// reflect only on a value whose provenance is certified here, and the safety of
-// that reflection must NOT depend on a mutable prototype chain or a
-// realm-replaceable intrinsic.
+// Phase 1, REF-1.1; S1i per Aster's S1h disposition + trust-model steer).
 //
-// TRUST MODEL (explicit — Aster S1g #2): the security property holds under
-// INTACT REALM INTRINSICS at kernel module-load time. This is the standard
-// trust base for JavaScript security code; the kernel does not run inside a
-// hardened realm. Two things follow:
-//   * We capture a PRISTINE `JSON.parse` at module load (`_parse`). A consumer
-//     that replaces the global `JSON.parse` AFTER load cannot make `certify`
-//     brand a Proxy. A consumer that replaced it BEFORE the kernel imported this
-//     module is outside the trust base (they could replace anything).
-//   * The package `exports` map blocking this subpath is API ENCAPSULATION /
-//     hygiene, NOT a security boundary. A consumer can still resolve the file by
-//     URL and import `certify`. The security property is designed to hold even
-//     then: `certify` takes serialized TEXT and builds a fresh graph with the
-//     pristine parser, and the dispatcher classifies nodes WITHOUT touching any
-//     prototype or constructor (see below), so a reachable `certify` cannot
-//     produce a value whose observation fires a trap.
+// TRUST BOUNDARY (Option B — NORMATIVE). The security properties of this module
+// hold under INTACT REALM INTRINSICS AND PROTOTYPES for the ENTIRE
+// certification-and-dispatch lifetime — not merely at module load. This is the
+// same assumption the rest of the kernel already relies on throughout: the DHT,
+// transport, wire codec, and the routed handlers themselves all call mutable
+// realm globals with no post-load capture. This module therefore does NOT claim
+// general post-load intrinsic-tamper resistance: same-realm post-load
+// replacement of a relied-upon intrinsic (JSON.parse, Object.keys,
+// WeakSet.prototype.has, Object.getOwnPropertyDescriptor, WeakMap.prototype.get,
+// Array.isArray, …) is EXPLICITLY OUT OF SCOPE. Hardening only this observation
+// module against that would not create a system-level boundary — a window in a
+// house with no walls. A future requirement for same-realm tamper resistance
+// would need a kernel-wide hardened compartment / SES-style realm, not an
+// intrinsic-capture checklist local to this file.
 //
-// PROVENANCE:
-//   * certify brands EVERY reachable object/array node in a WeakSet (identity,
-//     trap-free to check).
-//   * Structural kind is recorded at CONSTRUCTION time in a decoder-private
-//     WeakMap (`_kind`), read by `kindOf`. represent() uses that tag instead of
-//     `instanceof` or `Array.isArray` on the live value — so a prototype swapped
-//     after certification is never consulted and fires no trap (Aster S1g #1).
+// IN SCOPE and enforced (preserved from S1h): a certified value that an ATTACKER
+// MUTATES AFTER certification — including swapping its prototype to a Proxy, or
+// inserting a nested Proxy — must not cause shadow observation to fire a trap,
+// mutate handler-visible state, suppress the handler, or change its arguments.
+// Structural classification reads decoder-private CONSTRUCTION-TIME tags
+// (`kindOf`), never `instanceof` or a live prototype walk.
+//
+// PROVENANCE. `certify` parses a serialized frame (the decoder's own output from
+// wire bytes) and brands every reachable object/array node in a WeakSet (an
+// identity check, trap-free to read). It is NOT re-exported by registry/index.js
+// and its package subpath is blocked — that is API ENCAPSULATION / hygiene, not a
+// security boundary (the file is reachable by URL). The security property does
+// not rely on unreachability: certify takes TEXT, so under the intact-realm
+// assumption above its parse output is a plain graph, and classification never
+// touches a prototype.
 
-const _parse = JSON.parse;          // pristine parser captured at module load
 const _certified = new WeakSet();
 const _kind = new WeakMap();        // node -> frozen structural tag { k, len? }
 const MAX_DEPTH = 8;
@@ -39,13 +42,14 @@ export function isCertified(x) { try { return _certified.has(x); } catch { retur
 // object (classified as 'obj' without prototype traversal) or an uncertified value.
 export function kindOf(x) { try { return _kind.get(x) || null; } catch { return null; } }
 
-// certify(serialized): parse a serialized frame (the decoder's own output from
-// wire bytes) with the pristine parser and brand every reachable node, tagging
-// its structural kind at construction. Input is text, so a Proxy can never enter
-// the certified set. Returns the graph, or null on malformed input.
+// certify(serialized): parse a serialized frame and brand every reachable node,
+// tagging its structural kind at construction. Input is text, so under intact
+// realm intrinsics the parse output is a plain graph and a Proxy cannot enter the
+// certified set. Returns the graph, or null on malformed input. Internal callers
+// only (the frame decoder).
 export function certify(serialized) {
   if (typeof serialized !== 'string') return null;
-  let g; try { g = _parse(serialized); } catch { return null; }
+  let g; try { g = JSON.parse(serialized); } catch { return null; }
   brandWalk(g, 0, { n: 0 });
   return g;
 }
@@ -55,14 +59,14 @@ function brandWalk(v, depth, budget) {
   if (depth > MAX_DEPTH || budget.n >= MAX_NODES) return;   // beyond bounds: unbranded → skipped at read
   budget.n++;
   _certified.add(v);
-  // v is fresh output of the pristine parser here (never a Proxy), so Array.isArray
-  // and v.length are safe AT CONSTRUCTION. The result is frozen into a tag that
-  // the dispatcher reads later without touching v.
+  // v is fresh parser output here (plain under the intact-realm assumption), so
+  // Array.isArray and v.length are safe AT CONSTRUCTION. The result is frozen
+  // into a tag that the dispatcher reads later without touching v's prototype.
   if (Array.isArray(v)) {
     _kind.set(v, Object.freeze({ k: 'arr', len: v.length }));
     for (let i = 0; i < v.length; i++) { if (budget.n >= MAX_NODES) break; brandWalk(v[i], depth + 1, budget); }
   } else {
-    const ks = Object.keys(v);   // safe: pristine-parser output is a plain object
+    const ks = Object.keys(v);
     for (let i = 0; i < ks.length; i++) { if (budget.n >= MAX_NODES) break; brandWalk(v[ks[i]], depth + 1, budget); }
   }
 }

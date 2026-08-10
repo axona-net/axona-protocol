@@ -1,11 +1,12 @@
-// smoke_registry_core.mjs — REF-1.1 S1..S1h: the shadow registry CORE in
-// isolation. S1h closes Aster's S1g disposition: structural classification no
-// longer uses `instanceof` (which walks a mutable prototype chain) — it reads a
-// decoder-private construction-time tag — so a prototype swapped after
-// certification fires no trap; and the export-map block is treated as API
-// hygiene, not security (the mint is reachable by file URL, and safety holds by
-// construction with a pristine parser captured at load). Reproduces every
-// failure the S1g disposition demonstrated.
+// smoke_registry_core.mjs — REF-1.1 S1..S1i: the shadow registry CORE in
+// isolation. Structural classification reads decoder-private construction-time
+// tags (never `instanceof`), so a prototype swapped after certification fires no
+// trap; the export-map block is API hygiene, not security. Trust boundary
+// (Option B, Aster's S1i steer): intact realm intrinsics/prototypes for the
+// whole certification-and-dispatch lifetime — same-realm post-load intrinsic
+// replacement is out of scope, so there is no post-load-tamper gate. IN SCOPE
+// and tested: mutation of an attacker-controlled certified value or its
+// prototype chain.
 // Run: node test/smoke_registry_core.mjs
 import { pathToFileURL } from 'node:url';
 import { fileURLToPath } from 'node:url';
@@ -40,17 +41,10 @@ const mk = (sink, extra = {}) => { const r = new ShadowRegistry({ boundary: 'tes
   const fileUrl = pathToFileURL(fileURLToPath(new URL('../src/pubsub/registry/snapshotMint.js', import.meta.url))).href;
   const viaUrl = await import(fileUrl);
   ok('0c mint IS reachable by file URL — encapsulation is not the security boundary', typeof viaUrl.certify === 'function');
-  // reachable, but text-in + construction-time classification means it still cannot mint an unsafe graph:
+  // reachable, but text-in + construction-time classification means it still cannot mint an unsafe graph
+  // (under the stated intact-realm trust boundary; same-realm intrinsic replacement is out of scope):
   const f = viaUrl.certify('{"topicId":"aa"}');
   ok('0d a file-URL-reached certify still yields a safe certified graph', isCertified(f) && f.topicId === 'aa' && kindOf(f) === null);
-  // a parser intrinsic replaced AFTER load cannot make certify brand a Proxy (pristine parser captured at load)
-  const realParse = JSON.parse;
-  let branded = null;
-  try {
-    globalThis.JSON.parse = () => new Proxy({ topicId: 'EVIL' }, {});
-    branded = certify('{"topicId":"aa"}');
-  } finally { globalThis.JSON.parse = realParse; }
-  ok('0e post-load JSON.parse replacement does not affect certify', branded && branded.topicId === 'aa');
 }
 
 // ── 1. flag OFF verbatim; flag ON observes a CERTIFIED frame ──
