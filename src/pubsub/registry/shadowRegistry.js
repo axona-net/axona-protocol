@@ -27,7 +27,7 @@
 //     Map on (type, variant) with a Symbol base sentinel — no delimiter, no NUL.
 
 import { isRow, MAX_VARIANT_CASES, MAX_CAP_STR } from './types.js';
-import { isCertified } from './snapshotMint.js';
+import { isCertified, kindOf } from './snapshotMint.js';
 
 let _override = null;
 function envFlag() {
@@ -98,13 +98,16 @@ function represent(v, maxBytes) {
   if (t === 'boolean') return { value: v };
   if (t === 'bigint') return { struct: Object.freeze({ k: 'bigint' }) };   // no toString — no unbounded conversion
   if (t !== 'object') return { fault: 'unsupported' };   // function / symbol
-  // A structural/length/instanceof read is trap-capable, so reflect ONLY on a
-  // certified node. A nested Proxy or a post-mint insertion is uncertified here.
+  // Reflect ONLY on a certified node (a nested Proxy or a post-mint insertion is
+  // uncertified). Classification uses the decoder's CONSTRUCTION-TIME tag, never
+  // `instanceof` or `Array.isArray` on the live value — so a prototype swapped
+  // after certification is never consulted and fires no getPrototypeOf trap
+  // (Aster S1g #1). A certified plain object has no tag → classified 'obj'
+  // without touching its prototype.
   if (!isCertified(v)) return { fault: 'unbranded' };
-  if (Array.isArray(v)) return { struct: Object.freeze({ k: 'arr', len: v.length }) };
-  if (v instanceof Uint8Array) return { struct: Object.freeze({ k: 'bytes', len: v.byteLength }) };
-  if (typeof ArrayBuffer !== 'undefined' && v instanceof ArrayBuffer) return { struct: Object.freeze({ k: 'bytes', len: v.byteLength }) };
-  return { struct: Object.freeze({ k: 'obj' }) };   // never enumerate
+  const tag = kindOf(v);
+  if (tag) return { struct: tag };   // e.g. { k:'arr', len } (a future binary decoder tags { k:'bytes', len } at construction)
+  return { struct: Object.freeze({ k: 'obj' }) };
 }
 
 // ── fixed, vetted evaluators over frozen facts ──

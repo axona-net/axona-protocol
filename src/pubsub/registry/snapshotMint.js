@@ -1,55 +1,68 @@
 // registry/snapshotMint.js — the DECODER-PRIVATE snapshot capability (refactor
-// Phase 1, REF-1.1; S1g per Aster's S1f disposition). The shadow layer may
-// reflect only on a value whose provenance is certified here. Two properties the
-// S1f WeakSet mint lacked:
+// Phase 1, REF-1.1; S1h per Aster's S1g disposition). The shadow layer may
+// reflect only on a value whose provenance is certified here, and the safety of
+// that reflection must NOT depend on a mutable prototype chain or a
+// realm-replaceable intrinsic.
 //
-//   1. UNFORGEABLE. `certify` is NOT re-exported by registry/index.js and this
-//      module is blocked from the package `exports` map (see package.json:
-//      "./pubsub/registry/snapshotMint.js": null). A public consumer cannot
-//      import it, so it cannot mint membership for a hostile object. The mint
-//      also never brands a caller-supplied object graph — it parses a serialized
-//      frame itself, so a Proxy can never enter the certified set.
+// TRUST MODEL (explicit — Aster S1g #2): the security property holds under
+// INTACT REALM INTRINSICS at kernel module-load time. This is the standard
+// trust base for JavaScript security code; the kernel does not run inside a
+// hardened realm. Two things follow:
+//   * We capture a PRISTINE `JSON.parse` at module load (`_parse`). A consumer
+//     that replaces the global `JSON.parse` AFTER load cannot make `certify`
+//     brand a Proxy. A consumer that replaced it BEFORE the kernel imported this
+//     module is outside the trust base (they could replace anything).
+//   * The package `exports` map blocking this subpath is API ENCAPSULATION /
+//     hygiene, NOT a security boundary. A consumer can still resolve the file by
+//     URL and import `certify`. The security property is designed to hold even
+//     then: `certify` takes serialized TEXT and builds a fresh graph with the
+//     pristine parser, and the dispatcher classifies nodes WITHOUT touching any
+//     prototype or constructor (see below), so a reachable `certify` cannot
+//     produce a value whose observation fires a trap.
 //
-//   2. TRANSITIVE. `certify` brands EVERY reachable object and array node, and
-//      the dispatcher checks membership before every reflective operation
-//      (isCertified in shadowRegistry.js). A nested value that is not branded —
-//      a nested Proxy, a Proxy inserted after minting, anything the mint did not
-//      construct — is never touched. The membership check is a WeakSet identity
-//      lookup, which fires no Proxy trap.
-//
-// The graph is not frozen: the handler receives its frame verbatim (shadow mode
-// changes no behavior). Safety comes from construction (built from bytes, so
-// Proxy-free) plus per-node membership (a post-mint insertion is unbranded and
-// is skipped), not from immutability.
+// PROVENANCE:
+//   * certify brands EVERY reachable object/array node in a WeakSet (identity,
+//     trap-free to check).
+//   * Structural kind is recorded at CONSTRUCTION time in a decoder-private
+//     WeakMap (`_kind`), read by `kindOf`. represent() uses that tag instead of
+//     `instanceof` or `Array.isArray` on the live value — so a prototype swapped
+//     after certification is never consulted and fires no trap (Aster S1g #1).
 
+const _parse = JSON.parse;          // pristine parser captured at module load
 const _certified = new WeakSet();
+const _kind = new WeakMap();        // node -> frozen structural tag { k, len? }
 const MAX_DEPTH = 8;
 const MAX_NODES = 4096;
 
 export function isCertified(x) { try { return _certified.has(x); } catch { return false; } }
+// Construction-time structural tag (trap-free WeakMap read). null for a plain
+// object (classified as 'obj' without prototype traversal) or an uncertified value.
+export function kindOf(x) { try { return _kind.get(x) || null; } catch { return null; } }
 
-// certify(serialized): parse a serialized frame (JSON text — the decoder's own
-// output from wire bytes) into a fresh graph and brand every reachable node.
-// Structurally cannot brand a caller-supplied Proxy: the input is text, and
-// JSON.parse never yields a Proxy. Returns the parsed+branded graph, or null on
-// malformed input. Internal callers only (the frame decoder).
+// certify(serialized): parse a serialized frame (the decoder's own output from
+// wire bytes) with the pristine parser and brand every reachable node, tagging
+// its structural kind at construction. Input is text, so a Proxy can never enter
+// the certified set. Returns the graph, or null on malformed input.
 export function certify(serialized) {
   if (typeof serialized !== 'string') return null;
-  let g; try { g = JSON.parse(serialized); } catch { return null; }
-  const budget = { n: 0 };
-  brandWalk(g, 0, budget);
+  let g; try { g = _parse(serialized); } catch { return null; }
+  brandWalk(g, 0, { n: 0 });
   return g;
 }
 
 function brandWalk(v, depth, budget) {
   if (v === null || typeof v !== 'object') return;
-  if (depth > MAX_DEPTH || budget.n >= MAX_NODES) return;   // beyond bounds: leave unbranded → skipped at read
+  if (depth > MAX_DEPTH || budget.n >= MAX_NODES) return;   // beyond bounds: unbranded → skipped at read
   budget.n++;
   _certified.add(v);
+  // v is fresh output of the pristine parser here (never a Proxy), so Array.isArray
+  // and v.length are safe AT CONSTRUCTION. The result is frozen into a tag that
+  // the dispatcher reads later without touching v.
   if (Array.isArray(v)) {
+    _kind.set(v, Object.freeze({ k: 'arr', len: v.length }));
     for (let i = 0; i < v.length; i++) { if (budget.n >= MAX_NODES) break; brandWalk(v[i], depth + 1, budget); }
   } else {
-    const ks = Object.keys(v);   // safe: JSON.parse output is a plain object, never a Proxy
+    const ks = Object.keys(v);   // safe: pristine-parser output is a plain object
     for (let i = 0; i < ks.length; i++) { if (budget.n >= MAX_NODES) break; brandWalk(v[ks[i]], depth + 1, budget); }
   }
 }

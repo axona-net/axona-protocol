@@ -1,13 +1,17 @@
-// smoke_registry_core.mjs — REF-1.1 S1..S1g: the shadow registry CORE in
-// isolation. S1g closes Aster's S1f disposition: the snapshot brand is now
-// UNFORGEABLE (the mint is decoder-private, not importable by public consumers)
-// and TRANSITIVE (the mint brands every reachable node; the dispatcher checks
-// membership before every reflective op, so a nested or post-mint Proxy is never
-// touched). Reproduces every failure that disposition demonstrated.
+// smoke_registry_core.mjs — REF-1.1 S1..S1h: the shadow registry CORE in
+// isolation. S1h closes Aster's S1g disposition: structural classification no
+// longer uses `instanceof` (which walks a mutable prototype chain) — it reads a
+// decoder-private construction-time tag — so a prototype swapped after
+// certification fires no trap; and the export-map block is treated as API
+// hygiene, not security (the mint is reachable by file URL, and safety holds by
+// construction with a pristine parser captured at load). Reproduces every
+// failure the S1g disposition demonstrated.
 // Run: node test/smoke_registry_core.mjs
+import { pathToFileURL } from 'node:url';
+import { fileURLToPath } from 'node:url';
 import { defineRow, FrameKind, EvidenceLevel, Proves, CorrelationSubjectKind, FactType, ShadowRegistry, setShadowEnabled } from '../src/pubsub/registry/index.js';
 import * as publicSurface from '../src/pubsub/registry/index.js';
-import { certify } from '../src/pubsub/registry/snapshotMint.js';
+import { certify, isCertified, kindOf } from '../src/pubsub/registry/snapshotMint.js';
 
 let n = 0, fail = 0;
 const ok = (m, c, extra = '') => { if (c) console.log(`  ok ${++n} - ${m}`); else { console.log(`  ✗  ${m} ${extra}`); fail++; } };
@@ -26,13 +30,27 @@ const pubRow = () => defineRow({
 });
 const mk = (sink, extra = {}) => { const r = new ShadowRegistry({ boundary: 'test', sink, enabled: () => _on, ...extra }); r.register(pubRow()); return r; };
 
-// ── 0. the mint is UNFORGEABLE (Aster S1f #1) ──
+// ── 0. mint encapsulation is API HYGIENE, not a security boundary (Aster S1g #2) ──
 {
-  ok('0a public registry export has no certify', publicSurface.certify === undefined);
-  ok('0b public registry export has no snapshot/isSnapshot', publicSurface.snapshot === undefined && publicSurface.isSnapshot === undefined);
-  let blocked = false;
-  try { await import('@axona/protocol/pubsub/registry/snapshotMint.js'); } catch { blocked = true; }
-  ok('0c mint subpath is not a package export (public consumers cannot import it)', blocked);
+  ok('0a public registry export has no certify/snapshot', publicSurface.certify === undefined && publicSurface.snapshot === undefined);
+  let subpathBlocked = false;
+  try { await import('@axona/protocol/pubsub/registry/snapshotMint.js'); } catch { subpathBlocked = true; }
+  ok('0b package subpath is blocked (hygiene)', subpathBlocked);
+  // ...but the file is reachable by URL. That is expected: security must NOT rely on unreachability.
+  const fileUrl = pathToFileURL(fileURLToPath(new URL('../src/pubsub/registry/snapshotMint.js', import.meta.url))).href;
+  const viaUrl = await import(fileUrl);
+  ok('0c mint IS reachable by file URL — encapsulation is not the security boundary', typeof viaUrl.certify === 'function');
+  // reachable, but text-in + construction-time classification means it still cannot mint an unsafe graph:
+  const f = viaUrl.certify('{"topicId":"aa"}');
+  ok('0d a file-URL-reached certify still yields a safe certified graph', isCertified(f) && f.topicId === 'aa' && kindOf(f) === null);
+  // a parser intrinsic replaced AFTER load cannot make certify brand a Proxy (pristine parser captured at load)
+  const realParse = JSON.parse;
+  let branded = null;
+  try {
+    globalThis.JSON.parse = () => new Proxy({ topicId: 'EVIL' }, {});
+    branded = certify('{"topicId":"aa"}');
+  } finally { globalThis.JSON.parse = realParse; }
+  ok('0e post-load JSON.parse replacement does not affect certify', branded && branded.topicId === 'aa');
 }
 
 // ── 1. flag OFF verbatim; flag ON observes a CERTIFIED frame ──
@@ -86,6 +104,40 @@ const mk = (sink, extra = {}) => { const r = new ShadowRegistry({ boundary: 'tes
   let gopdM = 0; const meta = S({ ok: 1 }); meta.evil = new Proxy({}, { getOwnPropertyDescriptor() { gopdM++; return undefined; } });
   let ranM = 0; reg3.wrap('m', () => { ranM++; return 'consumed'; }).call({}, S({}), meta);
   ok('3e nested Proxy in certified meta → never reflected on, handler verbatim', gopdM === 0 && ranM === 1);
+}
+
+// ── 3B. a prototype swapped AFTER certification fires no trap (Aster S1g #1) ──
+{
+  const reg = new ShadowRegistry({ boundary: 't', sink: () => {}, enabled: () => true });
+  reg.register(defineRow({ type: 'proto', kind: FrameKind.ONE_WAY, owningService: 'S', versionRange: V, projection: { payload: ['x', 'marker'], meta: ['m'] }, schema: { types: { x: 'obj' } } }));
+  _on = true;
+  const tr = []; reg._sink = (r) => tr.push(r);
+  // side-effecting getPrototypeOf trap on a certified node's replaced prototype
+  let gpo = 0; const frame = S({ x: { v: 1 }, marker: 'clean' });
+  const evilProto = new Proxy({}, { getPrototypeOf() { gpo++; frame.marker = 'mutated-by-prototype-proxy'; return null; } });
+  Object.setPrototypeOf(frame.x, evilProto);
+  reg.wrap('proto', () => 'consumed').call({}, frame, S({ m: 1 }));
+  ok('3B-a swapped prototype never consulted; no trap; marker unchanged', gpo === 0 && frame.marker === 'clean');
+  ok('3B-b certified plain object classified obj without instanceof (schema ok)', tr[0].schemaOk === true);
+  // throwing prototype trap → contained, handler verbatim
+  let ran = 0, esc = null; const frame2 = S({ x: { v: 1 }, marker: 'clean' });
+  Object.setPrototypeOf(frame2.x, new Proxy({}, { getPrototypeOf() { throw new Error('proto-boom'); } }));
+  try { reg.wrap('proto', () => { ran++; return 'consumed'; }).call({}, frame2, S({ m: 1 })); } catch (e) { esc = e; }
+  ok('3B-c throwing swapped prototype → contained, handler ran once', ran === 1 && esc === null);
+  // metadata equivalent
+  let gpoM = 0; const p = S({ ok: 1 }); const meta = S({ m: { v: 1 } });
+  Object.setPrototypeOf(meta.m, new Proxy({}, { getPrototypeOf() { gpoM++; return null; } }));
+  const regM = new ShadowRegistry({ boundary: 't', sink: () => {}, enabled: () => true });
+  regM.register(defineRow({ type: 'pm', kind: FrameKind.ONE_WAY, owningService: 'S', versionRange: V, projection: { meta: ['m'] } }));
+  let ranM = 0; regM.wrap('pm', () => { ranM++; return 'consumed'; }).call({}, p, meta);
+  ok('3B-d swapped prototype on a metadata node fires no trap', gpoM === 0 && ranM === 1);
+  // a hostile prototype cannot fake a typed-array classification (tag, not instanceof)
+  const frame3 = S({ x: { v: 1 } });
+  Object.setPrototypeOf(frame3.x, new Uint8Array(4));   // prototype now leads to Uint8Array.prototype
+  const trT = []; const regT = new ShadowRegistry({ boundary: 't', sink: (r) => trT.push(r), enabled: () => true });
+  regT.register(defineRow({ type: 'ty', kind: FrameKind.ONE_WAY, owningService: 'S', versionRange: V, projection: { payload: ['x'] }, schema: { types: { x: 'obj' } } }));
+  regT.wrap('ty', () => 'consumed').call({}, frame3, {});
+  ok('3B-e hostile prototype cannot fake a bytes classification (tag-based)', trT[0].schemaOk === true);
 }
 
 // ── 4. NO row code — declarative recipes to fixed codes ──

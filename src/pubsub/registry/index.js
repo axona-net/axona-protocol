@@ -4,6 +4,10 @@
 // wrapper + flag).
 export { defineRow, FrameKind, EvidenceLevel, CorrelationSubjectKind, Proves, FactType } from './types.js';
 export { ShadowRegistry, shadowEnabled, setShadowEnabled } from './shadowRegistry.js';
-// NOTE: the snapshot mint (certify) is deliberately NOT exported. Provenance is
-// a decoder-private capability (snapshotMint.js, blocked from package exports),
-// so no public consumer can mint the trusted brand (Aster S1f).
+// NOTE: the snapshot mint (certify) is deliberately NOT re-exported, and its
+// subpath is blocked in package.json. That is API ENCAPSULATION / hygiene, NOT a
+// security boundary — a consumer can still resolve the file by URL (Aster S1g).
+// The security property does not rely on unreachability: certify takes text and
+// uses a pristine parser, and the dispatcher classifies nodes without touching
+// any prototype or constructor, so even a reachable certify cannot produce a
+// value whose observation fires a trap (under intact realm intrinsics at load).
