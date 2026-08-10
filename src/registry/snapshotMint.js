@@ -43,19 +43,24 @@
 // forbids. Each variant NORMALIZES its runtime input type (only a string is a
 // valid wire frame; anything else → null → uncertified → observation no-op) and
 // enforces an F7 pre-parse UTF-8 BYTE ceiling BEFORE JSON.parse, so an oversized
-// frame is rejected before it can allocate a parse graph. `MAX_DEPTH`/`MAX_NODES`
-// bound the brand WALK; F7 bounds the PARSE.
-import { bigintReviver } from '../transport/wire.js';
+// frame is rejected before it can allocate a parse graph. The ceiling is the
+// transport contract's own MAX_FRAME_BYTES (wire.js), NOT the registry's
+// per-scalar budget; a caller may only TIGHTEN it, never raise it.
+// `MAX_DEPTH`/`MAX_NODES` bound the brand WALK; F7 bounds the PARSE.
+import { bigintReviver, MAX_FRAME_BYTES } from '../transport/wire.js';
 
 const _certified = new WeakSet();
 const _kind = new WeakMap();        // node -> frozen structural tag { k, len? }
 const MAX_DEPTH = 8;
 const MAX_NODES = 4096;
-// F7 default per-variant serialized-byte ceiling. Matches the kernel's existing
-// envelope size guard (MAX_BYTES_CEILING). A boundary/type may pass a tighter
-// ceiling; the coupled depth/nodes/breadth acceptance gate (S2.1) is measured
-// against the ACTUAL ceiling a registered row uses, per Aster's disposition.
-const DEFAULT_MAX_BYTES = 65536;
+// F7 pre-parse ceiling. The HARD cap is owned and justified by the transport
+// contract (wire.js MAX_FRAME_BYTES) — the frame/envelope guard, sized against
+// the largest legitimate frame per ingress variant. It is NOT the registry's
+// per-scalar MAX_BYTES_CEILING (a different, smaller resource) that S2.0c v1
+// wrongly reused. A caller (a decoder variant / registered row) MAY supply a
+// TIGHTER ceiling; the hard cap can never be raised past it, and an invalid
+// supplied ceiling is rejected rather than silently defaulted (Aster seq 704,
+// findings 1-3).
 
 export function isCertified(x) { try { return _certified.has(x); } catch { return false; } }
 // Construction-time structural tag (trap-free WeakMap read). null for a plain
@@ -89,8 +94,23 @@ function utf8Over(s, cap) {
 function _certify(reviver, serialized, maxBytes) {
   // Input-type normalization: only a string is a valid wire frame.
   if (typeof serialized !== 'string') return null;
+  // F7 ceiling resolution (Aster seq 704, findings 1 & 3):
+  //   - OMITTED (undefined)  → the transport hard cap MAX_FRAME_BYTES. Defaulting
+  //     is legal only when no ceiling was supplied.
+  //   - SUPPLIED             → must be a positive integer that does NOT raise the
+  //     hard cap. Any other supplied value — 0, negative, fractional, NaN,
+  //     Infinity, non-number, null, or a value above MAX_FRAME_BYTES — is
+  //     REJECTED (return null → uncertified → observation no-op), never silently
+  //     defaulted. The hard cap is therefore invariant: it can only be tightened.
+  let cap;
+  if (maxBytes === undefined) {
+    cap = MAX_FRAME_BYTES;
+  } else if (Number.isInteger(maxBytes) && maxBytes > 0 && maxBytes <= MAX_FRAME_BYTES) {
+    cap = maxBytes;
+  } else {
+    return null;
+  }
   // F7: pre-parse UTF-8 byte ceiling, enforced BEFORE JSON.parse.
-  const cap = Number.isInteger(maxBytes) && maxBytes > 0 ? maxBytes : DEFAULT_MAX_BYTES;
   if (utf8Over(serialized, cap)) return null;
   let g;
   try { g = reviver ? JSON.parse(serialized, reviver) : JSON.parse(serialized); }

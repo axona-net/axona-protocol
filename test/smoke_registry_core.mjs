@@ -13,6 +13,8 @@ import { fileURLToPath } from 'node:url';
 import { defineRow, FrameKind, EvidenceLevel, Proves, CorrelationSubjectKind, FactType, ShadowRegistry, setShadowEnabled } from '../src/registry/index.js';
 import * as publicSurface from '../src/registry/index.js';
 import { certify, certifyPlain, certifyBigint, isCertified, kindOf } from '../src/registry/snapshotMint.js';
+import { MAX_FRAME_BYTES } from '../src/transport/wire.js';
+import { MAX_PUBLISH_BYTES } from '../src/pubsub/constants.js';
 
 let n = 0, fail = 0;
 const ok = (m, c, extra = '') => { if (c) console.log(`  ok ${++n} - ${m}`); else { console.log(`  ✗  ${m} ${extra}`); fail++; } };
@@ -217,7 +219,9 @@ const mk = (sink, extra = {}) => { const r = new ShadowRegistry({ boundary: 'tes
   ok('9c FactType export present', FactType && FactType.bigint === 'bigint');
 }
 
-// ── 10. S2.0c — fixed per-variant certified decoders + F7 pre-parse byte ceiling ──
+// ── 10. S2.0c — fixed per-variant certified decoders + F7 pre-parse byte ceiling
+//        (Aster seq 704 corrective: transport-owned hard cap, invariant, no
+//         fail-open on invalid supplied caps). ─────────────────────────────────
 {
   // 10a plain variant brands the graph; `certify` is the plain alias.
   const gp = certifyPlain('{"topicId":"aa","meta":{"x":1}}');
@@ -230,18 +234,62 @@ const mk = (sink, extra = {}) => { const r = new ShadowRegistry({ boundary: 'tes
   // 10c input-type normalization: only a string is a valid wire frame.
   for (const bad of [123, null, undefined, { a: 1 }, [1], true, 12n])
     ok('10c non-string rejected (' + String(typeof bad) + ')', certifyPlain(bad) === null && certifyBigint(bad) === null);
-  // 10d F7 is a UTF-8 BYTE ceiling, not a JS string-length ceiling.
-  ok('10d F7 accepts within byte cap', certifyPlain('"12345"', 8) !== null);            // 7 bytes <= 8
-  ok('10d F7 rejects over byte cap (ascii)', certifyPlain('"123456789"', 8) === null);  // 11 bytes > 8
-  ok('10d F7 counts BYTES not length', certifyPlain('"ééé"', 6) === null); // "ééé"=8 bytes>6, len 5
-  // 10e default ceiling rejects an oversized frame before parse.
-  ok('10e F7 default ceiling rejects >64KB', certifyPlain('"' + 'x'.repeat(70000) + '"') === null);
-  // 10f adversarial BREADTH: MAX_NODES exhaustion leaves a late object sibling
+  // 10d a SUPPLIED tighter ceiling is honored and counts UTF-8 BYTES, not JS length.
+  ok('10d supplied tighter cap accepts within it', certifyPlain('"12345"', 8) !== null);            // 7 bytes <= 8
+  ok('10d supplied tighter cap rejects over it (ascii)', certifyPlain('"123456789"', 8) === null);  // 11 bytes > 8
+  ok('10d ceiling counts BYTES not length', certifyPlain('"ééé"', 6) === null); // "ééé"=8 bytes>6, len 5
+
+  // 10e the DEFAULT (omitted) ceiling is the transport contract's MAX_FRAME_BYTES
+  // (1 MiB), NOT the 64 KiB per-scalar budget S2.0c v1 wrongly reused. A frame far
+  // above the old scalar cap is now accepted; only one above the frame cap rejects.
+  ok('10e default accepts a frame above the old 64KiB scalar cap',
+     MAX_FRAME_BYTES > (1 << 16) && certifyPlain('"' + 'x'.repeat(70000) + '"') !== null);
+  ok('10e default rejects a frame above MAX_FRAME_BYTES',
+     certifyPlain('"' + 'x'.repeat(MAX_FRAME_BYTES + 10) + '"') === null);
+
+  // 10f FINDING 1 — the hard cap is INVARIANT: a supplied ceiling may only tighten,
+  // never raise. A supplied cap above MAX_FRAME_BYTES is rejected outright (it does
+  // not clamp-and-proceed), closing the certifyPlain(text, 1e9) bypass.
+  ok('10f at the hard cap is allowed', certifyPlain('"ok"', MAX_FRAME_BYTES) !== null);
+  ok('10f one byte above the hard cap is rejected', certifyPlain('"ok"', MAX_FRAME_BYTES + 1) === null);
+  ok('10f the old 1e9 bypass no longer raises the cap', certifyPlain('"ok"', 1e9) === null);
+  ok('10f bypass rejects on both variants', certifyBigint('"ok"', 1e9) === null);
+
+  // 10g FINDING 3 — an invalid SUPPLIED cap REJECTS; it never silently falls back
+  // to the default. Only an omitted cap defaults. Every invalid class is a null.
+  for (const badCap of [0, -1, 1.5, NaN, Infinity, null, '100'])
+    ok('10g invalid supplied cap rejects (' + String(badCap) + ')',
+       certifyPlain('"ok"', badCap) === null && certifyBigint('"ok"', badCap) === null);
+  // ...contrast: omitted / explicit-undefined DO default (a valid frame passes).
+  ok('10g omitted cap defaults (valid frame passes)', certifyPlain('"ok"') !== null);
+  ok('10g explicit-undefined is treated as omitted', certifyPlain('"ok"', undefined) !== null);
+
+  // 10h FINDING 2 — the cap is JUSTIFIED against the largest LEGITIMATE frame,
+  // measured per ingress variant. peer.pub caps an enveloped publish at
+  // MAX_PUBLISH_BYTES CHARS (json.length); a char is up to 3 UTF-8 bytes, so the
+  // worst-case body is 3x that. Build such a frame for node/bridge (outer
+  // {type:'axona'} wrapper) and mesh (bare), and assert MAX_FRAME_BYTES admits it
+  // while the old 64 KiB scalar constant would have WRONGLY rejected legit traffic.
+  const bodyMax = 'あ'.repeat(MAX_PUBLISH_BYTES);   // U+3042 = 3 UTF-8 bytes each
+  const enveloped = '{"type":"route_msg","fromId":"' + 'a'.repeat(66) +
+    '","targetId":"' + 'b'.repeat(66) + '","hopCount":3,"payload":"' + bodyMax + '"}';
+  const nodeFrame = '{"type":"axona","payload":' + enveloped + '}';   // node WS / web-bridge WS
+  const meshFrame = enveloped;                                        // WebRTC mesh (no wrapper)
+  const nodeBytes = Buffer.byteLength(nodeFrame, 'utf8');
+  ok('10h measured legit-max node/bridge frame is within MAX_FRAME_BYTES',
+     nodeBytes <= MAX_FRAME_BYTES && nodeBytes > (3 * MAX_PUBLISH_BYTES));
+  ok('10h legit-max node/bridge frame certifies at default', certifyPlain(nodeFrame) !== null);
+  ok('10h legit-max mesh frame certifies at default', certifyBigint(meshFrame) !== null);
+  ok('10h the old 64 KiB scalar constant would WRONGLY reject legit traffic',
+     certifyPlain(nodeFrame, 1 << 16) === null);
+
+  // 10i adversarial BREADTH: MAX_NODES exhaustion leaves a late object sibling
   // unbranded (Aster Gate-2 correction). Safe: an unbranded container is a read
-  // no-op at observation, never a false verdict.
+  // no-op at observation, never a false verdict. F7 bounds the PARSE, MAX_NODES the
+  // WALK — the two ceilings are coupled but independent.
   const wide = {}; for (let i = 0; i < 4200; i++) wide['o' + i] = {}; wide.zlate = { deep: 1 };
   const gw = certifyPlain(JSON.stringify(wide));
-  ok('10f MAX_NODES exhaustion: root branded, late object sibling NOT', isCertified(gw) && !isCertified(gw.zlate));
+  ok('10i MAX_NODES exhaustion: root branded, late object sibling NOT', isCertified(gw) && !isCertified(gw.zlate));
 }
 
 _on = false; setShadowEnabled(null);
