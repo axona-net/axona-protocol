@@ -220,5 +220,51 @@ const now = 1e12;
   ok('profile: record cap is the Gate-A 768 B', TOMBSTONE_RECORD_MAX === 768);
 }
 
+// ---- Aster Phase-1 review fixes (council msgId 1b2b3715) -------------------
+// FIX 1: profile recordMax is honored by BOTH stores (was silently dropped).
+{
+  const P = { tombMaxCount: 10, candMax: 10, recordMax: 100, enabled: true };
+  const A = new TombstoneAuthority(P, { bodyMax: 10 });
+  ok('FIX1: tombstone store retained recordMax from the profile', A.tomb.recordMax === 100);
+  ok('FIX1: candidate store retained recordMax from the profile', A.cand.recordMax === 100);
+  const t = newTopicId(), m = newMsgId(), s = newSigner(); A.onBody(t, m, s, ed(now), null, now);
+  const r = A.onKill(t, m, s, killBytesFor(t, m, s, now), now);   // ~200 B record > 100 cap
+  ok('FIX1: tombstone store refuses an oversized record under the small profile cap', r.includes('REFUSED_RECORD_TOO_LARGE'), r);
+  const t2 = newTopicId(), m2 = newMsgId(), s2 = newSigner();
+  ok('FIX1: candidate store refuses an oversized record under the small profile cap', A.onKill(t2, m2, s2, killBytesFor(t2, m2, s2, now), now) === 'REFUSED_RECORD_TOO_LARGE');
+}
+
+// FIX 2: suppress() handles an existing tombstone first — idempotent confirm, mismatch fail-closed.
+{
+  const A = new TombstoneAuthority({ tombMaxCount: 10, candMax: 10, recordMax: TOMBSTONE_RECORD_MAX, enabled: true }, { bodyMax: 10 });
+  const t = newTopicId(), m = newMsgId(), s = newSigner(); const kb = killBytesFor(t, m, s, now);
+  const snap = () => JSON.stringify({ size: A.tomb.map.size, bytes: A.tomb.bytes, sig: A.tomb.perSigner.get(s), top: A.tomb.perTopic.get(t), fan: A.fx.fanouts, sup: A.fx.suppressions });
+  const r1 = A.suppress(t, m, s, kb, ed(now), now); const after1 = snap();
+  const r2 = A.suppress(t, m, s, kb, ed(now), now);   // identical -> CONFIRMED, zero side effects
+  ok('FIX2: repeated identical suppress is CONFIRMED with zero side effects (no double-count)', r1 === 'SUPPRESSED' && r2 === 'CONFIRMED' && snap() === after1, `${r1}/${r2}`);
+  const r3 = A.suppress(t, m, newSigner(), kb, ed(now), now);   // different signer -> fail closed, no overwrite
+  ok('FIX2: a different signer cannot overwrite the authoritative tombstone (fail closed)', r3 === 'REFUSED_MISMATCH_TOMB' && A.tomb.get(authKey(t, m)).signerPubkey === s && snap() === after1, r3);
+}
+
+// FIX 3: onKill() reclaims / deadline-checks before confirming an expired tombstone.
+{
+  const A = new TombstoneAuthority({ tombMaxCount: 10, candMax: 10, recordMax: TOMBSTONE_RECORD_MAX, enabled: true }, { bodyMax: 10 });
+  const t = newTopicId(), m = newMsgId(), s = newSigner(); const d = now + 1000;
+  A.suppress(t, m, s, killBytesFor(t, m, s, now), d, now);
+  const r = A.onKill(t, m, s, killBytesFor(t, m, s, now), d + 1);   // AFTER death, before any scheduled sweep
+  ok('FIX3: onKill at effectiveDeath+1 does NOT confirm and reclaims the expired tombstone', r !== 'CONFIRMED' && A.tomb.has(authKey(t, m)) === false, r);
+}
+
+// FIX 4: onBody() checks the committed deadline BEFORE caching; expired body leaves state unchanged.
+{
+  const A = new TombstoneAuthority({ tombMaxCount: 10, candMax: 10, recordMax: TOMBSTONE_RECORD_MAX, enabled: true }, { bodyMax: 10 });
+  const t = newTopicId(), m = newMsgId(), s = newSigner();
+  A.onKill(t, m, s, killBytesFor(t, m, s, now), now);   // body-absent candidate present
+  const candBefore = A.cand.total, tombBefore = A.tomb.map.size;
+  const r = A.onBody(t, m, s, now + 500, killBytesFor(t, m, s, now), now + 501);   // body past its committed death
+  ok('FIX4: expired body is DROP_EXPIRED and NOT cached (no false co-location basis)', r === 'DROP_EXPIRED' && A.bodies.has(authKey(t, m)) === false, r);
+  ok('FIX4: expired-body path leaves tombstone + candidate accounting unchanged (candidate retained)', A.tomb.map.size === tombBefore && A.cand.total === candBefore, `tomb=${A.tomb.map.size} cand=${A.cand.total}`);
+}
+
 console.log(`\nRESULT: ${n} checks passed, ${fail} failed.`);
 process.exit(fail ? 1 : 0);

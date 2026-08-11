@@ -127,8 +127,8 @@ export class BodyCache {
 // ClaimRetention. REFUSAL ONLY — it never evicts a non-expired entry.
 // =====================================================================
 export class CandidateStore {
-  constructor({ max, maxBytes, perSignerMax, perTopicMax }) {
-    Object.assign(this, { max, maxBytes, perSignerMax, perTopicMax });
+  constructor({ max, maxBytes, perSignerMax, perTopicMax, recordMax }) {
+    Object.assign(this, { max, maxBytes, perSignerMax, perTopicMax, recordMax });
     this.map       = new Map();   // key -> [ {signer, killBytes, tag, bodyArrivedAt, claimRet, _bytes} ]
     this.total     = 0;
     this.bytes     = 0;
@@ -220,8 +220,8 @@ export class CandidateStore {
 // minDeath-guarded so a full-store admit is O(1) amortized, not O(n).
 // =====================================================================
 export class TombstoneStore {
-  constructor({ maxCount, maxBytes, perSignerMax, perTopicMax }) {
-    Object.assign(this, { maxCount, maxBytes, perSignerMax, perTopicMax });
+  constructor({ maxCount, maxBytes, perSignerMax, perTopicMax, recordMax }) {
+    Object.assign(this, { maxCount, maxBytes, perSignerMax, perTopicMax, recordMax });
     this.map       = new Map();   // key -> { signerPubkey, effectiveDeath, killBytes, _bytes }
     this.bytes     = 0;
     this.perSigner = new Map();
@@ -310,9 +310,14 @@ export class TombstoneAuthority {
   // An already-expired authorization can never suppress a body or install an
   // expired tombstone on ANY path (direct KILL, late body, retry).
   suppress(topicId, msgId, signer, killBytes, effectiveDeath, now) {
-    if (now > effectiveDeath) return 'REFUSED_EXPIRED';       // fail-closed, before any side effect
     const k = authKey(topicId, msgId);
-    this.tomb.reclaimExpired(now);
+    this.tomb.reclaimExpired(now);                            // drop any expired tombstone for this key first
+    // An already-committed authoritative deletion is idempotent: an identical
+    // authoritative kill (same signer) is CONFIRMATION with ZERO side effects; a
+    // signer mismatch fails closed and never overwrites the authoritative record.
+    const existing = this.tomb.get(k);
+    if (existing) return existing.signerPubkey === signer ? 'CONFIRMED' : 'REFUSED_MISMATCH_TOMB';
+    if (now > effectiveDeath) return 'REFUSED_EXPIRED';       // fail-closed on the committed deadline, before any side effect
     const rec = { signerPubkey: signer, effectiveDeath, killBytes };
     const v = this.tomb.wouldAdmit(topicId, k, rec);
     if (v !== 'OK') return v;                                  // capacity refusal, no side effect
@@ -335,6 +340,7 @@ export class TombstoneAuthority {
   // A signed, signature-verified kill arrives (caller has run verifyKill).
   onKill(topicId, msgId, signer, killBytes, now) {
     const k = authKey(topicId, msgId);
+    this.tomb.reclaimExpired(now);                            // an expired tombstone must not confirm
     const tomb = this.tomb.get(k);
     if (tomb) return tomb.signerPubkey === signer ? 'CONFIRMED' : 'DROP_MISMATCH_TOMB';
     if (this.bodies.has(k)) {
@@ -363,13 +369,19 @@ export class TombstoneAuthority {
     // killed message (or a forgery that cannot recompute the msgId). Once the
     // tombstone passes its committed death it no longer dominates, and the
     // signed-expiry layer rejects the now-past-death body on its own.
+    this.tomb.reclaimExpired(now);
     if (this.isSuppressed(topicId, msgId, now)) return 'SUPPRESSED_TOMBSTONE';
+    // Fail-closed BEFORE any side effect: a body already past its committed death
+    // is dropped WITHOUT caching, so no expired body ever becomes a co-location
+    // basis. Any pre-existing bounded candidate for this key is left untouched —
+    // it reclaims on its own ClaimRetention schedule.
+    if (now > effectiveDeath) return 'DROP_EXPIRED';
     this._putBody(k, { publisher, effectiveDeath, arrivedAt: now });
     const match = this.cand.find(k, publisher);
     if (match) {
       const r = this.suppress(topicId, msgId, publisher, match.killBytes, effectiveDeath, now);
-      if (r === 'SUPPRESSED')      return 'SUPPRESSED';
-      if (r === 'REFUSED_EXPIRED') return 'DROP_EXPIRED';       // committed death passed
+      if (r === 'SUPPRESSED' || r === 'CONFIRMED') return 'SUPPRESSED';  // committed authoritative deletion
+      if (r === 'REFUSED_EXPIRED') return 'DROP_EXPIRED';       // (defensive: deadline already checked above)
       this.cand.setTag(k, publisher, 'pending', now);           // stays bounded in cand store
       return 'PENDING_CAPACITY:' + r;
     }
