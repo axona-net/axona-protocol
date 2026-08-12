@@ -100,7 +100,7 @@ export const topicStoreMethods = {
     const now = this._now();
     const dels = [];
     for (const [tgt, tomb] of (role?.tombstones ?? [])) {
-      if ((tomb?.exp ?? 0) > now) dels.push({ del: true, msgId: tgt, killTs: tomb.killTs, signer: tomb.signer ?? null, seq: tomb.seq, publishTs: tomb.killTs });
+      if ((tomb?.exp ?? 0) > now) dels.push({ del: true, msgId: tgt, killTs: tomb.killTs, signer: tomb.signer ?? null, seq: tomb.seq, publishTs: tomb.killTs, ...(this._tombAuthority && tomb.kill ? { kill: tomb.kill } : {}) });
     }
     return dels;
   },
@@ -110,7 +110,13 @@ export const topicStoreMethods = {
   // retracted). Shared by the replay-up and handoff receive paths.
   _applyDels(role, topicBig, dels) {
     for (const d of (Array.isArray(dels) ? dels : [])) {
-      if (d && d.msgId) this._applyKill(role, topicBig, d);
+      if (d && d.msgId) {
+        // A migrated del carrying a signed kill (flag-on) lets this node verifyKill()
+        // the proof LOCALLY and earn authority for it (Aster Phase-3 blocker b);
+        // fire-and-forget, never blocks the migration. Unsigned markers observe nothing.
+        this._taObservePropagatedKill(topicBig, d);
+        this._applyKill(role, topicBig, d);
+      }
     }
   },
 

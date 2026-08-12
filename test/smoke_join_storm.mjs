@@ -18,6 +18,7 @@ import { AxonaManager } from '../src/pubsub/AxonaManager.js';
 import { makeRole } from '../src/pubsub/rootClaim.js';
 import { buildEnvelope } from '../src/pubsub/envelope.js';
 import { createAuthorIdentity } from '../src/identity/index.js';
+import { deriveTopicIdBig } from '../src/pubsub/post.js';
 import {
   REPLICATE_FULL_BUDGET, INGEST_QUEUE_MAX,
   MESH_REWARM_MIN, MESH_REWARM_TICKS, MESH_REWARM_COOLDOWN_MS,
@@ -78,8 +79,11 @@ console.log('join-storm (I-11) — sender budget, receiver slicing, mesh re-warm
   const author = await createAuthorIdentity();
   const payloads = [];
   for (let i = 0; i < TOPICS; i++) {
-    const t = REG | (0x9000n + BigInt(i));
     const topic = { name: 'storm-' + i, region: 135, owner: null, write: 'open' };
+    // The replicate claim's topicId must equal deriveTopicId(descriptor): the
+    // stamped ingest now binds the signed body descriptor to the role topic
+    // (Aster Phase-3 blocker a), so a synthetic id would (correctly) be rejected.
+    const t = await deriveTopicIdBig(topic);   // region 135 == 0x87 == REG prefix
     const msgs = [];
     for (let j = 0; j < PER; j++) {
       const env = await buildEnvelope({ topic, message: `storm ${i}/${j}`, ts: 1000 + j, seq: j + 1, identity: author });

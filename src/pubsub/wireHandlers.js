@@ -333,8 +333,9 @@ export const wireHandlersMethods = {
     this._cachePush(role, { msgId: env.msgId, publishTs: ts, json, seq });
     // Phase 3 shadow: observe the VERIFIED body (env passed verifyEnvelope above)
     // ONLY if it survived the cache write (an immediate byte-cap eviction must not
-    // leave a stale shadow body). No-op flag-off.
-    if (this._tombAuthority && role.cacheIds.has(env.msgId)) this._taObserveBody(role.topicId, env, ts);
+    // leave a stale shadow body). The observer independently re-binds the topic.
+    // No-op flag-off.
+    if (this._tombAuthority && role.cacheIds.has(env.msgId)) await this._taObserveBody(role.topicId, env, ts);
     // The DURABILITY obligation opens at the stamp and can only be discharged
     // by a cohort verdict below. The DELIVERY leg is _pendingPub and moves
     // independently — that separation is the whole point (Aster, seq 123).
@@ -597,13 +598,26 @@ export const wireHandlersMethods = {
     try { env = JSON.parse(m.json); } catch { this._log('warn', 'drop-malformed-stamped', { msgId: String(m?.msgId).slice(0, 12) }); return 'rejected'; }
     const v = await verifyEnvelope(env);                                 // B-4 still applies
     if (!v.ok || env.msgId !== m.msgId) { this._log('warn', 'drop-bad-replayup', { reason: v.reason }); return 'rejected'; }
+    // TOPIC BINDING (Aster Phase-3 blocker a, seq 890): the stamped body's SIGNED
+    // descriptor must derive to THIS role's topic. _ingestPublish binds; the stamped
+    // paths (replay-up / handoff / replicate) did not, so a body signed for topic A
+    // could be re-stamped under role B — the V1 msgId is topic-agnostic, so B's
+    // history and any co-location basis get corrupted. In honest operation a role's
+    // topicId IS deriveTopicId(descriptor), so this rejects only the cross-topic case
+    // (claim.topicId == role.topicId already: the role is looked up by the claim).
+    // Fail closed on a malformed or mismatched descriptor.
+    let stid;
+    try { stid = await deriveTopicIdBig({ region: env.topic?.region, owner: env.topic?.owner, name: env.topic?.name, write: env.topic?.write }); }
+    catch { this._log('warn', 'drop-stamped-bad-topic', { msgId: String(m?.msgId).slice(0, 12) }); return 'rejected'; }
+    if (stid !== role.topicId) { this._log('warn', 'drop-stamped-cross-topic', { msgId: String(m?.msgId).slice(0, 12) }); return 'rejected'; }
     if (m.publishTs > this._now() + FUTURE_TOLERANCE_MS) { this._log('warn', 'drop-future-replayup'); return 'rejected'; } // §5 bad-clock
     if (role.cacheIds.has(m.msgId)) return 'held';                       // already have it
     if (this._tombstoned(role, m.msgId, m.json)) return 'held';          // killed → don't resurrect via replay-up
     this._cachePush(role, { msgId: m.msgId, publishTs: m.publishTs, json: m.json, seq: m.seq });
-    // Phase 3 shadow: observe the VERIFIED body (env passed verifyEnvelope above)
-    // if it survived the cache write. No-op flag-off.
-    if (this._tombAuthority && role.cacheIds.has(m.msgId)) this._taObserveBody(role.topicId, env, m.publishTs);
+    // Phase 3 shadow: observe the VERIFIED body (env passed verifyEnvelope + the
+    // topic-binding check above) if it survived the cache write. The observer
+    // independently re-binds the topic too (defense in depth). No-op flag-off.
+    if (this._tombAuthority && role.cacheIds.has(m.msgId)) await this._taObserveBody(role.topicId, env, m.publishTs);
     // Seeing our own msgId arrive via ANY stamped path (cohort replicate,
     // replay-up, handoff) is proof it landed on a durable holder — confirm the
     // pending so the retry machinery (and leave()'s evidence-based drain)
@@ -707,7 +721,7 @@ export const wireHandlersMethods = {
     const role = this.axonRoles.get(topicBig);        // set iff I'm a relay → re-fan
     for (const m of (Array.isArray(payload.msgs) ? payload.msgs : [])) {
       if (!m) continue;
-      if (m.del) { this._applyKill(role, topicBig, m); continue; }   // del-marker carries killTs+signer
+      if (m.del) { this._taObservePropagatedKill(topicBig, m); this._applyKill(role, topicBig, m); continue; }   // del-marker carries killTs+signer (+ signed kill flag-on)
       if (this._tombstoned(role, m.msgId, m.json)) continue;          // killed → suppress (don't cache/deliver/re-fan)
       if (role && !role.cacheIds.has(m.msgId)) {       // relay: cache once + re-fan once
         this._cachePush(role, { msgId: m.msgId, publishTs: m.publishTs, json: m.json, seq: m.seq });
@@ -776,7 +790,7 @@ export const wireHandlersMethods = {
     // set. Carries killTs+signer so the receiver's tombstone matches.
     const dels = [];
     for (const [tgt, tomb] of role.tombstones) {
-      if ((tomb?.exp ?? 0) > this._now()) dels.push({ del: true, msgId: tgt, killTs: tomb.killTs, signer: tomb.signer ?? null, publishTs: tomb.killTs, seq: tomb.seq });
+      if ((tomb?.exp ?? 0) > this._now()) dels.push({ del: true, msgId: tgt, killTs: tomb.killTs, signer: tomb.signer ?? null, publishTs: tomb.killTs, seq: tomb.seq, ...(this._tombAuthority && tomb.kill ? { kill: tomb.kill } : {}) });
     }
     if (dels.length) {
       sent = true;
@@ -817,17 +831,23 @@ export const wireHandlersMethods = {
     const seq = m.seq;                                 // root-assigned dense counter for this kill
     if (role && Number.isFinite(seq) && seq > role.seq) role.seq = seq;   // recover counter (kill occupied a slot)
     if (role && !role.tombstones.has(target)) {
-      role.tombstones.set(target, { exp: this._now() + TTL_MS, killTs, signer: m.signer ?? null, seq });
-      // NOTE: NO shadow observe here — _applyKill is reached from the del-fanout
-      // (_onDeliver) and migration (_applyDels) paths, which carry only an
-      // UNSIGNED marker. The shadow observes a kill ONLY at _onKill, after
-      // verifyKill(), so authority is never earned from unverified wire metadata.
+      const tomb = { exp: this._now() + TTL_MS, killTs, signer: m.signer ?? null, seq };
+      // SIGNED-KILL PROOF (Aster Phase-3 blocker b), flag-gated so flag-off is
+      // byte-identical: when the shadow authority is built, RETAIN the complete
+      // signed kill in the tombstone and TRANSPORT it on the wire (the fanout below
+      // + the replay / replicate / handoff emit sites), so any node holding the
+      // propagated tombstone verifyKill()s it LOCALLY (_taObservePropagatedKill)
+      // instead of trusting an unsigned marker. The DIRECT kill is still observed
+      // once, at _onKill after verifyKill(); _applyKill itself never observes.
+      if (this._tombAuthority && m.kill) tomb.kill = m.kill;
+      role.tombstones.set(target, tomb);
       const i = role.cache.findIndex(c => c.msgId === target);
       if (i >= 0) { role.cacheBytes -= role.cache[i].bytes; role.cache.splice(i, 1); }
       role.cacheIds.delete(target);
       // fan the delete down — carries killTs + signer + seq so each receiver records
-      // an identical tombstone (consistent replay + ordering + provisional authorship).
-      this._fanout(role, { del: true, msgId: target, killTs, signer: m.signer ?? null, publishTs: killTs, seq }, null);
+      // an identical tombstone (consistent replay + ordering + provisional authorship);
+      // flag-on it also carries the signed kill so receivers can verify it themselves.
+      this._fanout(role, { del: true, msgId: target, killTs, signer: m.signer ?? null, publishTs: killTs, seq, ...(this._tombAuthority && m.kill ? { kill: m.kill } : {}) }, null);
       // Replicas/cohort aren't subscribers/children — they don't see the fan-out. Push the
       // new tombstone to the cohort EAGERLY (not on the next tick) so a co-hosting root or a
       // backup that promotes mid-window can't serve the killed body it already holds (the
@@ -911,7 +931,10 @@ export const wireHandlersMethods = {
     const ts = Math.max(role.lastTs + 1, this._now());
     role.lastTs = ts;
     const seq = ++role.seq;
-    this._applyKill(role, topicBig, { msgId: target, killTs: ts, signer: lc(kill.signerPubkey), seq });
+    // Pass the COMPLETE signed kill so _applyKill can retain + transport the proof
+    // (blocker b). The root re-stamps ts/seq for replay ordering; the signed kill
+    // keeps the author's own ts/seq for verifyKill() at every downstream node.
+    this._applyKill(role, topicBig, { msgId: target, killTs: ts, signer: lc(kill.signerPubkey), seq, kill });
     // KILL completes on tombstone ingest, separately from PUB (v0.3 §1).
     // _applyKill is tombstone-gated internally; re-acking a duplicate kill is
     // the idempotent-success case, same as a duplicate publish.

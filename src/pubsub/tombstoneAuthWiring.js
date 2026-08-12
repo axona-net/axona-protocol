@@ -22,10 +22,23 @@
 //             the publisher; we never parse an unverified JSON body for authority.
 //   - kill  ← _onKill, AFTER verifyKill() passed, handed the signed kill object
 //             and its verified signerPubkey; the kill's topicId is bound to this
-//             topic before it can reach onKill(). The del-fanout / migration
-//             paths (which carry only an unsigned marker) are DELIBERATELY not
-//             observed — they are exactly the non-authoritative case.
+//             topic before it can reach onKill(). A kill that arrives via a
+//             PROPAGATION path (fanout _onDeliver / migrate _applyDels) is observed
+//             ONLY when it carries the COMPLETE signed kill and that kill passes a
+//             LOCAL verifyKill() here too (_taObservePropagatedKill, Aster blocker
+//             b) — an UNSIGNED marker, or a forged signed kill, is never observed.
 // Anything without local proof never becomes a candidate or a tombstone.
+//
+// TOPIC BINDING (Aster blocker a). A stamped body is bound to its role topic at the
+// LIVE path (_ingestStamped requires deriveTopicId(body.topic)===role.topicId,
+// mirroring _ingestPublish), and _taObserveBody re-derives it independently — so a
+// cross-topic re-stamp cannot corrupt a role's history or seed a false co-location.
+//
+// SIGNED-KILL PROOF TRANSPORT (Aster blocker b, flag-gated so flag-off is byte-
+// identical). When the authority is built, _applyKill RETAINS the complete signed
+// kill in the tombstone and the fanout / replay / replicate / handoff / pull emitters
+// carry it, so every node holding the propagated tombstone can verifyKill() it
+// locally rather than trusting an unsigned marker.
 //
 // CACHE FIDELITY (Aster Phase-3 review, class 2). The shadow body mirror must not
 // retain a body the live cache no longer holds, or it would be a false
@@ -51,8 +64,8 @@
 // =====================================================================
 
 import { TombstoneAuthority, RELAY_CAPS, TTL_CEILING, CLOCK_SKEW } from './tombstoneAuth.js';
-import { canonical } from './post.js';
-import { KILL_DOMAIN } from './kill.js';
+import { canonical, deriveTopicIdBig } from './post.js';
+import { KILL_DOMAIN, verifyKill } from './kill.js';
 import { idHex, idBig, lc } from './ids.js';
 
 // Build the per-node authority + observation counters. Called from the
@@ -74,10 +87,20 @@ export const tombstoneAuthWiringMethods = {
   // (callers pass the verifyEnvelope()-verified `env` and gate on cache survival).
   // publisher = the verified envelope's signerPubkey (or null for anonymous). We
   // never derive authority by parsing an unverified JSON body.
-  _taObserveBody(topicBig, env, publishTs) {
+  async _taObserveBody(topicBig, env, publishTs) {
     const ta = this._tombAuthority; if (!ta) return;
     try {
       if (!env || typeof env.msgId !== 'string') { ta.stats.skipped++; return; }
+      // INDEPENDENT topic binding (Aster b188a223): the observer does NOT trust
+      // the caller — it derives the body's SIGNED topic and requires it to equal
+      // this role's topic before onBody. Otherwise a cross-topic (migrated-from-A)
+      // body could seed a false co-location basis under B, since the V1 msgId is
+      // topic-agnostic. Fail closed on any mismatch/malformed descriptor.
+      const d = env.topic;
+      let stid;
+      try { stid = await deriveTopicIdBig({ region: d?.region, owner: d?.owner, name: d?.name, write: d?.write }); }
+      catch { ta.stats.skipped++; return; }
+      if (stid !== topicBig) { ta.stats.skipped++; return; }
       const publisher = env.signerPubkey ? lc(env.signerPubkey) : null;
       const topicId = idHex(topicBig);
       const v = ta.authority.onBody(topicId, env.msgId, publisher, this._taDeath(publishTs), null, this._now());
@@ -102,6 +125,24 @@ export const tombstoneAuthWiringMethods = {
       const killBytes = canonical({ d: KILL_DOMAIN, topicId: kill.topicId, msgId: kill.msgId, ts: kill.ts, seq: kill.seq });
       const v = ta.authority.onKill(topicId, kill.msgId, signer, killBytes, this._now());
       ta.stats.kills++; bump(ta.stats.verdicts, 'kill:' + String(v).split(':')[0]);
+    } catch { ta.stats.errors++; }
+  },
+
+  // A del marker arrived via a PROPAGATION path (fanout _onDeliver, migrate
+  // _applyDels) carrying a COMPLETE signed kill (Aster Phase-3 blocker b). This is
+  // where a non-root node earns authority for a kill it did not itself receive as a
+  // KILL RPC: it verifyKill()s the signed proof LOCALLY, exactly like _onKill does,
+  // and only then observes. An UNSIGNED marker (no d.kill — the legacy/flag-off wire
+  // shape) is never observed, so a forged or bare del can never seed a tombstone
+  // (preserves the D2 invariant). Fire-and-forget from the sync receive funnels; it
+  // only feeds the shadow and swallows its own errors.
+  async _taObservePropagatedKill(topicBig, d) {
+    const ta = this._tombAuthority; if (!ta) return;
+    try {
+      if (!d || !d.kill) return;                        // unsigned marker → never authoritative
+      const v = await verifyKill(d.kill);               // LOCAL proof check (non-root verifyKill)
+      if (!v.ok) { ta.stats.skipped++; return; }
+      this._taObserveKill(topicBig, d.kill, v.signerPubkey);   // re-binds kill.topicId to this topic
     } catch { ta.stats.errors++; }
   },
 

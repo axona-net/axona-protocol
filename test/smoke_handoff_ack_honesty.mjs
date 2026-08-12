@@ -28,6 +28,7 @@ import { AxonaManager } from '../src/pubsub/AxonaManager.js';
 import { createNodeIdentity } from '../src/identity/index.js';
 import { regionCenter } from '../src/utils/region-names.js';
 import { buildEnvelope } from '../src/pubsub/envelope.js';
+import { deriveTopicIdBig } from '../src/pubsub/post.js';
 
 let passed = 0, failed = 0;
 const check = (label, cond, extra = '') => {
@@ -105,10 +106,14 @@ async function main() {
   // NOT a hex id — a hex string fails verify as `missing_topic`.
   {
     const { am } = makeManager(SELF);
-    const role = emptyRole(T);
+    // A role's topicId IS deriveTopicId(descriptor) in production, and the stamped
+    // ingest now binds the body's signed descriptor to it (Aster Phase-3 blocker a).
+    // Build the role from the SAME descriptor the envelope is signed under so this
+    // exercises a realistic same-topic replay-up, not an impossible cross-topic one.
+    const desc = { region: 'useast', owner: null, name: 'ack-honesty-test', write: 'open' };
+    const role = emptyRole(await deriveTopicIdBig(desc));
     const env = await buildEnvelope({
-      topic: { region: 'useast', owner: null, name: 'ack-honesty-test', write: 'open' },
-      message: { hello: 'world' }, ts: 5, seq: 1, identity: ident,
+      topic: desc, message: { hello: 'world' }, ts: 5, seq: 1, identity: ident,
     });
     const stamped = { msgId: env.msgId, publishTs: 5, json: JSON.stringify(env), seq: 1 };
 

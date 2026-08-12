@@ -223,6 +223,83 @@ async function main() {
     check('E3b. resetState rebuilt the shadow — zero bodies/candidates/tombstones', afterReset.enabled && afterReset.sizes.bodies === 0 && afterReset.sizes.candidates === 0 && afterReset.sizes.tombstones === 0, JSON.stringify(afterReset.sizes));
   }
 
+  // ---- F. CROSS-TOPIC binding: a body signed for A can't seed B (Aster b188a223) ----
+  {
+    const fab = new Fabric({ tombstoneAuth: true });
+    const nodes = nodeIds.map(id => fab.addNode(id));
+    const dA = { region:'useast', owner:null, name:'ta-xtopic-A', write:'open' };
+    const dB = { region:'useast', owner:null, name:'ta-xtopic-B', write:'open' };
+    const tA = await deriveTopicIdBig(dA);
+    const tB = await deriveTopicIdBig(dB);
+    nodes[0].am.pubsubSubscribe(tB); await fab.settle(); fab.clock += 6000; await fab.tickAll();
+    const eBleg = await buildEnvelope({ topic: dB, message: { b: 1 }, seq: 1, identity: alice, ts: fab.clock });
+    nodes[1].am.pubsubPublish(tB, JSON.stringify(eBleg)); await fab.settle();
+    const rB = root(fab, tB);
+    const roleB = rB.am.axonRoles.get(tB);
+    const beforeF = rB.am.tombstoneAuthShadow();
+    // a VALID envelope signed for topic A, fed to _ingestStamped under role B (the replay-up/handoff path)
+    const eA = await buildEnvelope({ topic: dA, message: { a: 1 }, seq: 5, identity: alice, ts: fab.clock });
+    const verdict = await rB.am._ingestStamped(roleB, { msgId: eA.msgId, publishTs: fab.clock, json: JSON.stringify(eA), seq: 5 });
+    const afterF = rB.am.tombstoneAuthShadow();
+    // Belt AND suspenders (Aster Phase-3 blocker a): the LIVE path binds the signed
+    // descriptor to the role topic and REJECTS the cross-topic body before it is
+    // cached; the shadow observer independently re-derives and would refuse it too,
+    // so the shadow never gains a cross-topic body under B.
+    check('F1. cross-topic stamped body REJECTED at the live path (topic binding)', verdict === 'rejected' && !roleB.cacheIds.has(eA.msgId), `verdict=${verdict}`);
+    check('F2. shadow gained NO cross-topic body under B', afterF.stats.bodies === beforeF.stats.bodies, JSON.stringify({ before: beforeF.stats.bodies, after: afterF.stats.bodies }));
+    // a valid signed kill (topic-agnostic V1 msgId) must NOT fabricate B co-location from the migrated A body
+    const preSup = afterF.stats.verdicts['kill:SUPPRESSED'] || 0;
+    const killA = await buildKill({ topicId: idHex(tB), msgId: eA.msgId, seq: 6, identity: alice });
+    fab.clock += 100; rB.am.pubsubKill(tB, killA); await fab.settle();
+    const postF = rB.am.tombstoneAuthShadow();
+    check('F3. no fabricated B co-location: the cross-topic kill did NOT suppress via a migrated A body', (postF.stats.verdicts['kill:SUPPRESSED'] || 0) === preSup, JSON.stringify(postF.stats.verdicts));
+  }
+
+  // ---- G. SIGNED-KILL PROOF TRANSPORT (Aster Phase-3 blocker b) -----------------
+  // The kill's proof is RETAINED in the tombstone and TRAVELS with it, so a node
+  // that receives the tombstone via PROPAGATION (fanout / migrate) verifyKill()s it
+  // LOCALLY and earns authority — never trusting an unsigned marker (that stays the
+  // D2 case). Retain (send) + local verify (receive), the two halves of blocker b.
+  {
+    const fab = new Fabric({ tombstoneAuth: true });
+    const nodes = nodeIds.map(id => fab.addNode(id));
+    const dG = { region:'useast', owner:null, name:'ta-killproof', write:'open' };
+    const tG = await deriveTopicIdBig(dG);
+    nodes[0].am.pubsubSubscribe(tG); await fab.settle(); fab.clock += 6000; await fab.tickAll();
+    const e1 = await buildEnvelope({ topic: dG, message: { g: 1 }, seq: 1, identity: alice, ts: fab.clock });
+    const e2 = await buildEnvelope({ topic: dG, message: { g: 2 }, seq: 2, identity: alice, ts: fab.clock + 1 });
+    nodes[1].am.pubsubPublish(tG, JSON.stringify(e1)); await fab.settle();
+    nodes[1].am.pubsubPublish(tG, JSON.stringify(e2)); await fab.settle();
+    const rG = root(fab, tG);
+
+    // RETAIN (send side): a real signed kill is stored COMPLETE in the tombstone so
+    // the fanout / replicate / handoff / pull emitters can carry it (flag-gated).
+    const kill1 = await buildKill({ topicId: idHex(tG), msgId: e1.msgId, seq: 9, identity: alice });
+    fab.clock += 100; rG.am.pubsubKill(tG, kill1); await fab.settle();
+    const retained = rG.am.axonRoles.get(tG)?.tombstones?.get(e1.msgId)?.kill;
+    check('G1. root RETAINS the complete signed kill in the tombstone (for transport)', !!retained && retained.signature === kill1.signature, JSON.stringify({ has: !!retained }));
+
+    // RECEIVE (proof side): a del marker carrying a VALID signed kill, arriving via
+    // the PROPAGATION path, is verifyKill()d LOCALLY and observed — the mechanism by
+    // which a non-root holder earns authority for a kill it never received as a RPC.
+    const gBefore = rG.am.tombstoneAuthShadow();
+    const kill2 = await buildKill({ topicId: idHex(tG), msgId: e2.msgId, seq: 10, identity: alice });
+    await rG.am._taObservePropagatedKill(tG, { del: true, msgId: e2.msgId, killTs: fab.clock + 50, seq: 10, kill: kill2 });
+    const gAfter = rG.am.tombstoneAuthShadow();
+    check('G2. a propagated signed kill is verifyKill()d LOCALLY and observed', gAfter.stats.kills > gBefore.stats.kills, JSON.stringify({ before: gBefore.stats.kills, after: gAfter.stats.kills }));
+    check('G3. the locally-verified proof SUPPRESSED the co-located body', (gAfter.stats.verdicts['kill:SUPPRESSED'] || 0) > (gBefore.stats.verdicts['kill:SUPPRESSED'] || 0), JSON.stringify(gAfter.stats.verdicts));
+
+    // REFUSE: a FORGED signed kill through the same path fails the LOCAL verifyKill,
+    // so propagation can never smuggle authority — swallowed, never a throw.
+    const advBefore = rG.am.tombstoneAuthShadow();
+    const good3 = await buildKill({ topicId: idHex(tG), msgId: e2.msgId, seq: 11, identity: alice });
+    const forged3 = { ...good3, signature: 'ed25519:' + '0'.repeat(128) };
+    await rG.am._taObservePropagatedKill(tG, { del: true, msgId: e2.msgId, killTs: fab.clock + 60, seq: 11, kill: forged3 });
+    const advAfter = rG.am.tombstoneAuthShadow();
+    check('G4. a FORGED propagated kill is refused at local verifyKill (kills + errors unchanged)',
+      advAfter.stats.kills === advBefore.stats.kills && advAfter.stats.errors === advBefore.stats.errors, JSON.stringify({ killsB: advBefore.stats.kills, killsA: advAfter.stats.kills, errB: advBefore.stats.errors, errA: advAfter.stats.errors }));
+  }
+
   console.log(`\nResult: ${passed} passed, ${failed} failed`);
   process.exit(failed === 0 ? 0 : 1);
 }
