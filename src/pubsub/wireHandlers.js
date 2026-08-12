@@ -331,6 +331,10 @@ export const wireHandlersMethods = {
     const seq = ++role.seq;                                              // dense per-topic counter (gap detection)
     const msg = { json, publishTs: ts, msgId: env.msgId, seq };
     this._cachePush(role, { msgId: env.msgId, publishTs: ts, json, seq });
+    // Phase 3 shadow: observe the VERIFIED body (env passed verifyEnvelope above)
+    // ONLY if it survived the cache write (an immediate byte-cap eviction must not
+    // leave a stale shadow body). No-op flag-off.
+    if (this._tombAuthority && role.cacheIds.has(env.msgId)) this._taObserveBody(role.topicId, env, ts);
     // The DURABILITY obligation opens at the stamp and can only be discharged
     // by a cohort verdict below. The DELIVERY leg is _pendingPub and moves
     // independently — that separation is the whole point (Aster, seq 123).
@@ -597,6 +601,9 @@ export const wireHandlersMethods = {
     if (role.cacheIds.has(m.msgId)) return 'held';                       // already have it
     if (this._tombstoned(role, m.msgId, m.json)) return 'held';          // killed → don't resurrect via replay-up
     this._cachePush(role, { msgId: m.msgId, publishTs: m.publishTs, json: m.json, seq: m.seq });
+    // Phase 3 shadow: observe the VERIFIED body (env passed verifyEnvelope above)
+    // if it survived the cache write. No-op flag-off.
+    if (this._tombAuthority && role.cacheIds.has(m.msgId)) this._taObserveBody(role.topicId, env, m.publishTs);
     // Seeing our own msgId arrive via ANY stamped path (cohort replicate,
     // replay-up, handoff) is proof it landed on a durable holder — confirm the
     // pending so the retry machinery (and leave()'s evidence-based drain)
@@ -811,7 +818,10 @@ export const wireHandlersMethods = {
     if (role && Number.isFinite(seq) && seq > role.seq) role.seq = seq;   // recover counter (kill occupied a slot)
     if (role && !role.tombstones.has(target)) {
       role.tombstones.set(target, { exp: this._now() + TTL_MS, killTs, signer: m.signer ?? null, seq });
-      if (this._tombAuthority) this._taObserveKill(role, topicBig, m);   // Phase 3 shadow (no-op flag-off)
+      // NOTE: NO shadow observe here — _applyKill is reached from the del-fanout
+      // (_onDeliver) and migration (_applyDels) paths, which carry only an
+      // UNSIGNED marker. The shadow observes a kill ONLY at _onKill, after
+      // verifyKill(), so authority is never earned from unverified wire metadata.
       const i = role.cache.findIndex(c => c.msgId === target);
       if (i >= 0) { role.cacheBytes -= role.cache[i].bytes; role.cache.splice(i, 1); }
       role.cacheIds.delete(target);
@@ -880,6 +890,10 @@ export const wireHandlersMethods = {
     // (1) signature self-valid (B-4 analog for kills).
     const v = await verifyKill(kill);
     if (!v.ok) { this._log('warn', 'drop-bad-kill', { reason: v.reason }); return 'consumed'; }
+    // Phase 3 shadow: the ONLY kill-observe site — the signed kill is locally
+    // verifyKill()-verified here, and _taObserveKill re-binds its topicId to this
+    // topic before the shadow authority may act on it. No-op flag-off.
+    if (this._tombAuthority) this._taObserveKill(topicBig, kill, v.signerPubkey);
     // (2) authorship: if we hold the target, enforce signer===author NOW; if we
     // don't (kill races ahead of the publish, or we're a fresh root), accept
     // PROVISIONALLY — record the kill's signer and enforce when the target arrives

@@ -37,9 +37,12 @@ export const topicStoreMethods = {
       if (!old) break;
       role.cacheIds.delete(old.msgId);
       role.cacheBytes -= old.bytes;
-      if (this._tombAuthority) this._taObserveEvict(role, old.msgId);   // Phase 3 shadow (no-op flag-off)
+      if (this._tombAuthority) this._taObserveEvict(role, old.msgId);   // Phase 3 shadow: keep body mirror in step (no-op flag-off)
     }
-    if (this._tombAuthority) this._taObserveBody(role, entry);          // Phase 3 shadow (no-op flag-off)
+    // NOTE: the body OBSERVE is NOT here — a cache write is not a local
+    // verification, and _cachePush is also reached from the relay _onDeliver path
+    // (unverified). Body observation is driven from the verified ingress
+    // (_ingestPublish / _ingestStamped) with a cache-survival guard.
   },
 
   _expireCache(role, now) {

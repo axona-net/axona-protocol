@@ -1138,6 +1138,7 @@ export class AxonaManager {
 
   resetState() {
     this.axonRoles.clear();
+    if (this._tombAuthority) this._taReset();   // Phase 3 shadow: no role holds a body now — rebuild (no-op flag-off)
     this.mySubscriptions.clear();
     this._hostedTopics.clear();
     this._backupTopics.clear();
