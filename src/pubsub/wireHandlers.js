@@ -26,7 +26,22 @@ import { signAckProof, verifyAckProof, PURPOSE, OP } from './ackProof.js';
 
 export const wireHandlersMethods = {
   _registerHandlers() {
-    const on = (type, fn) => this.dht.onRoutedMessage(type, (p, m) => fn.call(this, p, m));
+    // REF-1.1 S2: when the Boundary-1 frame registry is built (frameRegistry:true),
+    // each routed handler is shadow-wrapped to OBSERVE a certified snapshot beside
+    // it. `base` is an arrow capturing the manager `this`, so the handler always
+    // receives the manager as `this` and the same (p, m); the wrap runs it verbatim
+    // when the runtime shadow flag is off, so flag-off (and registry-off) is
+    // byte-identical. reg is null unless the construction flag is set.
+    const reg = this._frameRegistry;
+    const on = (type, fn) => {
+      const base = (p, m) => fn.call(this, p, m);
+      let h = base;
+      if (reg) {
+        const w = reg.wiring.get(type);
+        if (w) h = reg.wrap(w.type, base, w.variantBy ? { variantBy: w.variantBy } : {});
+      }
+      this.dht.onRoutedMessage(type, h);
+    };
     on(T.SUB,      this._onSub);
     on(T.UNSUB,    this._onUnsub);
     on(T.PUB,      this._onPub);
@@ -46,6 +61,18 @@ export const wireHandlersMethods = {
     on(T.PULLRESP, this._onPullResp);
     on(T.ROOTBEACON, this._onRootBeacon);
     on(T.METRICSON, this._onMetricsOn);
+  },
+
+  // REF-1.1 S2 inspector: the Boundary-1 registry's shadow state. `built` is
+  // whether the construction flag armed the registry; `rows` the table size;
+  // `traces` a copy of the bounded trace ring (empty flag-off). Read by
+  // smoke_boundary1_registry.mjs; no effect on dispatch.
+  frameRegistryShadow() {
+    return {
+      built: !!this._frameRegistry,
+      rows: this._frameRegistry ? this._frameRegistry.size() : 0,
+      traces: this._frameTraces ? this._frameTraces.slice() : [],
+    };
   },
 
   // Decide what a topic-targeted message (SUB/PUB) should do at this node.

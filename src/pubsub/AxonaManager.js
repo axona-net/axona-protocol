@@ -68,6 +68,8 @@ import { wireHandlersMethods }  from './wireHandlers.js';
 import { syncEngineMethods }    from './syncEngine.js';
 import { writeFlightMethods }   from './writeFlight.js';
 import { tombstoneAuthWiringMethods, makeTombstoneAuthority } from './tombstoneAuthWiring.js';
+import buildBoundary1Registry from './boundary1Registry.js';
+import { shadowEnabled } from '../registry/index.js';
 
 // Constants, wire types, and the region-lock switch live in constants.js
 // (refactor Phase 2); the caps and region-lock functions are re-exported here
@@ -107,6 +109,7 @@ export class AxonaManager {
     neverRoot = false,             // HARD refusal: a bridge is a bridge (transport + introduction only)
     identity = null,               // node TRANSPORT identity {pubkey, sign} — signs D1 INGEST-ACK proofs
     tombstoneAuth = false,         // REF-1.1 S2.0c Phase 3: DEFAULT-OFF shadow wiring of the tombstone authorization core (observe-only; no behavior change)
+    frameRegistry = false,         // REF-1.1 S2: DEFAULT-OFF Boundary-1 frame-contract registry (shadow-wraps the 19 routed handlers; observe-only; byte-identical flag-off)
     ..._legacy   // accepted-and-ignored clean-break tunables (pickRelayPeer, rootSetSize, …)
   } = {}) {
     if (!dht || typeof dht.routeMessage !== 'function' || typeof dht.getSelfId !== 'function'
@@ -197,6 +200,20 @@ export class AxonaManager {
     // is byte-identical to today. Enforcement (making this the source of truth) is
     // a SEPARATE gate that also needs the signed exp from the envelope flag day.
     this._tombAuthority = tombstoneAuth ? makeTombstoneAuthority() : null;
+
+    // REF-1.1 S2: Boundary-1 frame-contract registry (DEFAULT-OFF). When set, the
+    // 19 routed handlers registered below are shadow-wrapped to OBSERVE a
+    // decoder-certified snapshot beside each handler — no acceptance behavior
+    // changes, and with the runtime shadow flag off the handler runs verbatim
+    // (byte-identical). Traces land in a bounded ring for inspection. Must be
+    // constructed BEFORE _registerHandlers() so the wrap map is available.
+    this._frameTraces = frameRegistry ? [] : null;
+    this._frameRegistry = frameRegistry
+      ? buildBoundary1Registry({
+          enabled: shadowEnabled,
+          sink: (rec) => { const b = this._frameTraces; if (b.length >= 1024) b.shift(); b.push(rec); },
+        })
+      : null;
 
     this.renewMs     = renewMs;          // adaptive ceiling
     this.renewFastMs = renewFastMs;      // adaptive floor
