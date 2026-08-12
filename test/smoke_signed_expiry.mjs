@@ -108,6 +108,12 @@ await rej('5: computeMsgIdV2 rejects an unsafe exp before hashing', 'BAD_EXP', (
 await rej('5: computeMsgIdV2 rejects a safe exp whose exp+CLOCK_SKEW is unsafe', 'BAD_EXP', () => computeMsgIdV2({ publisher: PUB, message: MSG, topicId: TOPIC, exp: MAX - 2 }));
 await rej('5: clampExp rejects ts = MAX_SAFE_INTEGER (clamped exp overflows)', 'BAD_EXP', () => clampExp(MAX));
 await rej('5: clampExp rejects an unsafe ts', 'BAD_EXP', () => clampExp(MAX + 5));
+// The EXPORTED helpers fail closed themselves — a Phase 3 caller can reach
+// effectiveDeath/isBodyFresh directly with an unvalidated envelope exp.
+await rej('5: effectiveDeath fails closed on exp = MAX_SAFE_INTEGER (skew overflows)', 'BAD_EXP', () => effectiveDeath(MAX));
+await rej('5: effectiveDeath fails closed on an unsafe exp (> MAX_SAFE_INTEGER)', 'BAD_EXP', () => effectiveDeath(MAX + 1));
+await rej('5: isBodyFresh inherits the guard — isBodyFresh(MAX, MAX) rejects (not true)', 'BAD_EXP', () => isBodyFresh(MAX, MAX));
+await rej('5: isBodyFresh rejects a safe now with an unsafe exp', 'BAD_EXP', () => isBodyFresh(0, MAX + 1));
 // A validated max-safe deadline still behaves correctly at effectiveDeath/isBodyFresh.
 const EXP_HI = MAX - CLOCK_SKEW - 1;                 // safe, and EXP_HI+CLOCK_SKEW = MAX-1 is safe
 ok('5: effectiveDeath at the safe-max boundary stays exact', effectiveDeath(EXP_HI) === MAX - 1 && Number.isSafeInteger(effectiveDeath(EXP_HI)));

@@ -177,8 +177,22 @@ export function validateExp(ts, exp) {
   return exp;
 }
 
-/** The one committed death used everywhere: effectiveDeath = exp + CLOCK_SKEW. */
-export function effectiveDeath(exp) { return exp + CLOCK_SKEW; }
+/**
+ * The one committed death used everywhere: effectiveDeath = exp + CLOCK_SKEW.
+ * Enforces the safe-exp guard itself (D1): this is an EXPORTED helper a Phase 3
+ * caller can reach directly with an unvalidated envelope exp, so it must fail
+ * closed rather than return an imprecise (unsafe-integer) deadline. The upstream
+ * compute/validate/clamp guards do not cover a direct call here.
+ */
+export function effectiveDeath(exp) {
+  assertSafeExp(exp);
+  return exp + CLOCK_SKEW;
+}
 
-/** A body is fresh (deliverable / suppressible) iff now <= effectiveDeath(exp). */
+/**
+ * A body is fresh (deliverable / suppressible) iff now <= effectiveDeath(exp).
+ * Inherits effectiveDeath's safe-exp guard, so an unsafe exp THROWS rather than
+ * yielding a bogus verdict (isBodyFresh(MAX_SAFE_INTEGER, MAX_SAFE_INTEGER) must
+ * not return true).
+ */
 export function isBodyFresh(now, exp) { return now <= effectiveDeath(exp); }
