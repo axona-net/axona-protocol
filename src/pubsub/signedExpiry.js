@@ -34,10 +34,20 @@
 //
 // PROFILE NOTE: 64/66 are the normative PRODUCTION widths. Under the shrunk sim
 // keyspace profile (configureKeyspace / AUTH_VERIFY_RELAXED) the ids are the
-// profile's truncated widths and enter computeMsgIdV2 at that width, exactly as
-// they do today; callers on that path pass { enforceWidths: false }. The sim
-// profile is not a production identity and its records are non-transferable to
-// production across the flag-day cutoff.
+// profile's truncated widths and enter computeMsgIdV2 at that width. A caller on
+// that path passes the EXPLICIT sim widths ({ pubWidth, topicWidth }); it does
+// NOT get to turn validation off. The relaxed profile permits a narrower
+// fixed-width canonical id — never an arbitrary type, a non-hex value, an
+// upper-case alias, or an unconstrained length: string + lowercase-hex + exact
+// configured width is always enforced. The sim profile is not a production
+// identity and its records are non-transferable to production across the
+// flag-day cutoff.
+//
+// TIMESTAMP CONTRACT (D1): ts and exp are finite SAFE integers. A value past
+// Number.MAX_SAFE_INTEGER loses precision, so it can never be committed into the
+// content address (computeMsgIdV2) or the deadline (validateExp/clampExp); those
+// fail closed, and the guard also rejects an exp whose exp + CLOCK_SKEW would
+// itself leave the safe range.
 //
 // PURITY: no Date.now() here — every time function takes `now`/`ts` from the
 // caller, so it is deterministic and testable.
@@ -56,9 +66,15 @@ export const MSGID_DOMAIN_V2 = 'axona:pubsub-msgid:v2';
 export const TTL_CEILING = TTL_MS;   // 24h absolute hold ceiling (constants.TTL_MS)
 export const CLOCK_SKEW  = 5_000;    // symmetric clock-skew allowance (ms)
 
-// Production identity widths. Lowercase-hex only, exact length — no normalize.
-const PUBLISHER_RE = /^[0-9a-f]{64}$/;   // 32-byte Ed25519 verification key
-const TOPICID_RE   = /^[0-9a-f]{66}$/;   // region byte + 32
+// Normative PRODUCTION identity widths. Lowercase-hex only, exact length.
+export const PUBLISHER_WIDTH = 64;   // 32-byte Ed25519 verification key
+export const TOPICID_WIDTH   = 66;   // region byte + 32
+const HEX_RE = /^[0-9a-f]+$/;        // lowercase hex ONLY — rejects upper-case + non-hex
+
+/** True iff `s` is a lowercase-hex STRING of exactly `width` chars. */
+function isHexOfWidth(s, width) {
+  return typeof s === 'string' && s.length === width && HEX_RE.test(s);
+}
 
 /** Typed error for pre-hash / lifetime rejections. `.code` names the failure. */
 export class SignedExpiryError extends Error {
@@ -66,17 +82,35 @@ export class SignedExpiryError extends Error {
 }
 
 /**
- * Validate the V2 identity widths BEFORE hashing (production profile).
- * publisher: exactly 64 lowercase hex, or JSON null (anonymous, local-only).
- * topicId:   exactly 66 lowercase hex.
- * Throws SignedExpiryError on any other form. This is the pre-hash gate the
- * golden/rejection vectors exercise.
+ * Fail closed unless `exp` is a finite SAFE integer whose committed death
+ * (exp + CLOCK_SKEW) is also safe — so nothing past Number.MAX_SAFE_INTEGER is
+ * ever hashed into the identity or used as a deadline (D1). Internal helper.
  */
-export function assertV2Widths(publisher, topicId) {
-  if (publisher !== null && !(typeof publisher === 'string' && PUBLISHER_RE.test(publisher)))
-    throw new SignedExpiryError('publisher must be exactly 64 lowercase hex or null', 'BAD_PUBLISHER_WIDTH');
-  if (!(typeof topicId === 'string' && TOPICID_RE.test(topicId)))
-    throw new SignedExpiryError('topicId must be exactly 66 lowercase hex', 'BAD_TOPICID_WIDTH');
+function assertSafeExp(exp) {
+  if (!Number.isSafeInteger(exp))
+    throw new SignedExpiryError('exp must be a finite safe-integer ms timestamp', 'BAD_EXP');
+  if (!Number.isSafeInteger(exp + CLOCK_SKEW))
+    throw new SignedExpiryError('exp + CLOCK_SKEW exceeds the safe-integer range', 'BAD_EXP');
+}
+
+/**
+ * Validate the V2 identity widths BEFORE hashing.
+ * publisher: exactly `pubWidth` lowercase hex, or JSON null (anonymous, local-only).
+ * topicId:   exactly `topicWidth` lowercase hex.
+ * The widths default to the production 64/66; a sim-relaxed caller passes its
+ * EXPLICIT narrower widths. There is no validation-off mode: string +
+ * lowercase-hex + exact width is enforced at every width, so an object, an
+ * array, a non-hex value, an upper-case alias, or a wrong length is rejected on
+ * every profile. Throws SignedExpiryError on any other form. This is the
+ * pre-hash gate the golden/rejection vectors exercise.
+ */
+export function assertV2Widths(publisher, topicId, { pubWidth = PUBLISHER_WIDTH, topicWidth = TOPICID_WIDTH } = {}) {
+  if (!Number.isInteger(pubWidth) || pubWidth <= 0 || !Number.isInteger(topicWidth) || topicWidth <= 0)
+    throw new SignedExpiryError('profile widths must be positive integers', 'BAD_PROFILE_WIDTH');
+  if (publisher !== null && !isHexOfWidth(publisher, pubWidth))
+    throw new SignedExpiryError(`publisher must be exactly ${pubWidth} lowercase hex or null`, 'BAD_PUBLISHER_WIDTH');
+  if (!isHexOfWidth(topicId, topicWidth))
+    throw new SignedExpiryError(`topicId must be exactly ${topicWidth} lowercase hex`, 'BAD_TOPICID_WIDTH');
 }
 
 /**
@@ -91,13 +125,14 @@ export function msgIdV2Preimage({ publisher, message, topicId, exp }) {
 /**
  * Compute the V2 (Option-1) content address.
  * @param {{publisher: string|null, message: *, topicId: string, exp: number}} core
- * @param {{enforceWidths?: boolean}} [opts]  enforceWidths (default true) applies the
- *        production 64/66 gate; pass false only on the sim-relaxed keyspace path.
+ * @param {{pubWidth?: number, topicWidth?: number}} [opts]  identity widths; default
+ *        the production 64/66. A sim-relaxed caller passes its explicit narrower
+ *        widths — validation is never disabled, only re-sized (see assertV2Widths).
  * @returns {Promise<string>} 64-char hex sha256
  */
-export function computeMsgIdV2({ publisher, message, topicId, exp }, { enforceWidths = true } = {}) {
-  if (!Number.isInteger(exp)) throw new SignedExpiryError('exp must be an integer ms timestamp', 'BAD_EXP');
-  if (enforceWidths) assertV2Widths(publisher, topicId);
+export function computeMsgIdV2({ publisher, message, topicId, exp }, { pubWidth, topicWidth } = {}) {
+  assertSafeExp(exp);
+  assertV2Widths(publisher, topicId, { pubWidth, topicWidth });
   return sha256Hex(msgIdV2Preimage({ publisher, message, topicId, exp }));
 }
 
@@ -112,19 +147,33 @@ export function computeMsgIdV1({ publisher = null, message }) {
 
 // ---- committed lifetime (D1/D2) --------------------------------------------
 
-/** The maximal exp a publisher may sign for a message minted at `ts`. */
-export function clampExp(ts) { return ts + TTL_CEILING; }
+/**
+ * The maximal exp a publisher may sign for a message minted at `ts`.
+ * Fails closed on an unsafe ts, or if the clamped exp + CLOCK_SKEW would leave
+ * the safe-integer range (D1) — a clamped deadline is never silently imprecise.
+ */
+export function clampExp(ts) {
+  if (!Number.isSafeInteger(ts))
+    throw new SignedExpiryError('ts must be a finite safe-integer ms timestamp', 'BAD_EXP');
+  const exp = ts + TTL_CEILING;
+  if (!Number.isSafeInteger(exp + CLOCK_SKEW))
+    throw new SignedExpiryError('clamped exp + CLOCK_SKEW exceeds the safe-integer range', 'BAD_EXP');
+  return exp;
+}
 
 /**
  * Validate a committed exp against its mint ts: ts < exp <= ts + TTL_CEILING.
- * A normal 24h message sets exp = ts + TTL_CEILING. Throws on out-of-range so
- * an ingress can fail closed; returns the exp on success.
+ * A normal 24h message sets exp = ts + TTL_CEILING. Both ts and exp must be
+ * finite SAFE integers, and exp + CLOCK_SKEW must stay safe (D1). Throws on
+ * out-of-range so an ingress can fail closed; returns the exp on success.
  */
 export function validateExp(ts, exp) {
-  if (!Number.isInteger(ts) || !Number.isInteger(exp))
-    throw new SignedExpiryError('ts and exp must be integer ms timestamps', 'BAD_EXP');
+  if (!Number.isSafeInteger(ts) || !Number.isSafeInteger(exp))
+    throw new SignedExpiryError('ts and exp must be finite safe-integer ms timestamps', 'BAD_EXP');
   if (!(exp > ts))            throw new SignedExpiryError('exp must be strictly after ts', 'EXP_NOT_AFTER_TS');
   if (exp > ts + TTL_CEILING) throw new SignedExpiryError('exp exceeds ts + TTL_CEILING', 'EXP_OVER_CEILING');
+  if (!Number.isSafeInteger(exp + CLOCK_SKEW))
+    throw new SignedExpiryError('exp + CLOCK_SKEW exceeds the safe-integer range', 'BAD_EXP');
   return exp;
 }
 
