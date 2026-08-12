@@ -322,6 +322,73 @@ async function main() {
     await fab.settle();
   }
 
+  // ---- H. PROOF-SIGNER CONSISTENCY — the verified proof signer is authoritative
+  //      (Aster S1 + S2). A proof carried with a MISSING or CONFLICTING signer is
+  //      stripped; a retained/emitted proof-bearing marker always carries the verified
+  //      signer (never null); an upgrade OVERRIDES a stale/poisoned prior signer; a
+  //      SECOND receiver retains the re-emitted consistent proof + strips a poisoned one.
+  {
+    const fab = new Fabric({ tombstoneAuth: true });
+    const nodes = nodeIds.map(id => fab.addNode(id));
+    const dH = { region:'useast', owner:null, name:'ta-signerconsistency', write:'open' };
+    const tH = await deriveTopicIdBig(dH);
+    nodes[0].am.pubsubSubscribe(tH); nodes[2].am.pubsubSubscribe(tH);
+    await fab.settle(); fab.clock += 6000; await fab.tickAll();
+    const eH1 = await buildEnvelope({ topic: dH, message: { h: 1 }, seq: 1, identity: alice, ts: fab.clock });
+    const eH2 = await buildEnvelope({ topic: dH, message: { h: 2 }, seq: 2, identity: alice, ts: fab.clock + 1 });
+    const eH3 = await buildEnvelope({ topic: dH, message: { h: 3 }, seq: 3, identity: alice, ts: fab.clock + 2 });
+    nodes[1].am.pubsubPublish(tH, JSON.stringify(eH1)); await fab.settle();
+    nodes[1].am.pubsubPublish(tH, JSON.stringify(eH2)); await fab.settle();
+    nodes[1].am.pubsubPublish(tH, JSON.stringify(eH3)); await fab.settle();
+    const rH = root(fab, tH);
+    const tombH = (mid) => rH.am.axonRoles.get(tH)?.tombstones?.get(mid);
+    const fannedMarker = (mid) => { for (const j of fab.queue) { const x = (j.payload?.msgs || []).find(y => y && y.del && y.msgId === mid && y.kill); if (x) return x; } return null; };
+    const mallory = bob.pubkeyHex;   // an arbitrary signer DISTINCT from alice's
+    const deliverH = (marker) => rH.am._onDeliver({ topicId: idHex(tH), from: idHex(nodeIds[7]), msgs: [marker] }, { targetId: rH.id });
+
+    // H1 (S1) — a valid proof with a MISSING carrier signer is stripped: not retained/observed.
+    const kH1 = await buildKill({ topicId: idHex(tH), msgId: eH1.msgId, seq: 9, identity: alice });
+    const hb1 = rH.am.tombstoneAuthShadow();
+    await deliverH({ del: true, msgId: eH1.msgId, killTs: fab.clock + 40, seq: 9, kill: kH1 });   // NO signer field
+    const ha1 = rH.am.tombstoneAuthShadow();
+    check('H1. S1: proof with a MISSING carrier signer is stripped (not retained/observed)',
+      tombH(eH1.msgId)?.kill === undefined && ha1.stats.kills === hb1.stats.kills);
+    await fab.settle();
+
+    // H2 (S1) — a consistent proof (signer present + matching) is retained with the VERIFIED
+    //           signer and re-fanned carrying it — never null.
+    const kH3 = await buildKill({ topicId: idHex(tH), msgId: eH3.msgId, seq: 10, identity: alice });
+    fab.queue.length = 0;
+    await deliverH({ del: true, msgId: eH3.msgId, killTs: fab.clock + 45, seq: 10, signer: kH3.signerPubkey, kill: kH3 });
+    const fmH2 = fannedMarker(eH3.msgId);
+    check('H2. S1: consistent proof retained with the VERIFIED signer + re-fanned carrying it (never null)',
+      lc(tombH(eH3.msgId)?.signer) === lc(kH3.signerPubkey) && !!fmH2 && lc(fmH2.signer) === lc(kH3.signerPubkey));
+    await fab.settle();
+
+    // H3 (S2) — proof-less tombstone installed with a CONFLICTING prior signer (Mallory), then a
+    //           valid Alice proof upgrades it: the tombstone signer becomes Alice, and the
+    //           re-emitted marker is CONSISTENT (signer Alice + Alice proof), never poisoned.
+    await rH.am._applyDels(rH.am.axonRoles.get(tH), tH, [{ del: true, msgId: eH2.msgId, killTs: fab.clock + 50, seq: 11, signer: mallory }]);   // unsigned, signer=Mallory
+    check('H3a. proof-less tombstone carries the prior (Mallory) signer, no proof', tombH(eH2.msgId) && tombH(eH2.msgId).kill === undefined && lc(tombH(eH2.msgId).signer) === lc(mallory));
+    const kH2 = await buildKill({ topicId: idHex(tH), msgId: eH2.msgId, seq: 12, identity: alice });
+    fab.queue.length = 0;
+    await deliverH({ del: true, msgId: eH2.msgId, killTs: fab.clock + 55, seq: 12, signer: kH2.signerPubkey, kill: kH2 });
+    const fmH3 = fannedMarker(eH2.msgId);
+    check('H3b. S2 upgrade OVERRIDES the stale signer: tombstone signer is now the verified proof signer',
+      tombH(eH2.msgId)?.kill?.signature === kH2.signature && lc(tombH(eH2.msgId).signer) === lc(kH2.signerPubkey));
+    check('H3c. S2 upgrade re-emits a CONSISTENT marker (verified signer + its proof), never poisoned',
+      !!fmH3 && lc(fmH3.signer) === lc(kH2.signerPubkey) && fmH3.kill?.signature === kH2.signature);
+    await fab.settle();
+
+    // H4 (S2 convergence) — a SECOND, independent receiver retains the re-emitted CONSISTENT
+    //     marker and strips the poisoned one (signer Mallory + Alice proof), at its verify gate.
+    const rx = nodes[5];
+    const okConsistent = await rx.am._taVerifyBoundKill(tH, fmH3);
+    const okPoison = await rx.am._taVerifyBoundKill(tH, { del: true, msgId: eH2.msgId, killTs: fab.clock + 60, seq: 12, signer: mallory, kill: kH2 });
+    check('H4a. second receiver ACCEPTS the re-emitted consistent proof (converges — would retain)', !!okConsistent && okConsistent.signature === kH2.signature);
+    check('H4b. second receiver STRIPS a poisoned marker (signer Mallory + Alice proof)', okPoison === null);
+  }
+
   console.log(`\nResult: ${passed} passed, ${failed} failed`);
   process.exit(failed === 0 ? 0 : 1);
 }

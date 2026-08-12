@@ -153,7 +153,11 @@ export const tombstoneAuthWiringMethods = {
       if (!bound) { ta.stats.skipped++; return null; }                     // proof bound to this topic
       const v = await verifyKill(k);                                       // LOCAL signature verify
       if (!v.ok) { ta.stats.skipped++; return null; }
-      if (marker.signer != null && lc(v.signerPubkey) !== lc(marker.signer)) { ta.stats.skipped++; return null; } // signer binds
+      // The verified proof signer MUST be present in AND match the carrier (Aster S1):
+      // a proof carried with a missing or conflicting signer is stripped, never retained
+      // or re-emitted. Our own emitters always stamp the carrier signer FROM the verified
+      // proof (see _applyKill), so a consistent proof-bearing marker always passes here.
+      if (marker.signer == null || lc(marker.signer) !== lc(v.signerPubkey)) { ta.stats.skipped++; return null; }
       this._taObserveKill(topicBig, k, v.signerPubkey);                    // shadow earns the verified, bound proof
       return k;                                                            // live path may now retain + transport it
     } catch { ta.stats.errors++; return null; }

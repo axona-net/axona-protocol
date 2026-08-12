@@ -848,6 +848,11 @@ export const wireHandlersMethods = {
     if (this._tombAuthority && m.kill && typeof m.kill.msgId === 'string' && m.kill.msgId === target) {
       try { if (m.kill.topicId != null && idBig(m.kill.topicId) === topicBig) proof = m.kill; } catch { proof = null; }
     }
+    // When a proof is retained, the proof's VERIFIED signer is authoritative and stamps
+    // the tombstone + every proof-bearing marker we emit, so a receiver's _taVerifyBoundKill
+    // (which now requires a present matching carrier signer) always accepts it — never an
+    // internally inconsistent carrier (Aster S1/S2). Flag-off / proof-less keeps m.signer.
+    const proofSigner = proof ? lc(proof.signerPubkey) : null;
     const existing = role ? role.tombstones.get(target) : null;
     if (role && existing && proof && !existing.kill) {
       // B2 UPGRADE — a proof-less tombstone gains a verified, bound proof. Attach it and
@@ -856,7 +861,8 @@ export const wireHandlersMethods = {
       // (cache drop, app kill delivery, pending confirm) already ran on first sighting,
       // so this is a PURE proof-attach and must not repeat them.
       existing.kill = proof;
-      this._fanout(role, { del: true, msgId: target, killTs: existing.killTs, signer: existing.signer ?? null, publishTs: existing.killTs, seq: existing.seq, kill: proof }, null);
+      existing.signer = proofSigner;   // the proof's verified signer becomes authoritative (Aster S2) — no stale/conflicting carrier
+      this._fanout(role, { del: true, msgId: target, killTs: existing.killTs, signer: existing.signer, publishTs: existing.killTs, seq: existing.seq, kill: proof }, null);
       if (role.isRoot && this._rootReplicas) {
         const bridge = (typeof this.dht.bridgeId === 'function') ? this.dht.bridgeId() : null;
         this._replicateRole(topicBig, role, bridge, this._now()).catch(() => {});
@@ -864,7 +870,7 @@ export const wireHandlersMethods = {
       return;
     }
     if (role && !existing) {
-      const tomb = { exp: this._now() + TTL_MS, killTs, signer: m.signer ?? null, seq };
+      const tomb = { exp: this._now() + TTL_MS, killTs, signer: proof ? proofSigner : (m.signer ?? null), seq };
       if (proof) tomb.kill = proof;                    // retain only the bound, caller-verified proof
       role.tombstones.set(target, tomb);
       const i = role.cache.findIndex(c => c.msgId === target);
@@ -872,8 +878,8 @@ export const wireHandlersMethods = {
       role.cacheIds.delete(target);
       // fan the delete down — carries killTs + signer + seq so each receiver records
       // an identical tombstone (consistent replay + ordering + provisional authorship);
-      // flag-on it also carries the BOUND signed kill so receivers can verify it themselves.
-      this._fanout(role, { del: true, msgId: target, killTs, signer: m.signer ?? null, publishTs: killTs, seq, ...(proof ? { kill: proof } : {}) }, null);
+      // flag-on it also carries the BOUND signed kill + its verified signer so receivers verify it.
+      this._fanout(role, { del: true, msgId: target, killTs, signer: tomb.signer, publishTs: killTs, seq, ...(proof ? { kill: proof } : {}) }, null);
       // Replicas/cohort aren't subscribers/children — they don't see the fan-out. Push the
       // new tombstone to the cohort EAGERLY (not on the next tick) so a co-hosting root or a
       // backup that promotes mid-window can't serve the killed body it already holds (the
