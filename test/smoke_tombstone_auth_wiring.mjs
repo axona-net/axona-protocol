@@ -380,13 +380,29 @@ async function main() {
       !!fmH3 && lc(fmH3.signer) === lc(kH2.signerPubkey) && fmH3.kill?.signature === kH2.signature);
     await fab.settle();
 
-    // H4 (S2 convergence) — a SECOND, independent receiver retains the re-emitted CONSISTENT
-    //     marker and strips the poisoned one (signer Mallory + Alice proof), at its verify gate.
+    // H4 (S2 convergence — ACTUAL FUNNEL) — an INDEPENDENT second receiver WITH A ROLE ingests
+    //     the re-emitted CONSISTENT marker through the real _onDeliver funnel and RETAINS the
+    //     proof + verified signer (its shadow observes the kill). The poisoned marker (signer
+    //     Mallory + Alice proof) driven through the real _applyDels funnel installs a PROOF-LESS
+    //     tombstone and is NOT observed. This is the end-to-end retention/upgrade regression gate:
+    //     it stays red if wiring later drops the proof while verification still passes (Aster).
     const rx = nodes[5];
-    const okConsistent = await rx.am._taVerifyBoundKill(tH, fmH3);
-    const okPoison = await rx.am._taVerifyBoundKill(tH, { del: true, msgId: eH2.msgId, killTs: fab.clock + 60, seq: 12, signer: mallory, kill: kH2 });
-    check('H4a. second receiver ACCEPTS the re-emitted consistent proof (converges — would retain)', !!okConsistent && okConsistent.signature === kH2.signature);
-    check('H4b. second receiver STRIPS a poisoned marker (signer Mallory + Alice proof)', okPoison === null);
+    const rxRole = rx.am._becomeRoot(tH, 'second-receiver');
+    const rxTomb = () => rx.am.axonRoles.get(tH)?.tombstones?.get(eH2.msgId);
+    const rxb = rx.am.tombstoneAuthShadow();
+    await rx.am._onDeliver({ topicId: idHex(tH), from: idHex(nodeIds[7]), msgs: [fmH3] }, { targetId: rx.id });
+    const rxa = rx.am.tombstoneAuthShadow();
+    check('H4a. second receiver RETAINS the re-emitted consistent proof + verified signer via _onDeliver (shadow observed the kill)',
+      !!rxRole && rxTomb()?.kill?.signature === kH2.signature && lc(rxTomb().signer) === lc(kH2.signerPubkey) && rxa.stats.kills > rxb.stats.kills);
+
+    const ry = nodes[6];
+    const ryRole = ry.am._becomeRoot(tH, 'second-receiver-poison');
+    const ryTomb = () => ry.am.axonRoles.get(tH)?.tombstones?.get(eH2.msgId);
+    const ryb = ry.am.tombstoneAuthShadow();
+    await ry.am._applyDels(ryRole, tH, [{ del: true, msgId: eH2.msgId, killTs: fab.clock + 60, seq: 12, signer: mallory, kill: kH2 }]);
+    const rya = ry.am.tombstoneAuthShadow();
+    check('H4b. poisoned marker through _applyDels installs a PROOF-LESS tombstone + kill NOT observed',
+      !!ryRole && !!ryTomb() && ryTomb().kill === undefined && rya.stats.kills === ryb.stats.kills);
   }
 
   console.log(`\nResult: ${passed} passed, ${failed} failed`);
