@@ -118,16 +118,29 @@ async function main() {
   check('T4. INGESTACK wiring carries a sig-presence variant discriminator',
     iaw && iaw.type === 'pubsub:ingestack' && iaw.variantBy && iaw.variantBy.path === 'sig' && iaw.variantBy.whenPresent === 'signed' && iaw.variantBy.whenAbsent === 'legacy');
   const byType = new Map(); for (const d of rowDefs()) byType.set(d.variant ? `${d.type}#${d.variant}` : d.type, d);
-  check('T5. PUB is an INGESTED ONE_WAY bound to a LegacyAuthorityRef (no forced request/response)',
-    byType.get('pubsub:pub').kind === 'ONE_WAY' && byType.get('pubsub:pub').evidence === 'INGESTED' && byType.get('pubsub:pub').correlation.kind === 'LegacyAuthorityRef');
+  check('T5. PUB is an INGESTED ONE_WAY that is an IngressRef, NOT an authority ref (F3); no msgId idempotency key (F5)',
+    byType.get('pubsub:pub').kind === 'ONE_WAY' && byType.get('pubsub:pub').evidence === 'INGESTED'
+    && byType.get('pubsub:pub').correlation.kind === 'IngressRef' && byType.get('pubsub:pub').idempotency == null);
   check('T6. DELIVER is an OBSERVED MULTICAST with no correlation contract',
     byType.get('pubsub:deliver').kind === 'MULTICAST' && byType.get('pubsub:deliver').evidence === 'OBSERVED' && byType.get('pubsub:deliver').correlation == null);
   check('T7. ROOTBEACON is an UNSOLICITED_EVENT with no correlation (no opposite)',
     byType.get('pubsub:rootbeacon').kind === 'UNSOLICITED_EVENT' && byType.get('pubsub:rootbeacon').correlation == null && byType.get('pubsub:rootbeacon').idempotency.from.includes('beaconId'));
-  check('T8. read path (PULL) correlates by conversation id → registers with no authority correlation',
-    byType.get('pubsub:pull').kind === 'ONE_WAY' && byType.get('pubsub:pull').correlation == null);
+  check('T8. read path (PULL) is a CONVERSATION keyed by corrId, NOT an authority correlation (F3)',
+    byType.get('pubsub:pull').kind === 'ONE_WAY' && byType.get('pubsub:pull').correlation == null
+    && byType.get('pubsub:pull').conversation && byType.get('pubsub:pull').conversation.key.includes('corrId'));
   check('T9. INGESTACK signed vs legacy differ in owningService + sig requirement',
     byType.get('pubsub:ingestack#signed').owningService === 'WriteIngress' && byType.get('pubsub:ingestack#legacy').owningService === 'writeFlight');
+  const iaS = byType.get('pubsub:ingestack#signed');
+  check('T10. signed INGESTACK is the ONLY LegacyAuthorityRef and binds the full flight + proof signer (F3), naming ackProof.js under LEGACY_ROOT_V4 (F2)',
+    iaS.correlation.kind === 'LegacyAuthorityRef'
+    && ['topicId', 'msgId', 'op', 'attemptId', 'ackTo', 'flightNonce', 'rootPub'].every((f) => iaS.correlation.requires.includes(f))
+    && iaS.authGuard === 'verifyAckProof' && iaS.capabilityRange.proofModule === 'ackProof.js' && iaS.capabilityRange.profile === 'LEGACY_ROOT_V4');
+  check('T11. REPLICATE (cohort spray on an unsigned `from`) claims NO authenticated holder subject (F3); handoff pair is a conversation',
+    byType.get('pubsub:replicate').correlation == null && byType.get('pubsub:replicate').conversation == null
+    && byType.get('pubsub:handoff').conversation && byType.get('pubsub:handoff').conversation.key.join(',') === 'topicId,from');
+  check('T12. write frames name real auth/admission guards, not `none` (F2)',
+    byType.get('pubsub:pub').authGuard === 'verifyEnvelope' && byType.get('pubsub:pub').admissionGuard === 'checkFreshness+writePolicy+topicBinding'
+    && byType.get('pubsub:kill').authGuard === 'verifyKill' && Array.isArray(byType.get('pubsub:pub').errorContract) && byType.get('pubsub:pub').errorContract.length > 0);
 
   // ── W. WIRING (construction flag) ────────────────────────────────────────────
   const fabOff = new Fabric({ frameRegistry: false }); const nOff = fabOff.addNode(nodeIds[0]);
@@ -150,22 +163,108 @@ async function main() {
   check('D4. registry-on but flag-OFF is byte-identical AND emits ZERO traces (inert wrap)',
     JSON.stringify(inert.outcome) === JSON.stringify(base.outcome) && inert.traces.length === 0);
 
-  // ── C. OBSERVATION depth (certified vs uncertified) ──────────────────────────
+  // ── C. OBSERVATION across ALL 19 wires (certified in-transit) ────────────────
+  // F6 (Aster): the D block proves byte-identity on LIVE (unbranded) traffic —
+  // that is its job. Branded observation depth is proven HERE by certifying a
+  // schema-satisfying frame per wire type (as the wire decoder does in production)
+  // and driving it through the actually-wrapped handler, then asserting the branded
+  // verdict — plus the INGESTACK variant discriminator, an async (Promise) handler,
+  // a schema-invalid frame, a rejecting handler, a throwing handler, and the
+  // unbranded no-reflection floor.
   {
     setShadowEnabled(true);
+    // A schema-satisfying representative frame per wire (INGESTACK has three).
+    const CERT = {
+      [T.SUB]: { topicId: 'aa', subscriberId: 'bb', since: 0 },
+      [T.UNSUB]: { topicId: 'aa', subscriberId: 'bb' },
+      [T.PUB]: { topicId: 'aa', json: '{"m":1}', via: 'n0', ackTo: 'n0', attemptId: 'x1', flightNonce: 'fn' },
+      [T.KILL]: { topicId: 'aa', kill: { msgId: 'm1', signerPubkey: 'pk' }, ackTo: 'n0', attemptId: 'x1', flightNonce: 'fn' },
+      [T.DELIVER]: { topicId: 'aa', from: 'nn', msgs: [] },
+      [T.ADOPT]: { topicId: 'aa', parent: 'pp', subs: [] },
+      [T.PULLUP]: { topicId: 'aa', sinceHw: 0, parentId: 'pp' },
+      [T.HANDOFFACK]: { topicId: 'aa', held: 1, sent: 1 },
+      [T.REPLAYUP]: { topicId: 'aa', msgs: [], dels: [] },
+      [T.HANDOFF]: { topicId: 'aa', from: 'nn', msgs: [], dels: [] },
+      [T.REPLICATE]: { topicId: 'aa', from: 'nn', msgs: [], dels: [] },
+      [T.RECEIPTPROBE]: { topicId: 'aa', msgId: 'm1', op: 'PUB' },
+      [T.RECEIPTNACK]: { topicId: 'aa', msgId: 'm1', op: 'PUB', reason: 'not-held' },
+      [T.TOUCH]: { topicId: 'aa' },
+      [T.PULL]: { topicId: 'aa', postHash: 'ph', corrId: 'c1', requesterId: 'r1' },
+      [T.PULLRESP]: { corrId: 'c1', json: null, publishTs: 0, requesterId: 'r1' },
+      [T.ROOTBEACON]: { root: 'rr', topics: [], epochs: [], beaconId: 'b1', layer: 0 },
+      [T.METRICSON]: { topicId: 'aa' },
+    };
+    const iaBase = { topicId: 'aa', msgId: 'm1', op: 'PUB', epoch: 1, attemptId: 'x1', ackTo: 'n0', flightNonce: 'fn', rootPub: 'rp', purpose: 'ingest' };
+    const iaSigned = { ...iaBase, sig: 'sigstr' };          // typeof sig === 'string' → signed
+    const iaLegacy = { topicId: 'aa', msgId: 'm1', op: 'PUB', epoch: 1 };  // sig absent → legacy
+    const iaNumSig = { ...iaBase, sig: 123 };               // sig present but numeric → legacy (F4)
+
     const tr = [];
-    const r2 = buildBoundary1Registry({ enabled: () => true, sink: (rec) => tr.push(rec) });
-    const w = r2.wrap('pubsub:sub', () => 'handle', {});
-    // a decoder-certified SUB frame IS observed against the row schema
-    const subFrame = certify(JSON.stringify({ topicId: 'aa', subscriberId: 'bb', since: 0 }));
-    const rc = w.call({}, subFrame, {});
-    check('C1. certified SUB frame: handler verdict preserved + schema-validated trace',
-      rc === 'handle' && tr.length === 1 && tr[0].type === 'pubsub:sub' && tr[0].registered === true && tr[0].schemaOk === true);
-    // an uncertified LIVE frame is never reflected on → observed as nothing
+    const reg2 = buildBoundary1Registry({ enabled: () => true, sink: (rec) => tr.push(rec) });
+    const wrapFor = (wire, handler) => { const w = reg2.wiring.get(wire); return reg2.wrap(w.type, handler, w.variantBy ? { variantBy: w.variantBy } : {}); };
+    const drive = (wire, frame) => { tr.length = 0; wrapFor(wire, () => undefined).call({}, certify(JSON.stringify(frame)), {}); return tr[0]; };
+
+    // C1 — every non-variant wire: certified frame → registered + schemaOk, handler verdict preserved.
+    let sweepOk = 0, sweepN = 0; const misses = [];
+    for (const wire of WIRED) {
+      if (wire === T.INGESTACK) continue;
+      sweepN++;
+      const r = drive(wire, CERT[wire]);
+      const ok = tr.length === 1 && r.type === reg2.wiring.get(wire).type && r.registered === true && r.schemaOk === true && r.verdict === 'passed' && r.faults == null;
+      if (ok) sweepOk++; else misses.push(`${String(wire)}:${JSON.stringify(r)}`);
+    }
+    check(`C1. certified sweep: all ${sweepN} non-variant wires observed registered+schemaOk, handler verdict preserved`, sweepOk === sweepN, `\n   ${misses.join('\n   ')}`);
+
+    // C2 — INGESTACK variant discriminator mirrors the handler's typeof-sig gate (F4).
+    const rS = drive(T.INGESTACK, iaSigned), rL = drive(T.INGESTACK, iaLegacy), rN = drive(T.INGESTACK, iaNumSig);
+    check('C2. INGESTACK signed/legacy/numeric-sig select signed/legacy/legacy (typeof-sig gate)',
+      rS.variant === 'signed' && rS.registered === true && rL.variant === 'legacy' && rL.registered === true && rN.variant === 'legacy',
+      `\n   signed=${rS.variant} legacy=${rL.variant} numsig=${rN.variant}`);
+
+    // C3 — a conversation frame observes conversationPresent, with NO authority correlation.
+    const rPull = drive(T.PULL, CERT[T.PULL]);
+    check('C3. conversation frame (PULL): conversationPresent observed, no authority correlation',
+      rPull.conversationPresent === true && rPull.correlationPresent == null);
+    // C4 — a write frame observes its IngressRef correlation, with NO conversation.
+    const rPub = drive(T.PUB, CERT[T.PUB]);
+    check('C4. write frame (PUB): IngressRef correlationPresent observed, no conversation',
+      rPub.correlationPresent === true && rPub.conversationPresent == null);
+
+    // C5 — certified-but-schema-invalid: still observed (registered), schemaOk=false, handler ran.
+    tr.length = 0; wrapFor(T.SUB, () => undefined).call({}, certify(JSON.stringify({ topicId: 'aa' })), {});
+    check('C5. certified but schema-invalid SUB: registered, schemaOk=false, schema fault, handler still ran',
+      tr.length === 1 && tr[0].registered === true && tr[0].schemaOk === false && tr[0].verdict === 'passed' && (tr[0].faults || []).some((f) => f.startsWith('schema:')));
+
+    // C6 — async handler: the returned Promise is passed through UNTOUCHED; the settled verdict is emitted after resolution (F1).
     tr.length = 0;
-    const rc2 = w.call({}, { topicId: 'aa', subscriberId: 'bb' }, {});
-    check('C2. uncertified live SUB frame: handler verbatim + unbranded-source (no reflection)',
-      rc2 === 'handle' && tr.length === 1 && tr[0].verdict === 'unobserved' && (tr[0].faults || []).includes('unbranded-source'));
+    const pPass = Promise.resolve(undefined);
+    const retA = wrapFor(T.SUB, () => pPass).call({}, certify(JSON.stringify(CERT[T.SUB])), {});
+    check('C6a. async handler: returned Promise passed through by identity (not awaited/rewrapped)', retA === pPass);
+    check('C6b. async handler: NO synchronous verdict emitted before the Promise settles', tr.length === 0);
+    await pPass; await Promise.resolve();
+    check('C6c. async pass: settled verdict emitted after resolution', tr.length === 1 && tr[0].registered === true && tr[0].verdict === 'passed');
+
+    // C7 — rejecting handler: the rejection propagates to the caller untouched; the settled verdict is `threw` (F1).
+    tr.length = 0;
+    const pRej = Promise.reject(new Error('nack'));
+    const retR = wrapFor(T.SUB, () => pRej).call({}, certify(JSON.stringify(CERT[T.SUB])), {});
+    check('C7a. async reject: caller receives the same rejected Promise', retR === pRej);
+    let caught = false; try { await retR; } catch { caught = true; }
+    check('C7b. async reject: caller sees the rejection', caught);
+    await Promise.resolve();
+    check('C7c. async reject: settled verdict is threw', tr.length === 1 && tr[0].verdict === 'threw');
+
+    // C8 — synchronous throw: rethrown to the caller; verdict `threw`.
+    tr.length = 0;
+    let sthrew = false; try { wrapFor(T.SUB, () => { throw new Error('boom'); }).call({}, certify(JSON.stringify(CERT[T.SUB])), {}); } catch { sthrew = true; }
+    check('C8. sync throw: rethrown to caller AND verdict threw emitted', sthrew && tr.length === 1 && tr[0].verdict === 'threw');
+
+    // C9 — the unbranded floor: an uncertified LIVE frame is never reflected on.
+    tr.length = 0;
+    const retU = wrapFor(T.SUB, () => 'handle').call({}, { topicId: 'aa', subscriberId: 'bb' }, {});
+    check('C9. uncertified live frame: handler verbatim + unbranded-source (no reflection)',
+      retU === 'handle' && tr.length === 1 && tr[0].verdict === 'unobserved' && (tr[0].faults || []).includes('unbranded-source'));
+
     setShadowEnabled(false);
   }
 

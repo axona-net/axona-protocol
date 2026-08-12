@@ -179,6 +179,22 @@ export function defineRow(row) {
     idempotency = Object.freeze({ from });
   }
 
+  // conversation — DECLARATIVE request/response pairing, SEPARATE from the
+  // authority correlation subject (Aster S2/S3 F3). The correlation-subject union
+  // is authority-centric (LegacyAuthorityRef/IngressRef/HolderRef/AuthorLaneRef);
+  // a read/catch-up pair (PULL↔PULLRESP, PULLUP↔REPLAYUP) is a conversation keyed
+  // by a conversation id (corrId/parentId), NOT an authority subject. `key` names
+  // the projected fields that pair a request with its response. No function.
+  notFn(type, 'conversation', row.conversation);
+  let conversation = null;
+  if (row.conversation != null) {
+    if (!isPlainObject(row.conversation)) fail(type, 'conversation must be a plain spec object');
+    const key = validPaths(type, 'conversation.key', row.conversation.key ?? [], MAX_LIST);
+    if (key.length === 0) fail(type, 'conversation must declare a non-empty key');
+    for (const p of key) if (!inProjection(p)) fail(type, `conversation.key path ${p} is not in the declared projection`);
+    conversation = Object.freeze({ key });
+  }
+
   // budget — plain object, positive ints. maxBytes has a HARD global ceiling
   // (a count cap alone doesn't bound a dispatch-thread scan — Aster S1f #5).
   // maxLeaves caps how many projected leaf paths are read (renamed from maxWork,
@@ -216,7 +232,7 @@ export function defineRow(row) {
     topicProfile: row.topicProfile ?? null, eventIdScheme: row.eventIdScheme ?? null,
     replayCursorType: row.replayCursorType ?? null, orderingModel: row.orderingModel ?? null,
     projection,
-    schema, correlation, idempotency,
+    schema, correlation, idempotency, conversation,
     subjectShape,
     evidence: row.evidence ?? null, producedPolicy: row.producedPolicy ?? null, requiredPolicy: row.requiredPolicy ?? null,
     proves: row.proves ?? null, outcome: row.outcome ?? null, terminalOutcome: row.terminalOutcome ?? null,

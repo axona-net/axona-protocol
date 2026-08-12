@@ -42,6 +42,7 @@ const DEFAULT_MAX_LEAVES = 64;   // projected-leaf cap when a row declares none
 const MAX_REFLECT_OPS = 256;     // fixed hard ceiling on descriptor reads per observation (incl. discriminator)
 const MAX_DEPTH = 8;             // leaf-path segment depth cap
 const BASE = Symbol('registry.base');   // inner-map key for the variant-less row — a private Symbol, never a real variant
+const VARIANT_VALUE_TYPES = new Set(['string', 'number', 'boolean']);   // F4: scalar type gate for a variant discriminator
 
 // Provenance is certified by the decoder-private mint (snapshotMint.js). The
 // shadow layer reflects on a value ONLY if isCertified(value) — a WeakSet
@@ -203,7 +204,27 @@ export class ShadowRegistry {
 
       let result, threw = false;
       try { result = handler.apply(this, args); } catch (e) { threw = true; result = e; }
-      if (pre) { try { self._emit(type, variant, pre, threw ? 'threw' : verdictOf(result), self._safeNow() - pre._t0); } catch { /* */ } }
+      if (pre) {
+        // F1 (Aster): a Promise-returning handler's REAL disposition is only known
+        // when it settles. Emit the settled verdict without altering the returned
+        // Promise — attach a fire-and-forget side observer; never await, never
+        // change the returned value/timing, and the side observer's own rejection
+        // handler prevents an unhandled rejection from the observation itself.
+        // Detect with `instanceof Promise` — a prototype-chain check that reads NO
+        // own property, so a hostile returned object with a `then` getter cannot be
+        // invoked by the observation (smoke_registry_core 8a).
+        if (!threw && result instanceof Promise) {
+          const t0 = pre._t0;
+          try {
+            result.then(
+              (v) => { try { self._emit(type, variant, pre, verdictOf(v), self._safeNow() - t0); } catch { /* */ } },
+              () => { try { self._emit(type, variant, pre, 'threw', self._safeNow() - t0); } catch { /* */ } },
+            );
+          } catch { /* a thenable whose .then throws must never break dispatch */ }
+        } else {
+          try { self._emit(type, variant, pre, threw ? 'threw' : verdictOf(result), self._safeNow() - pre._t0); } catch { /* */ }
+        }
+      }
       if (threw) throw result;
       return result;
     };
@@ -237,6 +258,7 @@ export class ShadowRegistry {
     const s = evalSchema(row.schema, facts.payload, facts.meta);
     out.schemaOk = s.ok; if (!s.ok) out.schemaCode = s.code;
     if (row.correlation) out.correlationPresent = evalPresence(row.correlation.requires, facts.payload, facts.meta);
+    if (row.conversation) out.conversationPresent = evalPresence(row.conversation.key, facts.payload, facts.meta);   // F3
     if (row.idempotency) out.idempotencyPresent = evalPresence(row.idempotency.from, facts.payload, facts.meta);
     return out;
   }
@@ -262,11 +284,16 @@ export class ShadowRegistry {
         variant: variant == null ? null : variant,
         registered: pre.registered,
         kind: pre.kind ?? null, owningService: pre.owningService ?? null,
-        evidence: pre.evidence ?? null, proves: pre.proves ?? null,
+        // F1 (Aster): these are the row's DECLARED contract — what the frame proves
+        // ON SUCCESS — NOT an observed outcome of this trace. The observed facts are
+        // verdict / schemaOk / faults below; a rejected, rerouted, or merely queued
+        // frame does not ACHIEVE its declared evidence just by being seen.
+        declaredEvidence: pre.evidence ?? null, declaredProves: pre.proves ?? null,
         correlationKind: pre.subjectShape ?? null,
         schemaOk: pre.schemaOk ?? null,
         schemaCode: pre.schemaCode ?? null,
         correlationPresent: pre.correlationPresent ?? null,
+        conversationPresent: pre.conversationPresent ?? null,
         idempotencyPresent: pre.idempotencyPresent ?? null,
         faults: faultCodes(pre),
         verdict,
@@ -295,7 +322,11 @@ function validateVariantBy(type, vb, inner) {
   if (typeof vb.path !== 'string' || !vb.path) throw new TypeError(`wrap(${type}): variantBy.path (string) required`);
   const isVar = (x) => x == null || (typeof x === 'string' && x.length > 0 && x.length <= 64);
   if (!isVar(vb.whenPresent) || !isVar(vb.whenAbsent) || !isVar(vb.default)) throw new TypeError(`wrap(${type}): variantBy variant names must be bounded strings`);
-  const out = { path: vb.path, whenPresent: vb.whenPresent ?? null, whenAbsent: vb.whenAbsent ?? null, default: vb.default ?? null, cases: null };
+  // F4 (Aster): an optional scalar TYPE gate so the discriminator mirrors a handler
+  // that checks `typeof payload.<path> === valueType`. A present-but-wrong-type leaf
+  // is then treated as absent (selects whenAbsent), never as whenPresent.
+  if (vb.valueType != null && !VARIANT_VALUE_TYPES.has(vb.valueType)) throw new TypeError(`wrap(${type}): variantBy.valueType must be one of string|number|boolean`);
+  const out = { path: vb.path, valueType: vb.valueType ?? null, whenPresent: vb.whenPresent ?? null, whenAbsent: vb.whenAbsent ?? null, default: vb.default ?? null, cases: null };
   if (vb.cases != null) {
     if (typeof vb.cases !== 'object' || Array.isArray(vb.cases)) throw new TypeError(`wrap(${type}): variantBy.cases must be a plain object`);
     const caseKeys = Object.keys(vb.cases);
@@ -320,7 +351,12 @@ function validateVariantBy(type, vb, inner) {
 
 function pickVariant(vb, leaf) {
   if (leaf.fault) return { variant: null, fault: leaf.fault };
-  const present = !leaf.absent;
+  let present = !leaf.absent;
+  // F4 (Aster): a type-gated discriminator mirrors a handler that checks
+  // `typeof payload.<path> === valueType`. A present-but-wrong-type leaf (e.g. a
+  // numeric `sig` where the handler wants a string) is treated as absent, so it
+  // selects whenAbsent/default — never the whenPresent variant.
+  if (present && vb.valueType) present = (typeof leaf.value === vb.valueType);
   if (vb.cases && present && leaf.value !== undefined) {
     const key = String(leaf.value);
     if (Object.prototype.hasOwnProperty.call(vb.cases, key)) return { variant: vb.cases[key], fault: null };
