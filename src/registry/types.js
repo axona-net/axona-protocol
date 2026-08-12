@@ -51,6 +51,33 @@ export const CorrelationSubjectKind = Object.freeze({
 });
 const CORRELATION_KINDS = new Set(Object.values(CorrelationSubjectKind));
 
+// Retry classification (§4.4 retry/backoff bound), as a closed vocabulary — the
+// row DECLARES how the frame is retried, it does not run retry code (S1e).
+export const Retry = Object.freeze({
+  NONE: 'NONE',                   // no retry concept — fire-and-forget event or fan-out leg
+  IDEMPOTENT: 'IDEMPOTENT',       // resend-safe; dedup by the declared idempotency key
+  SINGLE_FLIGHT: 'SINGLE_FLIGHT', // bounded writer flight (defer→probe→evict→promote→retry)
+  BOUNDED_ONCE: 'BOUNDED_ONCE',   // earns exactly one direct retry, then gives up
+  FLOOD_DEDUP: 'FLOOD_DEDUP',     // gossip flood; dedup by id, no targeted retry
+});
+const RETRY_CLASSES = new Set(Object.values(Retry));
+
+// The explicit "considered and genuinely inapplicable" marker for a descriptor
+// field (Aster S2/S3 recut-2 F2). A descriptor left `null` is UNCONSIDERED; a
+// descriptor set to NOT_APPLICABLE is a deliberate declaration that the field has
+// no meaning for this frame. The two are distinct; a complete table leaves no
+// applicable descriptor silently null.
+export const NOT_APPLICABLE = 'n/a';
+
+// The conversation leg role — which half of a request/response pair a row is.
+export const ConversationRole = Object.freeze({ REQUEST: 'REQUEST', RESPONSE: 'RESPONSE' });
+const CONVERSATION_ROLES = new Set(Object.values(ConversationRole));
+// Where a paired field is read from: the certified payload, or the routing meta
+// (used when the return destination — not the payload — supplies the peer
+// identity, e.g. REPLAYUP/HANDOFFACK routed back to the requester).
+export const PairSide = Object.freeze({ payload: 'payload', meta: 'meta' });
+const PAIR_SIDES = new Set(Object.values(PairSide));
+
 // Fact type names a schema spec may assert over a projected leaf.
 export const FactType = Object.freeze({
   string: 'string', number: 'number', boolean: 'boolean', bigint: 'bigint',
@@ -107,6 +134,10 @@ export function defineRow(row) {
   for (const p of ['topicProfile', 'eventIdScheme', 'replayCursorType', 'orderingModel', 'producedPolicy', 'requiredPolicy', 'outcome', 'terminalOutcome']) {
     if (row[p] != null && !isStr(row[p])) fail(type, `${p} must be a string or null`);
   }
+  // retry classification (§4.4) — a closed vocabulary, or the explicit N/A marker.
+  if (row.retry != null && row.retry !== NOT_APPLICABLE && !RETRY_CLASSES.has(row.retry)) {
+    fail(type, `retry must be one of ${[...RETRY_CLASSES].join('|')} or ${NOT_APPLICABLE}`);
+  }
   if (row.evidence != null && !EVIDENCE_LEVELS.has(row.evidence)) fail(type, `invalid evidence ${String(row.evidence)}`);
   if (row.proves != null && !PROVES.has(row.proves)) fail(type, `invalid proves ${String(row.proves)}`);
   if (row.evidence != null && row.proves != null && !EVIDENCE_FOR_PROOF[row.proves].has(row.evidence)) {
@@ -153,7 +184,13 @@ export function defineRow(row) {
     schema = Object.freeze({ require: require_, forbid, types: Object.freeze(types) });
   }
 
-  // correlation — DECLARATIVE spec, never a function (S1e).
+  // correlation — DECLARATIVE spec, never a function (S1e). The authority subject
+  // (LegacyAuthorityRef/IngressRef/HolderRef/AuthorLaneRef) is present iff every
+  // `requires` path is present. `binding` (Aster S2/S3 recut-2 F3) additionally
+  // GROUPS those paths into the exact identity they bind — the open flight, the
+  // authority/incarnation, and the proof signer — so a LegacyAuthorityRef declares
+  // the D1 flight match, not a flat presence list. Every binding path must also be
+  // a `requires` path (the group cannot bind a field the subject does not require).
   notFn(type, 'correlation', row.correlation);
   let correlation = null, subjectShape = null;
   if (row.correlation != null) {
@@ -162,7 +199,20 @@ export function defineRow(row) {
     const requires_ = validPaths(type, 'correlation.requires', row.correlation.requires ?? [], MAX_LIST);
     if (requires_.length === 0) fail(type, 'correlation must declare non-empty requires');
     for (const p of requires_) if (!inProjection(p)) fail(type, `correlation.requires path ${p} is not in the declared projection`);
-    correlation = Object.freeze({ kind: row.correlation.kind, requires: requires_ });
+    const requiresSet = new Set(requires_);
+    let binding = null;
+    if (row.correlation.binding != null) {
+      if (!isPlainObject(row.correlation.binding)) fail(type, 'correlation.binding must be a plain object');
+      const bindOut = {};
+      for (const group of ['flight', 'authority', 'proofSigner']) {
+        if (row.correlation.binding[group] == null) continue;
+        const g = validPaths(type, `correlation.binding.${group}`, row.correlation.binding[group], MAX_LIST);
+        for (const p of g) if (!requiresSet.has(p)) fail(type, `correlation.binding.${group} path ${p} is not a correlation.requires path`);
+        bindOut[group] = g;
+      }
+      binding = Object.freeze(bindOut);
+    }
+    correlation = Object.freeze({ kind: row.correlation.kind, requires: requires_, binding });
     subjectShape = row.correlation.kind;
   }
   if (kind === FrameKind.REQUEST_RESPONSE && !correlation) fail(type, 'REQUEST_RESPONSE requires a correlation spec');
@@ -179,20 +229,39 @@ export function defineRow(row) {
     idempotency = Object.freeze({ from });
   }
 
-  // conversation — DECLARATIVE request/response pairing, SEPARATE from the
-  // authority correlation subject (Aster S2/S3 F3). The correlation-subject union
-  // is authority-centric (LegacyAuthorityRef/IngressRef/HolderRef/AuthorLaneRef);
-  // a read/catch-up pair (PULL↔PULLRESP, PULLUP↔REPLAYUP) is a conversation keyed
-  // by a conversation id (corrId/parentId), NOT an authority subject. `key` names
-  // the projected fields that pair a request with its response. No function.
+  // conversation — a DECLARATIVE request/response PAIR ALGEBRA, separate from the
+  // authority correlation subject (Aster S2/S3 recut-2 F3). Presence is not
+  // correlation: a conversation names the OPPOSITE frame type, this leg's `role`,
+  // and a `pairing` — an ordered list of { local, remote, from } field
+  // correspondences. Two frames pair iff, for every entry, this frame's `local`
+  // field equals the opposite frame's `remote` field. `from` says where the local
+  // field is read: the certified `payload`, or the routing `meta` when the return
+  // destination (not the payload) supplies the peer identity — e.g. REPLAYUP and
+  // HANDOFFACK are routed back to the requester, so their requester/parent identity
+  // is a meta field, not a payload field. A meta-sourced local path must be
+  // projected on meta; a payload-sourced one on payload. No function (S1e).
   notFn(type, 'conversation', row.conversation);
   let conversation = null;
   if (row.conversation != null) {
-    if (!isPlainObject(row.conversation)) fail(type, 'conversation must be a plain spec object');
-    const key = validPaths(type, 'conversation.key', row.conversation.key ?? [], MAX_LIST);
-    if (key.length === 0) fail(type, 'conversation must declare a non-empty key');
-    for (const p of key) if (!inProjection(p)) fail(type, `conversation.key path ${p} is not in the declared projection`);
-    conversation = Object.freeze({ key });
+    const c = row.conversation;
+    if (!isPlainObject(c)) fail(type, 'conversation must be a plain spec object');
+    if (!CONVERSATION_ROLES.has(c.role)) fail(type, 'conversation.role (REQUEST|RESPONSE) required');
+    if (!isStr(c.opposite)) fail(type, 'conversation.opposite (the paired frame type) required');
+    if (!Array.isArray(c.pairing) || c.pairing.length === 0) fail(type, 'conversation.pairing must be a non-empty array');
+    if (c.pairing.length > MAX_LIST) fail(type, `conversation.pairing exceeds ${MAX_LIST} entries`);
+    const pairing = [], localKey = [];
+    for (const pr of c.pairing) {
+      if (!isPlainObject(pr)) fail(type, 'conversation.pairing entries must be plain objects');
+      if (!isBoundedStr(pr.local, MAX_PATH) || !isBoundedStr(pr.remote, MAX_PATH)) fail(type, 'conversation.pairing local/remote must be bounded path strings');
+      for (const seg of [...pr.local.split('.'), ...pr.remote.split('.')]) if (UNSAFE_SEG.has(seg)) fail(type, `conversation.pairing path segment "${seg}" is not allowed`);
+      const from = pr.from ?? PairSide.payload;
+      if (!PAIR_SIDES.has(from)) fail(type, 'conversation.pairing.from must be payload|meta');
+      if (from === PairSide.payload && !pPay.includes(pr.local)) fail(type, `conversation.pairing local ${pr.local} is not in projection.payload`);
+      if (from === PairSide.meta && !pMeta.includes(pr.local)) fail(type, `conversation.pairing local ${pr.local} is not in projection.meta`);
+      pairing.push(Object.freeze({ local: pr.local, remote: pr.remote, from }));
+      if (from === PairSide.payload) localKey.push(pr.local);   // payload legs are shadow-observable; meta is unbranded
+    }
+    conversation = Object.freeze({ role: c.role, opposite: c.opposite, pairing: Object.freeze(pairing), localKey: Object.freeze(localKey) });
   }
 
   // budget — plain object, positive ints. maxBytes has a HARD global ceiling
@@ -236,6 +305,7 @@ export function defineRow(row) {
     subjectShape,
     evidence: row.evidence ?? null, producedPolicy: row.producedPolicy ?? null, requiredPolicy: row.requiredPolicy ?? null,
     proves: row.proves ?? null, outcome: row.outcome ?? null, terminalOutcome: row.terminalOutcome ?? null,
+    retry: row.retry ?? null,
     errorContract, traceFields,
     budget: Object.freeze({ maxBytes: b.maxBytes ?? null, maxLeaves: b.maxLeaves ?? null }),
     capabilityRange: Object.freeze({ ...cap }),

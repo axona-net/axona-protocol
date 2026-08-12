@@ -205,25 +205,19 @@ export class ShadowRegistry {
       let result, threw = false;
       try { result = handler.apply(this, args); } catch (e) { threw = true; result = e; }
       if (pre) {
-        // F1 (Aster): a Promise-returning handler's REAL disposition is only known
-        // when it settles. Emit the settled verdict without altering the returned
-        // Promise — attach a fire-and-forget side observer; never await, never
-        // change the returned value/timing, and the side observer's own rejection
-        // handler prevents an unhandled rejection from the observation itself.
-        // Detect with `instanceof Promise` — a prototype-chain check that reads NO
-        // own property, so a hostile returned object with a `then` getter cannot be
-        // invoked by the observation (smoke_registry_core 8a).
-        if (!threw && result instanceof Promise) {
-          const t0 = pre._t0;
-          try {
-            result.then(
-              (v) => { try { self._emit(type, variant, pre, verdictOf(v), self._safeNow() - t0); } catch { /* */ } },
-              () => { try { self._emit(type, variant, pre, 'threw', self._safeNow() - t0); } catch { /* */ } },
-            );
-          } catch { /* a thenable whose .then throws must never break dispatch */ }
-        } else {
-          try { self._emit(type, variant, pre, threw ? 'threw' : verdictOf(result), self._safeNow() - pre._t0); } catch { /* */ }
-        }
+        // S1 INERTNESS (Aster recut-2 F1): the generic core inspects ONLY the
+        // synchronous return, by primitive type. It NEVER touches a returned object —
+        // no `.then`, no `instanceof`-driven branch — because a native Promise
+        // subclass with an own `then` getter would have `instanceof Promise` true and
+        // any subsequent `.then()` would invoke that getter, and attaching a
+        // settlement observer would mark an otherwise-ignored rejection handled and
+        // suppress Node's unhandledRejection. Both are observable, so neither is inert.
+        // A Promise return is therefore verdict 'object' (verdictOf): settlement is NOT
+        // observed here, and declaredEvidence marks evidence as a contract-on-success,
+        // so a deferred handler is not overclaimed as achieved. Real async-outcome
+        // observation belongs in an explicit owning-service adapter on a known effect
+        // path, never in this generic wrapper.
+        try { self._emit(type, variant, pre, threw ? 'threw' : verdictOf(result), self._safeNow() - pre._t0); } catch { /* */ }
       }
       if (threw) throw result;
       return result;
@@ -258,7 +252,14 @@ export class ShadowRegistry {
     const s = evalSchema(row.schema, facts.payload, facts.meta);
     out.schemaOk = s.ok; if (!s.ok) out.schemaCode = s.code;
     if (row.correlation) out.correlationPresent = evalPresence(row.correlation.requires, facts.payload, facts.meta);
-    if (row.conversation) out.conversationPresent = evalPresence(row.conversation.key, facts.payload, facts.meta);   // F3
+    if (row.conversation) {
+      // F3 (recut-3): observe presence of the payload-sourced pairing legs only.
+      // A meta-sourced leg (the return destination supplies the identity) rides
+      // unbranded routing meta, so it is not shadow-observable — record null, never
+      // reflect on it. `localKey` is exactly the payload-side pairing fields.
+      const lk = row.conversation.localKey;
+      out.conversationPresent = lk.length ? evalPresence(lk, facts.payload, facts.meta) : null;
+    }
     if (row.idempotency) out.idempotencyPresent = evalPresence(row.idempotency.from, facts.payload, facts.meta);
     return out;
   }

@@ -1,4 +1,4 @@
-// boundary1Registry.js — REF-1.1 S2 (recut-2): the Boundary-1 (pub/sub + DHT
+// boundary1Registry.js — REF-1.1 S2 (recut-3): the Boundary-1 (pub/sub + DHT
 // control) frame-contract registry TABLE, plus the wiring map that shadow-wraps
 // the 19 routed handlers registered in wireHandlers.js `_registerHandlers`.
 //
@@ -9,44 +9,42 @@
 // beside each handler and emits a trace — never mutating, suppressing, or
 // reordering a handler or its arguments. Dispatch is NOT migrated (§4.3).
 //
-// MODELING (grounded in axona-docs code-refactor-plan §4.3 + Refactor-Phase0-
-// Inventory §1 + Refactor-Phase0-OwnershipMap §2; catalog cross-checked against
-// the live handler bodies). Recut-2 addresses Aster's S2/S3 review (dde2562):
-//   * F2 — the Phase-1 row contract is completed: authentication / admission /
-//     placement guards, error contract, and trace fields are NAMED per frame
-//     (§4.3), not left at `none`. PUB/KILL name envelope/kill authentication,
-//     freshness, topic-binding, and write-policy; signed INGESTACK names
-//     ackProof.js + the flight/proof binding under LEGACY_ROOT_V4; legacy
-//     INGESTACK names adjacent-sender + incarnation; placement/admission frames
-//     name their region/role/admission guards.
-//   * F3 — correlation separates a CONVERSATION (a request/response pairing keyed
-//     by a conversation id — corrId, parentId, from) from the AUTHORITY subject
-//     union. Read/catch-up pairs (PULL↔PULLRESP, PULLUP↔REPLAYUP, HANDOFF↔
-//     HANDOFFACK) declare `conversation`, NOT an authority subject. Writes are an
-//     IngressRef (the ingress attempt — topicId alone is NOT a LegacyAuthorityRef);
-//     the LegacyAuthorityRef is claimed only by INGESTACK, whose signed variant
-//     binds op/attemptId/ackTo/flightNonce/rootPub, not just topicId/msgId. An
-//     unsigned `from`/`parent` is a routing hint, so REPLICATE (a cohort spray)
-//     claims no authenticated holder subject.
-//   * F4 — INGESTACK variant selection mirrors the handler exactly: `signed` only
-//     when `typeof payload.sig === 'string'` (variantBy.valueType:'string'); a
-//     present-but-non-string sig selects `legacy`, as the handler does.
-//   * F5 — PUB idempotency is UNDECLARED: production dedups on the envelope msgId,
-//     which hashes author+message (excludes ts/seq/topic/sig) and lives INSIDE the
-//     signed `json`, so it is not an accurately-observable top-level frame key at
-//     Boundary-1. KILL keeps `kill.msgId` (the projected tombstone key).
-//   * CAP_ATTEST is NOT here (transport/auth boundary). UNPUB is retired.
+// MODELING grounds each row in code-refactor-plan §4.3 (row contract + evidence
+// hierarchy + correlation subject union) and §4.4 (retry/ordering). Recut-3
+// addresses Aster's recut-2 disposition (d1b1d060, which closed F4/F5; F1 fixed
+// in the core):
+//   * F2 — the Phase-1 row contract is COMPLETE per row: authentication /
+//     admission / placement guards, error contract, trace fields, normalized
+//     `outcome` + `terminalOutcome`, `retry` classification, `topicProfile`,
+//     `eventIdScheme`, `replayCursorType`, `orderingModel`, a `capabilityRange`,
+//     and a per-row observation `budget`. A field with no meaning for a frame is
+//     marked NOT_APPLICABLE (NA) explicitly — never silently left null.
+//   * F3 — correlation is a PAIR ALGEBRA, not a presence list. Read/catch-up/
+//     handoff pairs declare `conversation { role, opposite, pairing:[{local,
+//     remote, from}] }`; where the return destination (routing, not payload)
+//     supplies the peer identity — REPLAYUP↔PULLUP, HANDOFFACK↔HANDOFF — the leg
+//     is `from:'meta'`. The authority subject is claimed only where a frame binds
+//     one: signed INGESTACK binds the exact D1 flight + incarnation + proof signer
+//     (`correlation.binding`), legacy INGESTACK binds flight + incarnation, PUB/
+//     KILL bind the ingress ATTEMPT (topicId+attemptId+flightNonce, not topicId
+//     alone), and REPLICATE (unsigned cohort spray) binds nothing.
+//   * F4 — INGESTACK variant selection is type-gated on `typeof sig === 'string'`.
+//   * F5 — PUB frame-level idempotency is left undeclared (msgId is nested in the
+//     signed envelope); KILL keeps kill.msgId.
 //   * No new wire fields. Rows describe the EXISTING frames.
 
 import { T } from './constants.js';
 import {
   defineRow, FrameKind, EvidenceLevel, Proves, CorrelationSubjectKind,
-  ShadowRegistry,
+  Retry, NOT_APPLICABLE as NA, ConversationRole, PairSide, ShadowRegistry,
 } from '../registry/index.js';
 
 const V = { min: 4, max: 4 };                 // Kernel-4 wire version
 const LAR = CorrelationSubjectKind.LegacyAuthorityRef;
 const INGRESS = CorrelationSubjectKind.IngressRef;
+const PROFILE = 'LEGACY_ROOT_V4';             // every Boundary-1 frame runs under the Kernel-4 singleton-root profile
+const REQ = ConversationRole.REQUEST, RESP = ConversationRole.RESPONSE;
+const budget = (leaves, maxBytes = 1024) => ({ maxLeaves: leaves, maxBytes });
 
 // The Boundary-1 row DEFINITIONS. `wire` (a routed-message T.* string) is carried
 // on the def so the wiring map derives from these, not from the minted rows
@@ -54,219 +52,270 @@ const INGRESS = CorrelationSubjectKind.IngressRef;
 // and handler wrapping.
 function rowDefs() {
   return [
-    // ── pub/sub control: subscription lease (TopicDeliveryPlane) ──
+    // ── subscription lease (TopicDeliveryPlane) ──
     ({
       type: 'pubsub:sub', wire: T.SUB, kind: FrameKind.ONE_WAY, owningService: 'TopicDeliveryPlane', versionRange: V,
-      evidence: EvidenceLevel.ROUTED, proves: Proves.ROUTING,
-      placementGuard: 'regionOk+admitRole+meshBareSelfRootGuard',
+      evidence: EvidenceLevel.ROUTED, proves: Proves.ROUTING, outcome: 'RoutingOutcome', terminalOutcome: 'LEASE_ESTABLISHED',
+      retry: Retry.IDEMPOTENT, topicProfile: PROFILE, eventIdScheme: NA, replayCursorType: 'HIGHWATER', orderingModel: 'ARRIVAL',
+      authGuard: NA, admissionGuard: NA, placementGuard: 'regionOk+admitRole+meshBareSelfRootGuard',
       projection: { payload: ['topicId', 'subscriberId', 'since', 'latest', 'hw', 'lw'] },
       schema: { require: ['topicId', 'subscriberId'], types: { topicId: 'string', subscriberId: 'string' } },
-      idempotency: { from: ['topicId', 'subscriberId'] },   // a renewal is idempotent
-      errorContract: ['refuse-region', 'refuse-role-budget'],
-      traceFields: ['topicId', 'subscriberId'],
-      note: 'establishes/renews a delivery lease routed toward topicId; no authority subject',
+      idempotency: { from: ['topicId', 'subscriberId'] },
+      capabilityRange: { profile: PROFILE },
+      errorContract: ['refuse-region', 'refuse-role-budget'], traceFields: ['topicId', 'subscriberId'], budget: budget(6),
+      note: 'establishes/renews a delivery lease routed toward topicId; advertises the subscriber replay cursor (hw/lw)',
     }),
     ({
       type: 'pubsub:unsub', wire: T.UNSUB, kind: FrameKind.ONE_WAY, owningService: 'TopicDeliveryPlane', versionRange: V,
-      evidence: EvidenceLevel.ROUTED, proves: Proves.ROUTING,
+      evidence: EvidenceLevel.ROUTED, proves: Proves.ROUTING, outcome: 'RoutingOutcome', terminalOutcome: 'LEASE_RELEASED',
+      retry: Retry.IDEMPOTENT, topicProfile: PROFILE, eventIdScheme: NA, replayCursorType: NA, orderingModel: 'ARRIVAL',
+      authGuard: NA, admissionGuard: NA, placementGuard: 'regionOk',
       projection: { payload: ['topicId', 'subscriberId'] },
       schema: { require: ['topicId', 'subscriberId'], types: { topicId: 'string', subscriberId: 'string' } },
       idempotency: { from: ['topicId', 'subscriberId'] },
-      traceFields: ['topicId', 'subscriberId'],
+      capabilityRange: { profile: PROFILE },
+      errorContract: ['refuse-region'], traceFields: ['topicId', 'subscriberId'], budget: budget(2),
     }),
 
-    // ── write ingress: PUB / KILL are an ingress attempt (IngressRef), NOT an
-    //    authority reference — the authority is proven by the returned INGESTACK.
+    // ── write ingress: PUB / KILL bind the ingress ATTEMPT (IngressRef), not authority ──
     ({
       type: 'pubsub:pub', wire: T.PUB, kind: FrameKind.ONE_WAY, owningService: 'WriteIngress', versionRange: V,
-      evidence: EvidenceLevel.INGESTED, proves: Proves.INGESTION,
-      authGuard: 'verifyEnvelope',                                   // B-4: signature + msgId
-      admissionGuard: 'checkFreshness+writePolicy+topicBinding',     // C-2 freshness, owner-write, derive===role.topicId
-      placementGuard: 'regionOk+admitRole',
+      evidence: EvidenceLevel.INGESTED, proves: Proves.INGESTION, outcome: 'IngestOutcome', terminalOutcome: 'INGEST_PROOF_OR_EVICT',
+      retry: Retry.SINGLE_FLIGHT, topicProfile: PROFILE, eventIdScheme: 'MSGID_CONTENT_V1', replayCursorType: NA, orderingModel: 'SINGLE_FLIGHT',
+      authGuard: 'verifyEnvelope', admissionGuard: 'checkFreshness+writePolicy+topicBinding', placementGuard: 'regionOk+admitRole',
       projection: { payload: ['topicId', 'json', 'via', 'ackTo', 'attemptId', 'flightNonce'] },
       schema: { require: ['topicId', 'json'], types: { topicId: 'string', json: 'string' } },
-      correlation: { kind: INGRESS, requires: ['topicId'] },
-      // F5: NO idempotency key — production dedups on the envelope msgId, which is
-      // inside the signed `json`, not an observable top-level frame field here.
+      correlation: { kind: INGRESS, requires: ['topicId', 'attemptId', 'flightNonce'], binding: { flight: ['topicId', 'attemptId', 'flightNonce'] } },
+      // F5: no frame-level idempotency key — msgId hashes author+message and lives inside the signed json.
+      capabilityRange: { profile: PROFILE },
       errorContract: ['drop-unparseable', 'drop-bad-envelope', 'drop-stale', 'drop-topic-mismatch', 'drop-write-policy'],
-      traceFields: ['topicId'],
-      note: 'signed envelope routed to the root; ingest proof returns as a separate INGESTACK',
+      traceFields: ['topicId'], budget: budget(6),
+      note: 'signed envelope routed to the root; the ingest attempt (topicId+attemptId+flightNonce) is the IngressRef; proof returns as a separate INGESTACK',
     }),
     ({
       type: 'pubsub:kill', wire: T.KILL, kind: FrameKind.ONE_WAY, owningService: 'WriteIngress', versionRange: V,
-      evidence: EvidenceLevel.INGESTED, proves: Proves.INGESTION,
-      authGuard: 'verifyKill',                                       // signed kill object
-      admissionGuard: 'authorship+topicBinding',                     // signer===author, kill.topicId===role.topicId
+      evidence: EvidenceLevel.INGESTED, proves: Proves.INGESTION, outcome: 'IngestOutcome', terminalOutcome: 'INGEST_PROOF_OR_EVICT',
+      retry: Retry.SINGLE_FLIGHT, topicProfile: PROFILE, eventIdScheme: 'MSGID_CONTENT_V1', replayCursorType: NA, orderingModel: 'SINGLE_FLIGHT',
+      authGuard: 'verifyKill', admissionGuard: 'authorship+topicBinding', placementGuard: 'regionOk+admitRole',
       projection: { payload: ['topicId', 'kill.msgId', 'kill.signerPubkey', 'via', 'ackTo', 'attemptId', 'flightNonce'] },
       schema: { require: ['topicId', 'kill.msgId'], types: { topicId: 'string', 'kill.msgId': 'string' } },
-      correlation: { kind: INGRESS, requires: ['topicId'] },
-      idempotency: { from: ['kill.msgId'] },                          // tombstone keyed by the target msgId
-      errorContract: ['drop-bad-kill-sig', 'drop-authorship-mismatch'],
-      traceFields: ['topicId', 'kill.msgId'],
+      correlation: { kind: INGRESS, requires: ['topicId', 'attemptId', 'flightNonce'], binding: { flight: ['topicId', 'attemptId', 'flightNonce'] } },
+      idempotency: { from: ['kill.msgId'] },
+      capabilityRange: { profile: PROFILE },
+      errorContract: ['drop-bad-kill-sig', 'drop-authorship-mismatch'], traceFields: ['topicId', 'kill.msgId'], budget: budget(7),
     }),
 
     // ── ingest proof: D1 signed + legacy unsigned variants ──
     ({
       type: 'pubsub:ingestack', variant: 'signed', wire: T.INGESTACK, kind: FrameKind.ONE_WAY, owningService: 'WriteIngress', versionRange: V,
-      evidence: EvidenceLevel.INGESTED, proves: Proves.INGESTION,
-      authGuard: 'verifyAckProof',
+      evidence: EvidenceLevel.INGESTED, proves: Proves.INGESTION, outcome: 'IngestOutcome', terminalOutcome: 'PROOF_DELIVERED',
+      retry: Retry.IDEMPOTENT, topicProfile: PROFILE, eventIdScheme: 'MSGID_CONTENT_V1', replayCursorType: NA, orderingModel: 'SINGLE_FLIGHT',
+      authGuard: 'verifyAckProof', admissionGuard: NA, placementGuard: NA,
       projection: { payload: ['topicId', 'msgId', 'op', 'epoch', 'attemptId', 'ackTo', 'flightNonce', 'sig', 'rootPub', 'purpose'] },
       schema: { require: ['topicId', 'msgId', 'sig', 'rootPub'], types: { topicId: 'string', msgId: 'string', sig: 'string', rootPub: 'string' } },
-      // F3: the FULL D1 flight + proof-signer binding, not a topicId/msgId presence test.
-      correlation: { kind: LAR, requires: ['topicId', 'msgId', 'op', 'attemptId', 'ackTo', 'flightNonce', 'rootPub'] },
+      // F3: the D1 subject binds the EXACT open flight, the incarnation, and the proof signer — grouped, not a flat list.
+      correlation: {
+        kind: LAR, requires: ['topicId', 'msgId', 'op', 'epoch', 'attemptId', 'ackTo', 'flightNonce', 'rootPub'],
+        binding: { flight: ['topicId', 'msgId', 'op', 'attemptId', 'ackTo', 'flightNonce'], authority: ['epoch'], proofSigner: ['rootPub'] },
+      },
       idempotency: { from: ['topicId', 'msgId', 'op'] },
-      capabilityRange: { proofModule: 'ackProof.js', profile: 'LEGACY_ROOT_V4' },
-      errorContract: ['drop-bad-proof', 'drop-flight-mismatch', 'drop-wrong-signer'],
-      traceFields: ['topicId', 'msgId', 'op'],
-      note: 'D1 signed proof; byte construction/verification owned by ackProof.js; bound under LEGACY_ROOT_V4',
+      capabilityRange: { proofModule: 'ackProof.js', profile: PROFILE },
+      errorContract: ['drop-bad-proof', 'drop-flight-mismatch', 'drop-wrong-signer'], traceFields: ['topicId', 'msgId', 'op'], budget: budget(10),
+      note: 'D1 signed proof; byte construction/verification owned by ackProof.js; binds (topicId,msgId,op,attemptId,ackTo,flightNonce)+epoch+rootPub',
     }),
     ({
       type: 'pubsub:ingestack', variant: 'legacy', wire: T.INGESTACK, kind: FrameKind.ONE_WAY, owningService: 'writeFlight', versionRange: V,
-      evidence: EvidenceLevel.INGESTED, proves: Proves.INGESTION,
-      authGuard: 'adjacentSenderAuth',                               // authenticated adjacent sender + intended incarnation
+      evidence: EvidenceLevel.INGESTED, proves: Proves.INGESTION, outcome: 'IngestOutcome', terminalOutcome: 'PROOF_DELIVERED',
+      retry: Retry.IDEMPOTENT, topicProfile: PROFILE, eventIdScheme: 'MSGID_CONTENT_V1', replayCursorType: NA, orderingModel: 'SINGLE_FLIGHT',
+      authGuard: 'adjacentSenderAuth', admissionGuard: NA, placementGuard: NA,
       projection: { payload: ['topicId', 'msgId', 'op', 'epoch', 'sig'] },   // `sig` projected (absent at runtime) for the type-gated discriminator
       schema: { require: ['topicId', 'msgId'], types: { topicId: 'string', msgId: 'string' } },
-      correlation: { kind: LAR, requires: ['topicId', 'msgId', 'op', 'epoch'] },   // adjacent-sender + incarnation(epoch)
+      correlation: { kind: LAR, requires: ['topicId', 'msgId', 'op', 'epoch'], binding: { flight: ['topicId', 'msgId', 'op'], authority: ['epoch'] } },
       idempotency: { from: ['topicId', 'msgId', 'op'] },
-      capabilityRange: { profile: 'LEGACY_ROOT_V4' },
-      errorContract: ['drop-wrong-sender', 'drop-wrong-incarnation'],
-      traceFields: ['topicId', 'msgId', 'op'],
-      note: 'legacy unsigned one-hop; completion binds the authenticated adjacent sender + intended incarnation',
+      capabilityRange: { profile: PROFILE },
+      errorContract: ['drop-wrong-sender', 'drop-wrong-incarnation'], traceFields: ['topicId', 'msgId', 'op'], budget: budget(5),
+      note: 'legacy unsigned one-hop; completion binds the authenticated adjacent sender + intended incarnation (epoch), no proof signer',
     }),
 
     // ── write-flight receipt probe / nack (writeFlight) ──
     ({
       type: 'pubsub:receiptprobe', wire: T.RECEIPTPROBE, kind: FrameKind.ONE_WAY, owningService: 'writeFlight', versionRange: V,
+      outcome: 'ProbeOutcome', terminalOutcome: 'PROBE_ANSWERED',
+      retry: Retry.BOUNDED_ONCE, topicProfile: PROFILE, eventIdScheme: 'MSGID_CONTENT_V1', replayCursorType: NA, orderingModel: 'SINGLE_FLIGHT',
+      authGuard: NA, admissionGuard: NA, placementGuard: NA,
       projection: { payload: ['topicId', 'msgId', 'op'] },
       schema: { require: ['topicId', 'msgId', 'op'], types: { topicId: 'string', msgId: 'string', op: 'string' } },
-      correlation: { kind: INGRESS, requires: ['topicId', 'msgId'] },
-      traceFields: ['topicId', 'msgId', 'op'],
+      correlation: { kind: INGRESS, requires: ['topicId', 'msgId', 'op'], binding: { flight: ['topicId', 'msgId', 'op'] } },
+      capabilityRange: { profile: PROFILE },
+      errorContract: ['probe-no-hit'], traceFields: ['topicId', 'msgId', 'op'], budget: budget(3),
       note: 'pure read of a suspect root’s held state; answered by INGESTACK (held) or RECEIPTNACK (not); no evidence produced',
     }),
     ({
       type: 'pubsub:receiptnack', wire: T.RECEIPTNACK, kind: FrameKind.ONE_WAY, owningService: 'writeFlight', versionRange: V,
+      outcome: 'ProbeOutcome', terminalOutcome: 'ABSENCE_ASSERTED',
+      retry: Retry.BOUNDED_ONCE, topicProfile: PROFILE, eventIdScheme: 'MSGID_CONTENT_V1', replayCursorType: NA, orderingModel: 'SINGLE_FLIGHT',
+      authGuard: NA, admissionGuard: NA, placementGuard: NA,
       projection: { payload: ['topicId', 'msgId', 'op', 'reason'] },
       schema: { require: ['topicId', 'msgId'], types: { topicId: 'string', msgId: 'string' } },
-      correlation: { kind: INGRESS, requires: ['topicId', 'msgId'] },
-      errorContract: ['reason'],
-      traceFields: ['topicId', 'msgId', 'reason'],
+      correlation: { kind: INGRESS, requires: ['topicId', 'msgId', 'op'], binding: { flight: ['topicId', 'msgId', 'op'] } },
+      capabilityRange: { profile: PROFILE },
+      errorContract: ['reason'], traceFields: ['topicId', 'msgId', 'reason'], budget: budget(4),
       note: 'explicit non-retention; earns exactly one direct retry; asserts absence, not a positive evidence level',
     }),
 
     // ── delivery + adoption (TopicDeliveryPlane) ──
     ({
       type: 'pubsub:deliver', wire: T.DELIVER, kind: FrameKind.MULTICAST, owningService: 'TopicDeliveryPlane', versionRange: V,
-      evidence: EvidenceLevel.OBSERVED, proves: Proves.OBSERVATION,
+      evidence: EvidenceLevel.OBSERVED, proves: Proves.OBSERVATION, outcome: 'DeliveryOutcome', terminalOutcome: 'APP_DELIVERED_ONCE',
+      retry: Retry.NONE, topicProfile: PROFILE, eventIdScheme: 'MSGID_CONTENT_V1', replayCursorType: NA, orderingModel: 'UNION_IDEMPOTENT',
+      authGuard: NA, admissionGuard: NA, placementGuard: NA,
       projection: { payload: ['topicId', 'from', 'msgs'] },
       schema: { require: ['topicId', 'msgs'], types: { topicId: 'string', msgs: 'arr' } },
-      traceFields: ['topicId'],
+      capabilityRange: { profile: PROFILE },
+      errorContract: ['drop-duplicate-msgid'], traceFields: ['topicId'], budget: budget(3),
       note: 'fan-out down the tree; each entry keyed by its own msgId (per-entry idempotency, not a frame key)',
     }),
     ({
       type: 'pubsub:adopt', wire: T.ADOPT, kind: FrameKind.ONE_WAY, owningService: 'TopicDeliveryPlane', versionRange: V,
-      evidence: EvidenceLevel.ROUTED, proves: Proves.ROUTING,
-      placementGuard: 'regionOk',
+      evidence: EvidenceLevel.ROUTED, proves: Proves.ROUTING, outcome: 'RoutingOutcome', terminalOutcome: 'SUBTREE_ADOPTED',
+      retry: Retry.IDEMPOTENT, topicProfile: PROFILE, eventIdScheme: NA, replayCursorType: NA, orderingModel: 'ARRIVAL',
+      authGuard: NA, admissionGuard: 'admitDelegatedSubs', placementGuard: 'regionOk',
       projection: { payload: ['topicId', 'parent', 'subs'] },
       schema: { require: ['topicId', 'parent'], types: { topicId: 'string', parent: 'string', subs: 'arr' } },
       idempotency: { from: ['topicId', 'parent'] },
-      traceFields: ['topicId', 'parent'],
+      capabilityRange: { profile: PROFILE },
+      errorContract: ['refuse-region'], traceFields: ['topicId', 'parent'], budget: budget(3),
       note: 'delegation command: adopt these subscribers under this parent',
     }),
 
-    // ── read path: PULL / PULLRESP are a CONVERSATION keyed by corrId (F3) ──
+    // ── read path: PULL / PULLRESP conversation keyed by corrId (F3 pair algebra) ──
     ({
       type: 'pubsub:pull', wire: T.PULL, kind: FrameKind.ONE_WAY, owningService: 'TopicDeliveryPlane', versionRange: V,
+      outcome: 'ReadOutcome', terminalOutcome: 'RESPONSE_OR_TIMEOUT',
+      retry: Retry.IDEMPOTENT, topicProfile: PROFILE, eventIdScheme: 'CORR_ID', replayCursorType: NA, orderingModel: 'NONE',
+      authGuard: NA, admissionGuard: NA, placementGuard: NA,
       projection: { payload: ['topicId', 'postHash', 'corrId', 'requesterId'] },
       schema: { require: ['topicId', 'corrId', 'requesterId'], types: { topicId: 'string', corrId: 'string', requesterId: 'string' } },
-      conversation: { key: ['corrId', 'requesterId'] },
-      traceFields: ['topicId', 'corrId'],
-      note: 'read request; corrId is the conversation id (not an authority subject); pure read, no idempotency',
+      conversation: { role: REQ, opposite: 'pubsub:pullresp', pairing: [{ local: 'corrId', remote: 'corrId' }, { local: 'requesterId', remote: 'requesterId' }] },
+      capabilityRange: { profile: PROFILE },
+      errorContract: ['no-hit'], traceFields: ['topicId', 'corrId'], budget: budget(4),
+      note: 'read request; corrId+requesterId is the conversation id (not an authority subject); pure read, no idempotency',
     }),
     ({
       type: 'pubsub:pullresp', wire: T.PULLRESP, kind: FrameKind.ONE_WAY, owningService: 'TopicDeliveryPlane', versionRange: V,
+      outcome: 'ReadOutcome', terminalOutcome: 'RESPONSE_MATCHED',
+      retry: Retry.NONE, topicProfile: PROFILE, eventIdScheme: 'CORR_ID', replayCursorType: NA, orderingModel: 'NONE',
+      authGuard: NA, admissionGuard: NA, placementGuard: NA,
       projection: { payload: ['corrId', 'json', 'publishTs', 'requesterId'] },
       schema: { require: ['corrId', 'requesterId'], types: { corrId: 'string', requesterId: 'string' } },
-      conversation: { key: ['corrId', 'requesterId'] },
-      traceFields: ['corrId'],
-      note: 'read response matched to _pending by corrId; json:null is a genuine no-hit',
+      conversation: { role: RESP, opposite: 'pubsub:pull', pairing: [{ local: 'corrId', remote: 'corrId' }, { local: 'requesterId', remote: 'requesterId' }] },
+      capabilityRange: { profile: PROFILE },
+      errorContract: ['drop-unmatched-corrid'], traceFields: ['corrId'], budget: budget(4),
+      note: 'read response matched to _pending by corrId+requesterId; json:null is a genuine no-hit',
     }),
 
     // ── sync engine: catch-up + cohort + handoff (SyncEngine / TopicRoleLifecycle) ──
     ({
       type: 'pubsub:pullup', wire: T.PULLUP, kind: FrameKind.ONE_WAY, owningService: 'SyncEngine', versionRange: V,
-      evidence: EvidenceLevel.ROUTED, proves: Proves.ROUTING,
+      evidence: EvidenceLevel.ROUTED, proves: Proves.ROUTING, outcome: 'RoutingOutcome', terminalOutcome: 'REPLAY_RECEIVED',
+      retry: Retry.IDEMPOTENT, topicProfile: PROFILE, eventIdScheme: NA, replayCursorType: 'HIGHWATER', orderingModel: 'ARRIVAL',
+      authGuard: NA, admissionGuard: NA, placementGuard: NA,
       projection: { payload: ['topicId', 'sinceHw', 'parentId'] },
       schema: { require: ['topicId', 'parentId'], types: { topicId: 'string', parentId: 'string' } },
-      conversation: { key: ['topicId', 'parentId'] },   // catch-up conversation (unsigned parent → not an authenticated holder)
-      traceFields: ['topicId', 'parentId'],
-      note: 'catch-up trigger to the parent holder; answered by REPLAYUP',
+      // catch-up conversation; parentId is the return destination the REPLAYUP is routed back to (its routing target).
+      conversation: { role: REQ, opposite: 'pubsub:replayup', pairing: [{ local: 'topicId', remote: 'topicId' }, { local: 'parentId', remote: 'targetId' }] },
+      capabilityRange: { profile: PROFILE },
+      errorContract: ['no-newer-history'], traceFields: ['topicId', 'parentId'], budget: budget(3),
+      note: 'catch-up trigger to the parent holder from cursor sinceHw; answered by REPLAYUP routed back to parentId',
     }),
     ({
       type: 'pubsub:replayup', wire: T.REPLAYUP, kind: FrameKind.ONE_WAY, owningService: 'SyncEngine', versionRange: V,
-      evidence: EvidenceLevel.RETAINED, proves: Proves.RETENTION,
-      authGuard: 'verifyEnvelope',                       // per-entry re-verify at ingest
-      projection: { payload: ['topicId', 'msgs', 'dels'] },
+      evidence: EvidenceLevel.RETAINED, proves: Proves.RETENTION, outcome: 'RetentionOutcome', terminalOutcome: 'REPLAY_APPLIED',
+      retry: Retry.IDEMPOTENT, topicProfile: PROFILE, eventIdScheme: 'MSGID_CONTENT_V1', replayCursorType: 'HIGHWATER', orderingModel: 'UNION_IDEMPOTENT',
+      authGuard: 'verifyEnvelope', admissionGuard: NA, placementGuard: NA,
+      projection: { payload: ['topicId', 'msgs', 'dels'], meta: ['targetId'] },
       schema: { require: ['topicId'], types: { topicId: 'string', msgs: 'arr', dels: 'arr' } },
-      conversation: { key: ['topicId'] },                // response leg; matched by topicId to the requesting parent
-      traceFields: ['topicId'],
-      note: 'replay-up response routed to the requesting parent; per-entry msgId idempotency at ingest',
+      // RESPONSE leg: REPLAYUP carries only topicId; the requester identity is the ROUTING return target (meta), matched to PULLUP.parentId.
+      conversation: { role: RESP, opposite: 'pubsub:pullup', pairing: [{ local: 'topicId', remote: 'topicId' }, { local: 'targetId', remote: 'parentId', from: PairSide.meta }] },
+      capabilityRange: { profile: PROFILE },
+      errorContract: ['drop-bad-envelope-entry'], traceFields: ['topicId'], budget: budget(4),
+      note: 'replay-up response routed to the requesting parent; per-entry msgId idempotency (union) at ingest; requester identity supplied by routing meta',
     }),
     ({
       type: 'pubsub:handoff', wire: T.HANDOFF, kind: FrameKind.ONE_WAY, owningService: 'TopicRoleLifecycle', versionRange: V,
-      evidence: EvidenceLevel.RETAINED, proves: Proves.RETENTION,
-      admissionGuard: 'admitPushedRole',
+      evidence: EvidenceLevel.RETAINED, proves: Proves.RETENTION, outcome: 'RetentionOutcome', terminalOutcome: 'HEIR_ACKED',
+      retry: Retry.BOUNDED_ONCE, topicProfile: PROFILE, eventIdScheme: 'MSGID_CONTENT_V1', replayCursorType: NA, orderingModel: 'UNION_IDEMPOTENT',
+      authGuard: NA, admissionGuard: 'admitPushedRole', placementGuard: NA,
       projection: { payload: ['topicId', 'from', 'msgs', 'dels'] },
       schema: { require: ['topicId', 'from'], types: { topicId: 'string', from: 'string', msgs: 'arr', dels: 'arr' } },
-      conversation: { key: ['topicId', 'from'] },        // transfer conversation (unsigned from → routing hint, not an authenticated holder)
-      traceFields: ['topicId', 'from'],
-      note: 'standing-state transfer to the heir; answered by HANDOFFACK',
+      // REQUEST leg: the departing node `from` is the return destination the HANDOFFACK is routed back to.
+      conversation: { role: REQ, opposite: 'pubsub:handoffack', pairing: [{ local: 'topicId', remote: 'topicId' }, { local: 'from', remote: 'targetId' }] },
+      capabilityRange: { profile: PROFILE },
+      errorContract: ['refuse-role-budget'], traceFields: ['topicId', 'from'], budget: budget(4),
+      note: 'standing-state transfer to the heir; answered by HANDOFFACK routed back to `from`',
     }),
     ({
       type: 'pubsub:handoffack', wire: T.HANDOFFACK, kind: FrameKind.ONE_WAY, owningService: 'SyncEngine', versionRange: V,
-      evidence: EvidenceLevel.ROUTED, proves: Proves.ROUTING,
-      projection: { payload: ['topicId', 'held', 'sent'] },
+      evidence: EvidenceLevel.ROUTED, proves: Proves.ROUTING, outcome: 'RoutingOutcome', terminalOutcome: 'HANDOFF_COMPLETE',
+      retry: Retry.NONE, topicProfile: PROFILE, eventIdScheme: NA, replayCursorType: NA, orderingModel: 'ARRIVAL',
+      authGuard: NA, admissionGuard: NA, placementGuard: NA,
+      projection: { payload: ['topicId', 'held', 'sent'], meta: ['targetId'] },
       schema: { require: ['topicId'], types: { topicId: 'string', held: 'number', sent: 'number' } },
-      conversation: { key: ['topicId'] },                // handoff completion
-      traceFields: ['topicId'],
-      note: 'handoff completion ack; a short ack (held<sent) is deliberately not recorded',
+      // RESPONSE leg: the ack carries only topicId; it is routed back to the departing node (meta), matched to HANDOFF.from.
+      conversation: { role: RESP, opposite: 'pubsub:handoff', pairing: [{ local: 'topicId', remote: 'topicId' }, { local: 'targetId', remote: 'from', from: PairSide.meta }] },
+      capabilityRange: { profile: PROFILE },
+      errorContract: ['ignore-short-ack'], traceFields: ['topicId'], budget: budget(3),
+      note: 'handoff completion ack; a short ack (held<sent) is deliberately not recorded; departing-node identity from routing meta',
     }),
     ({
       type: 'pubsub:replicate', wire: T.REPLICATE, kind: FrameKind.MULTICAST, owningService: 'SyncEngine', versionRange: V,
-      evidence: EvidenceLevel.RETAINED, proves: Proves.RETENTION,
+      evidence: EvidenceLevel.RETAINED, proves: Proves.RETENTION, outcome: 'RetentionOutcome', terminalOutcome: 'COHORT_CONVERGED',
+      retry: Retry.IDEMPOTENT, topicProfile: PROFILE, eventIdScheme: 'MSGID_CONTENT_V1', replayCursorType: NA, orderingModel: 'UNION_IDEMPOTENT',
+      authGuard: 'verifyEnvelope', admissionGuard: NA, placementGuard: NA,
       projection: { payload: ['topicId', 'from', 'msgs', 'dels'] },
       schema: { require: ['topicId'], types: { topicId: 'string', from: 'string', msgs: 'arr', dels: 'arr' } },
-      // No correlation: a cohort spray keyed by an unsigned `from` is not an
-      // authenticated holder subject, and has no request/response pairing (F3).
-      traceFields: ['topicId'],
+      // No correlation and no conversation: a cohort spray keyed by an unsigned `from` is not an authenticated holder
+      // subject and has no request/response pairing (F3). COUNT_HIGHWATER_HINT is rate gating, never an equality proof.
+      capabilityRange: { profile: PROFILE, summaryStrategy: 'COUNT_HIGHWATER_HINT' },
+      errorContract: ['drop-bad-envelope-entry'], traceFields: ['topicId'], budget: budget(4),
       note: 'cohort spray to K-closest; empty msgs+dels = liveness keepalive; union ingest is order-independent',
     }),
 
     // ── locator + lifecycle: beacon / metrics demand / deprecated touch ──
     ({
       type: 'pubsub:rootbeacon', wire: T.ROOTBEACON, kind: FrameKind.UNSOLICITED_EVENT, owningService: 'TopicLocator', versionRange: V,
-      placementGuard: 'verifyClosenessGate',             // verify-don't-trust closeness + epoch/tombstone yield rules
+      outcome: 'LocatorOutcome', terminalOutcome: 'SOFT_STATE_REFRESHED',
+      retry: Retry.FLOOD_DEDUP, topicProfile: PROFILE, eventIdScheme: 'BEACON_ID', replayCursorType: NA, orderingModel: 'NONE',
+      authGuard: NA, admissionGuard: NA, placementGuard: 'verifyClosenessGate',
       projection: { payload: ['root', 'topics', 'epochs', 'beaconId', 'layer'] },
       schema: { require: ['root', 'beaconId'], types: { root: 'string', beaconId: 'string', topics: 'arr', epochs: 'arr' } },
-      idempotency: { from: ['beaconId'] },               // flood dedup
-      traceFields: ['root', 'beaconId'],
-      note: 'soft-state root advertisement; no opposite → registers with no correlation (§4.3)',
+      idempotency: { from: ['beaconId'] },
+      capabilityRange: { profile: PROFILE },
+      errorContract: ['reject-closeness', 'reject-stale-epoch'], traceFields: ['root', 'beaconId'], budget: budget(5),
+      note: 'soft-state root advertisement; no opposite → registers with no correlation (§4.3); flood dedup by beaconId',
     }),
     ({
       type: 'pubsub:metricson', wire: T.METRICSON, kind: FrameKind.ONE_WAY, owningService: 'TopicRoleLifecycle', versionRange: V,
-      placementGuard: 'regionOk+admitRole',
+      outcome: 'RoutingOutcome', terminalOutcome: 'LEASE_ARMED',
+      retry: Retry.IDEMPOTENT, topicProfile: PROFILE, eventIdScheme: NA, replayCursorType: NA, orderingModel: 'ARRIVAL',
+      authGuard: NA, admissionGuard: NA, placementGuard: 'regionOk+admitRole',
       projection: { payload: ['topicId'] },
       schema: { require: ['topicId'], types: { topicId: 'string' } },
-      idempotency: { from: ['topicId'] },                // lease arm/renew is idempotent
-      traceFields: ['topicId'],
+      idempotency: { from: ['topicId'] },
+      capabilityRange: { profile: PROFILE },
+      errorContract: ['refuse-region'], traceFields: ['topicId'], budget: budget(1),
       note: 'demand signal arming a renewable metrics-publish lease at the root; no durability',
     }),
     ({
       type: 'pubsub:touch', wire: T.TOUCH, kind: FrameKind.ONE_WAY, owningService: 'TopicRoleLifecycle', versionRange: V,
-      evidence: EvidenceLevel.ROUTED, proves: Proves.ROUTING,
+      evidence: EvidenceLevel.ROUTED, proves: Proves.ROUTING, outcome: 'RoutingOutcome', terminalOutcome: 'NOOP',
+      retry: Retry.NONE, topicProfile: PROFILE, eventIdScheme: NA, replayCursorType: NA, orderingModel: 'ARRIVAL',
+      authGuard: NA, admissionGuard: NA, placementGuard: NA,
       projection: { payload: ['topicId'] },
       schema: { require: ['topicId'], types: { topicId: 'string' } },
-      traceFields: ['topicId'],
-      note: 'registered wire-compat no-op (peer.touch deprecated v4.3.0) — governed deprecation exception',
+      capabilityRange: { profile: NA },
+      errorContract: [], traceFields: ['topicId'], budget: budget(1),
+      note: 'registered wire-compat no-op (peer.touch deprecated v4.3.0) — governed deprecation exception; cannot fail',
     }),
   ];
 }

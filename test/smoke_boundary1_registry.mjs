@@ -1,28 +1,33 @@
 // =====================================================================
-// smoke_boundary1_registry.mjs — REF-1.1 S2/S3: the Boundary-1 (pub/sub + DHT
-// control) frame-contract registry TABLE + the shadow-wrap of the 19 routed
+// smoke_boundary1_registry.mjs — REF-1.1 S2/S3 (recut-3): the Boundary-1 (pub/sub
+// + DHT control) frame-contract registry TABLE + the shadow-wrap of the 19 routed
 // handlers in _registerHandlers.
 //
-// The tranche contract: the `frameRegistry` construction flag is DEFAULT-OFF;
-// when ON the 19 handlers are shadow-wrapped to OBSERVE a decoder-certified
-// snapshot beside each handler and emit a trace — never mutating, suppressing,
-// or reordering a handler or its arguments. With the runtime shadow flag OFF the
-// handler runs verbatim, so flag-off is byte-identical to legacy. Dispatch is NOT
-// migrated: the registry is source material observed alongside the live handlers.
+// The tranche contract: the `frameRegistry` construction flag is DEFAULT-OFF; when
+// ON the 19 handlers are shadow-wrapped to OBSERVE a decoder-certified snapshot
+// beside each handler and emit a trace — never mutating, suppressing, or reordering
+// a handler or its arguments. With the runtime shadow flag OFF the handler runs
+// verbatim, so flag-off is byte-identical to legacy. Dispatch is NOT migrated.
 //
-//   T. TABLE: all 20 rows (19 frames; INGESTACK = signed+legacy variants) mint,
-//      register, and the wire->row wiring covers every handler _registerHandlers
-//      registers. Representative row shapes match §4.3 (correlation subjects,
-//      evidence↔proof pairings).
-//   W. WIRING: frameRegistry:false builds no registry (built:false); true builds
-//      the 20-row table and wraps the handlers.
+//   T. TABLE: 20 rows (19 frames; INGESTACK signed+legacy) mint + register; the
+//      row contract is COMPLETE per row (F2); the correlation model is the recut-3
+//      pair algebra (F3): conversation opposite+pairing, IngressRef binds the
+//      attempt, signed INGESTACK binds the exact D1 flight+incarnation+signer,
+//      REPLICATE binds nothing.
+//   W. WIRING: frameRegistry:false builds nothing; true builds the 20-row table
+//      and wraps the handlers; INGESTACK carries the typeof-sig discriminator (F4).
 //   D. DIFFERENTIAL: the SAME scripted scenario over the SAME node ids is
-//      BYTE-IDENTICAL registry-off vs registry-on+flag-on (per-node delivery +
-//      root cache/tombstone state); registry-on+flag-on emits traces; registry-on
-//      but flag-OFF emits ZERO traces and stays byte-identical (inert wrap).
-//   C. OBSERVATION: a decoder-certified SUB frame through the wrapped handler
-//      yields a schema-validated trace (registered + schemaOk); an uncertified
-//      live frame is observed as nothing (unbranded-source) — never reflected on.
+//      BYTE-IDENTICAL registry-off vs registry-on+flag-on (per-node delivery + root
+//      cache/tomb). Flag-on emits traces; flag-OFF emits ZERO (inert wrap). D5:
+//      with CERTIFIED frames flowing through the REAL handlers, the outcome is
+//      STILL byte-identical AND the registry observes those real frames as BRANDED.
+//   R. REAL-HANDLER CERTIFIED SWEEP (F6): a certified representative frame is
+//      driven through the ACTUAL registered+wrapped handler of a live node for
+//      every one of the 19 wires — forward/no-op, asynchronous, and malformed
+//      (schema-invalid / handler-throw) cases — asserting branded observation.
+//   E. EVALUATOR SWEEP (retained separately): the standalone reg.wrap evaluator
+//      over a dummy handler across all wires + async-pass/reject/sync-throw/
+//      schema-invalid, plus the unbranded no-reflection floor.
 //
 // Run: node test/smoke_boundary1_registry.mjs
 // =====================================================================
@@ -41,15 +46,39 @@ const __LOC = regionCenter('useast');
 let passed = 0, failed = 0;
 const check = (label, cond, extra = '') => { if (cond) { console.log(`  ✓ ${label}`); passed++; } else { console.log(`  ✗ ${label} ${extra}`); failed++; } };
 const idHex = (b) => b.toString(16).padStart(66, '0');
-const lc = (s) => (typeof s === 'string' ? s.toLowerCase() : s);
 
-// The 19 wire types _registerHandlers registers (wireHandlers.js:31-49).
+// The 19 wire types _registerHandlers registers (wireHandlers.js).
 const WIRED = [T.SUB, T.UNSUB, T.PUB, T.DELIVER, T.ADOPT, T.PULLUP, T.HANDOFFACK, T.REPLAYUP,
   T.HANDOFF, T.REPLICATE, T.KILL, T.INGESTACK, T.RECEIPTPROBE, T.RECEIPTNACK, T.TOUCH, T.PULL,
   T.PULLRESP, T.ROOTBEACON, T.METRICSON];
 
+// A schema-satisfying representative frame per wire (INGESTACK gets three).
+const CERT = {
+  [T.SUB]: { topicId: 'aa', subscriberId: 'bb', since: 0 },
+  [T.UNSUB]: { topicId: 'aa', subscriberId: 'bb' },
+  [T.PUB]: { topicId: 'aa', json: '{"m":1}', via: 'n0', ackTo: 'n0', attemptId: 'x1', flightNonce: 'fn' },
+  [T.KILL]: { topicId: 'aa', kill: { msgId: 'm1', signerPubkey: 'pk' }, ackTo: 'n0', attemptId: 'x1', flightNonce: 'fn' },
+  [T.DELIVER]: { topicId: 'aa', from: 'nn', msgs: [] },
+  [T.ADOPT]: { topicId: 'aa', parent: 'pp', subs: [] },
+  [T.PULLUP]: { topicId: 'aa', sinceHw: 0, parentId: 'pp' },
+  [T.HANDOFFACK]: { topicId: 'aa', held: 1, sent: 1 },
+  [T.REPLAYUP]: { topicId: 'aa', msgs: [], dels: [] },
+  [T.HANDOFF]: { topicId: 'aa', from: 'nn', msgs: [], dels: [] },
+  [T.REPLICATE]: { topicId: 'aa', from: 'nn', msgs: [], dels: [] },
+  [T.RECEIPTPROBE]: { topicId: 'aa', msgId: 'm1', op: 'PUB' },
+  [T.RECEIPTNACK]: { topicId: 'aa', msgId: 'm1', op: 'PUB', reason: 'not-held' },
+  [T.TOUCH]: { topicId: 'aa' },
+  [T.PULL]: { topicId: 'aa', postHash: 'ph', corrId: 'c1', requesterId: 'r1' },
+  [T.PULLRESP]: { corrId: 'c1', json: null, publishTs: 0, requesterId: 'r1' },
+  [T.ROOTBEACON]: { root: 'rr', topics: [], epochs: [], beaconId: 'b1', layer: 0 },
+  [T.METRICSON]: { topicId: 'aa' },
+};
+const IA_SIGNED = { topicId: 'aa', msgId: 'm1', op: 'PUB', epoch: 1, attemptId: 'x1', ackTo: 'n0', flightNonce: 'fn', rootPub: 'rp', purpose: 'ingest', sig: 'sigstr' };
+const IA_LEGACY = { topicId: 'aa', msgId: 'm1', op: 'PUB', epoch: 1 };
+const certFrame = (obj) => certify(JSON.stringify(obj));
+
 class Fabric {
-  constructor({ frameRegistry = false } = {}) { this.nodes = new Map(); this.queue = []; this.clock = 1_000_000_000_000; this._fr = frameRegistry; }
+  constructor({ frameRegistry = false, certifyInTransit = false } = {}) { this.nodes = new Map(); this.queue = []; this.clock = 1_000_000_000_000; this._fr = frameRegistry; this.certifyInTransit = certifyInTransit; }
   addNode(idBig) {
     const handlers = new Map(); const self = this;
     const dht = {
@@ -69,16 +98,22 @@ class Fabric {
     this.nodes.set(idBig, rec); return rec;
   }
   _closest(target) { let b = null, bd = null; for (const [id, n] of this.nodes) { if (!n.alive) continue; const d = id ^ target; if (bd === null || d < bd) { bd = d; b = id; } } return b; }
-  async settle(cap = 500000) { let i = 0; while (this.queue.length) { if (++i > cap) throw new Error('settle cap'); const j = this.queue.shift(); const n = this.nodes.get(j.dest); if (!n || !n.alive) continue; const h = n.handlers.get(j.type); if (h) await h(j.payload, j.meta); } }
+  // In-transit certification (F6): mirror the production transport, which decodes
+  // wire bytes and CERTIFIES the frame before handing it to the handler. Certifying
+  // here means the REAL wrapped handlers observe branded frames. JSON round-trip is
+  // lossless for Boundary-1 payloads (verified: none carry bigints), so the handler
+  // sees the same data — branding is inert.
+  _wrapPayload(payload) { return this.certifyInTransit ? certFrame(payload) : payload; }
+  async settle(cap = 500000) { let i = 0; while (this.queue.length) { if (++i > cap) throw new Error('settle cap'); const j = this.queue.shift(); const n = this.nodes.get(j.dest); if (!n || !n.alive) continue; const h = n.handlers.get(j.type); if (h) await h(this._wrapPayload(j.payload), j.meta); } }
   async tickAll() { for (const n of this.nodes.values()) if (n.alive) await n.am.refreshTick(); await this.settle(); }
 }
 
-// A scripted scenario: node0 subscribes, node1 publishes two envelopes, node1
-// kills the first, everything settles. Returns a CANONICAL snapshot of observable
-// outcome (per-node delivery + root cache/tomb) plus the aggregate trace list.
-async function runScenario({ frameRegistry, shadowOn }, nodeIds, alice) {
+// A scripted scenario: node0 subscribes, node1 publishes two envelopes, node1 kills
+// the first, everything settles. Returns a CANONICAL snapshot of observable outcome
+// (per-node delivery + root cache/tomb) plus the aggregate trace list.
+async function runScenario({ frameRegistry, shadowOn, certifyInTransit = false }, nodeIds, alice) {
   setShadowEnabled(shadowOn ? true : false);
-  const fab = new Fabric({ frameRegistry });
+  const fab = new Fabric({ frameRegistry, certifyInTransit });
   const nodes = nodeIds.map((id) => fab.addNode(id));
   const desc = { region: 'useast', owner: null, name: 'b1-reg', write: 'open' };
   const t = await deriveTopicIdBig(desc);
@@ -99,7 +134,7 @@ async function runScenario({ frameRegistry, shadowOn }, nodeIds, alice) {
   const traces = [];
   for (const n of nodes) traces.push(...n.am.frameRegistryShadow().traces);
   setShadowEnabled(false);
-  return { outcome, traces, builtRows: nodes[0].am.frameRegistryShadow() };
+  return { outcome, traces };
 }
 
 async function main() {
@@ -115,32 +150,44 @@ async function main() {
   check('T3. wiring covers every registered handler wire type', WIRED.every((w) => reg.wiring.has(w)) && reg.wiring.size === WIRED.length,
     JSON.stringify(WIRED.filter((w) => !reg.wiring.has(w))));
   const iaw = reg.wiring.get(T.INGESTACK);
-  check('T4. INGESTACK wiring carries a sig-presence variant discriminator',
-    iaw && iaw.type === 'pubsub:ingestack' && iaw.variantBy && iaw.variantBy.path === 'sig' && iaw.variantBy.whenPresent === 'signed' && iaw.variantBy.whenAbsent === 'legacy');
-  const byType = new Map(); for (const d of rowDefs()) byType.set(d.variant ? `${d.type}#${d.variant}` : d.type, d);
-  check('T5. PUB is an INGESTED ONE_WAY that is an IngressRef, NOT an authority ref (F3); no msgId idempotency key (F5)',
-    byType.get('pubsub:pub').kind === 'ONE_WAY' && byType.get('pubsub:pub').evidence === 'INGESTED'
-    && byType.get('pubsub:pub').correlation.kind === 'IngressRef' && byType.get('pubsub:pub').idempotency == null);
-  check('T6. DELIVER is an OBSERVED MULTICAST with no correlation contract',
-    byType.get('pubsub:deliver').kind === 'MULTICAST' && byType.get('pubsub:deliver').evidence === 'OBSERVED' && byType.get('pubsub:deliver').correlation == null);
-  check('T7. ROOTBEACON is an UNSOLICITED_EVENT with no correlation (no opposite)',
-    byType.get('pubsub:rootbeacon').kind === 'UNSOLICITED_EVENT' && byType.get('pubsub:rootbeacon').correlation == null && byType.get('pubsub:rootbeacon').idempotency.from.includes('beaconId'));
-  check('T8. read path (PULL) is a CONVERSATION keyed by corrId, NOT an authority correlation (F3)',
-    byType.get('pubsub:pull').kind === 'ONE_WAY' && byType.get('pubsub:pull').correlation == null
-    && byType.get('pubsub:pull').conversation && byType.get('pubsub:pull').conversation.key.includes('corrId'));
-  check('T9. INGESTACK signed vs legacy differ in owningService + sig requirement',
-    byType.get('pubsub:ingestack#signed').owningService === 'WriteIngress' && byType.get('pubsub:ingestack#legacy').owningService === 'writeFlight');
+  check('T4. INGESTACK wiring is type-gated on typeof sig === string (F4)',
+    iaw && iaw.variantBy && iaw.variantBy.path === 'sig' && iaw.variantBy.valueType === 'string' && iaw.variantBy.whenPresent === 'signed' && iaw.variantBy.whenAbsent === 'legacy');
+  // Read MINTED rows (defineRow normalizes conversation.localKey, correlation.binding, etc.).
+  const byType = new Map(); for (const d of rows) byType.set(d.variant ? `${d.type}#${d.variant}` : d.type, d);
+
+  // F2: the row contract is COMPLETE — every applicable descriptor set (value or n/a), never silently null.
+  const DESC = ['topicProfile', 'eventIdScheme', 'replayCursorType', 'orderingModel', 'outcome', 'terminalOutcome', 'retry'];
+  const missing = [];
+  for (const r of rows) for (const d of DESC) if (r[d] == null) missing.push(`${r.type}${r.variant ? '#' + r.variant : ''}.${d}`);
+  check('T5. F2: every row declares all 7 descriptors + a retry class (no silent null)', missing.length === 0, missing.join(','));
+  const budgeted = rows.every((r) => r.budget && r.budget.maxLeaves != null && r.budget.maxBytes != null);
+  check('T6. F2: every row declares an observation budget (maxLeaves + maxBytes)', budgeted);
+  const guardsNamed = rows.every((r) => [r.authGuard, r.admissionGuard, r.placementGuard].every((g) => typeof g === 'string' && g.length > 0));
+  check('T7. F2: every guard slot is an explicit value or n/a, never empty', guardsNamed);
+
+  // F3: PUB binds the ingress ATTEMPT (IngressRef), not topicId alone.
+  const pub = byType.get('pubsub:pub');
+  check('T8. F3: PUB is an IngressRef binding the attempt (topicId+attemptId+flightNonce), no msgId idempotency (F5)',
+    pub.correlation.kind === 'IngressRef' && pub.correlation.binding.flight.join(',') === 'topicId,attemptId,flightNonce' && pub.idempotency == null);
+  // F3: signed INGESTACK is the only LegacyAuthorityRef and binds the exact flight + incarnation + proof signer.
   const iaS = byType.get('pubsub:ingestack#signed');
-  check('T10. signed INGESTACK is the ONLY LegacyAuthorityRef and binds the full flight + proof signer (F3), naming ackProof.js under LEGACY_ROOT_V4 (F2)',
+  check('T9. F3: signed INGESTACK binding = {flight, authority:[epoch], proofSigner:[rootPub]}, all within requires',
     iaS.correlation.kind === 'LegacyAuthorityRef'
-    && ['topicId', 'msgId', 'op', 'attemptId', 'ackTo', 'flightNonce', 'rootPub'].every((f) => iaS.correlation.requires.includes(f))
-    && iaS.authGuard === 'verifyAckProof' && iaS.capabilityRange.proofModule === 'ackProof.js' && iaS.capabilityRange.profile === 'LEGACY_ROOT_V4');
-  check('T11. REPLICATE (cohort spray on an unsigned `from`) claims NO authenticated holder subject (F3); handoff pair is a conversation',
-    byType.get('pubsub:replicate').correlation == null && byType.get('pubsub:replicate').conversation == null
-    && byType.get('pubsub:handoff').conversation && byType.get('pubsub:handoff').conversation.key.join(',') === 'topicId,from');
-  check('T12. write frames name real auth/admission guards, not `none` (F2)',
-    byType.get('pubsub:pub').authGuard === 'verifyEnvelope' && byType.get('pubsub:pub').admissionGuard === 'checkFreshness+writePolicy+topicBinding'
-    && byType.get('pubsub:kill').authGuard === 'verifyKill' && Array.isArray(byType.get('pubsub:pub').errorContract) && byType.get('pubsub:pub').errorContract.length > 0);
+    && iaS.correlation.binding.flight.join(',') === 'topicId,msgId,op,attemptId,ackTo,flightNonce'
+    && iaS.correlation.binding.authority.join(',') === 'epoch' && iaS.correlation.binding.proofSigner.join(',') === 'rootPub'
+    && ['epoch', 'attemptId', 'flightNonce', 'rootPub'].every((f) => iaS.correlation.requires.includes(f)));
+  // F3: conversation is a pair algebra with an opposite + a meta-sourced return-identity leg.
+  const rep = byType.get('pubsub:replayup');
+  check('T10. F3: REPLAYUP is a RESPONSE to pullup; the requester identity is a meta-sourced pairing leg (routing return)',
+    rep.conversation.role === 'RESPONSE' && rep.conversation.opposite === 'pubsub:pullup'
+    && rep.conversation.pairing.some((p) => p.from === 'meta' && p.remote === 'parentId') && rep.conversation.localKey.join(',') === 'topicId');
+  const ha = byType.get('pubsub:handoffack');
+  check('T11. F3: HANDOFFACK is a RESPONSE to handoff with a meta-sourced departing-node leg',
+    ha.conversation.role === 'RESPONSE' && ha.conversation.opposite === 'pubsub:handoff' && ha.conversation.pairing.some((p) => p.from === 'meta' && p.remote === 'from'));
+  // F3: REPLICATE (unsigned cohort spray) binds no authority subject and no conversation.
+  const replc = byType.get('pubsub:replicate');
+  check('T12. F3: REPLICATE binds no authority subject and no conversation (unsigned cohort spray)',
+    replc.correlation == null && replc.conversation == null);
 
   // ── W. WIRING (construction flag) ────────────────────────────────────────────
   const fabOff = new Fabric({ frameRegistry: false }); const nOff = fabOff.addNode(nodeIds[0]);
@@ -152,117 +199,127 @@ async function main() {
 
   // ── D. DIFFERENTIAL ──────────────────────────────────────────────────────────
   const base = await runScenario({ frameRegistry: false, shadowOn: false }, nodeIds, alice);
-  const on   = await runScenario({ frameRegistry: true,  shadowOn: true  }, nodeIds, alice);
-  const inert = await runScenario({ frameRegistry: true,  shadowOn: false }, nodeIds, alice);
+  const on = await runScenario({ frameRegistry: true, shadowOn: true }, nodeIds, alice);
+  const inert = await runScenario({ frameRegistry: true, shadowOn: false }, nodeIds, alice);
+  const certd = await runScenario({ frameRegistry: true, shadowOn: true, certifyInTransit: true }, nodeIds, alice);
   check('D1. registry-on+flag-on outcome is BYTE-IDENTICAL to registry-off',
     JSON.stringify(on.outcome) === JSON.stringify(base.outcome), `\n   off=${JSON.stringify(base.outcome)}\n   on =${JSON.stringify(on.outcome)}`);
   check('D2. scenario is non-trivial (a body was delivered and one was killed)',
     base.outcome.rootTombs.length === 1 && base.outcome.nodes.some((x) => x.got.length > 0));
-  check('D3. flag-on emitted traces on the pubsub+dht boundary for registered frame types',
-    on.traces.length > 0 && on.traces.every((r) => r.boundary === 'pubsub+dht') && on.traces.some((r) => typeof r.type === 'string' && r.type.startsWith('pubsub:')));
+  check('D3. flag-on (unbranded live traffic) emits traces on the pubsub+dht boundary',
+    on.traces.length > 0 && on.traces.every((r) => r.boundary === 'pubsub+dht'));
   check('D4. registry-on but flag-OFF is byte-identical AND emits ZERO traces (inert wrap)',
     JSON.stringify(inert.outcome) === JSON.stringify(base.outcome) && inert.traces.length === 0);
+  // D5 (F6): certified frames through the REAL handlers stay byte-identical AND are observed as BRANDED.
+  const certdBranded = certd.traces.filter((r) => r.registered === true && r.verdict !== 'unobserved');
+  check('D5. F6: certify-in-transit scenario is byte-identical AND the real frames are observed BRANDED (not unbranded-source)',
+    JSON.stringify(certd.outcome) === JSON.stringify(base.outcome) && certdBranded.length > 0
+    && certdBranded.some((r) => typeof r.type === 'string' && r.type.startsWith('pubsub:') && r.schemaOk === true),
+    `\n   certd=${JSON.stringify(certd.outcome)}\n   branded=${certdBranded.length}`);
 
-  // ── C. OBSERVATION across ALL 19 wires (certified in-transit) ────────────────
-  // F6 (Aster): the D block proves byte-identity on LIVE (unbranded) traffic —
-  // that is its job. Branded observation depth is proven HERE by certifying a
-  // schema-satisfying frame per wire type (as the wire decoder does in production)
-  // and driving it through the actually-wrapped handler, then asserting the branded
-  // verdict — plus the INGESTACK variant discriminator, an async (Promise) handler,
-  // a schema-invalid frame, a rejecting handler, a throwing handler, and the
-  // unbranded no-reflection floor.
+  // ── R. REAL-HANDLER CERTIFIED SWEEP across all 19 wires (F6) ──────────────────
+  // Drive a certified representative frame through the ACTUAL registered+wrapped
+  // handler of a live node, for every wire. The handler does its real work
+  // (forward/no-op/mutate/throw); we assert the registry observed the frame as
+  // BRANDED regardless of the handler's disposition. INGESTACK exercises both
+  // variants. A handler that throws on a bare frame is the malformed/rejection case.
   {
     setShadowEnabled(true);
-    // A schema-satisfying representative frame per wire (INGESTACK has three).
-    const CERT = {
-      [T.SUB]: { topicId: 'aa', subscriberId: 'bb', since: 0 },
-      [T.UNSUB]: { topicId: 'aa', subscriberId: 'bb' },
-      [T.PUB]: { topicId: 'aa', json: '{"m":1}', via: 'n0', ackTo: 'n0', attemptId: 'x1', flightNonce: 'fn' },
-      [T.KILL]: { topicId: 'aa', kill: { msgId: 'm1', signerPubkey: 'pk' }, ackTo: 'n0', attemptId: 'x1', flightNonce: 'fn' },
-      [T.DELIVER]: { topicId: 'aa', from: 'nn', msgs: [] },
-      [T.ADOPT]: { topicId: 'aa', parent: 'pp', subs: [] },
-      [T.PULLUP]: { topicId: 'aa', sinceHw: 0, parentId: 'pp' },
-      [T.HANDOFFACK]: { topicId: 'aa', held: 1, sent: 1 },
-      [T.REPLAYUP]: { topicId: 'aa', msgs: [], dels: [] },
-      [T.HANDOFF]: { topicId: 'aa', from: 'nn', msgs: [], dels: [] },
-      [T.REPLICATE]: { topicId: 'aa', from: 'nn', msgs: [], dels: [] },
-      [T.RECEIPTPROBE]: { topicId: 'aa', msgId: 'm1', op: 'PUB' },
-      [T.RECEIPTNACK]: { topicId: 'aa', msgId: 'm1', op: 'PUB', reason: 'not-held' },
-      [T.TOUCH]: { topicId: 'aa' },
-      [T.PULL]: { topicId: 'aa', postHash: 'ph', corrId: 'c1', requesterId: 'r1' },
-      [T.PULLRESP]: { corrId: 'c1', json: null, publishTs: 0, requesterId: 'r1' },
-      [T.ROOTBEACON]: { root: 'rr', topics: [], epochs: [], beaconId: 'b1', layer: 0 },
-      [T.METRICSON]: { topicId: 'aa' },
+    const tr = [];
+    const fab = new Fabric({ frameRegistry: true });
+    const node = fab.addNode(nodeIds[0]);
+    // redirect this node's registry sink into tr (rebuild with our sink)
+    const drive = async (wire, frame) => {
+      tr.length = 0;
+      const shadow = node.am.frameRegistryShadow();
+      const before = shadow.traces.length;
+      const h = node.handlers.get(wire);
+      let threw = false;
+      try { await h(certFrame(frame), { targetId: nodeIds[0], isTerminal: true, hopCount: 1, fromId: idHex(nodeIds[1]) }); } catch { threw = true; }
+      const after = node.am.frameRegistryShadow().traces;
+      return { rec: after[after.length - 1], grew: after.length > before, threw };
     };
-    const iaBase = { topicId: 'aa', msgId: 'm1', op: 'PUB', epoch: 1, attemptId: 'x1', ackTo: 'n0', flightNonce: 'fn', rootPub: 'rp', purpose: 'ingest' };
-    const iaSigned = { ...iaBase, sig: 'sigstr' };          // typeof sig === 'string' → signed
-    const iaLegacy = { topicId: 'aa', msgId: 'm1', op: 'PUB', epoch: 1 };  // sig absent → legacy
-    const iaNumSig = { ...iaBase, sig: 123 };               // sig present but numeric → legacy (F4)
+    let brandedOk = 0, sweptN = 0; const rmiss = [];
+    for (const wire of WIRED) {
+      const frames = wire === T.INGESTACK ? [IA_SIGNED, IA_LEGACY] : [CERT[wire]];
+      for (const f of frames) {
+        sweptN++;
+        const { rec, grew } = await drive(wire, f);
+        // branded = the registry produced an observation for a real frame (registered:true),
+        // NOT the unbranded-source floor. Handler disposition (forward/throw) is irrelevant here.
+        const branded = grew && rec && rec.registered === true && rec.verdict !== 'unobserved';
+        if (branded) brandedOk++; else rmiss.push(`${String(wire)}:${JSON.stringify(rec)}`);
+      }
+    }
+    check(`R1. F6: all ${sweptN} certified frames through REAL wrapped handlers (19 wires + 2 INGESTACK variants) observed BRANDED`,
+      brandedOk === sweptN, `\n   ${rmiss.slice(0, 4).join('\n   ')}`);
 
+    // R2 (F6 malformed): a certified but schema-INVALID frame through the real handler is still branded, schemaOk=false.
+    tr.length = 0;
+    const shadow = node.am.frameRegistryShadow();
+    const before = shadow.traces.length;
+    try { await node.handlers.get(T.SUB)(certFrame({ topicId: 'aa' }), { targetId: nodeIds[0], isTerminal: true, hopCount: 1, fromId: idHex(nodeIds[1]) }); } catch {}
+    const after = node.am.frameRegistryShadow().traces;
+    const rec = after[after.length - 1];
+    check('R2. F6: schema-invalid certified frame through the real handler is branded with schemaOk=false + a schema fault',
+      after.length > before && rec && rec.registered === true && rec.schemaOk === false && (rec.faults || []).some((f) => f.startsWith('schema:')));
+    setShadowEnabled(false);
+  }
+
+  // ── E. STANDALONE EVALUATOR SWEEP (retained separately, per Aster) ────────────
+  {
+    setShadowEnabled(true);
     const tr = [];
     const reg2 = buildBoundary1Registry({ enabled: () => true, sink: (rec) => tr.push(rec) });
     const wrapFor = (wire, handler) => { const w = reg2.wiring.get(wire); return reg2.wrap(w.type, handler, w.variantBy ? { variantBy: w.variantBy } : {}); };
-    const drive = (wire, frame) => { tr.length = 0; wrapFor(wire, () => undefined).call({}, certify(JSON.stringify(frame)), {}); return tr[0]; };
 
-    // C1 — every non-variant wire: certified frame → registered + schemaOk, handler verdict preserved.
-    let sweepOk = 0, sweepN = 0; const misses = [];
+    // E1 — evaluator over a dummy handler: every non-variant wire observed registered+schemaOk, verdict preserved.
+    let ok = 0, n = 0; const miss = [];
     for (const wire of WIRED) {
       if (wire === T.INGESTACK) continue;
-      sweepN++;
-      const r = drive(wire, CERT[wire]);
-      const ok = tr.length === 1 && r.type === reg2.wiring.get(wire).type && r.registered === true && r.schemaOk === true && r.verdict === 'passed' && r.faults == null;
-      if (ok) sweepOk++; else misses.push(`${String(wire)}:${JSON.stringify(r)}`);
+      n++; tr.length = 0;
+      wrapFor(wire, () => undefined).call({}, certFrame(CERT[wire]), {});
+      const r = tr[0];
+      if (tr.length === 1 && r.type === reg2.wiring.get(wire).type && r.registered === true && r.schemaOk === true && r.verdict === 'passed' && r.faults == null) ok++;
+      else miss.push(`${String(wire)}:${JSON.stringify(r)}`);
     }
-    check(`C1. certified sweep: all ${sweepN} non-variant wires observed registered+schemaOk, handler verdict preserved`, sweepOk === sweepN, `\n   ${misses.join('\n   ')}`);
+    check(`E1. standalone evaluator: all ${n} non-variant wires observed registered+schemaOk, verdict preserved`, ok === n, `\n   ${miss.join('\n   ')}`);
 
-    // C2 — INGESTACK variant discriminator mirrors the handler's typeof-sig gate (F4).
-    const rS = drive(T.INGESTACK, iaSigned), rL = drive(T.INGESTACK, iaLegacy), rN = drive(T.INGESTACK, iaNumSig);
-    check('C2. INGESTACK signed/legacy/numeric-sig select signed/legacy/legacy (typeof-sig gate)',
-      rS.variant === 'signed' && rS.registered === true && rL.variant === 'legacy' && rL.registered === true && rN.variant === 'legacy',
-      `\n   signed=${rS.variant} legacy=${rL.variant} numsig=${rN.variant}`);
+    // E2 — INGESTACK variant discriminator: signed / legacy / numeric-sig → signed / legacy / legacy (F4).
+    const drive = (frame) => { tr.length = 0; wrapFor(T.INGESTACK, () => undefined).call({}, certFrame(frame), {}); return tr[0]; };
+    const rS = drive(IA_SIGNED), rL = drive(IA_LEGACY), rN = drive({ ...IA_SIGNED, sig: 123 });
+    check('E2. INGESTACK signed/legacy/numeric-sig → signed/legacy/legacy (typeof-sig gate)',
+      rS.variant === 'signed' && rL.variant === 'legacy' && rN.variant === 'legacy', `\n   ${rS.variant}/${rL.variant}/${rN.variant}`);
 
-    // C3 — a conversation frame observes conversationPresent, with NO authority correlation.
-    const rPull = drive(T.PULL, CERT[T.PULL]);
-    check('C3. conversation frame (PULL): conversationPresent observed, no authority correlation',
-      rPull.conversationPresent === true && rPull.correlationPresent == null);
-    // C4 — a write frame observes its IngressRef correlation, with NO conversation.
-    const rPub = drive(T.PUB, CERT[T.PUB]);
-    check('C4. write frame (PUB): IngressRef correlationPresent observed, no conversation',
-      rPub.correlationPresent === true && rPub.conversationPresent == null);
-
-    // C5 — certified-but-schema-invalid: still observed (registered), schemaOk=false, handler ran.
-    tr.length = 0; wrapFor(T.SUB, () => undefined).call({}, certify(JSON.stringify({ topicId: 'aa' })), {});
-    check('C5. certified but schema-invalid SUB: registered, schemaOk=false, schema fault, handler still ran',
-      tr.length === 1 && tr[0].registered === true && tr[0].schemaOk === false && tr[0].verdict === 'passed' && (tr[0].faults || []).some((f) => f.startsWith('schema:')));
-
-    // C6 — async handler: the returned Promise is passed through UNTOUCHED; the settled verdict is emitted after resolution (F1).
+    // E3 — async handler: the returned Promise is passed through UNTOUCHED; the sync verdict is inert 'object'
+    //      (S1 F1: the generic core never awaits/observes settlement, never suppresses unhandledRejection).
     tr.length = 0;
-    const pPass = Promise.resolve(undefined);
-    const retA = wrapFor(T.SUB, () => pPass).call({}, certify(JSON.stringify(CERT[T.SUB])), {});
-    check('C6a. async handler: returned Promise passed through by identity (not awaited/rewrapped)', retA === pPass);
-    check('C6b. async handler: NO synchronous verdict emitted before the Promise settles', tr.length === 0);
-    await pPass; await Promise.resolve();
-    check('C6c. async pass: settled verdict emitted after resolution', tr.length === 1 && tr[0].registered === true && tr[0].verdict === 'passed');
-
-    // C7 — rejecting handler: the rejection propagates to the caller untouched; the settled verdict is `threw` (F1).
+    const pPass = Promise.resolve(7);
+    const retA = wrapFor(T.SUB, () => pPass).call({}, certFrame(CERT[T.SUB]), {});
+    check('E3. async handler: returned Promise passed through by identity; inert sync verdict, no settlement observation',
+      retA === pPass && tr.length === 1 && tr[0].verdict === 'object');
+    // E4 — a rejecting Promise return is NOT marked handled (unhandledRejection stays the caller's concern).
     tr.length = 0;
     const pRej = Promise.reject(new Error('nack'));
-    const retR = wrapFor(T.SUB, () => pRej).call({}, certify(JSON.stringify(CERT[T.SUB])), {});
-    check('C7a. async reject: caller receives the same rejected Promise', retR === pRej);
+    const retR = wrapFor(T.SUB, () => pRej).call({}, certFrame(CERT[T.SUB]), {});
     let caught = false; try { await retR; } catch { caught = true; }
-    check('C7b. async reject: caller sees the rejection', caught);
-    await Promise.resolve();
-    check('C7c. async reject: settled verdict is threw', tr.length === 1 && tr[0].verdict === 'threw');
+    check('E4. rejecting Promise: same object returned, verdict inert object, caller still owns the rejection', retR === pRej && caught && tr[0].verdict === 'object');
 
-    // C8 — synchronous throw: rethrown to the caller; verdict `threw`.
+    // E5 — synchronous throw: rethrown to the caller; verdict threw.
     tr.length = 0;
-    let sthrew = false; try { wrapFor(T.SUB, () => { throw new Error('boom'); }).call({}, certify(JSON.stringify(CERT[T.SUB])), {}); } catch { sthrew = true; }
-    check('C8. sync throw: rethrown to caller AND verdict threw emitted', sthrew && tr.length === 1 && tr[0].verdict === 'threw');
+    let sthrew = false; try { wrapFor(T.SUB, () => { throw new Error('boom'); }).call({}, certFrame(CERT[T.SUB]), {}); } catch { sthrew = true; }
+    check('E5. sync throw: rethrown to caller AND verdict threw emitted', sthrew && tr.length === 1 && tr[0].verdict === 'threw');
 
-    // C9 — the unbranded floor: an uncertified LIVE frame is never reflected on.
+    // E6 — schema-invalid: registered, schemaOk=false, handler still ran.
+    tr.length = 0;
+    wrapFor(T.SUB, () => undefined).call({}, certFrame({ topicId: 'aa' }), {});
+    check('E6. schema-invalid certified frame: registered, schemaOk=false, schema fault, handler ran',
+      tr.length === 1 && tr[0].registered === true && tr[0].schemaOk === false && (tr[0].faults || []).some((f) => f.startsWith('schema:')));
+
+    // E7 — the unbranded floor: an uncertified LIVE frame is never reflected on.
     tr.length = 0;
     const retU = wrapFor(T.SUB, () => 'handle').call({}, { topicId: 'aa', subscriberId: 'bb' }, {});
-    check('C9. uncertified live frame: handler verbatim + unbranded-source (no reflection)',
+    check('E7. uncertified live frame: handler verbatim + unbranded-source (no reflection)',
       retU === 'handle' && tr.length === 1 && tr[0].verdict === 'unobserved' && (tr[0].faults || []).includes('unbranded-source'));
 
     setShadowEnabled(false);

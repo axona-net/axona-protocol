@@ -10,7 +10,10 @@
 // implementation. Relocated out of src/pubsub so no boundary keeps a local copy
 // (Phase-1 post-mortem F1; Aster seq 664, Orion seq 670). The 48-gate suite is
 // the shared conformance gate every boundary re-runs unchanged.
-export { defineRow, FrameKind, EvidenceLevel, CorrelationSubjectKind, Proves, FactType } from './types.js';
+export {
+  defineRow, FrameKind, EvidenceLevel, CorrelationSubjectKind, Proves, FactType,
+  Retry, NOT_APPLICABLE, ConversationRole, PairSide,
+} from './types.js';
 export { ShadowRegistry, shadowEnabled, setShadowEnabled } from './shadowRegistry.js';
 // NOTE: the snapshot mint (certify) is deliberately NOT re-exported, and its
 // subpath is blocked in package.json. That is API ENCAPSULATION / hygiene, NOT a
