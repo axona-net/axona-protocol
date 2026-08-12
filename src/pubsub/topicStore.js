@@ -37,7 +37,9 @@ export const topicStoreMethods = {
       if (!old) break;
       role.cacheIds.delete(old.msgId);
       role.cacheBytes -= old.bytes;
+      if (this._tombAuthority) this._taObserveEvict(role, old.msgId);   // Phase 3 shadow (no-op flag-off)
     }
+    if (this._tombAuthority) this._taObserveBody(role, entry);          // Phase 3 shadow (no-op flag-off)
   },
 
   _expireCache(role, now) {
@@ -45,7 +47,9 @@ export const topicStoreMethods = {
       const old = role.cache.shift();
       role.cacheIds.delete(old.msgId);
       role.cacheBytes -= old.bytes;
+      if (this._tombAuthority) this._taObserveEvict(role, old.msgId);   // Phase 3 shadow (no-op flag-off)
     }
+    if (this._tombAuthority) this._taReclaim();                          // Phase 3 shadow: reclaim + retry (no-op flag-off)
   },
 
   // My cache high-water = the newest stamp I hold (or have emitted, as root).

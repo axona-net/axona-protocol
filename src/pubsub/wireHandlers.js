@@ -811,6 +811,7 @@ export const wireHandlersMethods = {
     if (role && Number.isFinite(seq) && seq > role.seq) role.seq = seq;   // recover counter (kill occupied a slot)
     if (role && !role.tombstones.has(target)) {
       role.tombstones.set(target, { exp: this._now() + TTL_MS, killTs, signer: m.signer ?? null, seq });
+      if (this._tombAuthority) this._taObserveKill(role, topicBig, m);   // Phase 3 shadow (no-op flag-off)
       const i = role.cache.findIndex(c => c.msgId === target);
       if (i >= 0) { role.cacheBytes -= role.cache[i].bytes; role.cache.splice(i, 1); }
       role.cacheIds.delete(target);

@@ -67,6 +67,7 @@ import { repairPlaneMethods }  from './repairPlane.js';
 import { wireHandlersMethods }  from './wireHandlers.js';
 import { syncEngineMethods }    from './syncEngine.js';
 import { writeFlightMethods }   from './writeFlight.js';
+import { tombstoneAuthWiringMethods, makeTombstoneAuthority } from './tombstoneAuthWiring.js';
 
 // Constants, wire types, and the region-lock switch live in constants.js
 // (refactor Phase 2); the caps and region-lock functions are re-exported here
@@ -105,6 +106,7 @@ export class AxonaManager {
     roleAdmitPerTick = ROLE_ADMIT_PER_TICK,  // paced admission: new roles per refresh tick
     neverRoot = false,             // HARD refusal: a bridge is a bridge (transport + introduction only)
     identity = null,               // node TRANSPORT identity {pubkey, sign} — signs D1 INGEST-ACK proofs
+    tombstoneAuth = false,         // REF-1.1 S2.0c Phase 3: DEFAULT-OFF shadow wiring of the tombstone authorization core (observe-only; no behavior change)
     ..._legacy   // accepted-and-ignored clean-break tunables (pickRelayPeer, rootSetSize, …)
   } = {}) {
     if (!dht || typeof dht.routeMessage !== 'function' || typeof dht.getSelfId !== 'function'
@@ -185,6 +187,16 @@ export class AxonaManager {
     // observing DELIVERY discharged DURABILITY. Nothing on the delivery path can
     // reach 'verified' — there is deliberately no function here for it to call.
     this._durability = new DurabilityLedger({ now });
+
+    // REF-1.1 S2.0c Phase 3 — DEFAULT-OFF shadow wiring of the accepted tombstone
+    // authorization core (src/pubsub/tombstoneAuth.js). When the flag is set, ONE
+    // per-node TombstoneAuthority is built and the _ta* observers (mixed in below)
+    // feed it the inbound body/kill/evict stream at the existing funnels WITHOUT
+    // changing any behavior — the legacy tombstone path stays authoritative. Flag
+    // OFF (default): this is null, every observer is a guarded no-op, and the node
+    // is byte-identical to today. Enforcement (making this the source of truth) is
+    // a SEPARATE gate that also needs the signed exp from the envelope flag day.
+    this._tombAuthority = tombstoneAuth ? makeTombstoneAuthority() : null;
 
     this.renewMs     = renewMs;          // adaptive ceiling
     this.renewFastMs = renewFastMs;      // adaptive floor
@@ -1160,6 +1172,7 @@ Object.assign(
   wireHandlersMethods,   // routed handlers + axon-tree mechanics
   syncEngineMethods,     // Phase 8: the ONE repair/durability sync operation + policy table
   writeFlightMethods,    // E3 (Dead-Root Eviction v0.3): ingest-ack write completion, receipt probe, evict + retry-promote
+  tombstoneAuthWiringMethods,  // REF-1.1 S2.0c Phase 3: DEFAULT-OFF shadow observers (no-op unless the tombstoneAuth flag is set)
 );
 
 export default AxonaManager;
