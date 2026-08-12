@@ -255,49 +255,71 @@ async function main() {
     check('F3. no fabricated B co-location: the cross-topic kill did NOT suppress via a migrated A body', (postF.stats.verdicts['kill:SUPPRESSED'] || 0) === preSup, JSON.stringify(postF.stats.verdicts));
   }
 
-  // ---- G. SIGNED-KILL PROOF TRANSPORT (Aster Phase-3 blocker b) -----------------
-  // The kill's proof is RETAINED in the tombstone and TRAVELS with it, so a node
-  // that receives the tombstone via PROPAGATION (fanout / migrate) verifyKill()s it
-  // LOCALLY and earns authority — never trusting an unsigned marker (that stays the
-  // D2 case). Retain (send) + local verify (receive), the two halves of blocker b.
+  // ---- G. SIGNED-KILL PROOF TRANSPORT — verify + BIND before retain/re-fan, and
+  //      UPGRADE a proof-less tombstone (Aster Phase-3 blocker b, B1 + B2). Driven
+  //      through the ACTUAL receive funnels (_onDeliver, _applyDels), NOT direct
+  //      helper calls: a propagated proof is retained + re-fanned ONLY after it is
+  //      verified and bound to its carrier (topicId + msgId + signer); a mismatched
+  //      or forged proof is stripped; a later valid proof upgrades a proof-less tomb.
   {
     const fab = new Fabric({ tombstoneAuth: true });
     const nodes = nodeIds.map(id => fab.addNode(id));
     const dG = { region:'useast', owner:null, name:'ta-killproof', write:'open' };
     const tG = await deriveTopicIdBig(dG);
-    nodes[0].am.pubsubSubscribe(tG); await fab.settle(); fab.clock += 6000; await fab.tickAll();
+    nodes[0].am.pubsubSubscribe(tG); nodes[2].am.pubsubSubscribe(tG);
+    await fab.settle(); fab.clock += 6000; await fab.tickAll();
     const e1 = await buildEnvelope({ topic: dG, message: { g: 1 }, seq: 1, identity: alice, ts: fab.clock });
     const e2 = await buildEnvelope({ topic: dG, message: { g: 2 }, seq: 2, identity: alice, ts: fab.clock + 1 });
+    const e3 = await buildEnvelope({ topic: dG, message: { g: 3 }, seq: 3, identity: alice, ts: fab.clock + 2 });
     nodes[1].am.pubsubPublish(tG, JSON.stringify(e1)); await fab.settle();
     nodes[1].am.pubsubPublish(tG, JSON.stringify(e2)); await fab.settle();
+    nodes[1].am.pubsubPublish(tG, JSON.stringify(e3)); await fab.settle();
     const rG = root(fab, tG);
+    const roleG   = () => rG.am.axonRoles.get(tG);
+    const tombKill = (mid) => roleG()?.tombstones?.get(mid)?.kill;
+    // Did any del carrying THIS proof get fanned/replicated on the wire since the drain?
+    const refanned = (mid) => fab.queue.some(j => [j.payload?.msgs, j.payload?.dels].filter(Array.isArray)
+      .some(a => a.some(x => x && x.del && x.msgId === mid && x.kill)));
+    const deliverDel = (marker) => rG.am._onDeliver({ topicId: idHex(tG), from: idHex(nodeIds[7]), msgs: [marker] }, { targetId: rG.id });
 
-    // RETAIN (send side): a real signed kill is stored COMPLETE in the tombstone so
-    // the fanout / replicate / handoff / pull emitters can carry it (flag-gated).
-    const kill1 = await buildKill({ topicId: idHex(tG), msgId: e1.msgId, seq: 9, identity: alice });
-    fab.clock += 100; rG.am.pubsubKill(tG, kill1); await fab.settle();
-    const retained = rG.am.axonRoles.get(tG)?.tombstones?.get(e1.msgId)?.kill;
-    check('G1. root RETAINS the complete signed kill in the tombstone (for transport)', !!retained && retained.signature === kill1.signature, JSON.stringify({ has: !!retained }));
+    // G1/G2/G3 — a VALID, bound proof via _onDeliver: retained, observed, re-fanned.
+    const k1 = await buildKill({ topicId: idHex(tG), msgId: e1.msgId, seq: 9, identity: alice });
+    const b1 = rG.am.tombstoneAuthShadow(); fab.queue.length = 0;
+    await deliverDel({ del: true, msgId: e1.msgId, killTs: fab.clock + 40, seq: 9, signer: k1.signerPubkey, kill: k1 });
+    const a1 = rG.am.tombstoneAuthShadow();
+    check('G1. valid propagated proof RETAINED in the tombstone (via _onDeliver)', tombKill(e1.msgId)?.signature === k1.signature);
+    check('G2. valid propagated proof observed by the shadow after LOCAL verify', a1.stats.kills > b1.stats.kills, JSON.stringify({ before: b1.stats.kills, after: a1.stats.kills }));
+    check('G3. valid proof RE-FANNED downstream (transport)', refanned(e1.msgId));
+    await fab.settle();
 
-    // RECEIVE (proof side): a del marker carrying a VALID signed kill, arriving via
-    // the PROPAGATION path, is verifyKill()d LOCALLY and observed — the mechanism by
-    // which a non-root holder earns authority for a kill it never received as a RPC.
-    const gBefore = rG.am.tombstoneAuthShadow();
-    const kill2 = await buildKill({ topicId: idHex(tG), msgId: e2.msgId, seq: 10, identity: alice });
-    await rG.am._taObservePropagatedKill(tG, { del: true, msgId: e2.msgId, killTs: fab.clock + 50, seq: 10, kill: kill2 });
-    const gAfter = rG.am.tombstoneAuthShadow();
-    check('G2. a propagated signed kill is verifyKill()d LOCALLY and observed', gAfter.stats.kills > gBefore.stats.kills, JSON.stringify({ before: gBefore.stats.kills, after: gAfter.stats.kills }));
-    check('G3. the locally-verified proof SUPPRESSED the co-located body', (gAfter.stats.verdicts['kill:SUPPRESSED'] || 0) > (gBefore.stats.verdicts['kill:SUPPRESSED'] || 0), JSON.stringify(gAfter.stats.verdicts));
+    // G4/G5/G6 — a proof for a DIFFERENT carrier (kill names e2, del names e3) is
+    // STRIPPED: never retained, never re-fanned, never observed under the wrong carrier.
+    const kMis = await buildKill({ topicId: idHex(tG), msgId: e2.msgId, seq: 10, identity: alice });
+    const b2 = rG.am.tombstoneAuthShadow(); fab.queue.length = 0;
+    await deliverDel({ del: true, msgId: e3.msgId, killTs: fab.clock + 50, seq: 10, signer: kMis.signerPubkey, kill: kMis });
+    const a2 = rG.am.tombstoneAuthShadow();
+    check('G4. carrier/proof mismatch: e3 tombstone installed but carries NO proof (stripped)', roleG()?.tombstones?.has(e3.msgId) === true && tombKill(e3.msgId) === undefined);
+    check('G5. carrier/proof mismatch: nothing re-fanned with the mismatched proof', !refanned(e3.msgId) && !refanned(e2.msgId));
+    check('G6. carrier/proof mismatch: the shadow did NOT observe the mismatched proof', a2.stats.kills === b2.stats.kills);
+    await fab.settle();
 
-    // REFUSE: a FORGED signed kill through the same path fails the LOCAL verifyKill,
-    // so propagation can never smuggle authority — swallowed, never a throw.
-    const advBefore = rG.am.tombstoneAuthShadow();
-    const good3 = await buildKill({ topicId: idHex(tG), msgId: e2.msgId, seq: 11, identity: alice });
-    const forged3 = { ...good3, signature: 'ed25519:' + '0'.repeat(128) };
-    await rG.am._taObservePropagatedKill(tG, { del: true, msgId: e2.msgId, killTs: fab.clock + 60, seq: 11, kill: forged3 });
-    const advAfter = rG.am.tombstoneAuthShadow();
-    check('G4. a FORGED propagated kill is refused at local verifyKill (kills + errors unchanged)',
-      advAfter.stats.kills === advBefore.stats.kills && advAfter.stats.errors === advBefore.stats.errors, JSON.stringify({ killsB: advBefore.stats.kills, killsA: advAfter.stats.kills, errB: advBefore.stats.errors, errA: advAfter.stats.errors }));
+    // G7 — a FORGED proof via _applyDels is stripped: proof-less tombstone, not observed, no throw.
+    const good2 = await buildKill({ topicId: idHex(tG), msgId: e2.msgId, seq: 11, identity: alice });
+    const forged2 = { ...good2, signature: 'ed25519:' + '0'.repeat(128) };
+    const b3 = rG.am.tombstoneAuthShadow();
+    await rG.am._applyDels(roleG(), tG, [{ del: true, msgId: e2.msgId, killTs: fab.clock + 60, seq: 11, signer: good2.signerPubkey, kill: forged2 }]);
+    const a3 = rG.am.tombstoneAuthShadow();
+    check('G7. forged proof via _applyDels: proof-less tombstone, not observed, no throw',
+      roleG()?.tombstones?.has(e2.msgId) === true && tombKill(e2.msgId) === undefined && a3.stats.kills === b3.stats.kills && a3.stats.errors === b3.stats.errors);
+
+    // G8/G9 — a later VALID proof UPGRADES the proof-less e2 tombstone (B2): attach + observe + re-fan.
+    const k2 = await buildKill({ topicId: idHex(tG), msgId: e2.msgId, seq: 12, identity: alice });
+    const b4 = rG.am.tombstoneAuthShadow(); fab.queue.length = 0;
+    await deliverDel({ del: true, msgId: e2.msgId, killTs: fab.clock + 70, seq: 12, signer: k2.signerPubkey, kill: k2 });
+    const a4 = rG.am.tombstoneAuthShadow();
+    check('G8. B2 upgrade: a later valid proof attaches to the proof-less tombstone', tombKill(e2.msgId)?.signature === k2.signature);
+    check('G9. B2 upgrade: the upgraded proof is observed + re-fanned downstream', a4.stats.kills > b4.stats.kills && refanned(e2.msgId), JSON.stringify({ before: b4.stats.kills, after: a4.stats.kills, refan: refanned(e2.msgId) }));
+    await fab.settle();
   }
 
   console.log(`\nResult: ${passed} passed, ${failed} failed`);

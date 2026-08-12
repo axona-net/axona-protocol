@@ -23,10 +23,11 @@
 //   - kill  ← _onKill, AFTER verifyKill() passed, handed the signed kill object
 //             and its verified signerPubkey; the kill's topicId is bound to this
 //             topic before it can reach onKill(). A kill that arrives via a
-//             PROPAGATION path (fanout _onDeliver / migrate _applyDels) is observed
-//             ONLY when it carries the COMPLETE signed kill and that kill passes a
-//             LOCAL verifyKill() here too (_taObservePropagatedKill, Aster blocker
-//             b) — an UNSIGNED marker, or a forged signed kill, is never observed.
+//             PROPAGATION path (fanout _onDeliver / migrate _applyDels) is verified
+//             + BOUND (topicId + msgId + signer) by _taVerifyBoundKill BEFORE it may
+//             be observed OR retained/re-fanned on the live path (Aster blocker b) —
+//             an UNSIGNED marker, a forged proof, or a proof naming a different
+//             carrier is stripped and never observed or transported.
 // Anything without local proof never becomes a candidate or a tombstone.
 //
 // TOPIC BINDING (Aster blocker a). A stamped body is bound to its role topic at the
@@ -35,10 +36,12 @@
 // cross-topic re-stamp cannot corrupt a role's history or seed a false co-location.
 //
 // SIGNED-KILL PROOF TRANSPORT (Aster blocker b, flag-gated so flag-off is byte-
-// identical). When the authority is built, _applyKill RETAINS the complete signed
-// kill in the tombstone and the fanout / replay / replicate / handoff / pull emitters
-// carry it, so every node holding the propagated tombstone can verifyKill() it
-// locally rather than trusting an unsigned marker.
+// identical). When the authority is built, a propagated proof is verified + bound to
+// its carrier (_taVerifyBoundKill) BEFORE _applyKill may retain it; only a bound proof
+// is stored in the tombstone and carried by the fanout / replay / replicate / handoff /
+// pull emitters, so every node holding the propagated tombstone can verifyKill() it
+// locally (B1). A verified proof also UPGRADES an existing proof-less tombstone and
+// re-converges downstream, so transport survives reordering / mixed-flag arrival (B2).
 //
 // CACHE FIDELITY (Aster Phase-3 review, class 2). The shadow body mirror must not
 // retain a body the live cache no longer holds, or it would be a false
@@ -128,22 +131,32 @@ export const tombstoneAuthWiringMethods = {
     } catch { ta.stats.errors++; }
   },
 
-  // A del marker arrived via a PROPAGATION path (fanout _onDeliver, migrate
-  // _applyDels) carrying a COMPLETE signed kill (Aster Phase-3 blocker b). This is
-  // where a non-root node earns authority for a kill it did not itself receive as a
-  // KILL RPC: it verifyKill()s the signed proof LOCALLY, exactly like _onKill does,
-  // and only then observes. An UNSIGNED marker (no d.kill — the legacy/flag-off wire
-  // shape) is never observed, so a forged or bare del can never seed a tombstone
-  // (preserves the D2 invariant). Fire-and-forget from the sync receive funnels; it
-  // only feeds the shadow and swallows its own errors.
-  async _taObservePropagatedKill(topicBig, d) {
-    const ta = this._tombAuthority; if (!ta) return;
+  // Verify + BIND a propagated proof to its carrier BEFORE it may be retained,
+  // re-fanned, or observed (Aster Phase-3 blocker b, B1). A del marker arriving via a
+  // PROPAGATION path (fanout _onDeliver, migrate _applyDels) may carry a COMPLETE
+  // signed kill. The kill is trusted for THIS tombstone ONLY when it (1) passes
+  // verifyKill() LOCALLY, (2) names this marker's target (kill.msgId===marker.msgId),
+  // (3) binds to this topic (idBig(kill.topicId)===topicBig), and (4) its verified
+  // signer matches the marker's advertised signer. On success it observes the proof
+  // into the shadow authority and RETURNS the kill, so the live path may retain +
+  // transport it. On any failure it returns null and the caller MUST strip
+  // marker.kill — an unverified, forged, or cross-carrier proof is never retained or
+  // re-fanned. An unsigned marker (no kill) returns null quietly (preserves D2). The
+  // caller AWAITS this so verification completes before _applyKill retains anything.
+  async _taVerifyBoundKill(topicBig, marker) {
+    const ta = this._tombAuthority; if (!ta) return null;
     try {
-      if (!d || !d.kill) return;                        // unsigned marker → never authoritative
-      const v = await verifyKill(d.kill);               // LOCAL proof check (non-root verifyKill)
-      if (!v.ok) { ta.stats.skipped++; return; }
-      this._taObserveKill(topicBig, d.kill, v.signerPubkey);   // re-binds kill.topicId to this topic
-    } catch { ta.stats.errors++; }
+      const k = marker && marker.kill;
+      if (!k || typeof k.msgId !== 'string') return null;                  // no proof to bind
+      if (k.msgId !== marker.msgId) { ta.stats.skipped++; return null; }   // proof must name the carrier's target
+      let bound = false; try { bound = k.topicId != null && idBig(k.topicId) === topicBig; } catch { bound = false; }
+      if (!bound) { ta.stats.skipped++; return null; }                     // proof bound to this topic
+      const v = await verifyKill(k);                                       // LOCAL signature verify
+      if (!v.ok) { ta.stats.skipped++; return null; }
+      if (marker.signer != null && lc(v.signerPubkey) !== lc(marker.signer)) { ta.stats.skipped++; return null; } // signer binds
+      this._taObserveKill(topicBig, k, v.signerPubkey);                    // shadow earns the verified, bound proof
+      return k;                                                            // live path may now retain + transport it
+    } catch { ta.stats.errors++; return null; }
   },
 
   // A cache entry aged out / was byte-capped (the _cachePush + _expireCache

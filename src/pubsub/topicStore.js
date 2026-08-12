@@ -108,14 +108,17 @@ export const topicStoreMethods = {
   // Apply a batch of migrated tombstones BEFORE ingesting the migrated bodies, so a
   // killed message in the same batch is suppressed (not briefly fanned/delivered then
   // retracted). Shared by the replay-up and handoff receive paths.
-  _applyDels(role, topicBig, dels) {
+  async _applyDels(role, topicBig, dels) {
     for (const d of (Array.isArray(dels) ? dels : [])) {
       if (d && d.msgId) {
-        // A migrated del carrying a signed kill (flag-on) lets this node verifyKill()
-        // the proof LOCALLY and earn authority for it (Aster Phase-3 blocker b);
-        // fire-and-forget, never blocks the migration. Unsigned markers observe nothing.
-        this._taObservePropagatedKill(topicBig, d);
-        this._applyKill(role, topicBig, d);
+        // Verify + BIND any propagated proof (topicId+msgId+signer) BEFORE _applyKill
+        // may retain or re-fan it (Aster Phase-3 blocker b, B1). A proof that fails
+        // local verifyKill or does not bind is STRIPPED, so the tombstone migrates
+        // WITHOUT an unverified/cross-carrier proof. Awaited so verification completes
+        // before retention; a verified proof also observes into the shadow authority.
+        let dd = d;
+        if (this._tombAuthority && d.kill && !(await this._taVerifyBoundKill(topicBig, d))) { const { kill, ...rest } = d; dd = rest; }
+        this._applyKill(role, topicBig, dd);
       }
     }
   },

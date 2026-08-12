@@ -702,7 +702,7 @@ export const wireHandlersMethods = {
   },
 
   // ── DELIVER (parent → subscriber; a relay re-fans down the tree) ──────
-  _onDeliver(payload, meta) {
+  async _onDeliver(payload, meta) {
     if (meta.targetId !== this.nodeId) return;        // forward (intermediate hop)
     const topicBig = idBig(payload.topicId);
     if (payload.from) {
@@ -721,7 +721,15 @@ export const wireHandlersMethods = {
     const role = this.axonRoles.get(topicBig);        // set iff I'm a relay → re-fan
     for (const m of (Array.isArray(payload.msgs) ? payload.msgs : [])) {
       if (!m) continue;
-      if (m.del) { this._taObservePropagatedKill(topicBig, m); this._applyKill(role, topicBig, m); continue; }   // del-marker carries killTs+signer (+ signed kill flag-on)
+      if (m.del) {
+        // A propagated proof is verified + BOUND (topicId+msgId+signer) BEFORE it can
+        // be retained or re-fanned (Aster B1). A proof that fails is stripped, so
+        // _applyKill installs the tombstone WITHOUT an unverified/cross-carrier proof.
+        let mm = m;
+        if (this._tombAuthority && m.kill && !(await this._taVerifyBoundKill(topicBig, m))) { const { kill, ...rest } = m; mm = rest; }
+        this._applyKill(role, topicBig, mm);
+        continue;
+      }
       if (this._tombstoned(role, m.msgId, m.json)) continue;          // killed → suppress (don't cache/deliver/re-fan)
       if (role && !role.cacheIds.has(m.msgId)) {       // relay: cache once + re-fan once
         this._cachePush(role, { msgId: m.msgId, publishTs: m.publishTs, json: m.json, seq: m.seq });
@@ -830,24 +838,42 @@ export const wireHandlersMethods = {
     const killTs = m.killTs ?? this._now();
     const seq = m.seq;                                 // root-assigned dense counter for this kill
     if (role && Number.isFinite(seq) && seq > role.seq) role.seq = seq;   // recover counter (kill occupied a slot)
-    if (role && !role.tombstones.has(target)) {
+    // SIGNED-KILL PROOF (Aster Phase-3 blocker b): retain + transport a proof ONLY when
+    // it is BOUND to this carrier — the kill's target IS this tombstone's target and it
+    // binds to this topic. The SIGNATURE was already verified by the caller (_onKill's
+    // verifyKill for a direct kill; _taVerifyBoundKill on every propagation funnel, which
+    // also checks the signer and STRIPS an unverified proof before it reaches here). This
+    // is the synchronous binding gate; a mismatched proof is never retained or re-fanned.
+    let proof = null;
+    if (this._tombAuthority && m.kill && typeof m.kill.msgId === 'string' && m.kill.msgId === target) {
+      try { if (m.kill.topicId != null && idBig(m.kill.topicId) === topicBig) proof = m.kill; } catch { proof = null; }
+    }
+    const existing = role ? role.tombstones.get(target) : null;
+    if (role && existing && proof && !existing.kill) {
+      // B2 UPGRADE — a proof-less tombstone gains a verified, bound proof. Attach it and
+      // converge it downstream (re-fan now + re-replicate; the replay / replicate /
+      // handoff / pull emitters read tomb.kill). The destructive/idempotent side effects
+      // (cache drop, app kill delivery, pending confirm) already ran on first sighting,
+      // so this is a PURE proof-attach and must not repeat them.
+      existing.kill = proof;
+      this._fanout(role, { del: true, msgId: target, killTs: existing.killTs, signer: existing.signer ?? null, publishTs: existing.killTs, seq: existing.seq, kill: proof }, null);
+      if (role.isRoot && this._rootReplicas) {
+        const bridge = (typeof this.dht.bridgeId === 'function') ? this.dht.bridgeId() : null;
+        this._replicateRole(topicBig, role, bridge, this._now()).catch(() => {});
+      }
+      return;
+    }
+    if (role && !existing) {
       const tomb = { exp: this._now() + TTL_MS, killTs, signer: m.signer ?? null, seq };
-      // SIGNED-KILL PROOF (Aster Phase-3 blocker b), flag-gated so flag-off is
-      // byte-identical: when the shadow authority is built, RETAIN the complete
-      // signed kill in the tombstone and TRANSPORT it on the wire (the fanout below
-      // + the replay / replicate / handoff emit sites), so any node holding the
-      // propagated tombstone verifyKill()s it LOCALLY (_taObservePropagatedKill)
-      // instead of trusting an unsigned marker. The DIRECT kill is still observed
-      // once, at _onKill after verifyKill(); _applyKill itself never observes.
-      if (this._tombAuthority && m.kill) tomb.kill = m.kill;
+      if (proof) tomb.kill = proof;                    // retain only the bound, caller-verified proof
       role.tombstones.set(target, tomb);
       const i = role.cache.findIndex(c => c.msgId === target);
       if (i >= 0) { role.cacheBytes -= role.cache[i].bytes; role.cache.splice(i, 1); }
       role.cacheIds.delete(target);
       // fan the delete down — carries killTs + signer + seq so each receiver records
       // an identical tombstone (consistent replay + ordering + provisional authorship);
-      // flag-on it also carries the signed kill so receivers can verify it themselves.
-      this._fanout(role, { del: true, msgId: target, killTs, signer: m.signer ?? null, publishTs: killTs, seq, ...(this._tombAuthority && m.kill ? { kill: m.kill } : {}) }, null);
+      // flag-on it also carries the BOUND signed kill so receivers can verify it themselves.
+      this._fanout(role, { del: true, msgId: target, killTs, signer: m.signer ?? null, publishTs: killTs, seq, ...(proof ? { kill: proof } : {}) }, null);
       // Replicas/cohort aren't subscribers/children — they don't see the fan-out. Push the
       // new tombstone to the cohort EAGERLY (not on the next tick) so a co-hosting root or a
       // backup that promotes mid-window can't serve the killed body it already holds (the
