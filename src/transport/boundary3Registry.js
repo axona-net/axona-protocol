@@ -119,14 +119,18 @@ function rowDefs() {
     ({
       type: 'mesh:peer-left', wire: 'peer-left', kind: FrameKind.UNSOLICITED_EVENT,
       owningService: 'MeshDiscovery', versionRange: V,
-      outcome: 'DiscoveryOutcome', terminalOutcome: 'PEER_DEPARTED',
-      retry: Retry.NATURAL,
+      // F4 (Vega found, Aster confirmed): the frame is a bridge (third-party) DEPARTURE
+      // HINT, not proof the peer left the mesh — so it must not claim departure or edge
+      // teardown (#374 bridge-independence invariant). It is a PROCESSED HINT, and its
+      // effect is state-dependent, so Retry is NONE, not NATURAL.
+      outcome: 'DiscoveryOutcome', terminalOutcome: 'DEPARTURE_HINT_PROCESSED',
+      retry: Retry.NONE,   // F4: state-dependent — the same hint is ignored while the channel is open and retires state once it is non-open; the nodeId fan-out has no dedup key. NOT naturally idempotent/order-independent.
       topicProfile: NA, eventIdScheme: NA, replayCursorType: NA, orderingModel: NA,
       authGuard: NA, admissionGuard: NA, placementGuard: NA,
       projection: { payload: ['peerId', 'nodeId'] },
       schema: { require: ['peerId'], types: { peerId: 'string', nodeId: 'string' } },
       errorContract: [], traceFields: ['peerId'], budget: budget(4),
-      note: 'a signalling-channel departure; tears down the edge. Optional hex `nodeId` is the #364-B departure hint (purge pub/sub ghosts), guarded by reportPeerDeparted (ignored while we hold a live channel to the subject). Old bridges omit it.',
+      note: 'bridge-asserted DEPARTURE HINT, not proof of mesh departure. onPeerLeft KEEPS an OPEN first-party channel (peer-left-ignored-live, no onPeerLost) and lets its own vitality reaper govern teardown; only NON-OPEN state is retired, unknown is a no-op (#374). The optional hex nodeId (reportPeerDeparted) is likewise IGNORED while a live channel to the subject exists; only an unreachable subject purges pub/sub ghosts (#364-B). Old bridges omit nodeId.',
     }),
 
     // ── WebRTC signal: SDP offer (responder builds the answer) ──

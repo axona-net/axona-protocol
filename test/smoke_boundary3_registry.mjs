@@ -17,7 +17,10 @@
 //      fingerprint CBV); discovery is bridge-asserted. RECUT (Aster F1-F3): ICE is
 //      Retry.NONE (pre-peer drop, order matters); mesh hello/hello-sig are a
 //      meshId-keyed REQUEST/RESPONSE conversation; signal meta.from + auth meta.meshId
-//      are schema-required (the projection is now observable, not decorative).
+//      are schema-required (the projection is now observable, not decorative). RECUT-2
+//      (F4, Vega found/Aster confirmed): mesh:peer-left is a bridge DEPARTURE_HINT_PROCESSED
+//      with Retry.NONE (state-dependent, no dedup key) — never unconditional edge teardown
+//      (#374 bridge-independence).
 //   W. WIRING: 6 wires; signal carries a value-gated variantBy on payload.kind
 //      (sdp-offer/sdp-answer/ice); the others map to a single row.
 //   R. EVALUATOR SWEEP: a certified representative frame + the correct per-wire meta
@@ -80,7 +83,7 @@ console.log('\nREF-1.1 S4b — Boundary-3 (WebRTC signalling + mesh-auth) regist
 
   check('T2. kinds + outcomes: discovery UNSOLICITED_EVENT/PEER_*; signal ONE_WAY/*_APPLIED; hello ONE_WAY/NONCE_EXCHANGED; hello-sig ONE_WAY/CHANNEL_AUTHENTICATED',
     by['mesh:peer-list'].kind === 'UNSOLICITED_EVENT' && by['mesh:peer-list'].terminalOutcome === 'PEER_SET_ANNOUNCED'
-    && by['mesh:peer-joined'].terminalOutcome === 'PEER_ANNOUNCED' && by['mesh:peer-left'].terminalOutcome === 'PEER_DEPARTED'
+    && by['mesh:peer-joined'].terminalOutcome === 'PEER_ANNOUNCED' && by['mesh:peer-left'].terminalOutcome === 'DEPARTURE_HINT_PROCESSED'
     && by['mesh:signal:offer'].kind === 'ONE_WAY' && by['mesh:signal:offer'].terminalOutcome === 'OFFER_APPLIED'
     && by['mesh:signal:answer'].terminalOutcome === 'ANSWER_APPLIED' && by['mesh:signal:candidate'].terminalOutcome === 'CANDIDATE_APPLIED'
     && by['mesh:hello'].kind === 'ONE_WAY' && by['mesh:hello'].terminalOutcome === 'NONCE_EXCHANGED'
@@ -124,6 +127,14 @@ console.log('\nREF-1.1 S4b — Boundary-3 (WebRTC signalling + mesh-auth) regist
   check('T7c. F2: signal rows schema-require meta.from; hello/hello-sig schema-require meta.meshId',
     ['offer', 'answer', 'candidate'].every((v) => req(by[`mesh:signal:${v}`]).has('from'))
     && req(h).has('meshId') && req(hsig).has('meshId'));
+
+  // RECUT F4 (Vega found, Aster confirmed): mesh:peer-left is a bridge DEPARTURE HINT,
+  // not proof of mesh departure — neutral outcome, Retry.NONE (state-dependent, no dedup
+  // key), and the note must carry the guarded-live semantics, never unconditional teardown.
+  const pl = by['mesh:peer-left'];
+  check('T7d. F4: mesh:peer-left is a processed HINT — terminalOutcome DEPARTURE_HINT_PROCESSED (not PEER_DEPARTED), Retry.NONE (not NATURAL), note states the live-retained guard (#374) and never "tears down"',
+    pl.terminalOutcome === 'DEPARTURE_HINT_PROCESSED' && pl.retry === 'NONE'
+    && /peer-left-ignored-live/.test(pl.note) && /#374/.test(pl.note) && !/tears down/.test(pl.note));
 }
 
 // ── W. WIRING ─────────────────────────────────────────────────────────
