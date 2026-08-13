@@ -245,17 +245,30 @@ async function main() {
   {
     setShadowEnabled(true);
     const fab = new Fabric({ frameRegistry: true });
-    const node = fab.addNode(nodeIds[0]);
-    fab.addNode(nodeIds[1]); fab.addNode(nodeIds[2]);   // routing targets so a forward actually enqueues
+    const added = [nodeIds[0], nodeIds[1], nodeIds[2]];
+    for (const id of added) fab.addNode(id);            // routing targets so a forward actually enqueues
     const desc = { region: 'useast', owner: null, name: 'b1-real', write: 'open' };
     const t = await deriveTopicIdBig(desc);
-    const T_HEX = idHex(t), N1 = idHex(nodeIds[1]), N2 = idHex(nodeIds[2]);
-    // node0 roots + subscribes the topic so its handlers have real state to act on.
+    const T_HEX = idHex(t);
+    // DETERMINISTIC ROOT (Aster recut-5 F6): node ids are RANDOM per run, so the
+    // actual topic terminus is fab._closest(t), NOT nodeIds[0]. recut-5 hardcoded
+    // node0 as "root" — true only ~2/3 of runs — so R2d's schema-invalid PUB was
+    // sometimes driven at a NON-root, where the live handler correctly REROUTES it
+    // onward (routed:true) BEFORE any ingress validation, failing the assertion
+    // (Aster measured three 40/40, two 39/40). Drive the real handlers on the node
+    // that IS the root, and prove it with an isRoot precondition (fail loud, not flaky).
+    const rootBig = fab._closest(t);
+    const node = fab.nodes.get(rootBig);
+    const others = added.filter((id) => id !== rootBig);   // exactly two genuine non-root peers (forward/ack targets)
+    const FROM = others[1];                                 // publisher/forwarder for the ack-target assertion
+    const N1 = idHex(others[0]), N2 = idHex(FROM);
     node.am.pubsubSubscribe(t); await fab.settle(); fab.clock += 6000; await node.am.refreshTick(); await fab.settle();
+    const rootRole = node.am.axonRoles.get(t);
+    check('R0. F6 determinism precondition: the driven node IS the actual topic root (fab._closest(t).isRoot)', !!rootRole && rootRole.isRoot === true);
     const ev = await buildEnvelope({ topic: desc, message: { m: 1 }, seq: 1, identity: alice, ts: fab.clock });
     const MSG = ev.msgId;
-    // TYPE-FAITHFUL certified routing meta: bigint targetId = the invoked node (node0).
-    const certMeta = () => certifyBigint(encode({ targetId: nodeIds[0], fromId: nodeIds[2], isTerminal: true, hopCount: 1 }));
+    // TYPE-FAITHFUL certified routing meta: bigint targetId = the invoked node (the ROOT); fromId = a non-root peer (the publisher).
+    const certMeta = () => certifyBigint(encode({ targetId: rootBig, fromId: FROM, isTerminal: true, hopCount: 1 }));
     // The wrong meta Aster flagged: hex-string targetId, uncertified — handlers early-exit and the meta side is unobservable.
     const wrongMeta = () => ({ targetId: N1, fromId: N2, isTerminal: true, hopCount: 1 });
 
@@ -285,7 +298,9 @@ async function main() {
       let threw = false;
       try { await node.handlers.get(wire)(certFrame(frame), meta); } catch { threw = true; }
       const traces = node.am.frameRegistryShadow().traces;
-      return { rec: traces[traces.length - 1], grew: traces.length > traces0, routed: fab.queue.length > q0, threw };
+      // F6 (Aster recut-5): assert on the EMITTED wire+target, not only queue-length growth.
+      const emitted = fab.queue.slice(q0).map((j) => ({ type: j.type, target: j.meta?.targetId }));
+      return { rec: traces[traces.length - 1], grew: traces.length > traces0, routed: fab.queue.length > q0, emitted, threw };
     };
 
     // R1 — coverage: VALID certified frames + TYPE-FAITHFUL meta through the real handlers → branded + schemaOk.
@@ -305,17 +320,19 @@ async function main() {
 
     // R2 — representative REAL dispositions (measured), with type-faithful meta so handlers actually run.
     const rPub = await driveReal(T.PUB, VALID[T.PUB], certMeta());
-    check('R2a. forward/route: a VALID PUB at the root FORWARDS a frame (routed) and is branded/schema-valid',
-      rPub.rec.registered === true && rPub.rec.schemaOk === true && rPub.routed === true && !rPub.threw);
+    check('R2a. route/emit: a VALID PUB at the root INGESTS and EMITS an INGESTACK to the publisher (fromId) — asserted on emitted wire + target, not queue length',
+      rPub.rec.registered === true && rPub.rec.schemaOk === true && !rPub.threw
+      && rPub.emitted.some((e) => e.type === T.INGESTACK && e.target === FROM));
     const rPullReal = await driveReal(T.PULLUP, VALID[T.PULLUP], certMeta());
     const rPullWrong = await driveReal(T.PULLUP, VALID[T.PULLUP], wrongMeta());
     check('R2b. targeted: PULLUP CONSUMES under type-faithful meta but EARLY-EXITS (passed) under a hex-string/uncertified meta (Aster F6 repro)',
       rPullReal.rec.verdict === 'consumed' && rPullWrong.rec.verdict === 'passed');
     const rTouch = await driveReal(T.TOUCH, VALID[T.TOUCH], certMeta());
     check('R2c. no-op: the deprecated TOUCH handler CONSUMES without routing or throwing', rTouch.rec.verdict === 'consumed' && !rTouch.routed && !rTouch.threw);
-    const rBad = await driveReal(T.PUB, { topicId: T_HEX }, certMeta());   // no json
-    check('R2d. reject: a schema-invalid PUB is branded schemaOk=false with a schema fault AND is NOT forwarded (no route)',
-      rBad.rec.registered === true && rBad.rec.schemaOk === false && (rBad.rec.faults || []).some((f) => f.startsWith('schema:')) && rBad.routed === false);
+    const rBad = await driveReal(T.PUB, { topicId: T_HEX }, certMeta());   // no json → fails root-ingress JSON.parse
+    check('R2d. reject: a schema-invalid PUB at the ROOT is branded schemaOk=false with a schema fault, is NOT forwarded (no PUB emitted) and produces NO ingest-ack (parse-drop at ingress, deterministic now the driven node is the root)',
+      rBad.rec.registered === true && rBad.rec.schemaOk === false && (rBad.rec.faults || []).some((f) => f.startsWith('schema:'))
+      && !rBad.emitted.some((e) => e.type === T.PUB) && !rBad.emitted.some((e) => e.type === T.INGESTACK));
     check('R2e. async: the async PUB handler return is observed as an inert object verdict (no settlement observation, F1)', rPub.rec.verdict === 'object');
 
     // R3 (F2.1) — a 2 KiB legitimate json PUB (well under the 15 KiB reliable-publish limit) is present-but-truncated, NOT malformed.
