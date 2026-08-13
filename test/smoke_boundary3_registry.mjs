@@ -14,19 +14,26 @@
 //      mesh hello + hello-sig (base auth). Deliberate decisions asserted:
 //      evidence-axis null (connection plane, named outcomes); signal frames are
 //      UNAUTHENTICATED here (channel identity bound downstream by hello-sig's
-//      fingerprint CBV); discovery is bridge-asserted; no conversation subject.
+//      fingerprint CBV); discovery is bridge-asserted. RECUT (Aster F1-F3): ICE is
+//      Retry.NONE (pre-peer drop, order matters); mesh hello/hello-sig are a
+//      meshId-keyed REQUEST/RESPONSE conversation; signal meta.from + auth meta.meshId
+//      are schema-required (the projection is now observable, not decorative).
 //   W. WIRING: 6 wires; signal carries a value-gated variantBy on payload.kind
 //      (sdp-offer/sdp-answer/ice); the others map to a single row.
-//   R. EVALUATOR SWEEP: a certified representative frame through the shadow wrap
-//      of each non-variant wire → registered + schemaOk + verdict preserved;
-//      async pass/reject inert 'object'; sync throw rethrown+threw; schema-
-//      invalid branded schemaOk=false; the uncertified unbranded floor.
-//   V. VARIANT SELECTION: a certified signal frame selects offer/answer/candidate
-//      by payload.kind; an unknown kind selects no known variant.
+//   R. EVALUATOR SWEEP: a certified representative frame + the correct per-wire meta
+//      through the shadow wrap of each non-variant wire → registered + schemaOk +
+//      verdict preserved; async pass/reject inert 'object'; sync throw rethrown+threw;
+//      schema-invalid branded schemaOk=false; the uncertified unbranded floor.
+//   V. VARIANT SELECTION: a certified signal frame (+ meta.from) selects
+//      offer/answer/candidate by payload.kind; an unknown kind selects no known variant.
+//   P. PROJECTION IS OBSERVABLE (Aster F2/F3): the required meta leg present → schemaOk;
+//      ABSENT → schemaOk=false + schema:missing-required (a green trace can no longer
+//      hide it); mesh hello/hello-sig conversationPresent true on a certified meshId.
 //   D. FLAG-OFF IDENTITY: flag OFF → wrap verbatim + ZERO traces, pass and throw.
 //   O. OBSERVE UNIT: makeBoundary3Observers().observe side-channel — flag-off
 //      zero traces + input untouched; flag-on branded + verdict UNOBSERVED +
-//      scope stamped; signal variant via observe; never throws out.
+//      scope stamped; the observer certifies the correct per-wire meta key so its
+//      own signal/auth observations are schemaOk; signal variant via observe; never throws out.
 // =====================================================================
 import { buildBoundary3Registry, boundary3Rows, makeBoundary3Observers } from '../src/transport/boundary3Registry.js';
 import { setShadowEnabled } from '../src/registry/index.js';
@@ -51,6 +58,11 @@ const CERT = {
   'hello-sig':   { proto: 'axona/5', nodeId: NODEID, pubkey: PUBKEY, sig: SIG, pow: '' },
 };
 const SIGNAL = { offer: { kind: 'sdp-offer', sdp: SDP }, answer: { kind: 'sdp-answer', sdp: SDP }, candidate: { kind: 'ice', candidate: CAND } };
+// The correct per-wire certified META (recut): mesh auth projects+requires meshId;
+// signal projects+requires from; discovery has no meta projection. A frame observed
+// with the WRONG (or empty) meta must now fail schema — that is the F2 fix.
+const META = { 'peer-list': {}, 'peer-joined': {}, 'peer-left': {}, 'hello': { meshId: 'm1' }, 'hello-sig': { meshId: 'm1' } };
+const SIG_META = { from: 'aa1' };   // signal's required meta leg
 // non-variant wires drive the R sweep; signal is exercised in the V block
 const WIRES = ['peer-list', 'peer-joined', 'peer-left', 'hello', 'hello-sig'];
 
@@ -95,6 +107,23 @@ console.log('\nREF-1.1 S4b — Boundary-3 (WebRTC signalling + mesh-auth) regist
   check('T6. signal variants: offer=sdp-offer, answer=sdp-answer, candidate=ice (capabilityRange.kind); discovery owningService MeshDiscovery, signal MeshSignalling, auth MeshAuth',
     by['mesh:signal:offer'].capabilityRange.kind === 'sdp-offer' && by['mesh:signal:answer'].capabilityRange.kind === 'sdp-answer' && by['mesh:signal:candidate'].capabilityRange.kind === 'ice'
     && by['mesh:peer-list'].owningService === 'MeshDiscovery' && by['mesh:signal:offer'].owningService === 'MeshSignalling' && by['mesh:hello'].owningService === 'MeshAuth');
+
+  // RECUT F1: ICE is fire-and-forget with order-dependent apply and no dedup key — Retry.NONE, not NATURAL.
+  check('T7a. F1: mesh:signal:candidate is Retry.NONE (not NATURAL); offer/answer are also Retry.NONE',
+    by['mesh:signal:candidate'].retry === 'NONE' && by['mesh:signal:offer'].retry === 'NONE' && by['mesh:signal:answer'].retry === 'NONE');
+
+  // RECUT F3: mesh auth is a meshId-keyed REQUEST/RESPONSE conversation (accepted B2 shape), kind still ONE_WAY.
+  const h = by['mesh:hello'], hsig = by['mesh:hello-sig'];
+  const metaLeg = (r) => r.conversation && r.conversation.pairing.length === 1 && r.conversation.pairing[0].local === 'meshId' && r.conversation.pairing[0].remote === 'meshId' && r.conversation.pairing[0].from === 'meta';
+  check('T7b. F3: hello=REQUEST↔hello-sig=RESPONSE, paired on meshId(meta); opposites cross-reference; KIND stays ONE_WAY',
+    h.conversation && h.conversation.role === 'REQUEST' && h.conversation.opposite === 'mesh:hello-sig' && metaLeg(h) && h.kind === 'ONE_WAY'
+    && hsig.conversation && hsig.conversation.role === 'RESPONSE' && hsig.conversation.opposite === 'mesh:hello' && metaLeg(hsig) && hsig.kind === 'ONE_WAY');
+
+  // RECUT F2: the projected meta leg is now schema-REQUIRED, so its absence is a fault, not a silent pass.
+  const req = (r) => new Set(r.schema.require);
+  check('T7c. F2: signal rows schema-require meta.from; hello/hello-sig schema-require meta.meshId',
+    ['offer', 'answer', 'candidate'].every((v) => req(by[`mesh:signal:${v}`]).has('from'))
+    && req(h).has('meshId') && req(hsig).has('meshId'));
 }
 
 // ── W. WIRING ─────────────────────────────────────────────────────────
@@ -115,11 +144,11 @@ console.log('\nREF-1.1 S4b — Boundary-3 (WebRTC signalling + mesh-auth) regist
   const reg = buildBoundary3Registry({ enabled: () => true, sink: (rec) => tr.push(rec) });
   const wrapFor = (wire, handler) => reg.wrap(reg.wiring.get(wire).type, handler);
 
-  // R1 — every non-variant wire: certified valid frame + certified meta → registered + schemaOk + verdict passed.
+  // R1 — every non-variant wire: certified valid frame + the CORRECT per-wire meta → registered + schemaOk + verdict passed.
   let ok = 0; const miss = [];
   for (const wire of WIRES) {
     tr.length = 0;
-    wrapFor(wire, () => undefined).call({}, certFrame(CERT[wire]), certFrame({ scope: 'aa1' }));
+    wrapFor(wire, () => undefined).call({}, certFrame(CERT[wire]), certFrame(META[wire]));
     const r = tr[0];
     if (tr.length === 1 && r.type === reg.wiring.get(wire).type && r.registered === true && r.schemaOk === true && r.verdict === 'passed' && r.faults == null) ok++;
     else miss.push(`${wire}:${JSON.stringify(r)}`);
@@ -129,25 +158,25 @@ console.log('\nREF-1.1 S4b — Boundary-3 (WebRTC signalling + mesh-auth) regist
   // R2 — async handler: the returned Promise is passed through UNTOUCHED; sync verdict is inert 'object'.
   tr.length = 0;
   const pPass = Promise.resolve(7);
-  const retA = wrapFor('hello-sig', () => pPass).call({}, certFrame(CERT['hello-sig']), certFrame({ scope: 'aa1' }));
+  const retA = wrapFor('hello-sig', () => pPass).call({}, certFrame(CERT['hello-sig']), certFrame(META['hello-sig']));
   check('R2. async handler: returned Promise passed through by identity; inert sync verdict object', retA === pPass && tr.length === 1 && tr[0].verdict === 'object');
 
   // R3 — rejecting Promise: same object returned, verdict inert object, caller still owns the rejection.
   tr.length = 0;
   const pRej = Promise.reject(new Error('nack'));
-  const retR = wrapFor('hello-sig', () => pRej).call({}, certFrame(CERT['hello-sig']), certFrame({ scope: 'aa1' }));
+  const retR = wrapFor('hello-sig', () => pRej).call({}, certFrame(CERT['hello-sig']), certFrame(META['hello-sig']));
   let caught = false; try { await retR; } catch { caught = true; }
   check('R3. rejecting Promise: same object returned, verdict object, caller still owns the rejection', retR === pRej && caught && tr[0].verdict === 'object');
 
   // R4 — synchronous throw: rethrown to the caller; verdict threw.
   tr.length = 0;
-  let sthrew = false; try { wrapFor('hello-sig', () => { throw new Error('boom'); }).call({}, certFrame(CERT['hello-sig']), certFrame({ scope: 'aa1' })); } catch { sthrew = true; }
+  let sthrew = false; try { wrapFor('hello-sig', () => { throw new Error('boom'); }).call({}, certFrame(CERT['hello-sig']), certFrame(META['hello-sig'])); } catch { sthrew = true; }
   check('R4. sync throw: rethrown to caller AND verdict threw', sthrew && tr.length === 1 && tr[0].verdict === 'threw');
 
-  // R5 — schema-invalid: a hello-sig missing sig → registered, schemaOk=false, schema fault, handler still ran.
+  // R5 — schema-invalid: a hello-sig missing sig (meshId present) → registered, schemaOk=false, schema fault, handler still ran.
   tr.length = 0;
   let ran = false;
-  wrapFor('hello-sig', () => { ran = true; }).call({}, certFrame({ proto: 'axona/5', nodeId: NODEID, pubkey: PUBKEY, pow: '' }), certFrame({ scope: 'aa1' }));
+  wrapFor('hello-sig', () => { ran = true; }).call({}, certFrame({ proto: 'axona/5', nodeId: NODEID, pubkey: PUBKEY, pow: '' }), certFrame(META['hello-sig']));
   check('R5. schema-invalid: hello-sig without sig → registered, schemaOk=false, schema fault, handler ran',
     ran && tr.length === 1 && tr[0].registered === true && tr[0].schemaOk === false && (tr[0].faults || []).some((f) => f.startsWith('schema:')));
 
@@ -164,10 +193,10 @@ console.log('\nREF-1.1 S4b — Boundary-3 (WebRTC signalling + mesh-auth) regist
   const tr = [];
   const reg = buildBoundary3Registry({ enabled: () => true, sink: (rec) => tr.push(rec) });
   const vb = reg.wiring.get('signal').variantBy;
-  const wrapSignal = (body) => { tr.length = 0; reg.wrap('mesh:signal', () => undefined, { variantBy: vb }).call({}, certFrame(body), certFrame({ scope: 'aa1' })); return tr[0]; };
+  const wrapSignal = (body, meta = SIG_META) => { tr.length = 0; reg.wrap('mesh:signal', () => undefined, { variantBy: vb }).call({}, certFrame(body), certFrame(meta)); return tr[0]; };
 
   const rOffer = wrapSignal(SIGNAL.offer);
-  check('V1. signal kind=sdp-offer → variant offer, registered + schemaOk, verdict passed', rOffer.variant === 'offer' && rOffer.registered === true && rOffer.schemaOk === true && rOffer.verdict === 'passed');
+  check('V1. signal kind=sdp-offer (+meta.from) → variant offer, registered + schemaOk, verdict passed', rOffer.variant === 'offer' && rOffer.registered === true && rOffer.schemaOk === true && rOffer.verdict === 'passed');
 
   const rAnswer = wrapSignal(SIGNAL.answer);
   check('V2. signal kind=sdp-answer → variant answer, registered + schemaOk', rAnswer.variant === 'answer' && rAnswer.registered === true && rAnswer.schemaOk === true);
@@ -178,6 +207,38 @@ console.log('\nREF-1.1 S4b — Boundary-3 (WebRTC signalling + mesh-auth) regist
   const rBogus = wrapSignal({ kind: 'bogus-kind', sdp: SDP });
   check('V4. signal kind=unknown → no known variant selected (not registered as offer/answer/candidate)',
     rBogus.variant == null || rBogus.registered !== true, `\n   ${JSON.stringify(rBogus)}`);
+}
+
+// ── P. PROJECTION IS OBSERVABLE (Aster F2/F3: required meta present vs absent) ──
+{
+  setShadowEnabled(true);
+  const tr = [];
+  const reg = buildBoundary3Registry({ enabled: () => true, sink: (rec) => tr.push(rec) });
+  const vb = reg.wiring.get('signal').variantBy;
+  const wrapSig = (meta) => { tr.length = 0; reg.wrap('mesh:signal', () => undefined, { variantBy: vb }).call({}, certFrame(SIGNAL.offer), certFrame(meta)); return tr[0]; };
+  const wrapHS = (meta) => { tr.length = 0; reg.wrap('mesh:hello-sig', () => undefined).call({}, certFrame(CERT['hello-sig']), certFrame(meta)); return tr[0]; };
+
+  // F2: with meta.from present the signal frame is schema-valid; with it ABSENT the
+  // trace now FAILS (missing-required) instead of silently passing — the defect the
+  // original 23/23 hid.
+  const pFrom = wrapSig({ from: 'aa1' });
+  check('P1. F2: signal WITH meta.from → schemaOk true', pFrom.schemaOk === true && (pFrom.faults == null));
+  const pNoFrom = wrapSig({});
+  check('P2. F2: signal WITHOUT meta.from → schemaOk FALSE + schema:missing-required (no longer a silent pass)',
+    pNoFrom.schemaOk === false && (pNoFrom.faults || []).includes('schema:missing-required'), `\n   ${JSON.stringify(pNoFrom)}`);
+
+  // F2 for the mesh-auth leg: meshId required.
+  const pMesh = wrapHS({ meshId: 'm1' });
+  check('P3. F2: hello-sig WITH meta.meshId → schemaOk true', pMesh.schemaOk === true);
+  const pNoMesh = wrapHS({});
+  check('P4. F2: hello-sig WITHOUT meta.meshId → schemaOk FALSE + schema:missing-required',
+    pNoMesh.schemaOk === false && (pNoMesh.faults || []).includes('schema:missing-required'));
+
+  // F3: the meshId-keyed conversation is OBSERVABLE — a certified meta with meshId
+  // makes conversationPresent true on both legs (REQUEST hello + RESPONSE hello-sig).
+  check('P5. F3: hello-sig conversationPresent TRUE on a certified meshId (the pairing key is observed, not guessed)', pMesh.conversationPresent === true);
+  tr.length = 0; reg.wrap('mesh:hello', () => undefined).call({}, certFrame(CERT['hello']), certFrame({ meshId: 'm1' }));
+  check('P6. F3: hello (REQUEST leg) conversationPresent TRUE on a certified meshId', tr[0].conversationPresent === true);
 }
 
 // ── D. FLAG-OFF IDENTITY (inert wrap) ─────────────────────────────────

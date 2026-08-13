@@ -47,13 +47,25 @@
 //     signed/legacy INGESTACK split), value-gated via variantBy.cases. NO wire
 //     correlation subject: the offer/answer relationship is tracked by the
 //     RTCPeerConnection state machine, not a frame field, and candidates trickle
-//     ONE_WAY. No CorrelationSubjectKind fits "negotiating channel peer".
-//   * MESH MUTUAL AUTH IS MULTI-LEG, ONE_WAY. Each side sends hello (its nonce)
-//     then hello-sig (its signed proof over the nonce+fingerprint CBV); both
-//     directions. hello-sig is not a payload-response to hello, so both are
-//     ONE_WAY with no conversation subject; the channel is the meshId (a meta
-//     leg). Base auth completes on hello-sig (verifyAuthHello + fingerprint CBV
-//     bind → bindPeer): terminalOutcome CHANNEL_AUTHENTICATED.
+//     ONE_WAY. No CorrelationSubjectKind fits "negotiating channel peer". The
+//     signalling peer id `from` (a meta leg) is projected AND schema-required, so a
+//     trace cannot pass while it is absent (Aster F2 — the projection is now
+//     observable, not decorative).
+//   * MESH MUTUAL AUTH IS A meshId-KEYED CONVERSATION (Aster F3). Each side sends
+//     hello (its nonce) then hello-sig (its signed proof over the nonce+fingerprint
+//     CBV). On the ingest side the two are CAUSALLY ordered: onHello stores the peer
+//     nonce that _progress/verifyAuthHello needs before onHelloSig can verify+bind
+//     (mesh-auth.js). So hello is the REQUEST leg and hello-sig the RESPONSE leg,
+//     paired on the meshId (a meta leg) — the accepted Boundary-2 mutual-auth shape.
+//     The frame KIND stays ONE_WAY (each leg is fire-and-forget, not a payload-
+//     correlated request/response); the pairing is declared via `conversation`, and
+//     meshId is projected + schema-required so the conversation key is observable.
+//     Base auth completes on hello-sig (verifyAuthHello + fingerprint CBV bind →
+//     bindPeer): terminalOutcome CHANNEL_AUTHENTICATED.
+//   * ICE IS Retry.NONE, NOT NATURAL (Aster F1). The live handler drops an ICE
+//     candidate whose peer entry does not yet exist (mesh.js `ice-for-unknown`), so
+//     arrival order changes the outcome and there is no registry-level dedup key.
+//     That is fire-and-forget, not an order-independent set-union.
 //   * TYPE NAMESPACE. Row types are prefixed `mesh:` so they never collide with
 //     Boundary-2's `transport:hello`/`transport:hello-ack` — the wire label
 //     'hello' means bridge auth in the B2 registry and mesh auth in this one,
@@ -62,11 +74,12 @@
 
 import {
   defineRow, FrameKind, Retry, NOT_APPLICABLE as NA,
-  ShadowRegistry, shadowEnabled,
+  ConversationRole, PairSide, ShadowRegistry, shadowEnabled,
 } from '../registry/index.js';
 import { certifyPlain } from '../registry/snapshotMint.js';
 
 const V = { min: 5, max: 5 };                 // AUTH_PROTO = 'axona/5' (mesh base auth)
+const REQ = ConversationRole.REQUEST, RESP = ConversationRole.RESPONSE;
 const budget = (leaves, maxBytes = 1024) => ({ maxLeaves: leaves, maxBytes });
 
 // The Boundary-3 row DEFINITIONS. `wire` (the dispatch label) and `variant`
@@ -126,7 +139,7 @@ function rowDefs() {
       authGuard: NA,   // UNAUTHENTICATED at this boundary; channel identity is bound by mesh:hello-sig (DTLS-fingerprint CBV)
       admissionGuard: NA, placementGuard: NA,
       projection: { payload: ['kind', 'sdp'], meta: ['from'] },
-      schema: { require: ['kind', 'sdp'], types: { kind: 'string', sdp: 'string' } },
+      schema: { require: ['kind', 'sdp', 'from'], types: { kind: 'string', sdp: 'string', from: 'string' } },   // F2: `from` (meta) is REQUIRED, not decorative
       capabilityRange: { kind: 'sdp-offer' },
       errorContract: [], traceFields: ['kind'], budget: budget(3, 16384),
       note: 'inbound WebRTC SDP offer from `from` (a signalling peer id, meta leg); we build/reuse the RTCPeerConnection and answer. Unsigned — the offered DTLS fingerprint is bound into the mesh-auth CBV downstream, so a rewritten offer fails the mutual signature.',
@@ -141,7 +154,7 @@ function rowDefs() {
       topicProfile: NA, eventIdScheme: NA, replayCursorType: NA, orderingModel: NA,
       authGuard: NA, admissionGuard: NA, placementGuard: NA,
       projection: { payload: ['kind', 'sdp'], meta: ['from'] },
-      schema: { require: ['kind', 'sdp'], types: { kind: 'string', sdp: 'string' } },
+      schema: { require: ['kind', 'sdp', 'from'], types: { kind: 'string', sdp: 'string', from: 'string' } },   // F2: `from` (meta) is REQUIRED, not decorative
       capabilityRange: { kind: 'sdp-answer' },
       errorContract: [], traceFields: ['kind'], budget: budget(3, 16384),
       note: 'inbound SDP answer to an offer we sent; setRemoteDescription on the matching PC (matched by the RTCPeerConnection state, not a wire field). Same fingerprint-CBV binding note as offer.',
@@ -152,14 +165,14 @@ function rowDefs() {
       type: 'mesh:signal', variant: 'candidate', wire: 'signal', kind: FrameKind.ONE_WAY,
       owningService: 'MeshSignalling', versionRange: V,
       outcome: 'SignalOutcome', terminalOutcome: 'CANDIDATE_APPLIED',
-      retry: Retry.NATURAL,   // addIceCandidate is idempotent; trickle is order-independent
+      retry: Retry.NONE,   // F1 (Aster): NOT order-independent — mesh.js drops an ICE whose peer entry is absent (ice-for-unknown), no dedup key; fire-and-forget, order matters
       topicProfile: NA, eventIdScheme: NA, replayCursorType: NA, orderingModel: NA,
       authGuard: NA, admissionGuard: NA, placementGuard: NA,
       projection: { payload: ['kind', 'candidate'], meta: ['from'] },
-      schema: { require: ['kind', 'candidate'], types: { kind: 'string' } },   // candidate is an RTCIceCandidateInit object, not a scalar
+      schema: { require: ['kind', 'candidate', 'from'], types: { kind: 'string', from: 'string' } },   // candidate is an RTCIceCandidateInit object, not a scalar; `from` (meta) required (F2)
       capabilityRange: { kind: 'ice' },
       errorContract: [], traceFields: ['kind'], budget: budget(4, 4096),
-      note: 'trickled ICE candidate; addIceCandidate (queued if the PC is not ready). Naturally idempotent + order-independent. `candidate` is an RTCIceCandidateInit object.',
+      note: 'trickled ICE candidate. Applied via addIceCandidate once the PC has a remote description, else buffered on the peer entry (pendingCandidates, flushed after the answer). An ICE arriving BEFORE the peer entry exists is DROPPED (mesh.js ice-for-unknown): arrival order changes the outcome and there is no dedup key, so Retry.NONE. `candidate` is an RTCIceCandidateInit object.',
     }),
 
     // ── mesh base auth: hello (nonce leg) ──
@@ -172,10 +185,14 @@ function rowDefs() {
       authGuard: NA,   // the nonce leg carries no proof; the proof is hello-sig
       admissionGuard: NA, placementGuard: NA,
       projection: { payload: ['proto', 'nonce'], meta: ['meshId'] },
-      schema: { require: ['proto', 'nonce'], types: { proto: 'string', nonce: 'string' } },
+      schema: { require: ['proto', 'nonce', 'meshId'], types: { proto: 'string', nonce: 'string', meshId: 'string' } },   // F2: meshId (meta) required — it is the conversation key
+      // F3: hello is the REQUEST leg — it supplies the peer nonce onHelloSig's verify
+      // consumes; paired with hello-sig on the meshId (a meta leg), the accepted
+      // Boundary-2 mutual-auth shape. KIND stays ONE_WAY (fire-and-forget leg).
+      conversation: { role: REQ, opposite: 'mesh:hello-sig', pairing: [{ local: 'meshId', remote: 'meshId', from: PairSide.meta }] },
       capabilityRange: { proto: 'axona/5' },
       errorContract: [], traceFields: ['proto'], budget: budget(3),
-      note: 'first leg of the mesh mutual auth over the data channel: our per-link nonce. Both sides send one; the pair of nonces (+ DTLS fingerprints) forms the channel CBV. No proof yet.',
+      note: 'first leg of the mesh mutual auth over the data channel: our per-link nonce. Both sides send one; the pair of nonces (+ DTLS fingerprints) forms the channel CBV. No proof yet. REQUEST leg of the meshId-keyed hello/hello-sig conversation.',
     }),
 
     // ── mesh base auth: hello-sig (signed proof leg → CHANNEL_AUTHENTICATED) ──
@@ -188,10 +205,13 @@ function rowDefs() {
       authGuard: 'verifyAuthHello: pubkey->nodeId 256-bit bind + ed25519 sig over {proto,nodeId,pubkey,cbv} where cbv = cbvFromNonces(myNonce,peerNonce,"mesh") | cbvFromFingerprints(localFp,remoteFp); id-mismatch to the channel peer rejects',
       admissionGuard: NA, placementGuard: NA,
       projection: { payload: ['proto', 'nodeId', 'pubkey', 'sig', 'pow'], meta: ['meshId'] },
-      schema: { require: ['proto', 'nodeId', 'pubkey', 'sig'], types: { proto: 'string', nodeId: 'string', pubkey: 'string', sig: 'string', pow: 'string' } },
+      schema: { require: ['proto', 'nodeId', 'pubkey', 'sig', 'meshId'], types: { proto: 'string', nodeId: 'string', pubkey: 'string', sig: 'string', pow: 'string', meshId: 'string' } },   // F2: meshId (meta) required
+      // F3: hello-sig is the RESPONSE leg — its verify consumes the nonce hello supplied;
+      // paired with hello on the meshId (a meta leg). KIND stays ONE_WAY.
+      conversation: { role: RESP, opposite: 'mesh:hello', pairing: [{ local: 'meshId', remote: 'meshId', from: PairSide.meta }] },
       capabilityRange: { proto: 'axona/5' },
       errorContract: [], traceFields: ['nodeId', 'proto'], budget: budget(6),
-      note: 'second leg: the authenticated hello signed over the nonce+fingerprint CBV. On verify we bindPeer (the channel becomes a routing member) and retain the peer pubkey + cbv for a later CAP_ATTEST (Boundary-2). The fingerprint fold is the MITM defense over the unsigned SDP.',
+      note: 'second leg: the authenticated hello signed over the nonce+fingerprint CBV. On verify we bindPeer (the channel becomes a routing member) and retain the peer pubkey + cbv for a later CAP_ATTEST (Boundary-2). The fingerprint fold is the MITM defense over the unsigned SDP. RESPONSE leg of the meshId-keyed hello/hello-sig conversation.',
     }),
   ];
 }
@@ -247,13 +267,23 @@ export function makeBoundary3Observers({ sink = () => {}, now, sampleEvery } = {
   let curScope = null;
   const reg = buildBoundary3Registry({ sink: (r) => sink({ ...r, scope: curScope }), now, sampleEvery });
   const wiringByWire = reg.wiring;
+  // F2 (Aster): the certified meta must carry the SAME field the rows project — the
+  // signal rows project meta.from, the mesh-auth rows project meta.meshId — or the
+  // required projection is unobservable and a green trace hides an absent field. Map
+  // each wire to its declared meta key (its single projection.meta field) so the one
+  // `scope` value the caller passes (the peer id / meshId the observation ran under)
+  // is certified under the RIGHT name. The schema then requires it, and the mesh-auth
+  // conversation keys on it. Discovery wires have no meta projection → empty meta.
+  const metaKeyByWire = new Map();
+  for (const d of rowDefs()) { const mk = d.projection?.meta?.[0]; if (mk && !metaKeyByWire.has(d.wire)) metaKeyByWire.set(d.wire, mk); }
   const observe = (wire, scope, body) => {
     if (!shadowEnabled()) return;                    // flag-off: no work, no trace, byte-identical
     const info = wiringByWire.get(wire); if (!info) return;   // unknown wire → not our frame
     try {
       curScope = scope == null ? null : String(scope);
+      const metaKey = metaKeyByWire.get(wire) || null;   // 'from' (signal) | 'meshId' (mesh auth) | none (discovery)
       const snap = certifyPlain(JSON.stringify(body ?? {}));
-      const meta = certifyPlain(JSON.stringify({ scope: curScope }));
+      const meta = certifyPlain(JSON.stringify(metaKey ? { [metaKey]: curScope } : {}));
       // SHAPE-ONLY observation — verdict 'unobserved', NO handler runs. The
       // variantBy (signal's payload.kind) is carried on the wiring info.
       reg.observeShape(info.type, snap, meta, { variantBy: info.variantBy });
