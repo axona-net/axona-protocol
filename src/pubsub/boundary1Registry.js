@@ -197,7 +197,7 @@ function rowDefs() {
       note: 'delegation command: adopt these subscribers under this parent',
     }),
 
-    // ── read path: PULL / PULLRESP conversation keyed by corrId (F3 pair algebra) ──
+    // ── read path: PULL / PULLRESP conversation keyed by (corrId, requesterId) (F3 pair algebra) ──
     ({
       type: 'pubsub:pull', wire: T.PULL, kind: FrameKind.ONE_WAY, owningService: 'TopicDeliveryPlane', versionRange: V,
       outcome: 'ReadOutcome', terminalOutcome: 'READ_ANSWERED',
@@ -205,10 +205,16 @@ function rowDefs() {
       authGuard: NA, admissionGuard: NA, placementGuard: NA,
       projection: { payload: ['topicId', 'postHash', 'corrId', 'requesterId'] },
       schema: { require: ['topicId', 'corrId', 'requesterId'], types: { topicId: 'string', corrId: 'string', requesterId: 'string' } },
+      // The LIVE handler now matches a response on the WHOLE pair: _onPullResp
+      // resolves _pending.get(corrId) AND requires the response's requesterId to
+      // fold to the requester recorded when the PULL was issued (requester gate,
+      // Aster council d17ece0b). The conversation pair is therefore honestly
+      // corrId+requesterId — a foreign-requester response with our corrId does
+      // NOT settle the read.
       conversation: { role: REQ, opposite: 'pubsub:pullresp', pairing: [{ local: 'corrId', remote: 'corrId' }, { local: 'requesterId', remote: 'requesterId' }] },
       capabilityRange: { profile: PROFILE },
       errorContract: ['no-hit'], traceFields: ['topicId', 'corrId'], budget: budget(4),
-      note: 'read request; corrId+requesterId is the conversation id (not an authority subject); pure read, no idempotency',
+      note: 'read request; the (corrId, requesterId) pair is the conversation id the handler matches on; pure read, no idempotency',
     }),
     ({
       type: 'pubsub:pullresp', wire: T.PULLRESP, kind: FrameKind.ONE_WAY, owningService: 'TopicDeliveryPlane', versionRange: V,
@@ -217,10 +223,14 @@ function rowDefs() {
       authGuard: NA, admissionGuard: NA, placementGuard: NA,
       projection: { payload: ['corrId', 'json', 'publishTs', 'requesterId'] },
       schema: { require: ['corrId', 'requesterId'], types: { corrId: 'string', requesterId: 'string' } },
+      // _onPullResp resolves _pending.get(corrId) AND enforces that the response's
+      // requesterId folds to the recorded requester (requester gate, Aster council
+      // d17ece0b) — the response pairs on corrId+requesterId, not corrId alone. A
+      // foreign-requester response with a matching corrId is dropped unmatched.
       conversation: { role: RESP, opposite: 'pubsub:pull', pairing: [{ local: 'corrId', remote: 'corrId' }, { local: 'requesterId', remote: 'requesterId' }] },
       capabilityRange: { profile: PROFILE },
-      errorContract: ['drop-unmatched-corrid'], traceFields: ['corrId'], budget: budget(4),
-      note: 'read response matched to _pending by corrId+requesterId; json:null is a genuine no-hit',
+      errorContract: ['drop-unmatched-corrid', 'drop-foreign-requester'], traceFields: ['corrId'], budget: budget(4),
+      note: 'read response matched to _pending by the (corrId, requesterId) pair; a foreign requesterId is dropped unmatched; json:null is a genuine no-hit',
     }),
 
     // ── sync engine: catch-up + cohort + handoff (SyncEngine / TopicRoleLifecycle) ──

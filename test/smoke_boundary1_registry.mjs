@@ -39,7 +39,8 @@ import { createNodeIdentity, createAuthorIdentity } from '../src/identity/index.
 import { regionCenter } from '../src/utils/region-names.js';
 import { buildBoundary1Registry, boundary1Rows, rowDefs } from '../src/pubsub/boundary1Registry.js';
 import { setShadowEnabled } from '../src/registry/index.js';
-import { certify } from '../src/registry/snapshotMint.js';
+import { certify, certifyBigint } from '../src/registry/snapshotMint.js';
+import { encode } from '../src/transport/wire.js';
 import { T } from '../src/pubsub/constants.js';
 
 const __LOC = regionCenter('useast');
@@ -231,24 +232,32 @@ async function main() {
     && certdBranded.some((r) => typeof r.type === 'string' && r.type.startsWith('pubsub:') && r.schemaOk === true),
     `\n   certd=${JSON.stringify(certd.outcome)}\n   branded=${certdBranded.length}`);
 
-  // ── R. REAL-HANDLER DISPOSITIONS with VALID frames + certified meta (F6) ──────
-  // Drive VALID, schema-satisfying frames (real hex ids + a real signed envelope)
-  // through the ACTUAL registered+wrapped handler of a live node — with a CERTIFIED
-  // routing-meta snapshot so the F3 meta-sourced pairing legs are observable — and
-  // assert the branded observation AND representative real dispositions: forward/
-  // route, no-op, reject/malformed, async; the F2.1 2 KiB legitimate-scalar case;
-  // and the F3.1 three-valued conversation over a meta leg.
+  // ── R. REAL-HANDLER DISPOSITIONS with TYPE-FAITHFUL certified meta (F6) ───────
+  // Aster recut-4 F6: the routing meta must be TYPE-FAITHFUL. Handlers compare
+  // `meta.targetId !== this.nodeId` against a BIGINT, so a hex-string targetId
+  // early-exits and a disposition assertion proves nothing. certifyBigint(encode(…))
+  // yields a CERTIFIED meta whose targetId IS the invoked node's bigint id, so a
+  // targeted handler actually runs. node0 is set up as the topic root+subscriber so
+  // its handlers have real state to act on. We assert REAL route/verdict outcomes
+  // per representative class — forward/route, targeted-consumed vs early-exit,
+  // no-op, reject, async — plus the F2.1 2 KiB case and the F3.1 three-valued
+  // conversation observed over a real meta leg.
   {
     setShadowEnabled(true);
     const fab = new Fabric({ frameRegistry: true });
     const node = fab.addNode(nodeIds[0]);
+    fab.addNode(nodeIds[1]); fab.addNode(nodeIds[2]);   // routing targets so a forward actually enqueues
     const desc = { region: 'useast', owner: null, name: 'b1-real', write: 'open' };
     const t = await deriveTopicIdBig(desc);
     const T_HEX = idHex(t), N1 = idHex(nodeIds[1]), N2 = idHex(nodeIds[2]);
+    // node0 roots + subscribes the topic so its handlers have real state to act on.
+    node.am.pubsubSubscribe(t); await fab.settle(); fab.clock += 6000; await node.am.refreshTick(); await fab.settle();
     const ev = await buildEnvelope({ topic: desc, message: { m: 1 }, seq: 1, identity: alice, ts: fab.clock });
     const MSG = ev.msgId;
-    const certMeta = () => certFrame({ targetId: N1, fromId: N2 });   // certified routing meta → meta legs observable
-    const plainMeta = () => ({ targetId: nodeIds[0], isTerminal: true, hopCount: 1, fromId: N2 });
+    // TYPE-FAITHFUL certified routing meta: bigint targetId = the invoked node (node0).
+    const certMeta = () => certifyBigint(encode({ targetId: nodeIds[0], fromId: nodeIds[2], isTerminal: true, hopCount: 1 }));
+    // The wrong meta Aster flagged: hex-string targetId, uncertified — handlers early-exit and the meta side is unobservable.
+    const wrongMeta = () => ({ targetId: N1, fromId: N2, isTerminal: true, hopCount: 1 });
 
     const VALID = {
       [T.SUB]: { topicId: T_HEX, subscriberId: N2, since: 0, latest: 0, hw: 0, lw: 0 },
@@ -279,7 +288,7 @@ async function main() {
       return { rec: traces[traces.length - 1], grew: traces.length > traces0, routed: fab.queue.length > q0, threw };
     };
 
-    // R1 — VALID certified frames + certified meta through the REAL handlers, all 19 wires + 2 INGESTACK variants: branded + schemaOk.
+    // R1 — coverage: VALID certified frames + TYPE-FAITHFUL meta through the real handlers → branded + schemaOk.
     let ok = 0, n = 0; const miss = [];
     for (const wire of WIRED) {
       const frames = wire === T.INGESTACK
@@ -292,32 +301,35 @@ async function main() {
         else miss.push(`${String(wire)}:${JSON.stringify(rec)}`);
       }
     }
-    check(`R1. F6: all ${n} VALID certified frames (+certified meta) through REAL handlers observed branded + schemaOk`, ok === n, `\n   ${miss.slice(0, 4).join('\n   ')}`);
+    check(`R1. F6: all ${n} VALID certified frames (+type-faithful meta) through REAL handlers observed branded + schemaOk`, ok === n, `\n   ${miss.slice(0, 4).join('\n   ')}`);
 
-    // R2 — representative real dispositions.
-    const rPub = await driveReal(T.PUB, VALID[T.PUB], plainMeta());
-    check('R2a. forward/route: a VALID PUB is processed by the real handler without throwing (schema-valid, branded)',
-      rPub.rec.registered === true && rPub.rec.schemaOk === true && !rPub.threw);
-    const rTouch = await driveReal(T.TOUCH, VALID[T.TOUCH], plainMeta());
-    check('R2b. no-op: the deprecated TOUCH handler neither throws nor routes', rTouch.rec.registered === true && !rTouch.threw && !rTouch.routed);
-    const rBad = await driveReal(T.PUB, { topicId: T_HEX }, plainMeta());   // no json
-    check('R2c. reject/malformed: a schema-invalid PUB is branded, schemaOk=false, with a schema fault',
-      rBad.rec.registered === true && rBad.rec.schemaOk === false && (rBad.rec.faults || []).some((f) => f.startsWith('schema:')));
-    check('R2d. async: the real (async) handler return is observed as an inert verdict (no settlement observation, F1)',
-      rPub.rec.verdict === 'object' || rPub.rec.verdict === 'passed');
+    // R2 — representative REAL dispositions (measured), with type-faithful meta so handlers actually run.
+    const rPub = await driveReal(T.PUB, VALID[T.PUB], certMeta());
+    check('R2a. forward/route: a VALID PUB at the root FORWARDS a frame (routed) and is branded/schema-valid',
+      rPub.rec.registered === true && rPub.rec.schemaOk === true && rPub.routed === true && !rPub.threw);
+    const rPullReal = await driveReal(T.PULLUP, VALID[T.PULLUP], certMeta());
+    const rPullWrong = await driveReal(T.PULLUP, VALID[T.PULLUP], wrongMeta());
+    check('R2b. targeted: PULLUP CONSUMES under type-faithful meta but EARLY-EXITS (passed) under a hex-string/uncertified meta (Aster F6 repro)',
+      rPullReal.rec.verdict === 'consumed' && rPullWrong.rec.verdict === 'passed');
+    const rTouch = await driveReal(T.TOUCH, VALID[T.TOUCH], certMeta());
+    check('R2c. no-op: the deprecated TOUCH handler CONSUMES without routing or throwing', rTouch.rec.verdict === 'consumed' && !rTouch.routed && !rTouch.threw);
+    const rBad = await driveReal(T.PUB, { topicId: T_HEX }, certMeta());   // no json
+    check('R2d. reject: a schema-invalid PUB is branded schemaOk=false with a schema fault AND is NOT forwarded (no route)',
+      rBad.rec.registered === true && rBad.rec.schemaOk === false && (rBad.rec.faults || []).some((f) => f.startsWith('schema:')) && rBad.routed === false);
+    check('R2e. async: the async PUB handler return is observed as an inert object verdict (no settlement observation, F1)', rPub.rec.verdict === 'object');
 
     // R3 (F2.1) — a 2 KiB legitimate json PUB (well under the 15 KiB reliable-publish limit) is present-but-truncated, NOT malformed.
     const bigJson = `{"m":"${'x'.repeat(2048)}"}`;
-    const rBig = await driveReal(T.PUB, { topicId: T_HEX, json: bigJson, via: N1, ackTo: N1, attemptId: 'x1', flightNonce: 'fn' }, plainMeta());
+    const rBig = await driveReal(T.PUB, { topicId: T_HEX, json: bigJson, via: N1, ackTo: N1, attemptId: 'x1', flightNonce: 'fn' }, certMeta());
     check('R3. F2.1: a 2 KiB legitimate json PUB is schemaOk:true + truncated:true (present-but-bounded, not malformed)',
       rBig.rec.registered === true && rBig.rec.schemaOk === true && rBig.rec.truncated === true);
 
-    // R4 (F3.1) — three-valued conversationPresent over REPLAYUP's meta-sourced requester leg (targetId).
-    const rUnknown = await driveReal(T.REPLAYUP, VALID[T.REPLAYUP], plainMeta());
-    check('R4a. F3.1: REPLAYUP + UNCERTIFIED meta → conversationPresent UNKNOWN (never claimed present from topicId alone)',
+    // R4 (F3.1) — three-valued conversationPresent over REPLAYUP's meta-sourced requester leg.
+    const rUnknown = await driveReal(T.REPLAYUP, VALID[T.REPLAYUP], wrongMeta());   // uncertified meta → meta leg unobservable
+    check('R4a. F3.1: REPLAYUP + uncertified meta → conversationPresent UNKNOWN (never present from topicId alone)',
       rUnknown.rec.conversationPresent === 'unknown');
-    const rKnown = await driveReal(T.REPLAYUP, VALID[T.REPLAYUP], certMeta());
-    check('R4b. F3.1: REPLAYUP + CERTIFIED meta carrying targetId → conversationPresent true (both legs observed)',
+    const rKnown = await driveReal(T.REPLAYUP, VALID[T.REPLAYUP], certMeta());       // type-faithful certified meta carries targetId
+    check('R4b. F3.1: REPLAYUP + type-faithful certified meta (targetId present) → conversationPresent true (both legs observed)',
       rKnown.rec.conversationPresent === true);
     const rFalse = await driveReal(T.REPLAYUP, { msgs: [], dels: [] }, certMeta());   // missing payload topicId leg
     check('R4c. F3.1: REPLAYUP missing its payload leg → conversationPresent false', rFalse.rec.conversationPresent === false);
