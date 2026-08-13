@@ -94,7 +94,13 @@ function represent(v, maxBytes) {
   const cap = Number.isInteger(maxBytes) && maxBytes > 0 ? maxBytes : DEFAULT_MAX_BYTES;
   const t = typeof v;
   if (v === null || v === undefined) return { absent: true };
-  if (t === 'string') return utf8LenCapped(v, cap) > cap ? { fault: 'budget' } : { value: v };
+  // F2.1 (Aster recut-3): an over-cap scalar is PRESENT and typed, not malformed.
+  // utf8LenCapped stops at cap+1, so this stays bounded (we never hold the full
+  // value). Return a typed struct with `truncated:true` — the field counts as
+  // present, its type is known, and schema does NOT fail; the truncation is
+  // reported separately from a schema fault so a legitimate large `json`/`msgs`
+  // frame under the reliable-publish limit is never mislabeled malformed.
+  if (t === 'string') return utf8LenCapped(v, cap) > cap ? { struct: Object.freeze({ k: 'string', truncated: true }) } : { value: v };
   if (t === 'number') return Number.isFinite(v) ? { value: v } : { fault: 'nonfinite' };
   if (t === 'boolean') return { value: v };
   if (t === 'bigint') return { struct: Object.freeze({ k: 'bigint' }) };   // no toString — no unbounded conversion
@@ -230,7 +236,7 @@ export class ShadowRegistry {
     out.kind = row.kind; out.owningService = row.owningService; out.evidence = row.evidence; out.proves = row.proves; out.subjectShape = row.subjectShape;
 
     const facts = { payload: Object.create(null), meta: Object.create(null) };
-    let projFault = null;
+    let projFault = null, truncated = false;
     const maxLeaves = row.budget.maxLeaves ?? DEFAULT_MAX_LEAVES;
     let leaves = 0;
     const sides = [['payload', payload], ['meta', metaObj]];
@@ -242,23 +248,31 @@ export class ShadowRegistry {
         const leaf = readLeaf(obj, path, row.budget.maxBytes, ops);
         if (leaf.absent) continue;
         if (leaf.fault) { projFault = projFault || leaf.fault; continue; }
+        if (leaf.struct && leaf.struct.truncated) truncated = true;   // F2.1: present-but-over-budget, NOT a fault
         facts[side][path] = leaf.value !== undefined ? leaf.value : leaf.struct;
       }
       Object.freeze(facts[side]);
     }
     Object.freeze(facts);
     out.projFault = projFault;
+    out.truncated = truncated;   // F2.1: bounded-observation artifact, reported separately from schema failure
 
     const s = evalSchema(row.schema, facts.payload, facts.meta);
     out.schemaOk = s.ok; if (!s.ok) out.schemaCode = s.code;
     if (row.correlation) out.correlationPresent = evalPresence(row.correlation.requires, facts.payload, facts.meta);
     if (row.conversation) {
-      // F3 (recut-3): observe presence of the payload-sourced pairing legs only.
-      // A meta-sourced leg (the return destination supplies the identity) rides
-      // unbranded routing meta, so it is not shadow-observable — record null, never
-      // reflect on it. `localKey` is exactly the payload-side pairing fields.
-      const lk = row.conversation.localKey;
-      out.conversationPresent = lk.length ? evalPresence(lk, facts.payload, facts.meta) : null;
+      // F3.1 (Aster recut-3): a two-leg conversation key cannot be reported present
+      // when a leg is unknown. Evaluate the FULL pairing as true/false/'unknown':
+      // a payload leg absent ⇒ false; else if a meta-sourced leg exists and the meta
+      // side is unbranded (the normal routing-meta case) ⇒ 'unknown' (never claim
+      // present from the payload leg alone); a CERTIFIED meta snapshot lets the meta
+      // legs be observed as genuinely present/absent.
+      const c = row.conversation;
+      const metaLegs = c.pairing.filter((p) => p.from === 'meta');
+      if (!evalPresence(c.localKey, facts.payload, facts.meta)) out.conversationPresent = false;
+      else if (metaLegs.length === 0) out.conversationPresent = true;
+      else if (metaObj == null) out.conversationPresent = 'unknown';
+      else out.conversationPresent = metaLegs.every((p) => factGet(facts.payload, facts.meta, p.local) !== undefined);
     }
     if (row.idempotency) out.idempotencyPresent = evalPresence(row.idempotency.from, facts.payload, facts.meta);
     return out;
@@ -296,6 +310,8 @@ export class ShadowRegistry {
         correlationPresent: pre.correlationPresent ?? null,
         conversationPresent: pre.conversationPresent ?? null,
         idempotencyPresent: pre.idempotencyPresent ?? null,
+        truncated: pre.truncated ?? null,   // F2.1: a projected scalar exceeded its byte budget (present, typed, bounded) — NOT a schema fault
+
         faults: faultCodes(pre),
         verdict,
         durationMs: Number.isFinite(durationMs) ? Math.round(durationMs * 1000) / 1000 : null,

@@ -188,6 +188,20 @@ async function main() {
   const replc = byType.get('pubsub:replicate');
   check('T12. F3: REPLICATE binds no authority subject and no conversation (unsigned cohort spray)',
     replc.correlation == null && replc.conversation == null);
+  // F2.2: retry honesty — IDEMPOTENT ⟺ has a dedup key; naturally-idempotent keyless frames are NATURAL; terminals match handler reality.
+  check('T13. F2.2: every IDEMPOTENT row has an idempotency key; PULL/PULLUP/REPLAYUP/REPLICATE are NATURAL (keyless)',
+    rows.every((r) => r.retry !== 'IDEMPOTENT' || r.idempotency != null)
+    && ['pubsub:pull', 'pubsub:pullup', 'pubsub:replayup', 'pubsub:replicate'].every((t) => byType.get(t).retry === 'NATURAL'));
+  check('T14. F2.2: terminal labels match the receiving handler, not an overclaim',
+    byType.get('pubsub:deliver').terminalOutcome === 'ENTRIES_DELIVERED_AT_MOST_ONCE'
+    && byType.get('pubsub:replicate').terminalOutcome === 'REPLICA_UNION_APPLIED'
+    && byType.get('pubsub:handoff').terminalOutcome === 'STANDING_STATE_RECEIVED'
+    && byType.get('pubsub:handoffack').terminalOutcome === 'ACK_RECEIVED');
+  // F3.2: the authority subject models the real relation, not just field presence.
+  check('T15. F3.2: signed INGESTACK binds rootPub→root-node-hash; legacy binds meta.fromId (adjacent sender), both as declared relations',
+    iaS.correlation.binding.relations && iaS.correlation.binding.relations.some((r) => r.subject === 'rootPub' && r.boundTo.includes('flight'))
+    && byType.get('pubsub:ingestack#legacy').correlation.binding.relations.some((r) => r.subject === 'fromId')
+    && byType.get('pubsub:ingestack#legacy').projection.meta.includes('fromId'));
 
   // ── W. WIRING (construction flag) ────────────────────────────────────────────
   const fabOff = new Fabric({ frameRegistry: false }); const nOff = fabOff.addNode(nodeIds[0]);
@@ -217,52 +231,97 @@ async function main() {
     && certdBranded.some((r) => typeof r.type === 'string' && r.type.startsWith('pubsub:') && r.schemaOk === true),
     `\n   certd=${JSON.stringify(certd.outcome)}\n   branded=${certdBranded.length}`);
 
-  // ── R. REAL-HANDLER CERTIFIED SWEEP across all 19 wires (F6) ──────────────────
-  // Drive a certified representative frame through the ACTUAL registered+wrapped
-  // handler of a live node, for every wire. The handler does its real work
-  // (forward/no-op/mutate/throw); we assert the registry observed the frame as
-  // BRANDED regardless of the handler's disposition. INGESTACK exercises both
-  // variants. A handler that throws on a bare frame is the malformed/rejection case.
+  // ── R. REAL-HANDLER DISPOSITIONS with VALID frames + certified meta (F6) ──────
+  // Drive VALID, schema-satisfying frames (real hex ids + a real signed envelope)
+  // through the ACTUAL registered+wrapped handler of a live node — with a CERTIFIED
+  // routing-meta snapshot so the F3 meta-sourced pairing legs are observable — and
+  // assert the branded observation AND representative real dispositions: forward/
+  // route, no-op, reject/malformed, async; the F2.1 2 KiB legitimate-scalar case;
+  // and the F3.1 three-valued conversation over a meta leg.
   {
     setShadowEnabled(true);
-    const tr = [];
     const fab = new Fabric({ frameRegistry: true });
     const node = fab.addNode(nodeIds[0]);
-    // redirect this node's registry sink into tr (rebuild with our sink)
-    const drive = async (wire, frame) => {
-      tr.length = 0;
-      const shadow = node.am.frameRegistryShadow();
-      const before = shadow.traces.length;
-      const h = node.handlers.get(wire);
-      let threw = false;
-      try { await h(certFrame(frame), { targetId: nodeIds[0], isTerminal: true, hopCount: 1, fromId: idHex(nodeIds[1]) }); } catch { threw = true; }
-      const after = node.am.frameRegistryShadow().traces;
-      return { rec: after[after.length - 1], grew: after.length > before, threw };
+    const desc = { region: 'useast', owner: null, name: 'b1-real', write: 'open' };
+    const t = await deriveTopicIdBig(desc);
+    const T_HEX = idHex(t), N1 = idHex(nodeIds[1]), N2 = idHex(nodeIds[2]);
+    const ev = await buildEnvelope({ topic: desc, message: { m: 1 }, seq: 1, identity: alice, ts: fab.clock });
+    const MSG = ev.msgId;
+    const certMeta = () => certFrame({ targetId: N1, fromId: N2 });   // certified routing meta → meta legs observable
+    const plainMeta = () => ({ targetId: nodeIds[0], isTerminal: true, hopCount: 1, fromId: N2 });
+
+    const VALID = {
+      [T.SUB]: { topicId: T_HEX, subscriberId: N2, since: 0, latest: 0, hw: 0, lw: 0 },
+      [T.UNSUB]: { topicId: T_HEX, subscriberId: N2 },
+      [T.PUB]: { topicId: T_HEX, json: JSON.stringify(ev), via: N1, ackTo: N1, attemptId: 'x1', flightNonce: 'fn' },
+      [T.KILL]: { topicId: T_HEX, kill: { msgId: MSG, signerPubkey: 'pk' }, ackTo: N1, attemptId: 'x1', flightNonce: 'fn' },
+      [T.DELIVER]: { topicId: T_HEX, from: N2, msgs: [ev] },
+      [T.ADOPT]: { topicId: T_HEX, parent: N2, subs: [] },
+      [T.PULLUP]: { topicId: T_HEX, sinceHw: 0, parentId: N2 },
+      [T.HANDOFFACK]: { topicId: T_HEX, held: 1, sent: 1 },
+      [T.REPLAYUP]: { topicId: T_HEX, msgs: [], dels: [] },
+      [T.HANDOFF]: { topicId: T_HEX, from: N2, msgs: [], dels: [] },
+      [T.REPLICATE]: { topicId: T_HEX, from: N2, msgs: [], dels: [] },
+      [T.RECEIPTPROBE]: { topicId: T_HEX, msgId: MSG, op: 'PUB' },
+      [T.RECEIPTNACK]: { topicId: T_HEX, msgId: MSG, op: 'PUB', reason: 'not-held' },
+      [T.TOUCH]: { topicId: T_HEX },
+      [T.PULL]: { topicId: T_HEX, postHash: MSG, corrId: 'c1', requesterId: N2 },
+      [T.PULLRESP]: { corrId: 'c1', json: null, publishTs: 0, requesterId: N2 },
+      [T.ROOTBEACON]: { root: N2, topics: [T_HEX], epochs: [1], beaconId: 'b1', layer: 0 },
+      [T.METRICSON]: { topicId: T_HEX },
     };
-    let brandedOk = 0, sweptN = 0; const rmiss = [];
+    const driveReal = async (wire, frame, meta) => {
+      const traces0 = node.am.frameRegistryShadow().traces.length;
+      const q0 = fab.queue.length;
+      let threw = false;
+      try { await node.handlers.get(wire)(certFrame(frame), meta); } catch { threw = true; }
+      const traces = node.am.frameRegistryShadow().traces;
+      return { rec: traces[traces.length - 1], grew: traces.length > traces0, routed: fab.queue.length > q0, threw };
+    };
+
+    // R1 — VALID certified frames + certified meta through the REAL handlers, all 19 wires + 2 INGESTACK variants: branded + schemaOk.
+    let ok = 0, n = 0; const miss = [];
     for (const wire of WIRED) {
-      const frames = wire === T.INGESTACK ? [IA_SIGNED, IA_LEGACY] : [CERT[wire]];
+      const frames = wire === T.INGESTACK
+        ? [{ ...IA_SIGNED, topicId: T_HEX, msgId: MSG }, { ...IA_LEGACY, topicId: T_HEX, msgId: MSG }]
+        : [VALID[wire]];
       for (const f of frames) {
-        sweptN++;
-        const { rec, grew } = await drive(wire, f);
-        // branded = the registry produced an observation for a real frame (registered:true),
-        // NOT the unbranded-source floor. Handler disposition (forward/throw) is irrelevant here.
-        const branded = grew && rec && rec.registered === true && rec.verdict !== 'unobserved';
-        if (branded) brandedOk++; else rmiss.push(`${String(wire)}:${JSON.stringify(rec)}`);
+        n++;
+        const { rec, grew } = await driveReal(wire, f, certMeta());
+        if (grew && rec && rec.registered === true && rec.schemaOk === true) ok++;
+        else miss.push(`${String(wire)}:${JSON.stringify(rec)}`);
       }
     }
-    check(`R1. F6: all ${sweptN} certified frames through REAL wrapped handlers (19 wires + 2 INGESTACK variants) observed BRANDED`,
-      brandedOk === sweptN, `\n   ${rmiss.slice(0, 4).join('\n   ')}`);
+    check(`R1. F6: all ${n} VALID certified frames (+certified meta) through REAL handlers observed branded + schemaOk`, ok === n, `\n   ${miss.slice(0, 4).join('\n   ')}`);
 
-    // R2 (F6 malformed): a certified but schema-INVALID frame through the real handler is still branded, schemaOk=false.
-    tr.length = 0;
-    const shadow = node.am.frameRegistryShadow();
-    const before = shadow.traces.length;
-    try { await node.handlers.get(T.SUB)(certFrame({ topicId: 'aa' }), { targetId: nodeIds[0], isTerminal: true, hopCount: 1, fromId: idHex(nodeIds[1]) }); } catch {}
-    const after = node.am.frameRegistryShadow().traces;
-    const rec = after[after.length - 1];
-    check('R2. F6: schema-invalid certified frame through the real handler is branded with schemaOk=false + a schema fault',
-      after.length > before && rec && rec.registered === true && rec.schemaOk === false && (rec.faults || []).some((f) => f.startsWith('schema:')));
+    // R2 — representative real dispositions.
+    const rPub = await driveReal(T.PUB, VALID[T.PUB], plainMeta());
+    check('R2a. forward/route: a VALID PUB is processed by the real handler without throwing (schema-valid, branded)',
+      rPub.rec.registered === true && rPub.rec.schemaOk === true && !rPub.threw);
+    const rTouch = await driveReal(T.TOUCH, VALID[T.TOUCH], plainMeta());
+    check('R2b. no-op: the deprecated TOUCH handler neither throws nor routes', rTouch.rec.registered === true && !rTouch.threw && !rTouch.routed);
+    const rBad = await driveReal(T.PUB, { topicId: T_HEX }, plainMeta());   // no json
+    check('R2c. reject/malformed: a schema-invalid PUB is branded, schemaOk=false, with a schema fault',
+      rBad.rec.registered === true && rBad.rec.schemaOk === false && (rBad.rec.faults || []).some((f) => f.startsWith('schema:')));
+    check('R2d. async: the real (async) handler return is observed as an inert verdict (no settlement observation, F1)',
+      rPub.rec.verdict === 'object' || rPub.rec.verdict === 'passed');
+
+    // R3 (F2.1) — a 2 KiB legitimate json PUB (well under the 15 KiB reliable-publish limit) is present-but-truncated, NOT malformed.
+    const bigJson = `{"m":"${'x'.repeat(2048)}"}`;
+    const rBig = await driveReal(T.PUB, { topicId: T_HEX, json: bigJson, via: N1, ackTo: N1, attemptId: 'x1', flightNonce: 'fn' }, plainMeta());
+    check('R3. F2.1: a 2 KiB legitimate json PUB is schemaOk:true + truncated:true (present-but-bounded, not malformed)',
+      rBig.rec.registered === true && rBig.rec.schemaOk === true && rBig.rec.truncated === true);
+
+    // R4 (F3.1) — three-valued conversationPresent over REPLAYUP's meta-sourced requester leg (targetId).
+    const rUnknown = await driveReal(T.REPLAYUP, VALID[T.REPLAYUP], plainMeta());
+    check('R4a. F3.1: REPLAYUP + UNCERTIFIED meta → conversationPresent UNKNOWN (never claimed present from topicId alone)',
+      rUnknown.rec.conversationPresent === 'unknown');
+    const rKnown = await driveReal(T.REPLAYUP, VALID[T.REPLAYUP], certMeta());
+    check('R4b. F3.1: REPLAYUP + CERTIFIED meta carrying targetId → conversationPresent true (both legs observed)',
+      rKnown.rec.conversationPresent === true);
+    const rFalse = await driveReal(T.REPLAYUP, { msgs: [], dels: [] }, certMeta());   // missing payload topicId leg
+    check('R4c. F3.1: REPLAYUP missing its payload leg → conversationPresent false', rFalse.rec.conversationPresent === false);
+
     setShadowEnabled(false);
   }
 

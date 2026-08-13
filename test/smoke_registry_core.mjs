@@ -161,9 +161,13 @@ const mk = (sink, extra = {}) => { const r = new ShadowRegistry({ boundary: 'tes
   const trb = []; const regb = new ShadowRegistry({ boundary: 't', sink: (r) => trb.push(r), enabled: () => true });
   regb.register(defineRow({ type: 'b', kind: FrameKind.ONE_WAY, owningService: 'S', versionRange: V, budget: { maxBytes: 4 }, projection: { payload: ['s'] }, correlation: { kind: 'IngressRef', requires: ['s'] } }));
   const wb = regb.wrap('b', () => 'consumed');
-  wb.call({}, S({ s: 'ééé' }), {}); ok('5b "ééé" (6 bytes) > 4 → budget fault', (trb[0].faults || []).includes('projection-budget'));
-  trb.length = 0; wb.call({}, S({ s: '\uD800é' }), {}); ok('5c lone high surrogate + é (5 bytes) → budget fault', (trb[0].faults || []).includes('projection-budget'));
-  trb.length = 0; wb.call({}, S({ s: 'abcd' }), {}); ok('5d "abcd" (4 bytes) → projected', trb[0].correlationPresent === true);
+  // F2.1 (Aster recut-3): an over-cap scalar is PRESENT + typed + truncated, NOT
+  // malformed. The scan stays bounded (utf8LenCapped stops at cap+1) and the struct
+  // holds no large value, so this is strictly safer than the old budget-fault path —
+  // and a legitimate large `json` frame is never mislabeled missing.
+  wb.call({}, S({ s: 'ééé' }), {}); ok('5b "ééé" (6 bytes) > 4 → present-but-truncated, not malformed (F2.1)', trb[0].correlationPresent === true && trb[0].truncated === true && !(trb[0].faults || []).includes('projection-budget'));
+  trb.length = 0; wb.call({}, S({ s: '\uD800é' }), {}); ok('5c lone high surrogate + é (5 bytes) > 4 → present-but-truncated (F2.1)', trb[0].correlationPresent === true && trb[0].truncated === true);
+  trb.length = 0; wb.call({}, S({ s: 'abcd' }), {}); ok('5d "abcd" (4 bytes, at cap) → projected in full, not truncated', trb[0].correlationPresent === true && trb[0].truncated === false);
 }
 
 // ── 6. variant selection bound to the projection ──

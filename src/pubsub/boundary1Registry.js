@@ -116,7 +116,12 @@ function rowDefs() {
       // F3: the D1 subject binds the EXACT open flight, the incarnation, and the proof signer — grouped, not a flat list.
       correlation: {
         kind: LAR, requires: ['topicId', 'msgId', 'op', 'epoch', 'attemptId', 'ackTo', 'flightNonce', 'rootPub'],
-        binding: { flight: ['topicId', 'msgId', 'op', 'attemptId', 'ackTo', 'flightNonce'], authority: ['epoch'], proofSigner: ['rootPub'] },
+        binding: {
+          flight: ['topicId', 'msgId', 'op', 'attemptId', 'ackTo', 'flightNonce'], authority: ['epoch'], proofSigner: ['rootPub'],
+          // F3.2: the real authority relation — the proof signer's pubkey must hash to
+          // the open flight's expected root node id (rootPubMatchesNodeHash), not merely be present.
+          relations: [{ subject: 'rootPub', derives: 'nodeIdHash=hashComponent(SHA-256(rootPub))', boundTo: 'flight.expectedRootHex' }],
+        },
       },
       idempotency: { from: ['topicId', 'msgId', 'op'] },
       capabilityRange: { proofModule: 'ackProof.js', profile: PROFILE },
@@ -128,9 +133,13 @@ function rowDefs() {
       evidence: EvidenceLevel.INGESTED, proves: Proves.INGESTION, outcome: 'IngestOutcome', terminalOutcome: 'PROOF_DELIVERED',
       retry: Retry.IDEMPOTENT, topicProfile: PROFILE, eventIdScheme: 'MSGID_CONTENT_V1', replayCursorType: NA, orderingModel: 'SINGLE_FLIGHT',
       authGuard: 'adjacentSenderAuth', admissionGuard: NA, placementGuard: NA,
-      projection: { payload: ['topicId', 'msgId', 'op', 'epoch', 'sig'] },   // `sig` projected (absent at runtime) for the type-gated discriminator
+      projection: { payload: ['topicId', 'msgId', 'op', 'epoch', 'sig'], meta: ['fromId'] },   // `sig` projected (absent at runtime) for the type-gated discriminator; `fromId` = the authenticated adjacent sender
       schema: { require: ['topicId', 'msgId'], types: { topicId: 'string', msgId: 'string' } },
-      correlation: { kind: LAR, requires: ['topicId', 'msgId', 'op', 'epoch'], binding: { flight: ['topicId', 'msgId', 'op'], authority: ['epoch'] } },
+      // F3.2: legacy completion binds the authenticated ADJACENT SENDER (meta.fromId) to the open flight's expected root, plus the intended incarnation (epoch).
+      correlation: {
+        kind: LAR, requires: ['topicId', 'msgId', 'op', 'epoch', 'fromId'],
+        binding: { flight: ['topicId', 'msgId', 'op'], authority: ['epoch'], relations: [{ subject: 'fromId', derives: 'authenticatedAdjacentSender', boundTo: 'flight.expectedRootHex' }] },
+      },
       idempotency: { from: ['topicId', 'msgId', 'op'] },
       capabilityRange: { profile: PROFILE },
       errorContract: ['drop-wrong-sender', 'drop-wrong-incarnation'], traceFields: ['topicId', 'msgId', 'op'], budget: budget(5),
@@ -166,7 +175,7 @@ function rowDefs() {
     // ── delivery + adoption (TopicDeliveryPlane) ──
     ({
       type: 'pubsub:deliver', wire: T.DELIVER, kind: FrameKind.MULTICAST, owningService: 'TopicDeliveryPlane', versionRange: V,
-      evidence: EvidenceLevel.OBSERVED, proves: Proves.OBSERVATION, outcome: 'DeliveryOutcome', terminalOutcome: 'APP_DELIVERED_ONCE',
+      evidence: EvidenceLevel.OBSERVED, proves: Proves.OBSERVATION, outcome: 'DeliveryOutcome', terminalOutcome: 'ENTRIES_DELIVERED_AT_MOST_ONCE',
       retry: Retry.NONE, topicProfile: PROFILE, eventIdScheme: 'MSGID_CONTENT_V1', replayCursorType: NA, orderingModel: 'UNION_IDEMPOTENT',
       authGuard: NA, admissionGuard: NA, placementGuard: NA,
       projection: { payload: ['topicId', 'from', 'msgs'] },
@@ -191,8 +200,8 @@ function rowDefs() {
     // ── read path: PULL / PULLRESP conversation keyed by corrId (F3 pair algebra) ──
     ({
       type: 'pubsub:pull', wire: T.PULL, kind: FrameKind.ONE_WAY, owningService: 'TopicDeliveryPlane', versionRange: V,
-      outcome: 'ReadOutcome', terminalOutcome: 'RESPONSE_OR_TIMEOUT',
-      retry: Retry.IDEMPOTENT, topicProfile: PROFILE, eventIdScheme: 'CORR_ID', replayCursorType: NA, orderingModel: 'NONE',
+      outcome: 'ReadOutcome', terminalOutcome: 'READ_ANSWERED',
+      retry: Retry.NATURAL, topicProfile: PROFILE, eventIdScheme: 'CORR_ID', replayCursorType: NA, orderingModel: 'NONE',
       authGuard: NA, admissionGuard: NA, placementGuard: NA,
       projection: { payload: ['topicId', 'postHash', 'corrId', 'requesterId'] },
       schema: { require: ['topicId', 'corrId', 'requesterId'], types: { topicId: 'string', corrId: 'string', requesterId: 'string' } },
@@ -217,8 +226,8 @@ function rowDefs() {
     // ── sync engine: catch-up + cohort + handoff (SyncEngine / TopicRoleLifecycle) ──
     ({
       type: 'pubsub:pullup', wire: T.PULLUP, kind: FrameKind.ONE_WAY, owningService: 'SyncEngine', versionRange: V,
-      evidence: EvidenceLevel.ROUTED, proves: Proves.ROUTING, outcome: 'RoutingOutcome', terminalOutcome: 'REPLAY_RECEIVED',
-      retry: Retry.IDEMPOTENT, topicProfile: PROFILE, eventIdScheme: NA, replayCursorType: 'HIGHWATER', orderingModel: 'ARRIVAL',
+      evidence: EvidenceLevel.ROUTED, proves: Proves.ROUTING, outcome: 'RoutingOutcome', terminalOutcome: 'REPLAY_SENT',
+      retry: Retry.NATURAL, topicProfile: PROFILE, eventIdScheme: NA, replayCursorType: 'HIGHWATER', orderingModel: 'ARRIVAL',
       authGuard: NA, admissionGuard: NA, placementGuard: NA,
       projection: { payload: ['topicId', 'sinceHw', 'parentId'] },
       schema: { require: ['topicId', 'parentId'], types: { topicId: 'string', parentId: 'string' } },
@@ -230,8 +239,8 @@ function rowDefs() {
     }),
     ({
       type: 'pubsub:replayup', wire: T.REPLAYUP, kind: FrameKind.ONE_WAY, owningService: 'SyncEngine', versionRange: V,
-      evidence: EvidenceLevel.RETAINED, proves: Proves.RETENTION, outcome: 'RetentionOutcome', terminalOutcome: 'REPLAY_APPLIED',
-      retry: Retry.IDEMPOTENT, topicProfile: PROFILE, eventIdScheme: 'MSGID_CONTENT_V1', replayCursorType: 'HIGHWATER', orderingModel: 'UNION_IDEMPOTENT',
+      evidence: EvidenceLevel.RETAINED, proves: Proves.RETENTION, outcome: 'RetentionOutcome', terminalOutcome: 'ENTRIES_APPLIED_UNION',
+      retry: Retry.NATURAL, topicProfile: PROFILE, eventIdScheme: 'MSGID_CONTENT_V1', replayCursorType: 'HIGHWATER', orderingModel: 'UNION_IDEMPOTENT',
       authGuard: 'verifyEnvelope', admissionGuard: NA, placementGuard: NA,
       projection: { payload: ['topicId', 'msgs', 'dels'], meta: ['targetId'] },
       schema: { require: ['topicId'], types: { topicId: 'string', msgs: 'arr', dels: 'arr' } },
@@ -243,7 +252,7 @@ function rowDefs() {
     }),
     ({
       type: 'pubsub:handoff', wire: T.HANDOFF, kind: FrameKind.ONE_WAY, owningService: 'TopicRoleLifecycle', versionRange: V,
-      evidence: EvidenceLevel.RETAINED, proves: Proves.RETENTION, outcome: 'RetentionOutcome', terminalOutcome: 'HEIR_ACKED',
+      evidence: EvidenceLevel.RETAINED, proves: Proves.RETENTION, outcome: 'RetentionOutcome', terminalOutcome: 'STANDING_STATE_RECEIVED',
       retry: Retry.BOUNDED_ONCE, topicProfile: PROFILE, eventIdScheme: 'MSGID_CONTENT_V1', replayCursorType: NA, orderingModel: 'UNION_IDEMPOTENT',
       authGuard: NA, admissionGuard: 'admitPushedRole', placementGuard: NA,
       projection: { payload: ['topicId', 'from', 'msgs', 'dels'] },
@@ -256,7 +265,7 @@ function rowDefs() {
     }),
     ({
       type: 'pubsub:handoffack', wire: T.HANDOFFACK, kind: FrameKind.ONE_WAY, owningService: 'SyncEngine', versionRange: V,
-      evidence: EvidenceLevel.ROUTED, proves: Proves.ROUTING, outcome: 'RoutingOutcome', terminalOutcome: 'HANDOFF_COMPLETE',
+      evidence: EvidenceLevel.ROUTED, proves: Proves.ROUTING, outcome: 'RoutingOutcome', terminalOutcome: 'ACK_RECEIVED',
       retry: Retry.NONE, topicProfile: PROFILE, eventIdScheme: NA, replayCursorType: NA, orderingModel: 'ARRIVAL',
       authGuard: NA, admissionGuard: NA, placementGuard: NA,
       projection: { payload: ['topicId', 'held', 'sent'], meta: ['targetId'] },
@@ -269,8 +278,8 @@ function rowDefs() {
     }),
     ({
       type: 'pubsub:replicate', wire: T.REPLICATE, kind: FrameKind.MULTICAST, owningService: 'SyncEngine', versionRange: V,
-      evidence: EvidenceLevel.RETAINED, proves: Proves.RETENTION, outcome: 'RetentionOutcome', terminalOutcome: 'COHORT_CONVERGED',
-      retry: Retry.IDEMPOTENT, topicProfile: PROFILE, eventIdScheme: 'MSGID_CONTENT_V1', replayCursorType: NA, orderingModel: 'UNION_IDEMPOTENT',
+      evidence: EvidenceLevel.RETAINED, proves: Proves.RETENTION, outcome: 'RetentionOutcome', terminalOutcome: 'REPLICA_UNION_APPLIED',
+      retry: Retry.NATURAL, topicProfile: PROFILE, eventIdScheme: 'MSGID_CONTENT_V1', replayCursorType: NA, orderingModel: 'UNION_IDEMPOTENT',
       authGuard: 'verifyEnvelope', admissionGuard: NA, placementGuard: NA,
       projection: { payload: ['topicId', 'from', 'msgs', 'dels'] },
       schema: { require: ['topicId'], types: { topicId: 'string', from: 'string', msgs: 'arr', dels: 'arr' } },

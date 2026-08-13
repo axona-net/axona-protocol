@@ -55,7 +55,8 @@ const CORRELATION_KINDS = new Set(Object.values(CorrelationSubjectKind));
 // row DECLARES how the frame is retried, it does not run retry code (S1e).
 export const Retry = Object.freeze({
   NONE: 'NONE',                   // no retry concept — fire-and-forget event or fan-out leg
-  IDEMPOTENT: 'IDEMPOTENT',       // resend-safe; dedup by the declared idempotency key
+  IDEMPOTENT: 'IDEMPOTENT',       // resend-safe, deduped BY THE DECLARED idempotency key (requires idempotency)
+  NATURAL: 'NATURAL',             // naturally idempotent WITHOUT a frame key — a read, a catch-up, or an order-independent set-union (Aster recut-3 F2.2)
   SINGLE_FLIGHT: 'SINGLE_FLIGHT', // bounded writer flight (defer→probe→evict→promote→retry)
   BOUNDED_ONCE: 'BOUNDED_ONCE',   // earns exactly one direct retry, then gives up
   FLOOD_DEDUP: 'FLOOD_DEDUP',     // gossip flood; dedup by id, no targeted retry
@@ -210,6 +211,24 @@ export function defineRow(row) {
         for (const p of g) if (!requiresSet.has(p)) fail(type, `correlation.binding.${group} path ${p} is not a correlation.requires path`);
         bindOut[group] = g;
       }
+      // F3.2 (Aster recut-3): model the actual authority RELATION, not just
+      // field presence. Each relation names a `subject` (a requires path), how it
+      // `derives` the authority (e.g. the signer pubkey hashing to the expected
+      // root node id, or an authenticated adjacent sender), and the `boundTo`
+      // expected authority reference (e.g. the open flight's rootHex). Declarative
+      // — the shadow layer records the contract; the live handler enforces it.
+      if (row.correlation.binding.relations != null) {
+        if (!Array.isArray(row.correlation.binding.relations)) fail(type, 'correlation.binding.relations must be an array');
+        if (row.correlation.binding.relations.length > MAX_LIST) fail(type, `correlation.binding.relations exceeds ${MAX_LIST}`);
+        const rels = [];
+        for (const r of row.correlation.binding.relations) {
+          if (!isPlainObject(r)) fail(type, 'correlation.binding.relations entries must be plain objects');
+          if (!isBoundedStr(r.subject, MAX_PATH) || !requiresSet.has(r.subject)) fail(type, 'binding relation subject must be a correlation.requires path');
+          if (!isStr(r.derives) || !isStr(r.boundTo)) fail(type, 'binding relation requires `derives` and `boundTo` strings');
+          rels.push(Object.freeze({ subject: r.subject, derives: r.derives, boundTo: r.boundTo }));
+        }
+        bindOut.relations = Object.freeze(rels);
+      }
       binding = Object.freeze(bindOut);
     }
     correlation = Object.freeze({ kind: row.correlation.kind, requires: requires_, binding });
@@ -292,6 +311,11 @@ export function defineRow(row) {
 
   if (row.note != null && !isBoundedStr(row.note, MAX_NOTE)) fail(type, `note must be a string <= ${MAX_NOTE} chars`);
   if (row.evidence === EvidenceLevel.COMMITTED && !isStr(row.producedPolicy)) fail(type, 'COMMITTED evidence requires a producedPolicy');
+  // F2.2 (Aster recut-3): retry IDEMPOTENT means "deduped by the declared idempotency
+  // key" — it is a contradiction to select it with no idempotency spec. A frame that
+  // is resend-safe WITHOUT a frame key (a read, a catch-up, an order-independent
+  // set-union) declares Retry.NATURAL instead.
+  if (row.retry === Retry.IDEMPOTENT && !idempotency) fail(type, 'retry IDEMPOTENT requires an idempotency key; use Retry.NATURAL for a frame that is naturally idempotent without a key');
 
   const norm = {
     type, variant: row.variant ?? null,
