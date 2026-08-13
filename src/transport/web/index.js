@@ -39,6 +39,10 @@ import { CompositeTransport } from './composite.js';
 import { isHexId, toHex, fromHex } from '../../utils/hexid.js';
 import { TransportError, ErrorCodes, UpgradeRequiredError } from '../../errors.js';
 import { KERNEL_VERSION, WIRE_VERSION } from '../handshake.js';
+// REF-1.1 S4a: Boundary-2 (transport hello/auth/session + CAP_ATTEST) frame-contract
+// registry, SHADOW MODE, DEFAULT-OFF. Built only under the `frameRegistry` flag;
+// observe() is a pure side-channel that never touches the notification handlers.
+import { makeBoundary2Observers } from '../boundary2Registry.js';
 import {
   buildAuthHello, verifyAuthHello, cbvFromNonces, AUTH_PROTO,
 } from '../handshake-auth.js';
@@ -167,6 +171,13 @@ export function webTransport({
   turnRefreshReplyMs          = 20 * 1000,       // per-attempt wait for the bridge's `turn` reply
   turnRefreshMaxTries         = 3,               // in-band attempts before graceful deferral
   turnRefreshSendErrBackoffMs = 5 * 1000,        // re-arm this long after a send error
+  // REF-1.1 S4a — Boundary-2 frame-contract registry, SHADOW MODE, DEFAULT-OFF.
+  // When true, the transport builds a Boundary-2 registry and OBSERVES a certified
+  // snapshot beside the bridge auth (hello/hello-ack), session (welcome), and
+  // CAP_ATTEST notification handlers — never mutating, suppressing, or reordering
+  // them. With the runtime shadow flag off (the default) observe() is a no-op, so
+  // flag-off is byte-identical. Dispatch is NOT migrated.
+  frameRegistry = false,
 } = {}) {
   if (typeof bridgeUrl !== 'string' || !/^wss?:\/\//.test(bridgeUrl)) {
     throw new TransportError(ErrorCodes.TRANSPORT_NOT_STARTED,
@@ -404,6 +415,17 @@ export function webTransport({
     log,
   });
 
+  // REF-1.1 S4a — Boundary-2 observers (SHADOW, DEFAULT-OFF). Built once, only
+  // under the `frameRegistry` flag. `b2observe(wire, connId, body)` is a pure
+  // side-channel called BEFORE each unchanged notification handler: with the
+  // runtime shadow flag off it returns immediately (byte-identical), and it never
+  // receives or alters the handler. `connId` is the ACTUAL channel/session scope
+  // at each site (the bridge connId / mesh id); observation is stateless, so the
+  // fixed BRIDGE_CONN_ID sentinel reused across reconnects carries no state.
+  const b2traces = [];
+  const b2 = frameRegistry ? makeBoundary2Observers({ sink: (r) => { b2traces.push(r); } }) : null;
+  const b2observe = b2 ? (wire, connId, body) => b2.observe(wire, connId, body) : () => {};
+
   // Signaling-frame dispatcher.  Bridge frames carry payloads addressed
   // to the local node's MeshManager so it can drive the WebRTC layer
   // (peer discovery + SDP/ICE relay).  The mapping from bridge frame
@@ -416,6 +438,7 @@ export function webTransport({
       const t = frame.type;
       switch (t) {
         case 'welcome':
+          b2observe('welcome', frame.connId, frame);   // S4a shadow (no-op unless flag on)
           // Bridge greeting (myConnId, server version, optional TURN
           // credentials).  composite.start has already called
           // mesh.setMyId(localNodeIdHex); here we just thread the TURN
@@ -875,8 +898,8 @@ export function webTransport({
       setBridgeState('open');
       bridgeReadyResolve(nodeIdBig);
     };
-    bridge.onNotification('hello',     (c, b) => onBridgeAuthHello(c, b, 'hello'));
-    bridge.onNotification('hello-ack', (c, b) => onBridgeAuthHello(c, b, 'hello-ack'));
+    bridge.onNotification('hello',     (c, b) => { b2observe('hello',     c, b); return onBridgeAuthHello(c, b, 'hello');     });
+    bridge.onNotification('hello-ack', (c, b) => { b2observe('hello-ack', c, b); return onBridgeAuthHello(c, b, 'hello-ack'); });
 
     socketEvents.close.add(() => {
       if (bridgeNodeIdBig === null) {
@@ -925,6 +948,7 @@ export function webTransport({
     // handlers get.  Translate back to the meshId MeshAuth keys on.
     webrtc.onNotification('cap-attest', (from, body) => {
       const meshId = (typeof from === 'string') ? from : webrtc.meshIdFor(from);
+      b2observe('cap-attest', meshId, body);   // S4a shadow (no-op unless flag on)
       if (meshId) meshAuth.onCapAttest(meshId, body);
     });
 
@@ -1116,6 +1140,11 @@ export function webTransport({
       bridgeMsgFraction: (m + b) ? +(b / (m + b)).toFixed(3) : 0,
     };
   };
+  // REF-1.1 S4a — test-only introspection of the Boundary-2 shadow (null unless
+  // frameRegistry:true). Mirrors AxonaManager.frameRegistryShadow(); never read on
+  // the live path — a consumer inspects `traces` to assert flag-on observation and
+  // flag-off zero-trace identity.
+  composite.frameRegistryShadow = () => (b2 ? { registry: b2.reg, traces: b2traces } : null);
   Object.defineProperty(composite, 'socket',          { get() { return socket; } });
   Object.defineProperty(composite, 'bridgeReady',     { get() { return bridgeReady; } });
   // Display surface: hex (derived from BigInt).  External UI / log

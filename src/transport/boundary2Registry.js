@@ -37,8 +37,13 @@
 
 import {
   defineRow, FrameKind, Retry, NOT_APPLICABLE as NA,
-  ConversationRole, PairSide, ShadowRegistry,
+  ConversationRole, PairSide, ShadowRegistry, shadowEnabled,
 } from '../registry/index.js';
+// certifyPlain is the FIXED string-only decoder variant for the WS bridge / node
+// path (JSON.parse, no reviver) — the same decode the transport already performs.
+// It is deliberately NOT re-exported by registry/index.js (encapsulation, not a
+// security boundary); a kernel-internal path import is the sanctioned consumer.
+import { certifyPlain } from '../registry/snapshotMint.js';
 
 const V = { min: 5, max: 5 };                 // the axona/5 transport generation (AUTH_PROTO = 'axona/5')
 const REQ = ConversationRole.REQUEST, RESP = ConversationRole.RESPONSE;
@@ -147,6 +152,34 @@ export function buildBoundary2Registry({ sink = () => {}, enabled, now, sampleEv
   for (const d of defs) reg.register(defineRow(d));
   reg.wiring = frameWiring(defs);
   return reg;
+}
+
+// ── S4a increment 2: the LIVE-WIRING observe side-channel ───────────────────
+// makeBoundary2Observers builds a Boundary-2 registry and returns `observe(wire,
+// connId, body)` — the ONLY thing the live transport calls. It is a pure
+// side-channel: it never receives, wraps, or returns the handler, so it cannot
+// change what the handler sees or does. Flag-off (the default) it returns
+// immediately — zero certify work, zero traces, byte-identical. Flag-on it feeds a
+// certified snapshot of `body` plus a certified `{connId}` meta (certified from the
+// ACTUAL channel/session scope the caller passes) to a no-op-handler wrap, which
+// observes and emits a trace. Stateless per call — no per-connId state is retained
+// — so reusing a fixed channel sentinel (BRIDGE_CONN_ID) across reconnects carries
+// nothing between sessions.
+export function makeBoundary2Observers({ sink = () => {}, now, sampleEvery } = {}) {
+  const reg = buildBoundary2Registry({ sink, now, sampleEvery });   // enabled defaults to the global shadow flag
+  const NOOP = () => {};
+  const wraps = new Map();
+  for (const [wire, info] of reg.wiring) wraps.set(wire, reg.wrap(info.type, NOOP));
+  const observe = (wire, connId, body) => {
+    if (!shadowEnabled()) return;                    // flag-off: no work, no trace, byte-identical
+    const w = wraps.get(wire); if (!w) return;       // unknown wire → not our frame
+    try {
+      const snap = certifyPlain(JSON.stringify(body ?? {}));
+      const meta = certifyPlain(JSON.stringify({ connId: connId == null ? null : String(connId) }));
+      w(snap, meta);                                 // observe-only; the NOOP is the "handler"; result ignored
+    } catch { /* observation must NEVER affect the transport */ }
+  };
+  return { reg, observe };
 }
 
 export { boundary2Rows, rowDefs, frameWiring };

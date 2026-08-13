@@ -31,9 +31,26 @@
 //
 // Run: node test/smoke_boundary2_registry.mjs
 // =====================================================================
-import { buildBoundary2Registry, boundary2Rows, rowDefs } from '../src/transport/boundary2Registry.js';
+import { buildBoundary2Registry, boundary2Rows, rowDefs, makeBoundary2Observers } from '../src/transport/boundary2Registry.js';
 import { setShadowEnabled } from '../src/registry/index.js';
 import { certify } from '../src/registry/snapshotMint.js';
+// Live-wiring (L block): drive a real webTransport over a fake WebSocket.
+import { webTransport } from '../src/transport/web/index.js';
+import { createNodeIdentity } from '../src/identity/index.js';
+import { buildAuthHello, cbvFromNonces } from '../src/transport/handshake-auth.js';
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+// Minimal fake WebSocket (the reconnect-smoke pattern): tracks instances, fires
+// events, and `deliver(obj)` feeds a wire frame into the transport.
+let liveSockets = [];
+class FakeWS {
+  constructor(url) { this.url = url; this.sent = []; this._l = new Map(); this.readyState = 0; liveSockets.push(this); queueMicrotask(() => { this.readyState = 1; this._fire('open'); }); }
+  addEventListener(t, h) { if (!this._l.has(t)) this._l.set(t, new Set()); this._l.get(t).add(h); }
+  send(d) { if (this.readyState === 1) this.sent.push(d); }
+  close(code, reason) { if (this.readyState === 3) return; this.readyState = 3; this._fire('close', { code, reason }); }
+  _fire(t, ev = {}) { const s = this._l.get(t); if (t === 'error' && (!s || !s.size)) throw ev.error || new Error('unhandled'); if (s) for (const h of s) try { h(ev); } catch {} }
+  deliver(obj) { this._fire('message', { data: JSON.stringify(obj) }); }
+}
 
 let passed = 0, failed = 0;
 const check = (label, cond, extra = '') => { if (cond) { console.log(`  ✓ ${label}`); passed++; } else { console.log(`  ✗ ${label} ${extra}`); failed++; } };
@@ -183,6 +200,79 @@ console.log('\nREF-1.1 S4a — Boundary-2 (transport hello/auth/session + CAP_AT
   tr.length = 0;
   let threw = false; try { reg.wrap('transport:hello', () => { throw new Error('x'); }).call({}, certFrame(CERT.hello), certFrame({ connId: 'c1' })); } catch { threw = true; }
   check('D2. flag-off: a throwing handler still rethrows verbatim AND ZERO traces', threw && tr.length === 0);
+}
+
+// ── O. OBSERVE UNIT (the live-wiring side-channel makeBoundary2Observers) ──────
+{
+  const HELLO = { proto: 'axona/5', nodeId: NODEID, pubkey: PUBKEY, sig: SIG, pow: '' };
+  const CAP   = { capId: 'write-flight-ack-v1', nodeId: NODEID, sig: CAPSIG };
+
+  { const tr = []; const { observe } = makeBoundary2Observers({ sink: (r) => tr.push(r) });
+    setShadowEnabled(false);
+    observe('hello', 'c1', Object.freeze({ ...HELLO }));   // frozen: proves observe never mutates its input
+    check('O1. observe() flag-off: ZERO traces + input untouched (byte-identical, no certify work)', tr.length === 0); }
+
+  { const tr = []; const { observe } = makeBoundary2Observers({ sink: (r) => tr.push(r) });
+    setShadowEnabled(true);
+    observe('hello', 'c1', HELLO);
+    check('O2. observe() flag-on: branded transport:hello, schemaOk, channel connId observed (conversation true)',
+      tr.length === 1 && tr[0].type === 'transport:hello' && tr[0].registered === true && tr[0].schemaOk === true && tr[0].conversationPresent === true); }
+
+  { const tr = []; const { observe } = makeBoundary2Observers({ sink: (r) => tr.push(r) });
+    setShadowEnabled(true);
+    observe('cap-attest', 'BRIDGE', CAP);   // reused fixed sentinel connId, twice
+    observe('cap-attest', 'BRIDGE', CAP);
+    check('O3. reconnect isolation: reused sentinel connId → two INDEPENDENT traces, no retained per-connId state',
+      tr.length === 2 && tr.every((r) => r.type === 'transport:cap-attest')); }
+
+  { const { observe } = makeBoundary2Observers({});
+    setShadowEnabled(true);
+    let obsThrew = false; const cyc = {}; cyc.self = cyc;   // cyclic → JSON.stringify throws INSIDE observe
+    try { observe('hello', 'c1', cyc); } catch { obsThrew = true; }
+    check('O4. observe() never throws OUT — a cyclic/malformed body is swallowed (transport unaffected)', obsThrew === false); }
+
+  setShadowEnabled(false);
+}
+
+// ── L. LIVE TRANSPORT WIRING (differential over the REAL webTransport) ─────────
+// Drive a real webTransport{frameRegistry:true} over a fake WebSocket through the
+// actual bridge handshake, and prove the live notification handlers still RUN on
+// raw args while the registry observes flag-on / stays silent flag-off.
+{
+  const alice  = await createNodeIdentity({ lat: 40.71, lng: -74.0 });
+  const bridge = await createNodeIdentity({ lat: 51.5,  lng: -0.12 });
+  const CONN = 'zz', NONCE = 'seednonce77';
+  const feed = async (sock) => {
+    sock.deliver({ type: 'welcome', connId: CONN, serverNonce: NONCE, version: '2.112.0', kernelVersion: '4.62.2', turn: null });
+    const cbv = cbvFromNonces(NONCE, CONN, 'bridge');
+    const hello = await buildAuthHello({ identity: bridge, cbv });
+    sock.deliver({ type: 'axona', payload: { k: 'ntf', type: 'hello', body: hello } });
+  };
+  const drive = async () => {
+    liveSockets = [];
+    const t = webTransport({ bridgeUrl: 'wss://test.example', identity: alice, WebSocketImpl: FakeWS, handshakeTimeoutMs: 2000, reconnect: false, frameRegistry: true });
+    const wl = []; t.onWelcome((i) => wl.push(i));
+    const startP = t.start();
+    await sleep(5);
+    await feed(t.socket);
+    await startP;
+    const sh = t.frameRegistryShadow();
+    const out = { connId: t.bridgeInfo && t.bridgeInfo.connId, welcomes: wl.length, traces: sh ? sh.traces.map((x) => x.type) : null };
+    try { t.socket?.close?.(1000); } catch { /* */ }
+    return out;
+  };
+
+  setShadowEnabled(true);
+  const on = await drive();
+  check('L1. live flag-on: welcome+hello handlers RAN on raw args (bridgeInfo + onWelcome) AND the registry observed transport:welcome + transport:hello',
+    on.connId === CONN && on.welcomes === 1 && on.traces && on.traces.includes('transport:welcome') && on.traces.includes('transport:hello'));
+
+  setShadowEnabled(false);
+  const off = await drive();   // registry built, runtime shadow flag OFF
+  check('L2. live flag-off: the SAME handlers RAN identically AND the registry emitted ZERO traces (byte-identical live path)',
+    off.connId === CONN && off.welcomes === 1 && off.traces && off.traces.length === 0);
+
+  setShadowEnabled(false);
 }
 
 setShadowEnabled(false);
