@@ -215,8 +215,8 @@ console.log('\nREF-1.1 S4a — Boundary-2 (transport hello/auth/session + CAP_AT
   { const tr = []; const { observe } = makeBoundary2Observers({ sink: (r) => tr.push(r) });
     setShadowEnabled(true);
     observe('hello', 'c1', HELLO);
-    check('O2. observe() flag-on: branded transport:hello, schemaOk, channel connId observed (conversation true)',
-      tr.length === 1 && tr[0].type === 'transport:hello' && tr[0].registered === true && tr[0].schemaOk === true && tr[0].conversationPresent === true); }
+    check('O2. observe() flag-on: branded transport:hello, schemaOk, conversation true, verdict UNOBSERVED (F1: no handler success claimed), connId stamped (F3)',
+      tr.length === 1 && tr[0].type === 'transport:hello' && tr[0].registered === true && tr[0].schemaOk === true && tr[0].conversationPresent === true && tr[0].verdict === 'unobserved' && tr[0].connId === 'c1'); }
 
   { const tr = []; const { observe } = makeBoundary2Observers({ sink: (r) => tr.push(r) });
     setShadowEnabled(true);
@@ -236,41 +236,102 @@ console.log('\nREF-1.1 S4a — Boundary-2 (transport hello/auth/session + CAP_AT
 
 // ── L. LIVE TRANSPORT WIRING (differential over the REAL webTransport) ─────────
 // Drive a real webTransport{frameRegistry:true} over a fake WebSocket through the
-// actual bridge handshake, and prove the live notification handlers still RUN on
-// raw args while the registry observes flag-on / stays silent flag-off.
+// actual bridge handshake. Proves the four live notification sites RUN on raw args
+// while the registry observes flag-on / stays silent flag-off, plus the recut
+// points: F1 unobserved verdict (never 'passed'), F3 session-scoped connId + real
+// reconnect isolation, F4 all four wires, F2 bounded trace ring.
 {
-  const alice  = await createNodeIdentity({ lat: 40.71, lng: -74.0 });
-  const bridge = await createNodeIdentity({ lat: 51.5,  lng: -0.12 });
-  const CONN = 'zz', NONCE = 'seednonce77';
-  const feed = async (sock) => {
-    sock.deliver({ type: 'welcome', connId: CONN, serverNonce: NONCE, version: '2.112.0', kernelVersion: '4.62.2', turn: null });
-    const cbv = cbvFromNonces(NONCE, CONN, 'bridge');
-    const hello = await buildAuthHello({ identity: bridge, cbv });
-    sock.deliver({ type: 'axona', payload: { k: 'ntf', type: 'hello', body: hello } });
+  const alice    = await createNodeIdentity({ lat: 40.71, lng: -74.0 });
+  const bridgeId = await createNodeIdentity({ lat: 51.5,  lng: -0.12 });
+  const mkHello = async (nonce, conn, badSig = false) => {
+    const h = await buildAuthHello({ identity: bridgeId, cbv: cbvFromNonces(nonce, conn, 'bridge') });
+    if (badSig) h.sig = 'ed25519:' + 'ff'.repeat(64);   // valid shape, wrong signature → live verify fails
+    return h;
   };
-  const drive = async () => {
+  const bringUp = async (conn, nonce) => {
     liveSockets = [];
     const t = webTransport({ bridgeUrl: 'wss://test.example', identity: alice, WebSocketImpl: FakeWS, handshakeTimeoutMs: 2000, reconnect: false, frameRegistry: true });
     const wl = []; t.onWelcome((i) => wl.push(i));
     const startP = t.start();
     await sleep(5);
-    await feed(t.socket);
+    const sock = t.socket;
+    sock.deliver({ type: 'welcome', connId: conn, serverNonce: nonce, version: '2.112.0', kernelVersion: '4.62.2', turn: null });
+    sock.deliver({ type: 'axona', payload: { k: 'ntf', type: 'hello', body: await mkHello(nonce, conn) } });
     await startP;
-    const sh = t.frameRegistryShadow();
-    const out = { connId: t.bridgeInfo && t.bridgeInfo.connId, welcomes: wl.length, traces: sh ? sh.traces.map((x) => x.type) : null };
-    try { t.socket?.close?.(1000); } catch { /* */ }
-    return out;
+    return { t, sock, wl };
   };
+  const typesOf = (t) => t.frameRegistryShadow().traces.map((x) => x.type);
+  const helloTrace = (t, conn) => t.frameRegistryShadow().traces.find((x) => x.type === 'transport:hello' && (conn === undefined || x.connId === conn));
 
+  // L1 — flag ON: welcome+hello RUN on raw args (bridgeInfo + onWelcome) AND observed;
+  // hello verdict UNOBSERVED (F1) and the SESSION connId, not the BRIDGE sentinel (F3).
   setShadowEnabled(true);
-  const on = await drive();
-  check('L1. live flag-on: welcome+hello handlers RAN on raw args (bridgeInfo + onWelcome) AND the registry observed transport:welcome + transport:hello',
-    on.connId === CONN && on.welcomes === 1 && on.traces && on.traces.includes('transport:welcome') && on.traces.includes('transport:hello'));
+  { const { t, wl } = await bringUp('c-A', 'nonceA');
+    const h = helloTrace(t);
+    check('L1. live flag-on: welcome+hello ran on raw args (bridgeInfo+onWelcome) AND observed; hello verdict UNOBSERVED (F1) + SESSION connId c-A not the BRIDGE sentinel (F3)',
+      t.bridgeInfo && t.bridgeInfo.connId === 'c-A' && wl.length === 1
+      && typesOf(t).includes('transport:welcome') && h && h.verdict === 'unobserved' && h.connId === 'c-A');
+    try { t.socket?.close?.(1000); } catch { /* */ } }
 
+  // L2 — F4: hello-ack + cap-attest live sites also RUN + observe.
+  { const { t, sock } = await bringUp('c-B', 'nonceB');
+    sock.deliver({ type: 'axona', payload: { k: 'ntf', type: 'hello-ack', body: await mkHello('nonceB', 'c-B') } });
+    await t._testDeliverMeshNotification('m1', 'cap-attest', { capId: 'write-flight-ack-v1', nodeId: NODEID, sig: CAPSIG });
+    const types = typesOf(t);
+    check('L2. live flag-on F4: hello-ack + cap-attest sites RAN and observed transport:hello-ack + transport:cap-attest',
+      types.includes('transport:hello-ack') && types.includes('transport:cap-attest'));
+    try { t.socket?.close?.(1000); } catch { /* */ } }
+
+  // L3 — F1 negative: a hello whose auth SIGNATURE is invalid — the real async handler
+  // fails, yet the trace (emitted BEFORE the handler runs) says UNOBSERVED, never 'passed'.
+  { liveSockets = [];
+    const t = webTransport({ bridgeUrl: 'wss://test.example', identity: alice, WebSocketImpl: FakeWS, handshakeTimeoutMs: 300, reconnect: false, frameRegistry: true });
+    t.start().catch(() => {});
+    await sleep(5);
+    const sock = t.socket;
+    sock.deliver({ type: 'welcome', connId: 'c-neg', serverNonce: 'nonceN', version: '2.112.0', kernelVersion: '4.62.2', turn: null });
+    sock.deliver({ type: 'axona', payload: { k: 'ntf', type: 'hello', body: await mkHello('nonceN', 'c-neg', true) } });
+    await sleep(5);
+    const h = helloTrace(t);
+    check('L3. F1 negative: bridge auth with an INVALID signature — the trace says UNOBSERVED, NEVER passed (async failure not overclaimed)',
+      h && h.verdict === 'unobserved' && h.connId === 'c-neg');
+    try { t.socket?.close?.(4000); } catch { /* */ } }
+
+  // L4 — F3 REAL reconnect isolation: one transport, socket dropped, reconnect with a
+  // DIFFERENT welcome connId — the two hello legs carry sess-A vs sess-B, never conflated.
+  { liveSockets = [];
+    const t = webTransport({ bridgeUrl: 'wss://test.example', identity: alice, WebSocketImpl: FakeWS, handshakeTimeoutMs: 2000, reconnect: true, reconnectInitialMs: 40, reconnectMaxMs: 40, frameRegistry: true });
+    const startP = t.start(); await sleep(5);
+    const s1 = t.socket;
+    s1.deliver({ type: 'welcome', connId: 'sess-A', serverNonce: 'nA', version: '2.112.0', kernelVersion: '4.62.2', turn: null });
+    s1.deliver({ type: 'axona', payload: { k: 'ntf', type: 'hello', body: await mkHello('nA', 'sess-A') } });
+    await startP;
+    const aHello = helloTrace(t, 'sess-A');
+    s1.close(1006); await sleep(120);                     // drop → reconnect (reconnectInitialMs 40) opens a fresh socket
+    const s2 = t.socket;
+    s2.deliver({ type: 'welcome', connId: 'sess-B', serverNonce: 'nB', version: '2.112.0', kernelVersion: '4.62.2', turn: null });
+    s2.deliver({ type: 'axona', payload: { k: 'ntf', type: 'hello', body: await mkHello('nB', 'sess-B') } });
+    await sleep(5);
+    const bHello = helloTrace(t, 'sess-B');
+    check('L4. F3 reconnect isolation: reconnect with a NEW welcome connId → the two hello legs carry sess-A vs sess-B, never conflated (bridge-auth keyed by session, not the fixed BRIDGE sentinel)',
+      s2 !== s1 && aHello && aHello.connId === 'sess-A' && bHello && bHello.connId === 'sess-B');
+    try { t.socket?.close?.(1000); } catch { /* */ } }
+
+  // L5 — F2 saturation: drive past the 1024 ring cap through a live site; the trace
+  // store stays bounded (drop-oldest), never growing unbounded for the session.
+  { const { t } = await bringUp('c-sat', 'nSat');
+    const before = t.frameRegistryShadow().traces.length;
+    for (let i = 0; i < 1100; i++) await t._testDeliverMeshNotification('m' + i, 'cap-attest', { capId: 'write-flight-ack-v1', nodeId: NODEID, sig: CAPSIG });
+    check('L5. F2 saturation: 1100+ observed frames → trace ring stays BOUNDED at 1024 (drop-oldest, not unbounded growth)',
+      before < 1024 && t.frameRegistryShadow().traces.length === 1024);
+    try { t.socket?.close?.(1000); } catch { /* */ } }
+
+  // L6 — flag OFF: the SAME live path RUNS the handlers but emits ZERO traces.
   setShadowEnabled(false);
-  const off = await drive();   // registry built, runtime shadow flag OFF
-  check('L2. live flag-off: the SAME handlers RAN identically AND the registry emitted ZERO traces (byte-identical live path)',
-    off.connId === CONN && off.welcomes === 1 && off.traces && off.traces.length === 0);
+  { const { t, wl } = await bringUp('c-off', 'nOff');
+    check('L6. live flag-off: handlers RAN identically AND the registry emitted ZERO traces (byte-identical live path)',
+      t.bridgeInfo && t.bridgeInfo.connId === 'c-off' && wl.length === 1 && t.frameRegistryShadow().traces.length === 0);
+    try { t.socket?.close?.(1000); } catch { /* */ } }
 
   setShadowEnabled(false);
 }

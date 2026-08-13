@@ -422,8 +422,11 @@ export function webTransport({
   // receives or alters the handler. `connId` is the ACTUAL channel/session scope
   // at each site (the bridge connId / mesh id); observation is stateless, so the
   // fixed BRIDGE_CONN_ID sentinel reused across reconnects carries no state.
+  // F2: bounded trace ring (Boundary-1 parity) — drop-oldest at 1024, never grows
+  // unbounded across reconnect/session traffic for the transport lifetime.
+  const B2_TRACE_CAP = 1024;
   const b2traces = [];
-  const b2 = frameRegistry ? makeBoundary2Observers({ sink: (r) => { b2traces.push(r); } }) : null;
+  const b2 = frameRegistry ? makeBoundary2Observers({ sink: (r) => { if (b2traces.length >= B2_TRACE_CAP) b2traces.shift(); b2traces.push(r); } }) : null;
   const b2observe = b2 ? (wire, connId, body) => b2.observe(wire, connId, body) : () => {};
 
   // Signaling-frame dispatcher.  Bridge frames carry payloads addressed
@@ -898,8 +901,12 @@ export function webTransport({
       setBridgeState('open');
       bridgeReadyResolve(nodeIdBig);
     };
-    bridge.onNotification('hello',     (c, b) => { b2observe('hello',     c, b); return onBridgeAuthHello(c, b, 'hello');     });
-    bridge.onNotification('hello-ack', (c, b) => { b2observe('hello-ack', c, b); return onBridgeAuthHello(c, b, 'hello-ack'); });
+    // F3: certify the per-SESSION connId (the welcome's frame.connId, captured on
+    // bridgeInfo), NOT the fixed BRIDGE_CONN_ID sentinel that BridgeTransport hands
+    // these handlers as `c`. welcome precedes hello per connection, and a reconnect
+    // installs a fresh welcome connId, so the two sessions' auth legs never conflate.
+    bridge.onNotification('hello',     (c, b) => { b2observe('hello',     bridgeInfo?.connId ?? c, b); return onBridgeAuthHello(c, b, 'hello');     });
+    bridge.onNotification('hello-ack', (c, b) => { b2observe('hello-ack', bridgeInfo?.connId ?? c, b); return onBridgeAuthHello(c, b, 'hello-ack'); });
 
     socketEvents.close.add(() => {
       if (bridgeNodeIdBig === null) {
@@ -1145,6 +1152,11 @@ export function webTransport({
   // the live path — a consumer inspects `traces` to assert flag-on observation and
   // flag-off zero-trace identity.
   composite.frameRegistryShadow = () => (b2 ? { registry: b2.reg, traces: b2traces } : null);
+  // REF-1.1 S4a — test-only: drive a mesh notification through the REAL webrtc
+  // dispatch, so the boundary-2 smoke can exercise the live cap-attest site
+  // (webrtc.onNotification -> b2observe) without a real WebRTC channel. Unbound
+  // path: a STRING fromMeshId is passed straight to the handler as `from`.
+  composite._testDeliverMeshNotification = (fromMeshId, type, body) => webrtc._onMessage(fromMeshId, { k: 'ntf', type, body });
   Object.defineProperty(composite, 'socket',          { get() { return socket; } });
   Object.defineProperty(composite, 'bridgeReady',     { get() { return bridgeReady; } });
   // Display surface: hex (derived from BigInt).  External UI / log

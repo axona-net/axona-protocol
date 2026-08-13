@@ -230,6 +230,36 @@ export class ShadowRegistry {
     };
   }
 
+  // Shape-only observation for a side-channel that must NEVER run or touch the
+  // real handler (REF-1.1 S4a F1). Unlike wrap(type, NOOP) — which emits the
+  // no-op's verdict 'passed' and thus OVERCLAIMS handler success — observeShape
+  // runs no handler and emits verdict 'unobserved': it records the certified
+  // frame's SHAPE (registered / schemaOk / correlation / conversation) and makes
+  // NO claim about the real handler's disposition (which may be async and later
+  // reject). Flag-off: no-op. Uncertified arg: unbranded-source, no reflection.
+  // Never throws out — observation must not affect the caller.
+  observeShape(type, payload, meta, opts = {}) {
+    let on; try { on = this._enabled(); } catch { on = false; }
+    if (!on) return;
+    if (!isCertified(payload)) { try { this._emitUnbranded(type); } catch { /* */ } return; }
+    try {
+      const t0 = this._safeNow();
+      const ops = { n: 0 };
+      const variantBy = validateVariantBy(type, opts.variantBy, this._byType.get(type));
+      let variant = null, variantFault = null;
+      if (variantBy) {
+        const leaf = readLeaf(payload, variantBy.path, DEFAULT_MAX_BYTES, ops);
+        const r = pickVariant(variantBy, leaf);
+        variant = r.variant; variantFault = r.fault;
+      }
+      const row = variantFault ? null : this.row(type, variant);
+      const unknownVariant = (!variantFault && variant != null && !row);
+      const metaObj = isCertified(meta) ? meta : null;
+      const pre = this._observe(row, payload, metaObj, { variantFault, unknownVariant }, ops);
+      this._emit(type, variant, pre, 'unobserved', this._safeNow() - t0);   // NEVER 'passed' — no handler ran
+    } catch { /* an observer fault must never reach the caller */ }
+  }
+
   _observe(row, payload, metaObj, faults, ops) {
     const out = { registered: !!row, variantFault: faults.variantFault || null, unknownVariant: !!faults.unknownVariant };
     if (!row) return out;

@@ -166,18 +166,26 @@ export function buildBoundary2Registry({ sink = () => {}, enabled, now, sampleEv
 // — so reusing a fixed channel sentinel (BRIDGE_CONN_ID) across reconnects carries
 // nothing between sessions.
 export function makeBoundary2Observers({ sink = () => {}, now, sampleEvery } = {}) {
-  const reg = buildBoundary2Registry({ sink, now, sampleEvery });   // enabled defaults to the global shadow flag
-  const NOOP = () => {};
-  const wraps = new Map();
-  for (const [wire, info] of reg.wiring) wraps.set(wire, reg.wrap(info.type, NOOP));
+  // F3: stamp the ACTUAL channel/session connId the observation ran under onto each
+  // emitted trace. observeShape is synchronous, so a transient set-before / reset-
+  // after around the one call reaches the sink with the right scope. This is what
+  // lets two reconnect sessions with distinct welcome connIds be told apart, and it
+  // keeps the bridge-auth channel scope out of the certified body and in the trace.
+  let curConnId = null;
+  const reg = buildBoundary2Registry({ sink: (r) => sink({ ...r, connId: curConnId }), now, sampleEvery });
+  const typeByWire = new Map();
+  for (const [wire, info] of reg.wiring) typeByWire.set(wire, info.type);
   const observe = (wire, connId, body) => {
     if (!shadowEnabled()) return;                    // flag-off: no work, no trace, byte-identical
-    const w = wraps.get(wire); if (!w) return;       // unknown wire → not our frame
+    const type = typeByWire.get(wire); if (!type) return;   // unknown wire → not our frame
     try {
+      curConnId = connId == null ? null : String(connId);
       const snap = certifyPlain(JSON.stringify(body ?? {}));
-      const meta = certifyPlain(JSON.stringify({ connId: connId == null ? null : String(connId) }));
-      w(snap, meta);                                 // observe-only; the NOOP is the "handler"; result ignored
-    } catch { /* observation must NEVER affect the transport */ }
+      const meta = certifyPlain(JSON.stringify({ connId: curConnId }));
+      // F1: SHAPE-ONLY observation — verdict 'unobserved', NO handler runs, so a
+      // later async rejection of the real handler is never overclaimed as 'passed'.
+      reg.observeShape(type, snap, meta);
+    } catch { /* observation must NEVER affect the transport */ } finally { curConnId = null; }
   };
   return { reg, observe };
 }
