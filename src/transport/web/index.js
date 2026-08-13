@@ -43,6 +43,9 @@ import { KERNEL_VERSION, WIRE_VERSION } from '../handshake.js';
 // registry, SHADOW MODE, DEFAULT-OFF. Built only under the `frameRegistry` flag;
 // observe() is a pure side-channel that never touches the notification handlers.
 import { makeBoundary2Observers } from '../boundary2Registry.js';
+// REF-1.1 S4b: Boundary-3 (WebRTC signalling + mesh-auth) frame-contract registry,
+// SHADOW MODE, DEFAULT-OFF — same flag and no-op-when-off discipline as Boundary-2.
+import { makeBoundary3Observers } from '../boundary3Registry.js';
 import {
   buildAuthHello, verifyAuthHello, cbvFromNonces, AUTH_PROTO,
 } from '../handshake-auth.js';
@@ -429,6 +432,18 @@ export function webTransport({
   const b2 = frameRegistry ? makeBoundary2Observers({ sink: (r) => { if (b2traces.length >= B2_TRACE_CAP) b2traces.shift(); b2traces.push(r); } }) : null;
   const b2observe = b2 ? (wire, connId, body) => b2.observe(wire, connId, body) : () => {};
 
+  // REF-1.1 S4b increment 2 — Boundary-3 observers (SHADOW, DEFAULT-OFF), same
+  // discipline as Boundary-2: a pure side-channel called BEFORE each unchanged
+  // signalling / mesh-auth handler, never receiving or altering it. Flag-off it is a
+  // no-op (byte-identical). `scope` is the ACTUAL channel identity the observation
+  // ran under — the signalling peer `from` for a signal, the meshId for mesh auth —
+  // stamped onto each trace and, where the row projects it, certified under its
+  // declared meta key. Bounded trace ring (drop-oldest 1024, Boundary-2 parity).
+  const B3_TRACE_CAP = 1024;
+  const b3traces = [];
+  const b3 = frameRegistry ? makeBoundary3Observers({ sink: (r) => { if (b3traces.length >= B3_TRACE_CAP) b3traces.shift(); b3traces.push(r); } }) : null;
+  const b3observe = b3 ? (wire, scope, body) => b3.observe(wire, scope, body) : () => {};
+
   // Signaling-frame dispatcher.  Bridge frames carry payloads addressed
   // to the local node's MeshManager so it can drive the WebRTC layer
   // (peer discovery + SDP/ICE relay).  The mapping from bridge frame
@@ -488,16 +503,19 @@ export function webTransport({
           applyTurnFrame(frame.turn ?? null);
           return;
         case 'peer-list':
+          b3observe('peer-list', null, frame);   // S4b shadow (no-op unless flag on)
           if (typeof mesh.onPeerList === 'function') {
             return mesh.onPeerList(Array.isArray(frame.peers) ? frame.peers : []);
           }
           break;
         case 'peer-joined':
+          b3observe('peer-joined', frame.peerId, frame);   // S4b shadow
           if (typeof mesh.onPeerJoined === 'function' && typeof frame.peerId === 'string') {
             return mesh.onPeerJoined(frame.peerId);
           }
           break;
         case 'peer-left': {
+          b3observe('peer-left', frame.peerId, frame);   // S4b shadow
           // Departure hint (#364-B): a bridge that knows the departed
           // connection's authenticated nodeId includes it — purge the node's
           // pub/sub ghosts via the standard peer-died path. Guarded inside
@@ -515,6 +533,7 @@ export function webTransport({
           break;
         }
         case 'signal':
+          b3observe('signal', frame.from, frame.payload);   // S4b shadow — body is frame.payload (kind/sdp|candidate); scope = signalling peer `from`
           if (typeof mesh.onSignal === 'function' && typeof frame.from === 'string') {
             return mesh.onSignal(frame.from, frame.payload);
           }
@@ -948,8 +967,8 @@ export function webTransport({
     if (typeof mesh.onPeerLost === 'function') {
       mesh.onPeerLost((meshId) => meshAuth.onChannelLost(meshId));
     }
-    webrtc.onNotification('hello',     (fromConnId, body) => meshAuth.onHello(fromConnId, body));
-    webrtc.onNotification('hello-sig', (fromConnId, body) => meshAuth.onHelloSig(fromConnId, body));
+    webrtc.onNotification('hello',     (fromConnId, body) => { b3observe('hello',     fromConnId, body); return meshAuth.onHello(fromConnId, body); });
+    webrtc.onNotification('hello-sig', (fromConnId, body) => { b3observe('hello-sig', fromConnId, body); return meshAuth.onHelloSig(fromConnId, body); });
     // CAP_ATTEST arrives POST-bind, so webrtc dispatches the sender's
     // BigInt nodeId here — not the pre-bind meshId string the hello
     // handlers get.  Translate back to the meshId MeshAuth keys on.
@@ -1147,11 +1166,12 @@ export function webTransport({
       bridgeMsgFraction: (m + b) ? +(b / (m + b)).toFixed(3) : 0,
     };
   };
-  // REF-1.1 S4a — test-only introspection of the Boundary-2 shadow (null unless
-  // frameRegistry:true). Mirrors AxonaManager.frameRegistryShadow(); never read on
-  // the live path — a consumer inspects `traces` to assert flag-on observation and
-  // flag-off zero-trace identity.
-  composite.frameRegistryShadow = () => (b2 ? { registry: b2.reg, traces: b2traces } : null);
+  // REF-1.1 S4a/S4b — test-only introspection of the Boundary-2 and Boundary-3
+  // shadows (null unless frameRegistry:true). Mirrors AxonaManager.frameRegistryShadow();
+  // never read on the live path — a consumer inspects `traces` to assert flag-on
+  // observation and flag-off zero-trace identity. Boundary-2 keeps the top-level shape;
+  // Boundary-3 (S4b increment 2) is nested under `.b3`.
+  composite.frameRegistryShadow = () => (b2 ? { registry: b2.reg, traces: b2traces, b3: b3 ? { registry: b3.reg, traces: b3traces } : null } : null);
   Object.defineProperty(composite, 'socket',          { get() { return socket; } });
   Object.defineProperty(composite, 'bridgeReady',     { get() { return bridgeReady; } });
   // Display surface: hex (derived from BigInt).  External UI / log

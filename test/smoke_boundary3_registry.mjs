@@ -41,10 +41,27 @@
 import { buildBoundary3Registry, boundary3Rows, makeBoundary3Observers } from '../src/transport/boundary3Registry.js';
 import { setShadowEnabled } from '../src/registry/index.js';
 import { certify } from '../src/registry/snapshotMint.js';
+// L block: drive a real webTransport over a fake WebSocket (S4a live-wiring pattern).
+import { webTransport } from '../src/transport/web/index.js';
+import { createNodeIdentity } from '../src/identity/index.js';
+import { buildAuthHello, cbvFromNonces } from '../src/transport/handshake-auth.js';
+import { installMockWebRTC } from './helpers/mock-webrtc.mjs';   // real onSignal runs a mock PC (observe fires before it)
 
 let passed = 0, failed = 0;
 const check = (label, cond, extra = '') => { if (cond) { console.log(`  ✓ ${label}`); passed++; } else { console.log(`  ✗ ${label} ${extra}`); failed++; } };
 const certFrame = (obj) => certify(JSON.stringify(obj));
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+// Minimal fake WebSocket (the reconnect-smoke pattern), mirroring smoke_boundary2:
+// `deliver(obj)` feeds a wire frame into the transport.
+let liveSockets = [];
+class FakeWS {
+  constructor(url) { this.url = url; this.sent = []; this._l = new Map(); this.readyState = 0; liveSockets.push(this); queueMicrotask(() => { this.readyState = 1; this._fire('open'); }); }
+  addEventListener(t, h) { if (!this._l.has(t)) this._l.set(t, new Set()); this._l.get(t).add(h); }
+  send(d) { if (this.readyState === 1) this.sent.push(d); }
+  close(code, reason) { if (this.readyState === 3) return; this.readyState = 3; this._fire('close', { code, reason }); }
+  _fire(t, ev = {}) { const s = this._l.get(t); if (t === 'error' && (!s || !s.size)) throw ev.error || new Error('unhandled'); if (s) for (const h of s) try { h(ev); } catch {} }
+  deliver(obj) { this._fire('message', { data: JSON.stringify(obj) }); }
+}
 
 // Representative VALID frames (shape only — the registry observes shape; the live
 // authGuard enforces the crypto). Hex strings need not be crypto-valid here.
@@ -291,6 +308,68 @@ console.log('\nREF-1.1 S4b — Boundary-3 (WebRTC signalling + mesh-auth) regist
     let obsThrew = false; const cyc = {}; cyc.self = cyc;   // cyclic → JSON.stringify throws INSIDE observe
     try { observe('hello', 'aa1', cyc); } catch { obsThrew = true; }
     check('O4. observe() never throws OUT — a cyclic/malformed body is swallowed (transport unaffected)', obsThrew === false); }
+}
+
+// ── L. LIVE TRANSPORT WIRING (S4b increment 2 — differential over the REAL webTransport) ──
+// Drive a real webTransport{frameRegistry:true} over a fake WebSocket. The four
+// signalling wires arrive via signaling.dispatch (bare non-`axona` socket frames);
+// the two mesh-auth wires via the transport's OWN webrtc dispatch (t.webrtc._onMessage —
+// the exact ingress the MeshManager registers; NO production test hook). Flag-on every
+// site observes (verdict UNOBSERVED, scope stamped); runtime flag-off emits ZERO B3
+// traces (byte-identical); frameRegistry:false has no B3 shadow at all.
+{
+  const uninstallWebRTC = installMockWebRTC();   // a delivered sdp-offer runs the REAL onSignal on a mock PC; observe fires first
+  const alice    = await createNodeIdentity({ lat: 40.71, lng: -74.0 });
+  const bridgeId = await createNodeIdentity({ lat: 51.5,  lng: -0.12 });
+  const mkHello = async (nonce, conn) => buildAuthHello({ identity: bridgeId, cbv: cbvFromNonces(nonce, conn, 'bridge') });
+  const bringUp = async (conn, nonce, { frameRegistry = true } = {}) => {
+    liveSockets = [];
+    const t = webTransport({ bridgeUrl: 'wss://test.example', identity: alice, WebSocketImpl: FakeWS, handshakeTimeoutMs: 2000, reconnect: false, frameRegistry });
+    const startP = t.start();
+    await sleep(5);
+    const sock = t.socket;
+    sock.deliver({ type: 'welcome', connId: conn, serverNonce: nonce, version: '2.112.0', kernelVersion: '4.62.2', turn: null });
+    sock.deliver({ type: 'axona', payload: { k: 'ntf', type: 'hello', body: await mkHello(nonce, conn) } });
+    await startP;
+    return { t, sock };
+  };
+
+  setShadowEnabled(true);
+  { const { t, sock } = await bringUp('c-b3', 'nB3');
+    sock.deliver({ type: 'peer-list',   peers: ['p1', 'p2'] });
+    sock.deliver({ type: 'peer-joined', peerId: 'p1' });
+    sock.deliver({ type: 'peer-left',   peerId: 'p1', nodeId: 'abcdef01' });
+    sock.deliver({ type: 'signal',      from: 'p1', payload: SIGNAL.offer });
+    await t.webrtc._onMessage('m1', { k: 'ntf', type: 'hello',     body: { proto: 'axona/5', nonce: 'nn' } });
+    await t.webrtc._onMessage('m1', { k: 'ntf', type: 'hello-sig', body: CERT['hello-sig'] });
+    const b3 = t.frameRegistryShadow().b3;
+    const tys = b3.traces.map((x) => x.type);
+    check('L1. live flag-on: all 6 B3 wires observed (signalling via socket dispatch, mesh-auth via webrtc dispatch, no production hook)',
+      ['mesh:peer-list', 'mesh:peer-joined', 'mesh:peer-left', 'mesh:signal', 'mesh:hello', 'mesh:hello-sig'].every((ty) => tys.includes(ty)), `\n   got: ${tys.join(',')}`);
+    const sig = b3.traces.find((x) => x.type === 'mesh:signal');
+    check('L2. live signal: observed as variant offer, verdict UNOBSERVED, scope = the signalling peer `from` (p1)',
+      sig && sig.variant === 'offer' && sig.verdict === 'unobserved' && sig.scope === 'p1', `\n   ${JSON.stringify(sig)}`);
+    const hsig = b3.traces.find((x) => x.type === 'mesh:hello-sig');
+    check('L3. live mesh:hello-sig: verdict UNOBSERVED (never a handler-claim), scope = meshId (m1)',
+      hsig && hsig.verdict === 'unobserved' && hsig.scope === 'm1', `\n   ${JSON.stringify(hsig)}`);
+    try { t.socket?.close?.(1000); } catch { /* */ } }
+
+  // runtime flag OFF (registry still built): the signalling + mesh-auth handlers RUN, but
+  // observe() short-circuits → ZERO B3 traces. This is the byte-identical property.
+  { setShadowEnabled(false);
+    const { t, sock } = await bringUp('c-off', 'nOff');
+    sock.deliver({ type: 'peer-list', peers: ['p1'] });
+    await t.webrtc._onMessage('m2', { k: 'ntf', type: 'hello', body: { proto: 'axona/5', nonce: 'x' } });
+    check('L4. runtime flag-off: ZERO B3 traces though the registry is built (byte-identical)',
+      t.frameRegistryShadow().b3.traces.length === 0);
+    try { t.socket?.close?.(1000); } catch { /* */ } }
+
+  // frameRegistry:false — no B3 shadow constructed at all.
+  { setShadowEnabled(true);
+    const { t } = await bringUp('c-noreg', 'nNo', { frameRegistry: false });
+    check('L5. frameRegistry:false → no B3 shadow at all (frameRegistryShadow() null)', t.frameRegistryShadow() === null);
+    try { t.socket?.close?.(1000); } catch { /* */ } }
+  uninstallWebRTC();
 }
 
 setShadowEnabled(false);
