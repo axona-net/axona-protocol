@@ -1114,7 +1114,11 @@ export class AxonaManager {
       // manufactured a confident negative from it. See test/fence_pull_outcome.mjs.
       const timer = setTimeout(() => { this._pending.delete(corrId); resolve({ kind: 'timeout', timeoutMs }); }, timeoutMs);
       if (typeof timer.unref === 'function') timer.unref();
-      this._pending.set(corrId, { resolve, timer });
+      // Store the requester alongside corrId: the PULL/PULLRESP pair is (corrId,
+      // requesterId), not corrId alone. _onPullResp requires the response's
+      // requesterId to fold to this so a locally-routed response carrying a
+      // FOREIGN requesterId cannot settle our read (Aster, council d17ece0b).
+      this._pending.set(corrId, { resolve, timer, requesterId: this.nodeId });
       this._send(T.PULL, { topicId: idHex(topicId), via: hint ? [hint] : [], corrId, postHash: postHash || null, requesterId: idHex(this.nodeId) });
     });
   }

@@ -1050,6 +1050,18 @@ export const wireHandlersMethods = {
     if (meta.targetId !== this.nodeId && idBig(payload.requesterId) !== this.nodeId) return;
     const p = this._pending.get(payload.corrId);
     if (!p) return 'consumed';
+    // REQUESTER GATE (Aster, council d17ece0b). A read is matched by the WHOLE
+    // pair (corrId, requesterId), not corrId alone. The destination OR-guard
+    // above admits any response routed to THIS node's targetId — so a certified
+    // PULLRESP routed here carrying our corrId but a FOREIGN requesterId would
+    // otherwise resolve, and delete, another party's pending read. The requester
+    // we recorded when issuing the PULL is this node; a response whose
+    // requesterId does not fold to it is not ours — ignore it (leave the pending
+    // intact for the real answer / its timeout). A missing/malformed requesterId
+    // (idBig throws) is likewise not a match; no conforming responder omits it.
+    let respReq;
+    try { respReq = idBig(payload.requesterId); } catch { return 'consumed'; }
+    if (respReq !== p.requesterId) return 'consumed';
     clearTimeout(p.timer);
     this._pending.delete(payload.corrId);
     // Q1 TAGGED OUTCOME. These three cases were all collapsed to null:

@@ -594,6 +594,10 @@
       "class": "default"
     },
     {
+      "file": "smoke_pull_requester_gate.mjs",
+      "class": "default"
+    },
+    {
       "file": "smoke_pull_latest.js",
       "class": "retired",
       "reason": "Retired 2026-07-29. White-box test against the pre-Phase-1 AxonaManager: calls _addToReplayCache, which the routing-only core (task #220) does not define. Behaviour it covered is now covered by the Phase-1+ smokes; reviving it means rewriting against the current API, not re-wiring it."
