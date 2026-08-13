@@ -1118,6 +1118,12 @@ export function webTransport({
   //   `mesh:signal` reached us as its target; feed it into the SAME mesh
   //   signaling state machine the bridge path drives (offerer/responder/ICE).
   composite.deliverMeshSignal = (fromHex, payload) => {
+    // S4b increment 2 (Vega): the RELAYED (bridgeless) signalling ingress. This is the
+    // SAME mesh:signal wire as the bridge-path signaling.dispatch case, reaching us via
+    // a relayed terminal delivery instead of the bridge socket, so it observes too —
+    // otherwise the flag-on shadow is blind to bridgeless signalling. scope = the
+    // relayed sender's nodeId hex (the bridge path's `from` analogue).
+    b3observe('signal', fromHex, payload);   // S4b shadow (no-op unless flag on)
     if (typeof mesh.onSignal !== 'function') return;
     try { return mesh.onSignal(fromHex, payload); }
     catch (err) { log('mesh-signal-deliver-threw', { from: fromHex, err: err.message }); }

@@ -369,6 +369,19 @@ console.log('\nREF-1.1 S4b — Boundary-3 (WebRTC signalling + mesh-auth) regist
     const { t } = await bringUp('c-noreg', 'nNo', { frameRegistry: false });
     check('L5. frameRegistry:false → no B3 shadow at all (frameRegistryShadow() null)', t.frameRegistryShadow() === null);
     try { t.socket?.close?.(1000); } catch { /* */ } }
+
+  // L6 (Vega, increment-2 completeness): the RELAYED (bridgeless) signalling ingress.
+  // composite.deliverMeshSignal feeds the SAME mesh.onSignal as the bridge path but
+  // reaches us via a relayed terminal delivery — it must observe too, or the flag-on
+  // shadow is blind to bridgeless signalling. scope = the relayed sender's nodeId hex.
+  { setShadowEnabled(true);
+    const { t } = await bringUp('c-relay', 'nRelay');
+    t.deliverMeshSignal('deadbeef01', SIGNAL.offer);
+    const b3 = t.frameRegistryShadow().b3;
+    const sig = b3.traces.find((x) => x.type === 'mesh:signal' && x.scope === 'deadbeef01');
+    check('L6. relayed signalling ingress (deliverMeshSignal) observed: variant offer, verdict UNOBSERVED, scope = fromHex',
+      sig && sig.variant === 'offer' && sig.verdict === 'unobserved' && sig.scope === 'deadbeef01', `\n   ${JSON.stringify(sig)}`);
+    try { t.socket?.close?.(1000); } catch { /* */ } }
   uninstallWebRTC();
 }
 
