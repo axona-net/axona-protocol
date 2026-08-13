@@ -38,6 +38,7 @@ import { certify } from '../src/registry/snapshotMint.js';
 import { webTransport } from '../src/transport/web/index.js';
 import { createNodeIdentity } from '../src/identity/index.js';
 import { buildAuthHello, cbvFromNonces } from '../src/transport/handshake-auth.js';
+import { MeshAuth } from '../src/transport/web/mesh-auth.js';
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 // Minimal fake WebSocket (the reconnect-smoke pattern): tracks instances, fires
@@ -248,9 +249,9 @@ console.log('\nREF-1.1 S4a — Boundary-2 (transport hello/auth/session + CAP_AT
     if (badSig) h.sig = 'ed25519:' + 'ff'.repeat(64);   // valid shape, wrong signature → live verify fails
     return h;
   };
-  const bringUp = async (conn, nonce) => {
+  const bringUp = async (conn, nonce, { frameRegistry = true } = {}) => {
     liveSockets = [];
-    const t = webTransport({ bridgeUrl: 'wss://test.example', identity: alice, WebSocketImpl: FakeWS, handshakeTimeoutMs: 2000, reconnect: false, frameRegistry: true });
+    const t = webTransport({ bridgeUrl: 'wss://test.example', identity: alice, WebSocketImpl: FakeWS, handshakeTimeoutMs: 2000, reconnect: false, frameRegistry });
     const wl = []; t.onWelcome((i) => wl.push(i));
     const startP = t.start();
     await sleep(5);
@@ -260,8 +261,56 @@ console.log('\nREF-1.1 S4a — Boundary-2 (transport hello/auth/session + CAP_AT
     await startP;
     return { t, sock, wl };
   };
+  // hello-ack as the FIRST auth frame (bridge not yet bound) — drives onBridgeAuthHello's
+  // full verify+bind, not the post-auth early return. start() resolves IFF that bind lands.
+  const bringUpAck = async (conn, nonce, { frameRegistry = true } = {}) => {
+    liveSockets = [];
+    const t = webTransport({ bridgeUrl: 'wss://test.example', identity: alice, WebSocketImpl: FakeWS, handshakeTimeoutMs: 400, reconnect: false, frameRegistry });
+    const wl = []; t.onWelcome((i) => wl.push(i));
+    const startP = t.start();
+    await sleep(5);
+    const sock = t.socket;
+    sock.deliver({ type: 'welcome', connId: conn, serverNonce: nonce, version: '2.112.0', kernelVersion: '4.62.2', turn: null });
+    sock.deliver({ type: 'axona', payload: { k: 'ntf', type: 'hello-ack', body: await mkHello(nonce, conn) } });
+    let bound = true; try { await startP; } catch { bound = false; }   // resolves only if hello-ack bound the bridge
+    return { t, sock, wl, bound };
+  };
+  // Establish a REAL bound + write-flight-ack-capable mesh peer against the live
+  // webTransport, driving frames through the transport's OWN webrtc dispatch
+  // (t.webrtc._onMessage — the exact ingress MeshManager's registered onMessage
+  // callback invokes) and a driver MeshAuth playing the peer. NO production hook:
+  // t.webrtc / t.mesh are pre-existing composite handles, _onMessage is webrtc's
+  // own private method, and the fingerprint/send overrides are a test-only adapter
+  // outside src/. cbvFromNonces / cbvFromFingerprints both sort, so the driver's
+  // matching fp stub yields an identical channel cbv on both sides → real bind.
+  const meshPeerAttests = async (t, peerId, { freezeCap = false } = {}) => {
+    const FP = { local: 'aa11', remote: 'bb22' };
+    t.mesh.fingerprintsFor = () => FP;                       // give alice a stable DTLS-fp cbv
+    const bob = new MeshAuth({
+      identity: peerId,
+      fingerprints: () => FP,                                // sorted → identical cbv both sides
+      bindPeer: () => {},
+      send: (_m, frame) => {                                 // bob → alice via the REAL webrtc ingress
+        let body = frame.body;
+        if (freezeCap && frame.type === 'cap-attest') body = Object.freeze({ ...frame.body });
+        queueMicrotask(() => { try { t.webrtc._onMessage('B', { k: 'ntf', type: frame.type, body }); } catch { /* */ } });
+      },
+    });
+    const origSend = t.mesh.send.bind(t.mesh);
+    t.mesh.send = (meshId, frame) => {                       // alice → bob (capture alice's outgoing mesh frames)
+      if (frame && frame.k === 'ntf') queueMicrotask(() => {
+        if (frame.type === 'hello') bob.onHello('A', frame.body);
+        else if (frame.type === 'hello-sig') bob.onHelloSig('A', frame.body);
+        else if (frame.type === 'cap-attest') bob.onCapAttest('A', frame.body);
+      });
+      try { return origSend(meshId, frame); } catch { return undefined; /* no real channel */ }
+    };
+    bob.onChannelOpen('A');                                  // kick: bob hello → alice → mutual bind → mutual cap-attest
+    for (let i = 0; i < 40; i++) await sleep(2);             // settle the microtask handshake
+  };
   const typesOf = (t) => t.frameRegistryShadow().traces.map((x) => x.type);
   const helloTrace = (t, conn) => t.frameRegistryShadow().traces.find((x) => x.type === 'transport:hello' && (conn === undefined || x.connId === conn));
+  const capTrace   = (t) => t.frameRegistryShadow().traces.find((x) => x.type === 'transport:cap-attest');
 
   // L1 — flag ON: welcome+hello RUN on raw args (bridgeInfo + onWelcome) AND observed;
   // hello verdict UNOBSERVED (F1) and the SESSION connId, not the BRIDGE sentinel (F3).
@@ -273,14 +322,33 @@ console.log('\nREF-1.1 S4a — Boundary-2 (transport hello/auth/session + CAP_AT
       && typesOf(t).includes('transport:welcome') && h && h.verdict === 'unobserved' && h.connId === 'c-A');
     try { t.socket?.close?.(1000); } catch { /* */ } }
 
-  // L2 — F4: hello-ack + cap-attest live sites also RUN + observe.
-  { const { t, sock } = await bringUp('c-B', 'nonceB');
-    sock.deliver({ type: 'axona', payload: { k: 'ntf', type: 'hello-ack', body: await mkHello('nonceB', 'c-B') } });
-    await t._testDeliverMeshNotification('m1', 'cap-attest', { capId: 'write-flight-ack-v1', nodeId: NODEID, sig: CAPSIG });
-    const types = typesOf(t);
-    check('L2. live flag-on F4: hello-ack + cap-attest sites RAN and observed transport:hello-ack + transport:cap-attest',
-      types.includes('transport:hello-ack') && types.includes('transport:cap-attest'));
-    try { t.socket?.close?.(1000); } catch { /* */ } }
+  // L2 — F4/F6 hello-ack MEANINGFUL: a first-frame hello-ack drives onBridgeAuthHello's
+  // full verify+bind (not the post-auth early return). The observe side-channel neither
+  // breaks the bind nor changes it — flag-on binds identically to registry-off.
+  { const on  = await bringUpAck('ack-on',  'nAckOn');
+    const off = await bringUpAck('ack-off', 'nAckOff', { frameRegistry: false });
+    const h = on.t.frameRegistryShadow().traces.find((x) => x.type === 'transport:hello-ack');
+    check('L2. F6 hello-ack MEANINGFUL: first-frame hello-ack verify+bound (start resolved) flag-on AND registry-off identically; observed flag-on (verdict UNOBSERVED, connId ack-on)',
+      on.bound === true && off.bound === true && off.t.frameRegistryShadow() === null
+      && h && h.verdict === 'unobserved' && h.connId === 'ack-on');
+    try { on.t.socket?.close?.(1000); off.t.socket?.close?.(1000); } catch { /* */ } }
+
+  // L2b — F4/F6 cap-attest MEANINGFUL: base auth binds and the peer's CAP_ATTEST
+  // verifies against the AUTHENTICATED pubkey + channel cbv → isCapable flips true,
+  // driven through the transport's OWN webrtc dispatch (NO production hook). The observe
+  // side-channel neither breaks the verify nor mutates the raw frame (frozen-body proof),
+  // and the disposition is identical with the registry absent.
+  { const peer = await createNodeIdentity({ lat: 48.8, lng: 2.35 });
+    const on = await bringUp('cap-on', 'nCapOn');
+    await meshPeerAttests(on.t, peer, { freezeCap: true });
+    const ct = capTrace(on.t);
+    const onCapable = on.t.isCapable(peer.id) === true;
+    const off = await bringUp('cap-off', 'nCapOff', { frameRegistry: false });
+    await meshPeerAttests(off.t, peer);
+    check('L2b. F6 cap-attest MEANINGFUL: peer base-auth binds + CAP_ATTEST verifies → isCapable true via the real webrtc dispatch (no hook); observed flag-on (verdict UNOBSERVED, connId B, frozen frame untouched) AND capable identically registry-off',
+      onCapable && ct && ct.verdict === 'unobserved' && ct.connId === 'B'
+      && off.t.isCapable(peer.id) === true && off.t.frameRegistryShadow() === null);
+    try { on.t.socket?.close?.(1000); off.t.socket?.close?.(1000); } catch { /* */ } }
 
   // L3 — F1 negative: a hello whose auth SIGNATURE is invalid — the real async handler
   // fails, yet the trace (emitted BEFORE the handler runs) says UNOBSERVED, never 'passed'.
@@ -321,15 +389,20 @@ console.log('\nREF-1.1 S4a — Boundary-2 (transport hello/auth/session + CAP_AT
   // store stays bounded (drop-oldest), never growing unbounded for the session.
   { const { t } = await bringUp('c-sat', 'nSat');
     const before = t.frameRegistryShadow().traces.length;
-    for (let i = 0; i < 1100; i++) await t._testDeliverMeshNotification('m' + i, 'cap-attest', { capId: 'write-flight-ack-v1', nodeId: NODEID, sig: CAPSIG });
-    check('L5. F2 saturation: 1100+ observed frames → trace ring stays BOUNDED at 1024 (drop-oldest, not unbounded growth)',
+    const capBody = { capId: 'write-flight-ack-v1', nodeId: NODEID, sig: CAPSIG };
+    for (let i = 0; i < 1100; i++) await t.webrtc._onMessage('sat', { k: 'ntf', type: 'cap-attest', body: capBody });   // real webrtc dispatch (no hook)
+    check('L5. F2 saturation: 1100+ observed cap-attest frames (real webrtc dispatch) → trace ring stays BOUNDED at 1024 (drop-oldest, not unbounded growth)',
       before < 1024 && t.frameRegistryShadow().traces.length === 1024);
     try { t.socket?.close?.(1000); } catch { /* */ } }
 
-  // L6 — flag OFF: the SAME live path RUNS the handlers but emits ZERO traces.
+  // L6 — F6 flag OFF: the SAME live path RUNS the handlers on ALL FOUR sites
+  // (welcome, hello, hello-ack, cap-attest) yet the registry emits ZERO traces.
   setShadowEnabled(false);
-  { const { t, wl } = await bringUp('c-off', 'nOff');
-    check('L6. live flag-off: handlers RAN identically AND the registry emitted ZERO traces (byte-identical live path)',
+  { const { t, wl, sock } = await bringUp('c-off', 'nOff');                                      // welcome + hello ran
+    sock.deliver({ type: 'axona', payload: { k: 'ntf', type: 'hello-ack', body: await mkHello('nOff', 'c-off') } });   // hello-ack site
+    await t.webrtc._onMessage('off', { k: 'ntf', type: 'cap-attest', body: { capId: 'write-flight-ack-v1', nodeId: NODEID, sig: CAPSIG } });   // cap-attest site
+    await sleep(2);
+    check('L6. F6 live flag-off: ALL FOUR sites (welcome/hello/hello-ack/cap-attest) RAN AND the registry emitted ZERO traces (byte-identical live path)',
       t.bridgeInfo && t.bridgeInfo.connId === 'c-off' && wl.length === 1 && t.frameRegistryShadow().traces.length === 0);
     try { t.socket?.close?.(1000); } catch { /* */ } }
 

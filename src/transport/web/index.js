@@ -1152,11 +1152,6 @@ export function webTransport({
   // the live path — a consumer inspects `traces` to assert flag-on observation and
   // flag-off zero-trace identity.
   composite.frameRegistryShadow = () => (b2 ? { registry: b2.reg, traces: b2traces } : null);
-  // REF-1.1 S4a — test-only: drive a mesh notification through the REAL webrtc
-  // dispatch, so the boundary-2 smoke can exercise the live cap-attest site
-  // (webrtc.onNotification -> b2observe) without a real WebRTC channel. Unbound
-  // path: a STRING fromMeshId is passed straight to the handler as `from`.
-  composite._testDeliverMeshNotification = (fromMeshId, type, body) => webrtc._onMessage(fromMeshId, { k: 'ntf', type, body });
   Object.defineProperty(composite, 'socket',          { get() { return socket; } });
   Object.defineProperty(composite, 'bridgeReady',     { get() { return bridgeReady; } });
   // Display surface: hex (derived from BigInt).  External UI / log
