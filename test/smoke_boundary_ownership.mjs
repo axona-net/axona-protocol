@@ -131,13 +131,17 @@ function discover(fileList) {
       if (n.type === 'Literal' && typeof n.value === 'string' && METHODS.has(n.value) && !exemptNameLiterals.has(n)) {
         unresolved.push(`${fp} '${n.value}' — registration-method name as a loose string literal; a dynamic registration handle`);
       }
-      // Track a local bound to a computed non-literal member (const r = x[expr]) and identifier
-      // calls (r(...)); if such a local is later invoked it is an untrackable dynamic method ref.
-      if (n.type === 'VariableDeclarator' && n.id?.type === 'Identifier' && n.init?.type === 'MemberExpression'
-        && n.init.computed && !(n.init.property?.type === 'Literal' && typeof n.init.property.value === 'string')) {
-        memberBoundLocals.set(n.id.name, n);
-      }
+      // Track a local bound to a computed non-literal member — by DECLARATION (const r = x[expr])
+      // OR by ASSIGNMENT (r = x[expr]) — and identifier calls (r(...)); if such a local is later
+      // invoked it is an untrackable dynamic method ref.
+      const cmInit = (e) => e?.type === 'MemberExpression' && e.computed && !(e.property?.type === 'Literal' && typeof e.property.value === 'string');
+      if (n.type === 'VariableDeclarator' && n.id?.type === 'Identifier' && cmInit(n.init)) memberBoundLocals.set(n.id.name, n);
+      if (n.type === 'AssignmentExpression' && n.operator === '=' && n.left?.type === 'Identifier' && cmInit(n.right)) memberBoundLocals.set(n.left.name, n);
       if (n.type === 'CallExpression' && n.callee?.type === 'Identifier') calledIdents.add(n.callee.name);
+      // register.call(...) / .apply(...) / .bind(...) invokes the bound local through Function.prototype
+      // (the callee is a MemberExpression, so the direct-Identifier check above misses it) — count it.
+      if (n.type === 'CallExpression' && n.callee?.type === 'MemberExpression' && !n.callee.computed
+        && n.callee.object?.type === 'Identifier' && ['call', 'apply', 'bind'].includes(n.callee.property?.name)) calledIdents.add(n.callee.object.name);
       if (n.type === 'VariableDeclarator' && n.id?.name === 'signaling' && n.init?.type === 'ObjectExpression') {
         const disp = n.init.properties.find((p) => p.key && (p.key.name === 'dispatch' || p.key.value === 'dispatch'));
         if (disp?.value) walk(disp.value, (m) => { if (m.type === 'SwitchCase' && m.test?.type === 'Literal' && typeof m.test.value === 'string') sites.push({ surface: 'bridge-ws', wire: m.test.value, site: `${fp} dispatch case '${m.test.value}'` }); });
@@ -237,7 +241,7 @@ check('INV0c. source coverage: EVERY src file parsed as a JavaScript AST (no par
   check('INV0. fail-closed: every discovered registration site is classified in-scope or documented-exclusion',
     unclassified.length === 0, `\n   unclassified: ${unclassified.map((e) => e.site).join(', ')}`);
 }
-check('INV0b. fail-closed on every single-reference dynamic-name form: a registration-method name never appears as a loose string literal; no registration method is aliased or destructured out (static, computed-key, or computed-member-alias); no computed dynamic-method callee, computed destructure key, or computed-member-derived local that is invoked; registration CALLs resolve to a string-literal wire; on() resolves to a literal T.<name> — else unresolved; only the FOUR documented MECHANISM_EXEMPT shims are allowed non-literal. (Residual outside the fence: a method reached only via a runtime-computed name threaded across object/array indirection, which needs points-to analysis; measured absent in src.)',
+check('INV0b. fail-closed within the SOUNDLY-CHECKED envelope: a registration-method name never appears as a loose string literal (closes every literal-name form); no registration method is aliased or destructured out (static alias, ObjectPattern extraction, computed-key destructure); no computed dynamic-method callee; a computed-member-derived local (bound by const/let init OR assignment) is not invoked directly nor via .call/.apply/.bind; registration CALLs resolve to a string-literal wire; on() resolves to a literal T.<name> — else unresolved; only the FOUR documented MECHANISM_EXEMPT shims are allowed non-literal. ESCAPE BOUNDARY (this scanner is not a points-to analysis, so these are NOT claimed closed and are a recorded governance surface, measured absent in src): a computed-member value re-aliased through a further binding (const g=r; g()), invoked via Reflect.apply, passed as an argument to an invoker, or threaded across object/array/return indirection. A SOUND no-alias guarantee requires the canonical-registrar enforcement (part of the held cutover), not a syntactic scan.',
   unresolved.length === 0, `\n   unresolved: ${unresolved.join(', ')}`);
 
 const L = sites.map((e) => ({ e, c: classify(e) })).filter((x) => Array.isArray(x.c))
@@ -344,11 +348,13 @@ check('NEG2. a wrong reassignment (pong B4→B2) FAILS INV1', L.map((x) => x.key
 {
   const fails = {
     'member-alias-litname': "const method = 'onNotification'; const r = transport[method]; r('__gv__', () => {});", // caught by BOTH string-literal and member-alias rules
-    'member-alias-nolit':   "const r = transport[dyn]; r('__gv__', () => {});",                                    // no literal name → caught by member-alias rule alone
+    'member-alias-nolit':   "const r = transport[dyn]; r('__gv__', () => {});",                                    // no literal name → caught by member-alias (const-init) rule
+    'member-alias-assign':  "let r; r = transport[dyn]; r('__gv__', () => {});",                                   // ASSIGNMENT not declaration → caught by member-alias (assignment) rule (Vega recut-7 F1)
+    'member-alias-dotcall': "const r = transport[dyn]; r.call(transport, '__gv__', () => {});",                    // invoked via Function.prototype.call → caught by the .call/.apply/.bind clause (Aster recut-7 F2)
     'name-literal-loose':   "const m = 'onRoutedMessage';",                                                        // bare loose method-name literal → caught by string-literal rule
   };
   const allFail = Object.values(fails).every((code) => discover([{ path: 'src/__a__.js', code }]).unresolved.length >= 1);
-  check('NEG10. a computed-member alias later invoked (const r = x[method]; r(…)), incl. a runtime-only name, and any loose registration-method-name string literal each FAIL closed (Vega recut-6 F1 + literal-name class)', allFail);
+  check('NEG10. a computed-member alias later invoked — by const-init OR assignment, called directly OR via .call/.apply/.bind (const r = x[m]; r(…) / let r; r = x[dyn]; r(…) / r.call(…)), incl. a runtime-only name, and any loose registration-method-name string literal each FAIL closed (Vega recut-6/7 & Aster recut-7 F1/F2 + literal-name class)', allFail);
 }
 
 console.log(`\nResult: ${passed} passed, ${failed} failed\n`);
