@@ -22,6 +22,12 @@
 //   · a COMPUTED DYNAMIC-METHOD callee (x[expr](...) where expr is not a string
 //     literal, e.g. const m='onNotification'; x[m](...)) → UNRESOLVED: expr
 //     cannot be proven not to be onNotification/onRoutedMessage. (Aster recut-4 F1.)
+//   · a COMPUTED DESTRUCTURE KEY that is not a string literal ({ [expr]: r },
+//     e.g. const m='onNotification'; const { [m]: r } = x) → UNRESOLVED, symmetric
+//     with the computed callee rule. (Vega recut-5 F1.)
+//   · the on() B1 helper called with any first arg that is not a literal
+//     T.<Identifier> (on(T['SUB']), on(T[expr]), on(bareVar), on()) → UNRESOLVED:
+//     only the literal T.<name> form resolves to a B1 site.
 //   · on(T.X,…) → B1 routed (wire from T); signaling.dispatch switch-case string
 //     labels → bridge-ws.
 //   · a file that fails to parse → a hard parse-error (INV0c), so source coverage
@@ -106,18 +112,30 @@ function discover(fileList) {
         const disp = n.init.properties.find((p) => p.key && (p.key.name === 'dispatch' || p.key.value === 'dispatch'));
         if (disp?.value) walk(disp.value, (m) => { if (m.type === 'SwitchCase' && m.test?.type === 'Literal' && typeof m.test.value === 'string') sites.push({ surface: 'bridge-ws', wire: m.test.value, site: `${fp} dispatch case '${m.test.value}'` }); });
       }
-      if (n.type === 'CallExpression' && n.callee?.type === 'Identifier' && n.callee.name === 'on'
-        && n.arguments[0]?.type === 'MemberExpression' && n.arguments[0].object?.type === 'Identifier' && n.arguments[0].object.name === 'T'
-        && n.arguments[0].property?.type === 'Identifier') {
-        const NAME = n.arguments[0].property.name, w = T[NAME];
-        if (typeof w === 'string' && w) sites.push({ surface: 'routed', wire: w, site: `${fp} on(T.${NAME})` });
-        else unresolved.push(`${fp} on(T.${NAME}) — T.${NAME} does not resolve`);
+      if (n.type === 'CallExpression' && n.callee?.type === 'Identifier' && n.callee.name === 'on') {
+        const a0 = n.arguments[0];
+        // Only the literal T.<Identifier> (non-computed) form is a resolvable B1 site.
+        // on(T['SUB']), on(T[expr]), on(bareVar), on() cannot be resolved statically → fail closed.
+        if (a0?.type === 'MemberExpression' && !a0.computed && a0.object?.type === 'Identifier' && a0.object.name === 'T' && a0.property?.type === 'Identifier') {
+          const NAME = a0.property.name, w = T[NAME];
+          if (typeof w === 'string' && w) sites.push({ surface: 'routed', wire: w, site: `${fp} on(T.${NAME})` });
+          else unresolved.push(`${fp} on(T.${NAME}) — T.${NAME} does not resolve`);
+        } else {
+          unresolved.push(`${fp} on(${a0 ? a0.type : 'none'}) — B1 routed registration without a literal T.<name> first arg`);
+        }
       }
       // A registration method DESTRUCTURED out of any object binds a bare local
       // that is then called with no MemberExpression — untrackable, so fail closed.
       if (n.type === 'ObjectPattern') {
         for (const pr of n.properties) {
-          if (pr.type !== 'Property') continue;
+          if (pr.type !== 'Property') continue; // RestElement ({...rest}) forwards other props; a later rest.method() is a normal MemberExpression call, caught below
+          // A COMPUTED destructure key that is not a string literal ({ [method]: r }) can
+          // resolve to a registration method and cannot be proven otherwise — fail closed,
+          // symmetric with the computed dynamic-method callee rule.
+          if (pr.computed && !(pr.key?.type === 'Literal' && typeof pr.key.value === 'string')) {
+            unresolved.push(`${fp} { [${pr.key?.type || 'expr'}]: … } — computed dynamic destructure key, cannot prove it is not a registration method`);
+            continue;
+          }
           const kn = !pr.computed && pr.key?.type === 'Identifier' ? pr.key.name
             : (pr.computed && pr.key?.type === 'Literal' && typeof pr.key.value === 'string' ? pr.key.value : null);
           if (kn && METHODS.has(kn)) unresolved.push(`${fp} { ${kn} } — registration method destructured out; call site is an untrackable bare local`);
@@ -188,7 +206,7 @@ check('INV0c. source coverage: EVERY src file parsed as a JavaScript AST (no par
   check('INV0. fail-closed: every discovered registration site is classified in-scope or documented-exclusion',
     unclassified.length === 0, `\n   unclassified: ${unclassified.map((e) => e.site).join(', ')}`);
 }
-check('INV0b. fail-closed: every registration CALL resolves to a string-literal wire; every referenced registration method is directly called (no alias, no destructuring); and no computed dynamic-method callee exists — else unresolved; only the FOUR documented MECHANISM_EXEMPT shims are allowed non-literal',
+check('INV0b. fail-closed on every dynamic-name form: registration CALLs resolve to a string-literal wire; on() resolves to a literal T.<name>; no registration method is aliased or destructured out (incl. computed-key destructure); no computed dynamic-method callee or computed-key destructure exists — else unresolved; only the FOUR documented MECHANISM_EXEMPT shims are allowed non-literal',
   unresolved.length === 0, `\n   unresolved: ${unresolved.join(', ')}`);
 
 const L = sites.map((e) => ({ e, c: classify(e) })).filter((x) => Array.isArray(x.c))
@@ -272,12 +290,23 @@ check('NEG2. a wrong reassignment (pong B4→B2) FAILS INV1', L.map((x) => x.key
   const fails = {
     'destructure-rename':     "const { onNotification: register } = transport; register('__gv__', () => {});",
     'destructure-shorthand':  "const { onRoutedMessage } = dht; onRoutedMessage('__gv__', () => {});",
-    'destructure-computed':   "const { ['onNotification']: reg } = transport; reg('__gv__', () => {});",
+    'destructure-litkey':     "const { ['onNotification']: reg } = transport; reg('__gv__', () => {});",
+    'destructure-computed':   "const method = 'onNotification'; const { [method]: reg } = transport; reg('__gv__', () => {});",
     'computed-const-method':  "const method = 'onNotification'; transport[method]('__gv__', () => {});",
     'computed-member-callee': "transport[names.reg]('__gv__', () => {});",
   };
   const allFail = Object.entries(fails).every(([, code]) => discover([{ path: 'src/__d__.js', code }]).unresolved.length >= 1);
-  check('NEG8. ObjectPattern method extraction ({onNotification: r}, {onRoutedMessage}, {[\'onNotification\']: r}) and computed dynamic-method callees (transport[method](…)) each FAIL closed as unresolved (Aster recut-4 F1)', allFail);
+  check('NEG8. ObjectPattern method extraction ({onNotification: r}, {onRoutedMessage}, {[\'onNotification\']: r}, {[method]: r}) and computed dynamic-method callees (transport[method](…)) each FAIL closed as unresolved (Aster/Vega recut-4 & recut-5 F1)', allFail);
+}
+// NEG9: the on() B1 helper fails closed on any first arg that is not a literal T.<name>.
+{
+  const fails = {
+    'on-bracket-literal': "on(T['SUB'], () => {});",
+    'on-computed-var':    "const w = 'SUB'; on(T[w], () => {});",
+    'on-bare-var':        "const w = T.SUB; on(w, () => {});",
+  };
+  const allFail = Object.values(fails).every((code) => discover([{ path: 'src/__o__.js', code }]).unresolved.length >= 1);
+  check('NEG9. the on() B1 helper FAILS closed on a bracket/computed/bare-var first arg (on(T[\'SUB\']), on(T[w]), on(w)) — only literal on(T.NAME) resolves to a site', allFail);
 }
 
 console.log(`\nResult: ${passed} passed, ${failed} failed\n`);
