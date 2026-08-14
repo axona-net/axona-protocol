@@ -59,6 +59,7 @@ export const Retry = Object.freeze({
   NATURAL: 'NATURAL',             // naturally idempotent WITHOUT a frame key — a read, a catch-up, or an order-independent set-union (Aster recut-3 F2.2)
   SINGLE_FLIGHT: 'SINGLE_FLIGHT', // bounded writer flight (defer→probe→evict→promote→retry)
   BOUNDED_ONCE: 'BOUNDED_ONCE',   // earns exactly one direct retry, then gives up
+  BOUNDED_N: 'BOUNDED_N',         // a bounded number of direct retries (declared N), then gives up; NOT idempotent — a resend may produce a DISTINCT effect (S4c F2: turn-refresh retries up to N and each mints a fresh credential)
   FLOOD_DEDUP: 'FLOOD_DEDUP',     // gossip flood; dedup by id, no targeted retry
 });
 const RETRY_CLASSES = new Set(Object.values(Retry));

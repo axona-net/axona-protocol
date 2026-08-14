@@ -81,8 +81,8 @@ console.log('\nREF-1.1 S4c — Boundary-4 (bridge administration) registry\n');
   // never cryptographic — authGuard is n/a across the whole boundary; client-hello IS
   // the version gate (closes 4426); the post-admit frames are 'admitted'-gated.
   const ch = by['bridge:client-hello'];
-  check('T4. ADMISSION not AUTH: client-hello admissionGuard names the version gate + 4426, authGuard n/a; ping/turn-refresh/peer-list-request admissionGuard=admitted; EVERY row authGuard n/a',
-    ch.authGuard === 'n/a' && /version gate/i.test(ch.admissionGuard) && /4426/.test(ch.admissionGuard)
+  check('T4. ADMISSION not AUTH: client-hello admissionGuard names the version gate + 4426 + the flagDayFloor stage (F1), authGuard n/a; ping/turn-refresh/peer-list-request admissionGuard=admitted; EVERY row authGuard n/a',
+    ch.authGuard === 'n/a' && /version gate/i.test(ch.admissionGuard) && /4426/.test(ch.admissionGuard) && /flagDayFloor/.test(ch.admissionGuard)
     && /admitted/.test(by['bridge:ping'].admissionGuard) && /admitted/.test(by['bridge:turn-refresh'].admissionGuard) && /admitted/.test(by['bridge:peer-list-request'].admissionGuard)
     && rows.every((r) => r.authGuard === 'n/a'));
 
@@ -101,10 +101,10 @@ console.log('\nREF-1.1 S4c — Boundary-4 (bridge administration) registry\n');
     && by['bridge:turn-refresh'].correlation === null && by['bridge:turn'].correlation === null && by['bridge:peer-list-request'].correlation === null);
 
   // Retry classifications grounded in the live handlers + owningService split.
-  check('T7. retry: client-hello NONE, version-gate NATURAL, ping NONE, pong NONE, turn-refresh NATURAL, turn NONE, peer-list-request NATURAL; services Admission/Heartbeat/Turn/Discovery',
+  check('T7. retry: client-hello NONE, version-gate NATURAL, ping NONE, pong NONE, turn-refresh BOUNDED_N (F2), turn NONE, peer-list-request NATURAL; services Admission/Heartbeat/Turn/Discovery',
     by['bridge:client-hello'].retry === 'NONE' && by['bridge:version-gate'].retry === 'NATURAL'
     && by['bridge:ping'].retry === 'NONE' && by['bridge:pong'].retry === 'NONE'
-    && by['bridge:turn-refresh'].retry === 'NATURAL' && by['bridge:turn'].retry === 'NONE' && by['bridge:peer-list-request'].retry === 'NATURAL'
+    && by['bridge:turn-refresh'].retry === 'BOUNDED_N' && by['bridge:turn'].retry === 'NONE' && by['bridge:peer-list-request'].retry === 'NATURAL'
     && by['bridge:client-hello'].owningService === 'BridgeAdmission' && by['bridge:ping'].owningService === 'BridgeHeartbeat'
     && by['bridge:turn'].owningService === 'BridgeTurn' && by['bridge:peer-list-request'].owningService === 'BridgeDiscovery');
 }
@@ -180,6 +180,41 @@ console.log('\nREF-1.1 S4c — Boundary-4 (bridge administration) registry\n');
   check('P2. pong (RESPONSE leg) conversationPresent TRUE on a certified payload `t`', drive('pong', CERT['pong']).conversationPresent === true);
   // A no-conversation row must not claim one.
   check('P3. client-hello (no conversation) → conversationPresent falsey', !drive('client-hello', CERT['client-hello']).conversationPresent);
+}
+
+// ── FR. RECUT-1 (Aster/Vega F1-F4: describe the live handlers, not the story) ──
+{
+  const rows = boundary4Rows();
+  const by = Object.fromEntries(rows.map((r) => [r.type, r]));
+
+  // F1 — the flagDayFloor stage is named in BOTH the client-hello guard and note.
+  const ch = by['bridge:client-hello'];
+  check('FR1. F1: client-hello admissionGuard + note name the flagDayFloor namespace-floor stage (MIN_KERNEL_VERSION / MIN_PEER_APP_VERSION)',
+    /flagDayFloor/.test(ch.admissionGuard) && /flagDayFloor/.test(ch.note)
+    && /MIN_KERNEL_VERSION/.test(ch.admissionGuard) && /MIN_PEER_APP_VERSION/.test(ch.admissionGuard));
+
+  // F2 — turn-refresh is the bounded, non-idempotent retry; note names the bound + fresh credential.
+  const tref = by['bridge:turn-refresh'];
+  check('FR2. F2: turn-refresh retry=BOUNDED_N (not NATURAL/NONE); note names TURN_REFRESH_MAX_TRIES + the fresh-credential-per-attempt',
+    tref.retry === 'BOUNDED_N' && /TURN_REFRESH_MAX_TRIES/.test(tref.note) && /fresh/i.test(tref.note));
+
+  // F3 — version-gate types minPeerVersion as a string in the table…
+  check('FR3. F3: version-gate schema.types.minPeerVersion === "string"',
+    by['bridge:version-gate'].schema.types && by['bridge:version-gate'].schema.types.minPeerVersion === 'string');
+
+  // …and a NUMERIC minPeerVersion is now schema-invalid (junk no longer certifies).
+  setShadowEnabled(true);
+  const tr = [];
+  const reg = buildBoundary4Registry({ enabled: () => true, sink: (rec) => tr.push(rec) });
+  reg.wrap('bridge:version-gate', () => undefined).call({}, certFrame({ minPeerVersion: 4, serverT: 1 }), EMPTY);
+  check('FR4. F3 negative: version-gate with a NUMERIC minPeerVersion → schemaOk FALSE + schema fault (not silently certified)',
+    tr.length === 1 && tr[0].schemaOk === false && (tr[0].faults || []).some((f) => f.startsWith('schema:')), `\n   ${JSON.stringify(tr[0])}`);
+  setShadowEnabled(false);
+
+  // F4 — peer-list-request note describes the additive onPeerList ingest, not a full replace.
+  const plr = by['bridge:peer-list-request'];
+  check('FR5. F4: peer-list-request note names the ADDITIVE onPeerList ingest (never removes) and does NOT claim a "full replace"',
+    /additive/i.test(plr.note) && /onPeerList/.test(plr.note) && /never removes/i.test(plr.note) && !/full replace/i.test(plr.note));
 }
 
 // ── D. FLAG-OFF IDENTITY (inert wrap) ─────────────────────────────────

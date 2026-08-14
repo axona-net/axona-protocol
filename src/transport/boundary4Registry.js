@@ -104,14 +104,17 @@ function rowDefs() {
       retry: Retry.NONE,   // one-shot admission handshake; a resend after admission is dropped
       topicProfile: NA, eventIdScheme: NA, replayCursorType: NA, orderingModel: NA,
       authGuard: NA,       // NOT cryptographic — admission is version-gated
-      admissionGuard: 'bridge version gate: WIRE_VERSION major must meet REQUIRED_WIRE_MAJOR and version >= MIN_PEER_VERSION (optional STRICT_MIN_KERNEL floor on kernelVersion); a mismatch closes 4426 BEFORE admission',
+      // F1 (Aster/Vega): the live gate is THREE stages, not two — the third is
+      // flagDayFloor(peerVersion) at server.js:1123, which picks a namespace floor
+      // and rejects below effectiveMin = max(MIN_PEER_VERSION, that floor).
+      admissionGuard: 'version gate: REQUIRED_WIRE_MAJOR; peerVersion >= max(MIN_PEER_VERSION, flagDayFloor floor MIN_KERNEL_VERSION|MIN_PEER_APP_VERSION by ns); STRICT_MIN_KERNEL optional; below closes 4426 (full detail in note)',
       placementGuard: NA,
       projection: { payload: ['version', 'wireVersion', 'kernelVersion', 'capabilities'] },
       // `capabilities` is a non-scalar (string[]) — required-present + projected but
       // NOT typed, mirroring B3's ICE `candidate` object (type only the scalars).
       schema: { require: ['version', 'wireVersion', 'kernelVersion'], types: { version: 'string', wireVersion: 'string', kernelVersion: 'string' } },
       errorContract: [], traceFields: ['wireVersion'], budget: budget(6),
-      note: 'the peer\'s opening frame on socket open; the ADMISSION GATE the bridge waits for (server.js:1068). Until it passes, conn.admitted is false and every other frame is dropped (pre-hello-message-dropped). Success sets admitted + answers with `welcome` (a Boundary-2 frame, cross-registry, no shared wire key). Carries version, wireVersion (WIRE_VERSION major-compat), kernelVersion (exact build for a MIN_KERNEL floor), and optional capabilities:[mesh-relay].',
+      note: 'the peer\'s opening frame; the ADMISSION GATE the bridge waits for — until it passes conn.admitted is false and every other frame is dropped. THREE stages: REQUIRED_WIRE_MAJOR, then MIN_PEER_VERSION, then flagDayFloor(peerVersion) picks a namespace floor (MIN_KERNEL_VERSION|MIN_PEER_APP_VERSION) and rejects below max of the two; a miss closes 4426. Success sets admitted + answers with `welcome` (Boundary-2). Carries version, wireVersion, kernelVersion, capabilities.',
     }),
 
     // ── admission: version-gate (bridge->peer; pre-admit gate announcement) ──
@@ -123,7 +126,9 @@ function rowDefs() {
       topicProfile: NA, eventIdScheme: NA, replayCursorType: NA, orderingModel: NA,
       authGuard: NA, admissionGuard: NA, placementGuard: NA,   // pre-admission informational
       projection: { payload: ['minPeerVersion', 'serverT'] },
-      schema: { require: ['minPeerVersion', 'serverT'], types: { serverT: 'number' } },
+      // F3 (Aster): the bridge emits minPeerVersion as a semver STRING (server.js:931),
+      // so type it — a numeric value must be schema-invalid, not silently certified.
+      schema: { require: ['minPeerVersion', 'serverT'], types: { minPeerVersion: 'string', serverT: 'number' } },
       errorContract: [], traceFields: [], budget: budget(3),
       note: 'the bridge announces its MIN_PEER_VERSION once on connect, BEFORE admission, so an old client gets an obvious failure mode instead of a silent ghost. The client no-ops it (index.js:546); the real gate runs on the bridge over client-hello.',
     }),
@@ -168,7 +173,12 @@ function rowDefs() {
       type: 'bridge:turn-refresh', wire: 'turn-refresh', kind: FrameKind.ONE_WAY,
       owningService: 'BridgeTurn', versionRange: V,
       outcome: 'TurnOutcome', terminalOutcome: 'TURN_REFRESH_REQUESTED',
-      retry: Retry.NATURAL,   // safe to re-request; each yields a fresh valid credential
+      // F2 (Aster): NOT Retry.NATURAL. The kernel retries in-band up to
+      // TURN_REFRESH_MAX_TRIES=3 (requestTurnRefreshInBand, index.js:788) and each
+      // bridge handling mints a FRESH random credential (makeTurnCredential), so a
+      // resend is bounded and NON-idempotent — not naturally idempotent (no key,
+      // not order-independent), and not NONE (the kernel does retry).
+      retry: Retry.BOUNDED_N,
       topicProfile: NA, eventIdScheme: NA, replayCursorType: NA, orderingModel: NA,
       authGuard: NA,
       admissionGuard: 'admitted: admitted peers only (server.js:1193)',
@@ -176,7 +186,7 @@ function rowDefs() {
       projection: {},
       schema: { require: [] },   // carries only {type}
       errorContract: [], traceFields: [], budget: budget(2),
-      note: 'a long-lived meshed client whose 2h TURN credential is about to lapse asks for a fresh one over its existing socket (index.js:794), so it never closes a healthy connection to re-welcome. Solicited: the bridge replies with a `turn` frame. No wire correlation key — the reply is matched by the single in-flight socket round-trip, so no conversation is declared.',
+      note: 'a long-lived client whose 2h TURN credential is about to lapse asks for a fresh one in-band (index.js:794), never closing a healthy connection to re-welcome. The kernel retries up to TURN_REFRESH_MAX_TRIES=3, then defers; each bridge handling mints a FRESH credential (makeTurnCredential) — a bounded, NON-idempotent resend (Retry.BOUNDED_N). Solicited: the bridge replies with `turn`. No wire correlation key (single in-flight socket round-trip), so no conversation.',
     }),
 
     // ── turn: turn (bridge->peer; TURN credential reply) ──
@@ -200,7 +210,11 @@ function rowDefs() {
       type: 'bridge:peer-list-request', wire: 'peer-list-request', kind: FrameKind.ONE_WAY,
       owningService: 'BridgeDiscovery', versionRange: V,
       outcome: 'DiscoveryOutcome', terminalOutcome: 'PEER_LIST_REQUESTED',
-      retry: Retry.NATURAL,   // idempotent snapshot request; the reply is a full replace
+      // F4 (Aster/Vega): a re-request is safe, so Retry.NATURAL holds — but the
+      // reply is NOT a "full replace". Its consumer MeshManager.onPeerList is
+      // ADDITIVE (mesh.js:458, hasPeer-guarded): skips existing peers, initiates
+      // only missing ones, never removes peers absent from the snapshot.
+      retry: Retry.NATURAL,
       topicProfile: NA, eventIdScheme: NA, replayCursorType: NA, orderingModel: NA,
       authGuard: NA,
       admissionGuard: 'admitted: admitted peers only (server.js:1151)',
@@ -208,7 +222,7 @@ function rowDefs() {
       projection: {},
       schema: { require: [] },   // carries only {type}
       errorContract: [], traceFields: [], budget: budget(2),
-      note: 'the kernel\'s mesh-rewarm asks the bridge to re-introduce the current signalling peers (requestPeerIntroductions, index.js:1220). Solicited: the bridge resends the admitted `peer-list` (server.js:1150) — but that reply is a BOUNDARY-3 row, so the pair spans two registries and there is no wire correlation key here. No conversation declared.',
+      note: 'mesh-rewarm asks the bridge to re-introduce the signalling peers (requestPeerIntroductions, index.js:1220). Solicited: the bridge resends the admitted `peer-list` (server.js:1150), a BOUNDARY-3 row — spans two registries, no wire correlation key, so no conversation. The reply is additive, not a wholesale replacement: MeshManager.onPeerList (mesh.js:458) skips existing peers, initiates only missing ones, never removes absent ones; Retry.NATURAL via the hasPeer-guarded ingest.',
     }),
   ];
 }
