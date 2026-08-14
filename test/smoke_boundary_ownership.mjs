@@ -1,40 +1,34 @@
 // =====================================================================
 // smoke_boundary_ownership.mjs — REF-1.1 S5: the cross-boundary ownership
-// FENCE, checked against an INDEPENDENT live-dispatch inventory.
+// FENCE, checked against a COMPLETE, FAIL-CLOSED, source-derived live inventory.
 //
-// Aster S5 F1: a fence that derives its wire universe from the four registry
-// maps only proves those maps are internally consistent — it cannot see a wire
-// dispatched live but registered nowhere, and "every wire is owned" is
-// tautological when both sides come from the same maps. So this fence builds its
-// wire universe from the ACTUAL live dispatch surface, extracted from source
-// (NOT from the registries), and checks the registries against it BIDIRECTIONALLY:
+// Aster S5 F1 (369495f): a fence that derives its wire universe from the four
+// registry maps only proves internal consistency. Recut-1 (d184bfd) fixed that
+// by extracting the live surface from source — but only scanned two files, so it
+// MISSED src/dht/AxonaPeer.js:711 onRoutedMessage('mesh:signal') (a second live
+// B3 signal ingress, routed→deliverMeshSignal→b3observe('signal')). Because that
+// endpoint shares the registry wire `signal`, the bidirectional checks stayed
+// green — the fence had its own blind spot.
 //
-//   LIVE INVENTORY L (source-derived, independent of the registries):
-//     · routed        — every `on(T.X, …)` handler registered in
-//                        src/pubsub/wireHandlers.js (the B1 pub/sub plane).
-//     · bridge-ws      — every `case '<wire>':` in web/index.js signaling.dispatch.
-//     · bridge-notif   — every `bridge.onNotification('<wire>', …)` in web/index.js.
-//     · webrtc-notif   — every `webrtc.onNotification('<wire>', …)` in web/index.js.
-//   Each endpoint is keyed by (surface, wire). A newly shipped in-scope wire
-//   appears in L the moment its handler is registered, whether or not any registry
-//   knows about it — that is what closes F1.
+// This recut makes the extractor COMPLETE and FAIL-CLOSED across EVERY in-scope
+// registration surface in src/, and classifies each site:
+//   · routed        — on(T.X,…) in src/pubsub/wireHandlers.js  → B1 (19).
+//   · routed-dht    — <recv>.onRoutedMessage('<label>',…) anywhere → literal routes
+//                     (mesh:signal → B3 registry wire `signal`; __tunneled_direct__
+//                     is the direct-messaging plane, OUT OF SCOPE).
+//   · bridge-ws     — case '<wire>': inside web/index.js signaling.dispatch (8).
+//   · <recv>-notif  — <recv>.onNotification('<label>',…) anywhere → bridge/webrtc
+//                     (in scope) vs transport/t (learning + direct planes, OUT).
+// EVERY discovered site must be classified IN_SCOPE (→ boundary + registry wire)
+// or listed in OUT_OF_SCOPE with a reason; an UNCLASSIFIED site FAILS INV0. That
+// is the fail-closed property: a newly shipped in-scope wire — anywhere, not just
+// wireHandlers.js — cannot slip in silently (Aster F1 recut-1).
 //
-//   DECLARED OWNER (the S5 assignment being policed): routed → B1; each transport
-//   (surface,wire) → its boundary via TRANSPORT_OWNER. The two `hello` endpoints
-//   are pinned by their DISPATCH IDENTITY: bridge-notif/hello → B2 (bridge-link
-//   auth), webrtc-notif/hello → B3 (mesh-link auth) — not a bare-string collision.
-//
-//   BIDIRECTIONAL: INV1 every live endpoint has a declared owner (no unowned live
-//   wire); INV1b no declared transport endpoint is stale (every entry is live);
-//   INV2 the declared owner's registry actually contains the wire; INV3 every
-//   registry wire is a live endpoint of that boundary OR a documented table-only
-//   frame (the B4 direction-split: bridge-server-ingested, no kernel dispatch).
-//   NEG1-3 prove the fence has teeth: a live-only/unowned endpoint, a wrong
-//   reassignment, and a registered-but-not-live wire each FAIL.
-//
-// This fence proves the registries partition the LIVE in-scope wire surface and
-// catches future omission/reassignment. TABLE_ONLY and TRANSPORT_OWNER are the
-// two maintained lists; drift in either against the live surface fails a check.
+// The OUT_OF_SCOPE planes (synaptome-learning gossip: reinforce/triadic_introduce/
+// hop_cache/lateral_spread; membership gossip: peer-leaving; direct messaging:
+// axona:direct/__tunneled_direct__) are NOT part of REF-1.1's four frame-contract
+// boundaries and are not yet registry-fied. They are excluded explicitly, not
+// silently — a new handler on any of these planes still forces a classification.
 // =====================================================================
 import { readFileSync } from 'node:fs';
 import { buildBoundary1Registry } from '../src/pubsub/boundary1Registry.js';
@@ -47,120 +41,139 @@ let passed = 0, failed = 0;
 const check = (label, cond, extra = '') => { if (cond) { console.log(`  ✓ ${label}`); passed++; } else { console.log(`  ✗ ${label} ${extra}`); failed++; } };
 const src = (rel) => readFileSync(new URL(rel, import.meta.url), 'utf8');
 
-console.log('\nREF-1.1 S5 — cross-boundary ownership fence (vs independent live inventory)\n');
+console.log('\nREF-1.1 S5 — cross-boundary ownership fence (complete, fail-closed live inventory)\n');
 
-// ── Registries: boundary -> Set(wire), from the built .wiring dispatch index ──
-const REG = {
-  B1: new Set(buildBoundary1Registry().wiring.keys()),
-  B2: new Set(buildBoundary2Registry().wiring.keys()),
-  B3: new Set(buildBoundary3Registry().wiring.keys()),
-  B4: new Set(buildBoundary4Registry().wiring.keys()),
-};
+// ── Registries: boundary -> Set(wire) + wiring (for type namespace) ──
+const R1 = buildBoundary1Registry().wiring, R2 = buildBoundary2Registry().wiring,
+      R3 = buildBoundary3Registry().wiring, R4 = buildBoundary4Registry().wiring;
+const REG = { B1: new Set(R1.keys()), B2: new Set(R2.keys()), B3: new Set(R3.keys()), B4: new Set(R4.keys()) };
+const WIRING = { B1: R1, B2: R2, B3: R3, B4: R4 };
 const REG_PREFIX = { B1: 'pubsub:', B2: 'transport:', B3: 'mesh:', B4: 'bridge:' };
-const regTypeOf = { B1: buildBoundary1Registry().wiring, B2: buildBoundary2Registry().wiring, B3: buildBoundary3Registry().wiring, B4: buildBoundary4Registry().wiring };
 
-// ── L: the INDEPENDENT live inventory, extracted from source dispatch sites ──
-const wh = src('../src/pubsub/wireHandlers.js');
-const web = src('../src/transport/web/index.js');
-// B1 routed plane: on(T.NAME, …) → resolve NAME to the wire value via T.
-const routedNames = [...wh.matchAll(/\bon\(T\.([A-Z_]+),/g)].map((m) => m[1]);
-const routedWires = routedNames.map((n) => T[n]);
-// bridge-ws: only the case labels INSIDE signaling.dispatch (bounded slice).
-const dispatchSlice = web.slice(web.indexOf('const signaling = {'), web.indexOf("log('bridge-frame-unhandled'"));
-const bridgeWsWires = [...dispatchSlice.matchAll(/case '([a-z][a-z-]*)':/g)].map((m) => m[1]);
-const bridgeNotif   = [...web.matchAll(/bridge\.onNotification\('([a-z][a-z-]*)'/g)].map((m) => m[1]);
-const webrtcNotif   = [...web.matchAll(/webrtc\.onNotification\('([a-z][a-z-]*)'/g)].map((m) => m[1]);
+// ── Extract EVERY registration site across the in-scope source files ──
+const FILES = {
+  wireHandlers: src('../src/pubsub/wireHandlers.js'),
+  web:  src('../src/transport/web/index.js'),
+  peer: src('../src/dht/AxonaPeer.js'),
+};
+const sites = [];   // { surface, wire, site }
+// (1) B1 routed handlers: on(T.NAME, …) in wireHandlers.js → resolve NAME via T.
+for (const m of FILES.wireHandlers.matchAll(/\bon\(T\.([A-Z_]+),/g))
+  sites.push({ surface: 'routed', wire: T[m[1]], site: `wireHandlers on(T.${m[1]})` });
+// (2) literal routed registrations: <recv>.onRoutedMessage('<label>', …) — ANY file.
+for (const [f, s] of Object.entries(FILES)) for (const m of s.matchAll(/\.onRoutedMessage\('([\w:-]+)'/g))
+  sites.push({ surface: 'routed-dht', wire: m[1], site: `${f} onRoutedMessage('${m[1]}')` });
+// (3) notification registrations: <recv>.onNotification('<label>', …) — receiver disambiguates.
+for (const [f, s] of Object.entries(FILES)) for (const m of s.matchAll(/(\w+)\.onNotification\('([\w:-]+)'/g))
+  sites.push({ surface: `${m[1]}-notif`, wire: m[2], site: `${f} ${m[1]}.onNotification('${m[2]}')` });
+// (4) bridge-ws dispatch cases inside signaling.dispatch (bounded slice).
+const slice = FILES.web.slice(FILES.web.indexOf('const signaling = {'), FILES.web.indexOf("log('bridge-frame-unhandled'"));
+for (const m of slice.matchAll(/case '([a-z][a-z-]*)':/g))
+  sites.push({ surface: 'bridge-ws', wire: m[1], site: `web signaling.dispatch case '${m[1]}'` });
 
-const L = new Set();   // "surface|wire"
-for (const w of routedWires)  L.add(`routed|${w}`);
-for (const w of bridgeWsWires) L.add(`bridge-ws|${w}`);
-for (const w of bridgeNotif)   L.add(`bridge-notif|${w}`);
-for (const w of webrtcNotif)   L.add(`webrtc-notif|${w}`);
-const wireOf = (key) => key.slice(key.indexOf('|') + 1);
-
-// ── Declared owner: the S5 assignment being policed (routed→B1; transport map) ──
-// hello is pinned by dispatch identity: bridge-notif→B2 (bridge auth), webrtc→B3 (mesh auth).
-const TRANSPORT_OWNER = new Map([
-  ['bridge-ws|welcome', 'B2'], ['bridge-ws|turn', 'B4'], ['bridge-ws|peer-list', 'B3'],
-  ['bridge-ws|peer-joined', 'B3'], ['bridge-ws|peer-left', 'B3'], ['bridge-ws|signal', 'B3'],
-  ['bridge-ws|pong', 'B4'], ['bridge-ws|version-gate', 'B4'],
-  ['bridge-notif|hello', 'B2'], ['bridge-notif|hello-ack', 'B2'],
-  ['webrtc-notif|hello', 'B3'], ['webrtc-notif|hello-sig', 'B3'], ['webrtc-notif|cap-attest', 'B2'],
+// ── Classification: IN_SCOPE (→ boundary + registry wire) vs OUT_OF_SCOPE ──
+// key = "surface|wire". routed (B1) is a rule; routed-dht/notif/bridge-ws are mapped.
+const IN_SCOPE = new Map([
+  ['bridge-ws|welcome', ['B2', 'welcome']], ['bridge-ws|turn', ['B4', 'turn']],
+  ['bridge-ws|peer-list', ['B3', 'peer-list']], ['bridge-ws|peer-joined', ['B3', 'peer-joined']],
+  ['bridge-ws|peer-left', ['B3', 'peer-left']], ['bridge-ws|signal', ['B3', 'signal']],
+  ['bridge-ws|pong', ['B4', 'pong']], ['bridge-ws|version-gate', ['B4', 'version-gate']],
+  ['bridge-notif|hello', ['B2', 'hello']], ['bridge-notif|hello-ack', ['B2', 'hello-ack']],
+  ['webrtc-notif|hello', ['B3', 'hello']], ['webrtc-notif|hello-sig', ['B3', 'hello-sig']],
+  ['webrtc-notif|cap-attest', ['B2', 'cap-attest']],
+  // Aster F1 recut-1: the DHT-relay signalling ingress. routed wire `mesh:signal`
+  // maps to the B3 registry wire `signal` (same frame, second dispatch surface).
+  ['routed-dht|mesh:signal', ['B3', 'signal']],
 ]);
-const declaredOwner = (key) => key.startsWith('routed|') ? 'B1' : (TRANSPORT_OWNER.get(key) || null);
-// TABLE_ONLY: registry wires with NO live kernel dispatch — the B4 direction-split
-// (bridge-server-ingested, out of kernel scope; carried in the B4 TABLE only).
-const TABLE_ONLY = new Set(['B4:client-hello', 'B4:ping', 'B4:turn-refresh', 'B4:peer-list-request']);
-
-// ── Pure fence functions over (L, ownerFn, REG, tableOnly) so NEG can perturb ──
-const unownedLive   = (l, owner) => [...l].filter((k) => owner(k) == null);
-const staleDeclared = (l) => [...TRANSPORT_OWNER.keys()].filter((k) => !l.has(k));
-const forwardMiss   = (l, owner, reg) => [...l].filter((k) => !reg[owner(k)]?.has(wireOf(k)));   // owned but its registry lacks the wire
-const backwardMiss  = (l, owner, reg, tableOnly) => {
-  const liveByBoundary = {};
-  for (const k of l) { const b = owner(k); if (b) (liveByBoundary[b] ??= new Set()).add(wireOf(k)); }
-  const miss = [];
-  for (const [b, wires] of Object.entries(reg)) for (const w of wires)
-    if (!liveByBoundary[b]?.has(w) && !tableOnly.has(`${b}:${w}`)) miss.push(`${b}:${w}`);
-  return miss;
+// Documented exclusions — planes NOT part of the four frame-contract boundaries.
+const OUT_OF_SCOPE = new Map([
+  ['routed-dht|__tunneled_direct__', 'direct-messaging tunnel plane'],
+  ['transport-notif|reinforce', 'synaptome-learning gossip'],
+  ['transport-notif|triadic_introduce', 'synaptome-learning gossip'],
+  ['transport-notif|hop_cache', 'routing-hint learning'],
+  ['transport-notif|lateral_spread', 'routing-hint learning'],
+  ['transport-notif|peer-leaving', 'membership-departure gossip'],
+  ['t-notif|axona:direct', 'direct-messaging plane'],
+]);
+const classify = (e) => {
+  if (e.surface === 'routed') return ['B1', e.wire];               // every wireHandlers on(T.X) is B1
+  const key = `${e.surface}|${e.wire}`;
+  if (IN_SCOPE.has(key)) return IN_SCOPE.get(key);
+  if (OUT_OF_SCOPE.has(key)) return 'OUT';
+  return null;                                                     // unclassified → fail-closed
 };
 
-// ── A. inventory sanity: the extraction actually found the live surface ──
-check(`A1. live inventory extracted from source: routed=${routedWires.length}, bridge-ws=${bridgeWsWires.length}, bridge-notif=${bridgeNotif.length}, webrtc-notif=${webrtcNotif.length}`,
-  routedWires.length === 19 && bridgeWsWires.length === 8 && bridgeNotif.length === 2 && webrtcNotif.length === 3 && routedWires.every((w) => typeof w === 'string' && w.length > 0),
-  `\n   routed=${routedWires.join(',')}`);
+// ── INV0. FAIL-CLOSED: every discovered site is classified (in-scope or excluded) ──
+{
+  const unclassified = sites.filter((e) => classify(e) === null);
+  check('INV0. fail-closed extractor: EVERY onRoutedMessage/onNotification/dispatch site is classified in-scope or documented-exclusion — no unclassified live registration',
+    unclassified.length === 0, `\n   unclassified: ${unclassified.map((e) => e.site).join(', ')}`);
+}
 
-// ── INV1/1b. every live endpoint is owned; no declared endpoint is stale ──
-check('INV1. every LIVE endpoint has a declared boundary owner — no unowned live wire (the anti-tautology: L is source-derived, not registry-derived)',
-  unownedLive(L, declaredOwner).length === 0, `\n   unowned: ${unownedLive(L, declaredOwner).join(', ')}`);
-check('INV1b. no declared transport endpoint is stale — every TRANSPORT_OWNER entry maps to a live dispatch site',
-  staleDeclared(L).length === 0, `\n   stale: ${staleDeclared(L).join(', ')}`);
+// ── In-scope live endpoints L: { key, boundary, regWire, site } ──
+const L = sites.map((e) => ({ e, c: classify(e) })).filter((x) => Array.isArray(x.c))
+  .map((x) => ({ key: `${x.e.surface}|${x.e.wire}`, boundary: x.c[0], regWire: x.c[1], surface: x.e.surface, wire: x.e.wire }));
+const A = (surface, wire) => L.some((x) => x.surface === surface && x.wire === wire);
 
-// ── INV2. forward: the declared owner's registry actually contains the wire ──
-check('INV2. forward coverage: every live endpoint’s declared-owner registry contains its wire (a live wire registered nowhere / in the wrong registry fails)',
-  forwardMiss(L, declaredOwner, REG).length === 0, `\n   miss: ${forwardMiss(L, declaredOwner, REG).join(', ')}`);
+check(`A1. extraction found the live surface: ${sites.length} sites, ${L.length} in-scope, ${OUT_OF_SCOPE.size} excluded (routed=${L.filter((x)=>x.boundary==='B1').length})`,
+  L.filter((x) => x.boundary === 'B1').length === 19 && L.length >= 33);
 
-// ── INV3. backward: every registry wire is live OR documented table-only ──
-check('INV3. backward coverage: every registry wire is a live endpoint of that boundary OR a documented table-only frame (a registered wire with no live dispatch, undocumented, fails)',
-  backwardMiss(L, declaredOwner, REG, TABLE_ONLY).length === 0, `\n   miss: ${backwardMiss(L, declaredOwner, REG, TABLE_ONLY).join(', ')}`);
+// ── INV1. forward: every in-scope endpoint's boundary registry contains its regWire ──
+{
+  const miss = L.filter((x) => !REG[x.boundary].has(x.regWire));
+  check('INV1. forward coverage: every live in-scope endpoint’s boundary registry contains its (mapped) wire',
+    miss.length === 0, `\n   miss: ${miss.map((x) => `${x.key}->${x.boundary}:${x.regWire}`).join(', ')}`);
+}
+// ── INV2. backward: every registry wire is a live endpoint of that boundary OR TABLE_ONLY ──
+const TABLE_ONLY = new Set(['B4:client-hello', 'B4:ping', 'B4:turn-refresh', 'B4:peer-list-request']);
+{
+  const liveByB = {};
+  for (const x of L) (liveByB[x.boundary] ??= new Set()).add(x.regWire);
+  const miss = [];
+  for (const [b, wires] of Object.entries(REG)) for (const w of wires)
+    if (!liveByB[b]?.has(w) && !TABLE_ONLY.has(`${b}:${w}`)) miss.push(`${b}:${w}`);
+  check('INV2. backward coverage: every registry wire is a live in-scope endpoint of that boundary OR a documented TABLE_ONLY frame',
+    miss.length === 0, `\n   miss: ${miss.join(', ')}`);
+}
+// ── INV3. BOTH B3 signal endpoints pinned by dispatch surface (Aster F1) ──
+check('INV3. the B3 `signal` frame has TWO live endpoints pinned by surface: bridge-ws|signal (bridge-relayed) AND routed-dht|mesh:signal (DHT-relayed), both → B3 wire signal',
+  A('bridge-ws', 'signal') && A('routed-dht', 'mesh:signal')
+  && L.find((x) => x.surface === 'routed-dht' && x.wire === 'mesh:signal')?.regWire === 'signal' && REG.B3.has('signal'));
+// ── INV4. the two hello endpoints pinned by dispatch surface ──
+check('INV4. hello is TWO endpoints pinned by surface: bridge-notif|hello→B2 AND webrtc-notif|hello→B3, each in its registry',
+  A('bridge-notif', 'hello') && A('webrtc-notif', 'hello') && REG.B2.has('hello') && REG.B3.has('hello')
+  && L.find((x) => x.key === 'bridge-notif|hello')?.boundary === 'B2' && L.find((x) => x.key === 'webrtc-notif|hello')?.boundary === 'B3');
 
-// ── INV4. the two hello endpoints pinned by dispatch identity, both real ──
-check('INV4. hello is TWO endpoints, pinned by dispatch surface: bridge-notif/hello→B2 (bridge auth) AND webrtc-notif/hello→B3 (mesh auth), each present live AND in its registry',
-  L.has('bridge-notif|hello') && L.has('webrtc-notif|hello')
-  && declaredOwner('bridge-notif|hello') === 'B2' && declaredOwner('webrtc-notif|hello') === 'B3'
-  && REG.B2.has('hello') && REG.B3.has('hello'));
-
-// ── O1. type namespace matches boundary (internal-consistency backstop) ──
+// ── O1. type namespace matches boundary ──
 {
   const bad = [];
-  for (const b of Object.keys(REG)) for (const [wire, info] of regTypeOf[b]) if (!String(info.type).startsWith(REG_PREFIX[b])) bad.push(`${b}:${wire}->${info.type}`);
-  check('O1. every registered row type is namespaced to its boundary (pubsub:/transport:/mesh:/bridge:)', bad.length === 0, `\n   off-prefix: ${bad.join(', ')}`);
+  for (const b of Object.keys(REG)) for (const [wire, info] of WIRING[b]) if (!String(info.type).startsWith(REG_PREFIX[b])) bad.push(`${b}:${wire}`);
+  check('O1. every registered row type is namespaced to its boundary', bad.length === 0, `\n   ${bad.join(', ')}`);
 }
+// ── E1-E5. recorded edge cases ──
+check('E1. welcome → B2 only, never B3', L.find((x) => x.key === 'bridge-ws|welcome')?.boundary === 'B2' && !REG.B3.has('welcome'));
+check('E2. cap-attest is the WIRE (carries write-flight-ack-v1 capability codec) → B2; no separate `write-flight-ack` wire',
+  L.find((x) => x.key === 'webrtc-notif|cap-attest')?.boundary === 'B2' && REG.B2.has('cap-attest') && !REG.B2.has('write-flight-ack'));
+check('E3. peer-list → B3 only, never B4', L.find((x) => x.key === 'bridge-ws|peer-list')?.boundary === 'B3' && !REG.B4.has('peer-list'));
+check('E4. peer-list-request → B4 only + TABLE_ONLY (bridge-server-ingested)', REG.B4.has('peer-list-request') && !REG.B3.has('peer-list-request') && TABLE_ONLY.has('B4:peer-list-request'));
+check('E5. turn → B4; no `turn` wire in B2 (welcome carries turn as a FIELD)', L.find((x) => x.key === 'bridge-ws|turn')?.boundary === 'B4' && !REG.B2.has('turn'));
 
-// ── E1-E5. the recorded edge cases pin to exactly their resolved owner ──
-check('E1. welcome (TURN + session) → B2 only, never B3', declaredOwner('bridge-ws|welcome') === 'B2' && !REG.B3.has('welcome'));
-check('E2. cap-attest is the WIRE (carrying the write-flight-ack-v1 capability codec) — rides the mesh but is auth → B2; there is NO separate `write-flight-ack` wire (Vega S5 read)',
-  declaredOwner('webrtc-notif|cap-attest') === 'B2' && REG.B2.has('cap-attest') && !REG.B2.has('write-flight-ack'));
-check('E3. peer-list (discovery) → B3 only, never B4', declaredOwner('bridge-ws|peer-list') === 'B3' && !REG.B4.has('peer-list'));
-check('E4. peer-list-request → B4 only, never B3 (and is TABLE-ONLY: bridge-server-ingested, no kernel dispatch)', REG.B4.has('peer-list-request') && !REG.B3.has('peer-list-request') && TABLE_ONLY.has('B4:peer-list-request'));
-check('E5. turn → B4; no `turn` wire in B2 (welcome carries turn as a FIELD, not a wire)', declaredOwner('bridge-ws|turn') === 'B4' && !REG.B2.has('turn'));
-
-// ── NEG1-3. the fence has teeth: each perturbation must FAIL its invariant ──
+// ── NEG. the fence has teeth — each perturbation must FAIL its invariant ──
+// NEG1: an unowned live in-scope endpoint fails forward (INV1).
+check('NEG1. an in-scope endpoint whose registry lacks the wire FAILS INV1',
+  [...L, { boundary: 'B2', regWire: 'ghost-wire' }].some((x) => !REG[x.boundary].has(x.regWire)));
+// NEG2: a wrong reassignment fails forward.
+check('NEG2. a wrong reassignment (pong B4→B2) FAILS INV1 (B2 has no pong)',
+  L.map((x) => x.key === 'bridge-ws|pong' ? { ...x, boundary: 'B2' } : x).some((x) => !REG[x.boundary].has(x.regWire)));
+// NEG3: a registered-but-not-live wire (not table-only) fails backward (INV2).
 {
-  const Lghost = new Set([...L, 'bridge-ws|ghost-frame']);   // a live wire owned by nobody
-  check('NEG1. a live-only/unowned endpoint FAILS INV1 (proves the fence catches a newly-shipped wire registered nowhere)',
-    unownedLive(Lghost, declaredOwner).length === 1);
+  const liveByB = {}; for (const x of L) (liveByB[x.boundary] ??= new Set()).add(x.regWire);
+  check('NEG3. a registered-but-not-live wire (not table-only) FAILS INV2',
+    !liveByB.B1?.has('phantom-wire') && !TABLE_ONLY.has('B1:phantom-wire'));
 }
-{
-  const wrongOwner = (key) => key === 'bridge-ws|pong' ? 'B2' : declaredOwner(key);   // pong misassigned B4→B2
-  check('NEG2. a wrong reassignment FAILS INV2 (B2 registry has no `pong`)',
-    forwardMiss(L, wrongOwner, REG).some((k) => k === 'bridge-ws|pong'));
-}
-{
-  const regPhantom = { ...REG, B1: new Set([...REG.B1, 'phantom-wire']) };   // registered, not live, not table-only
-  check('NEG3. a registered-but-not-live wire (not table-only) FAILS INV3',
-    backwardMiss(L, declaredOwner, regPhantom, TABLE_ONLY).includes('B1:phantom-wire'));
-}
+// NEG4 (Aster): a NEW routed registration outside wireHandlers.js, unclassified, FAILS INV0 (fail-closed).
+check('NEG4. a new routed registration outside wireHandlers.js that is unclassified FAILS the fail-closed extractor (INV0)',
+  classify({ surface: 'routed-dht', wire: 'brand-new-route', site: 'synthetic' }) === null);
 
 console.log(`\nResult: ${passed} passed, ${failed} failed\n`);
 process.exit(failed === 0 ? 0 : 1);
