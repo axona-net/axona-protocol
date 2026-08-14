@@ -46,6 +46,7 @@ import { makeBoundary2Observers } from '../boundary2Registry.js';
 // REF-1.1 S4b: Boundary-3 (WebRTC signalling + mesh-auth) frame-contract registry,
 // SHADOW MODE, DEFAULT-OFF — same flag and no-op-when-off discipline as Boundary-2.
 import { makeBoundary3Observers } from '../boundary3Registry.js';
+import { makeBoundary4Observers } from '../boundary4Registry.js';
 import {
   buildAuthHello, verifyAuthHello, cbvFromNonces, AUTH_PROTO,
 } from '../handshake-auth.js';
@@ -443,6 +444,14 @@ export function webTransport({
   const b3traces = [];
   const b3 = frameRegistry ? makeBoundary3Observers({ sink: (r) => { if (b3traces.length >= B3_TRACE_CAP) b3traces.shift(); b3traces.push(r); } }) : null;
   const b3observe = b3 ? (wire, scope, body) => b3.observe(wire, scope, body) : () => {};
+  // S4c increment 2: Boundary-4 (bridge administration). Only the THREE kernel-ingested
+  // frames are wired — version-gate / pong / turn in signaling.dispatch below (the four
+  // peer-SENT frames are ingested by the bridge server, out of kernel scope). B4 rows
+  // carry no meta leg, so scope is null (session-wide admin, no per-frame subject).
+  const B4_TRACE_CAP = 1024;
+  const b4traces = [];
+  const b4 = frameRegistry ? makeBoundary4Observers({ sink: (r) => { if (b4traces.length >= B4_TRACE_CAP) b4traces.shift(); b4traces.push(r); } }) : null;
+  const b4observe = b4 ? (wire, scope, body) => b4.observe(wire, scope, body) : () => {};
 
   // Signaling-frame dispatcher.  Bridge frames carry payloads addressed
   // to the local node's MeshManager so it can drive the WebRTC layer
@@ -496,6 +505,7 @@ export function webTransport({
           });
           return;
         case 'turn':
+          b4observe('turn', null, frame);   // S4c shadow (no-op unless flag on)
           // In-band credential refresh: the bridge's reply to a turn-refresh
           // request (see requestTurnRefreshInBand). Install the fresh credential
           // and reschedule — no socket or mesh change. Distinct from `welcome`
@@ -539,11 +549,13 @@ export function webTransport({
           }
           break;
         case 'pong':
+          b4observe('pong', null, frame);   // S4c shadow
           bridge._emitPingTraffic('recv');
           // RTT + liveness: the bridge echoes the ping's `t` timestamp.
           recordPong(frame.t);
           return;
         case 'version-gate':
+          b4observe('version-gate', null, frame);   // S4c shadow
           // Version-gate announcement — no action needed.
           return;
       }
@@ -1177,7 +1189,7 @@ export function webTransport({
   // never read on the live path — a consumer inspects `traces` to assert flag-on
   // observation and flag-off zero-trace identity. Boundary-2 keeps the top-level shape;
   // Boundary-3 (S4b increment 2) is nested under `.b3`.
-  composite.frameRegistryShadow = () => (b2 ? { registry: b2.reg, traces: b2traces, b3: b3 ? { registry: b3.reg, traces: b3traces } : null } : null);
+  composite.frameRegistryShadow = () => (b2 ? { registry: b2.reg, traces: b2traces, b3: b3 ? { registry: b3.reg, traces: b3traces } : null, b4: b4 ? { registry: b4.reg, traces: b4traces } : null } : null);
   Object.defineProperty(composite, 'socket',          { get() { return socket; } });
   Object.defineProperty(composite, 'bridgeReady',     { get() { return bridgeReady; } });
   // Display surface: hex (derived from BigInt).  External UI / log

@@ -35,6 +35,11 @@ import { readFileSync } from 'node:fs';
 import { buildBoundary4Registry, boundary4Rows, makeBoundary4Observers } from '../src/transport/boundary4Registry.js';
 import { setShadowEnabled } from '../src/registry/index.js';
 import { certify } from '../src/registry/snapshotMint.js';
+// L block: drive a real webTransport over a fake WebSocket (the S4a/S4b live-wiring pattern).
+import { webTransport } from '../src/transport/web/index.js';
+import { createNodeIdentity } from '../src/identity/index.js';
+import { buildAuthHello, cbvFromNonces } from '../src/transport/handshake-auth.js';
+import { installMockWebRTC } from './helpers/mock-webrtc.mjs';
 
 let passed = 0, failed = 0;
 const check = (label, cond, extra = '') => { if (cond) { console.log(`  ✓ ${label}`); passed++; } else { console.log(`  ✗ ${label} ${extra}`); failed++; } };
@@ -264,6 +269,70 @@ console.log('\nREF-1.1 S4c — Boundary-4 (bridge administration) registry\n');
     let obsThrew = false; const cyc = {}; cyc.self = cyc;   // cyclic → JSON.stringify throws INSIDE observe
     try { observe('ping', 'c-3', cyc); } catch { obsThrew = true; }
     check('O4. observe() never throws OUT — a cyclic/malformed body is swallowed (transport unaffected)', obsThrew === false); }
+}
+
+// ── L. LIVE TRANSPORT WIRING (S4c increment 2 — the 3 kernel-ingested frames) ──
+// Drive a real webTransport{frameRegistry:true} over a fake WebSocket. version-gate /
+// pong / turn arrive via signaling.dispatch (bare non-`axona` socket frames) and are
+// observed BEFORE their unchanged handlers. Flag-on each observes (verdict UNOBSERVED);
+// runtime flag-off emits ZERO B4 traces (byte-identical live path); frameRegistry:false
+// builds no B4 shadow. The four peer-SENT frames (client-hello/ping/turn-refresh/
+// peer-list-request) have NO kernel ingress and are deliberately NOT wired.
+{
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  let liveSockets = [];
+  class FakeWS {
+    constructor(url) { this.url = url; this.sent = []; this._l = new Map(); this.readyState = 0; liveSockets.push(this); queueMicrotask(() => { this.readyState = 1; this._fire('open'); }); }
+    addEventListener(t, h) { if (!this._l.has(t)) this._l.set(t, new Set()); this._l.get(t).add(h); }
+    send(d) { if (this.readyState === 1) this.sent.push(d); }
+    close(code, reason) { if (this.readyState === 3) return; this.readyState = 3; this._fire('close', { code, reason }); }
+    _fire(t, ev = {}) { const s = this._l.get(t); if (t === 'error' && (!s || !s.size)) throw ev.error || new Error('unhandled'); if (s) for (const h of s) try { h(ev); } catch {} }
+    deliver(obj) { this._fire('message', { data: JSON.stringify(obj) }); }
+  }
+  const uninstallWebRTC = installMockWebRTC();
+  const alice    = await createNodeIdentity({ lat: 40.71, lng: -74.0 });
+  const bridgeId = await createNodeIdentity({ lat: 51.5,  lng: -0.12 });
+  const mkHello = async (nonce, conn) => buildAuthHello({ identity: bridgeId, cbv: cbvFromNonces(nonce, conn, 'bridge') });
+  const bringUp = async (conn, nonce, { frameRegistry = true } = {}) => {
+    liveSockets = [];
+    const t = webTransport({ bridgeUrl: 'wss://test.example', identity: alice, WebSocketImpl: FakeWS, handshakeTimeoutMs: 2000, reconnect: false, frameRegistry });
+    const startP = t.start();
+    await sleep(5);
+    const sock = t.socket;
+    sock.deliver({ type: 'welcome', connId: conn, serverNonce: nonce, version: '2.112.0', kernelVersion: '4.62.2', turn: null });
+    sock.deliver({ type: 'axona', payload: { k: 'ntf', type: 'hello', body: await mkHello(nonce, conn) } });
+    await startP;
+    return { t, sock };
+  };
+
+  setShadowEnabled(true);
+  { const { t, sock } = await bringUp('c-b4', 'nB4');
+    sock.deliver({ type: 'version-gate', minPeerVersion: '4', serverT: 1 });
+    sock.deliver({ type: 'pong',         t: 123, serverT: 2 });
+    sock.deliver({ type: 'turn',         turn: null, serverT: 3 });
+    const b4 = t.frameRegistryShadow().b4;
+    const tys = b4.traces.map((x) => x.type);
+    check('L1. live flag-on: the 3 kernel-ingested B4 wires observed via signaling.dispatch (version-gate, pong, turn)',
+      ['bridge:version-gate', 'bridge:pong', 'bridge:turn'].every((ty) => tys.includes(ty)), `\n   got: ${tys.join(',')}`);
+    const pong = b4.traces.find((x) => x.type === 'bridge:pong');
+    check('L2. live pong: verdict UNOBSERVED (shape-only, never a handler-claim)', pong && pong.verdict === 'unobserved', `\n   ${JSON.stringify(pong)}`);
+    try { t.socket?.close?.(1000); } catch { /* */ } }
+
+  // runtime flag OFF (registry still built): the handlers RUN, observe() short-circuits → ZERO B4 traces.
+  { setShadowEnabled(false);
+    const { t, sock } = await bringUp('c-off', 'nOff');
+    sock.deliver({ type: 'pong', t: 1, serverT: 2 });
+    sock.deliver({ type: 'turn', turn: null, serverT: 3 });
+    check('L3. runtime flag-off: ZERO B4 traces though the registry is built (byte-identical live path)',
+      t.frameRegistryShadow().b4.traces.length === 0);
+    try { t.socket?.close?.(1000); } catch { /* */ } }
+
+  // frameRegistry:false — no B4 shadow constructed at all.
+  { setShadowEnabled(true);
+    const { t } = await bringUp('c-noreg', 'nNo', { frameRegistry: false });
+    check('L4. frameRegistry:false → no shadow at all (frameRegistryShadow() null)', t.frameRegistryShadow() === null);
+    try { t.socket?.close?.(1000); } catch { /* */ } }
+  uninstallWebRTC();
 }
 
 setShadowEnabled(false);
