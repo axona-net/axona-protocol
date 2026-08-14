@@ -28,6 +28,15 @@
 //   · the on() B1 helper called with any first arg that is not a literal
 //     T.<Identifier> (on(T['SUB']), on(T[expr]), on(bareVar), on()) → UNRESOLVED:
 //     only the literal T.<name> form resolves to a B1 site.
+//   · a registration-method NAME as a loose string literal anywhere (const m =
+//     'onNotification'; …) → UNRESOLVED. This one rule closes the whole literal-name
+//     class — every Aster/Vega dynamic construction names the method with a literal,
+//     so alias/destructure/callback/multi-hop are all caught by the literal alone.
+//     (Exempt: the property of a bracket-access site x['onNotification'], a classified site.)
+//   · a computed-member-derived local that is later invoked (const r = x[expr]; r(...))
+//     → UNRESOLVED (Vega recut-6 F1). The one construction OUTSIDE this fence is a
+//     method reached only via a runtime-computed name threaded across object/array
+//     indirection (no literal, multi-hop) — a points-to problem, measured absent in src.
 //   · on(T.X,…) → B1 routed (wire from T); signaling.dispatch switch-case string
 //     labels → bridge-ws.
 //   · a file that fails to parse → a hard parse-error (INV0c), so source coverage
@@ -102,12 +111,33 @@ function discover(fileList) {
     catch { try { ast = acorn.parse(code, { ecmaVersion: 'latest', sourceType: 'script', allowHashBang: true, allowReturnOutsideFunction: true }); }
       catch (e) { parseErrors.push(`${fp}: ${e.message}`); continue; } }
     const called = new Set(), members = [], typeofGuarded = new Set();
+    const memberBoundLocals = new Map(); // local name → node, bound to a computed non-literal member (const r = x[expr])
+    const calledIdents = new Set();      // identifier names used as a call callee (r(...))
+    const exemptNameLiterals = new Set(); // method-name string literals that are a bracket-access property (x['onNotification']) — a classified site, not a loose handle
     walk(ast, (n) => {
       // `typeof X.onNotification` is a duck-type guard, not a registration or alias
       // (it returns a string, can never register) — exclude its operand.
       if (n.type === 'UnaryExpression' && n.operator === 'typeof' && n.argument?.type === 'MemberExpression') {
         const mn = methodName(n.argument); if (mn && METHODS.has(mn)) typeofGuarded.add(n.argument);
       }
+      // A bracket-access property that names a registration method (x['onNotification']) IS a
+      // classified site (handled by methodName below); exempt its literal from the loose-string rule.
+      if (n.type === 'MemberExpression' && n.computed && n.property?.type === 'Literal' && typeof n.property.value === 'string' && METHODS.has(n.property.value)) {
+        exemptNameLiterals.add(n.property);
+      }
+      // A registration-method NAME appearing as a loose string literal anywhere else is a dynamic
+      // registration handle (const m = 'onNotification'; …x[m]… / {[m]:…} / passed as a callback).
+      // Every Aster/Vega dynamic construction names the method with a literal; flag them all at once.
+      if (n.type === 'Literal' && typeof n.value === 'string' && METHODS.has(n.value) && !exemptNameLiterals.has(n)) {
+        unresolved.push(`${fp} '${n.value}' — registration-method name as a loose string literal; a dynamic registration handle`);
+      }
+      // Track a local bound to a computed non-literal member (const r = x[expr]) and identifier
+      // calls (r(...)); if such a local is later invoked it is an untrackable dynamic method ref.
+      if (n.type === 'VariableDeclarator' && n.id?.type === 'Identifier' && n.init?.type === 'MemberExpression'
+        && n.init.computed && !(n.init.property?.type === 'Literal' && typeof n.init.property.value === 'string')) {
+        memberBoundLocals.set(n.id.name, n);
+      }
+      if (n.type === 'CallExpression' && n.callee?.type === 'Identifier') calledIdents.add(n.callee.name);
       if (n.type === 'VariableDeclarator' && n.id?.name === 'signaling' && n.init?.type === 'ObjectExpression') {
         const disp = n.init.properties.find((p) => p.key && (p.key.name === 'dispatch' || p.key.value === 'dispatch'));
         if (disp?.value) walk(disp.value, (m) => { if (m.type === 'SwitchCase' && m.test?.type === 'Literal' && typeof m.test.value === 'string') sites.push({ surface: 'bridge-ws', wire: m.test.value, site: `${fp} dispatch case '${m.test.value}'` }); });
@@ -165,6 +195,7 @@ function discover(fileList) {
       }
     });
     for (const m of members) if (!called.has(m) && !typeofGuarded.has(m)) unresolved.push(`${fp} ${receiverLabel(m.object)}.${methodName(m)} — referenced/aliased, not directly called`);
+    for (const [name] of memberBoundLocals) if (calledIdents.has(name)) unresolved.push(`${fp} const ${name} = x[expr]; ${name}(…) — computed-member-derived local is invoked; cannot prove it is not a registration method`);
   }
   return { sites, unresolved, parseErrors };
 }
@@ -206,7 +237,7 @@ check('INV0c. source coverage: EVERY src file parsed as a JavaScript AST (no par
   check('INV0. fail-closed: every discovered registration site is classified in-scope or documented-exclusion',
     unclassified.length === 0, `\n   unclassified: ${unclassified.map((e) => e.site).join(', ')}`);
 }
-check('INV0b. fail-closed on every dynamic-name form: registration CALLs resolve to a string-literal wire; on() resolves to a literal T.<name>; no registration method is aliased or destructured out (incl. computed-key destructure); no computed dynamic-method callee or computed-key destructure exists — else unresolved; only the FOUR documented MECHANISM_EXEMPT shims are allowed non-literal',
+check('INV0b. fail-closed on every single-reference dynamic-name form: a registration-method name never appears as a loose string literal; no registration method is aliased or destructured out (static, computed-key, or computed-member-alias); no computed dynamic-method callee, computed destructure key, or computed-member-derived local that is invoked; registration CALLs resolve to a string-literal wire; on() resolves to a literal T.<name> — else unresolved; only the FOUR documented MECHANISM_EXEMPT shims are allowed non-literal. (Residual outside the fence: a method reached only via a runtime-computed name threaded across object/array indirection, which needs points-to analysis; measured absent in src.)',
   unresolved.length === 0, `\n   unresolved: ${unresolved.join(', ')}`);
 
 const L = sites.map((e) => ({ e, c: classify(e) })).filter((x) => Array.isArray(x.c))
@@ -307,6 +338,17 @@ check('NEG2. a wrong reassignment (pong B4→B2) FAILS INV1', L.map((x) => x.key
   };
   const allFail = Object.values(fails).every((code) => discover([{ path: 'src/__o__.js', code }]).unresolved.length >= 1);
   check('NEG9. the on() B1 helper FAILS closed on a bracket/computed/bare-var first arg (on(T[\'SUB\']), on(T[w]), on(w)) — only literal on(T.NAME) resolves to a site', allFail);
+}
+// NEG10: a computed-member alias later invoked (const r = x[method]; r(...)) — the recut-6 residual
+// Vega found — and the loose-string-literal rule that closes the whole literal-name class in one pass.
+{
+  const fails = {
+    'member-alias-litname': "const method = 'onNotification'; const r = transport[method]; r('__gv__', () => {});", // caught by BOTH string-literal and member-alias rules
+    'member-alias-nolit':   "const r = transport[dyn]; r('__gv__', () => {});",                                    // no literal name → caught by member-alias rule alone
+    'name-literal-loose':   "const m = 'onRoutedMessage';",                                                        // bare loose method-name literal → caught by string-literal rule
+  };
+  const allFail = Object.values(fails).every((code) => discover([{ path: 'src/__a__.js', code }]).unresolved.length >= 1);
+  check('NEG10. a computed-member alias later invoked (const r = x[method]; r(…)), incl. a runtime-only name, and any loose registration-method-name string literal each FAIL closed (Vega recut-6 F1 + literal-name class)', allFail);
 }
 
 console.log(`\nResult: ${passed} passed, ${failed} failed\n`);
