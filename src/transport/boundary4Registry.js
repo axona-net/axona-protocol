@@ -45,11 +45,13 @@
 //   * ADMISSION GUARD, NOT AUTH GUARD. Boundary-2/3 carry a cryptographic
 //     `authGuard` (verifyAuthHello / verifyCapAttest). Bridge administration is
 //     gated on PROTOCOL VERSION and ADMITTED STATE, not identity. So client-hello
-//     carries an `admissionGuard` (the version gate: WIRE_VERSION major +
-//     MIN_PEER_VERSION + optional STRICT_MIN_KERNEL; a mismatch closes 4426 before
-//     admission), and the post-admission frames (ping/turn-refresh/
-//     peer-list-request) carry admissionGuard 'admitted' (dropped pre-hello).
-//     `authGuard` stays NA across this boundary — none of these frames is signed.
+//     carries an `admissionGuard` — the THREE-stage version gate (F1): REQUIRED_WIRE_MAJOR,
+//     then MIN_PEER_VERSION, then flagDayFloor(peerVersion) which picks a namespace floor
+//     (MIN_KERNEL_VERSION or MIN_PEER_APP_VERSION) and rejects below effectiveMin = max of
+//     the two (server.js:1123); optional STRICT_MIN_KERNEL on kernelVersion; a miss closes
+//     4426 before admission. The post-admission frames (ping/turn-refresh/peer-list-request)
+//     carry admissionGuard 'admitted' (dropped pre-hello). `authGuard` stays NA across this
+//     boundary — none of these frames is signed.
 //   * PING/PONG IS A `t`-KEYED CONVERSATION ON THE PAYLOAD LEG. pong echoes the
 //     ping's `t` timestamp unchanged (server.js:1175) so the client can sample
 //     RTT (recordPong). That is a REAL correlation key, so ping is the REQUEST leg
@@ -173,12 +175,14 @@ function rowDefs() {
       type: 'bridge:turn-refresh', wire: 'turn-refresh', kind: FrameKind.ONE_WAY,
       owningService: 'BridgeTurn', versionRange: V,
       outcome: 'TurnOutcome', terminalOutcome: 'TURN_REFRESH_REQUESTED',
-      // F2 (Aster): NOT Retry.NATURAL. The kernel retries in-band up to
-      // TURN_REFRESH_MAX_TRIES=3 (requestTurnRefreshInBand, index.js:788) and each
-      // bridge handling mints a FRESH random credential (makeTurnCredential), so a
-      // resend is bounded and NON-idempotent — not naturally idempotent (no key,
-      // not order-independent), and not NONE (the kernel does retry).
+      // F2/F5 (Aster): NOT Retry.NATURAL. The kernel runs up to TURN_REFRESH_MAX_TRIES=3
+      // ATTEMPTS (attempts 0,1,2 = at most 2 retries; requestTurnRefreshInBand, index.js:788)
+      // and each bridge handling mints a FRESH random credential (makeTurnCredential), so a
+      // resend is bounded and NON-idempotent — not naturally idempotent (no key, not
+      // order-independent), and not NONE (the kernel does retry). F5: the bound is declared
+      // STRUCTURALLY as retryMaxAttempts (defineRow requires it for BOUNDED_N), not comment-only.
       retry: Retry.BOUNDED_N,
+      retryMaxAttempts: 3,   // total attempts (= at most 2 retries)
       topicProfile: NA, eventIdScheme: NA, replayCursorType: NA, orderingModel: NA,
       authGuard: NA,
       admissionGuard: 'admitted: admitted peers only (server.js:1193)',
@@ -186,7 +190,7 @@ function rowDefs() {
       projection: {},
       schema: { require: [] },   // carries only {type}
       errorContract: [], traceFields: [], budget: budget(2),
-      note: 'a long-lived client whose 2h TURN credential is about to lapse asks for a fresh one in-band (index.js:794), never closing a healthy connection to re-welcome. The kernel retries up to TURN_REFRESH_MAX_TRIES=3, then defers; each bridge handling mints a FRESH credential (makeTurnCredential) — a bounded, NON-idempotent resend (Retry.BOUNDED_N). Solicited: the bridge replies with `turn`. No wire correlation key (single in-flight socket round-trip), so no conversation.',
+      note: 'a long-lived client whose 2h TURN credential is about to lapse asks for a fresh one in-band (index.js:794). The kernel runs up to TURN_REFRESH_MAX_TRIES=3 attempts (at most 2 retries), then defers; each bridge handling mints a FRESH credential (makeTurnCredential) — a bounded, NON-idempotent resend (Retry.BOUNDED_N, retryMaxAttempts=3). Solicited: the bridge replies with `turn`. No wire correlation key (socket round-trip), so no conversation.',
     }),
 
     // ── turn: turn (bridge->peer; TURN credential reply) ──

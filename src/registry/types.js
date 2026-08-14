@@ -59,7 +59,7 @@ export const Retry = Object.freeze({
   NATURAL: 'NATURAL',             // naturally idempotent WITHOUT a frame key — a read, a catch-up, or an order-independent set-union (Aster recut-3 F2.2)
   SINGLE_FLIGHT: 'SINGLE_FLIGHT', // bounded writer flight (defer→probe→evict→promote→retry)
   BOUNDED_ONCE: 'BOUNDED_ONCE',   // earns exactly one direct retry, then gives up
-  BOUNDED_N: 'BOUNDED_N',         // a bounded number of direct retries (declared N), then gives up; NOT idempotent — a resend may produce a DISTINCT effect (S4c F2: turn-refresh retries up to N and each mints a fresh credential)
+  BOUNDED_N: 'BOUNDED_N',         // a bounded number of retries then gives up; NOT idempotent — a resend may produce a DISTINCT effect. The bound is declared STRUCTURALLY as retryMaxAttempts (total attempts; N attempts = at most N-1 retries), required by defineRow (S4c F2/F5: turn-refresh runs up to 3 attempts and each mints a fresh credential)
   FLOOD_DEDUP: 'FLOOD_DEDUP',     // gossip flood; dedup by id, no targeted retry
 });
 const RETRY_CLASSES = new Set(Object.values(Retry));
@@ -317,6 +317,16 @@ export function defineRow(row) {
   // is resend-safe WITHOUT a frame key (a read, a catch-up, an order-independent
   // set-union) declares Retry.NATURAL instead.
   if (row.retry === Retry.IDEMPOTENT && !idempotency) fail(type, 'retry IDEMPOTENT requires an idempotency key; use Retry.NATURAL for a frame that is naturally idempotent without a key');
+  // S4c F5 (Aster/Vega): Retry.BOUNDED_N declares "a bounded number of retries" — the
+  // bound must be a MACHINE-CHECKABLE field, not comment text. Require retryMaxAttempts
+  // (total attempts, so >= 2 means at least one retry) iff BOUNDED_N, and forbid it
+  // otherwise, exactly as IDEMPOTENT requires its key. Mirrors the recut-3 F2.2 shape.
+  const rma = row.retryMaxAttempts;
+  if (row.retry === Retry.BOUNDED_N) {
+    if (!(Number.isInteger(rma) && rma >= 2)) fail(type, 'retry BOUNDED_N requires retryMaxAttempts: an integer >= 2 (total attempts; N attempts = at most N-1 retries)');
+  } else if (rma != null) {
+    fail(type, 'retryMaxAttempts is only valid with retry BOUNDED_N');
+  }
 
   const norm = {
     type, variant: row.variant ?? null,
@@ -331,6 +341,7 @@ export function defineRow(row) {
     evidence: row.evidence ?? null, producedPolicy: row.producedPolicy ?? null, requiredPolicy: row.requiredPolicy ?? null,
     proves: row.proves ?? null, outcome: row.outcome ?? null, terminalOutcome: row.terminalOutcome ?? null,
     retry: row.retry ?? null,
+    retryMaxAttempts: row.retryMaxAttempts ?? null,   // S4c F5: the declared BOUNDED_N bound, frozen into the row
     errorContract, traceFields,
     budget: Object.freeze({ maxBytes: b.maxBytes ?? null, maxLeaves: b.maxLeaves ?? null }),
     capabilityRange: Object.freeze({ ...cap }),

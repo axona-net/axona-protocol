@@ -10,7 +10,7 @@
 // Run: node test/smoke_registry_core.mjs
 import { pathToFileURL } from 'node:url';
 import { fileURLToPath } from 'node:url';
-import { defineRow, FrameKind, EvidenceLevel, Proves, CorrelationSubjectKind, FactType, ShadowRegistry, setShadowEnabled } from '../src/registry/index.js';
+import { defineRow, FrameKind, EvidenceLevel, Proves, CorrelationSubjectKind, FactType, Retry, ShadowRegistry, setShadowEnabled } from '../src/registry/index.js';
 import * as publicSurface from '../src/registry/index.js';
 import { certify, certifyPlain, certifyBigint, isCertified, kindOf } from '../src/registry/snapshotMint.js';
 import { MAX_FRAME_BYTES, encode } from '../src/transport/wire.js';
@@ -194,6 +194,13 @@ const mk = (sink, extra = {}) => { const r = new ShadowRegistry({ boundary: 'tes
   rej('7f projection "__proto__" rejected', () => F({ projection: { payload: ['__proto__'] } }));
   rej('7g >24 projection fields rejected', () => F({ projection: { payload: Array.from({ length: 25 }, (_, i) => 'f' + i) } }));
   rej('7h OBSERVED + proves:routing rejected', () => F({ evidence: EvidenceLevel.OBSERVED, proves: Proves.ROUTING }));
+  // S4c F5: Retry.BOUNDED_N must declare a machine-checkable bound (retryMaxAttempts),
+  // mirroring IDEMPOTENT requiring its key — comment-only "declared N" is not enough.
+  rej('7i BOUNDED_N without retryMaxAttempts rejected', () => F({ retry: Retry.BOUNDED_N }));
+  rej('7j BOUNDED_N retryMaxAttempts:0 rejected', () => F({ retry: Retry.BOUNDED_N, retryMaxAttempts: 0 }));
+  rej('7k BOUNDED_N retryMaxAttempts fractional rejected', () => F({ retry: Retry.BOUNDED_N, retryMaxAttempts: 1.5 }));
+  rej('7l retryMaxAttempts without BOUNDED_N rejected', () => F({ retry: Retry.NATURAL, retryMaxAttempts: 3 }));
+  ok('7m valid BOUNDED_N + retryMaxAttempts:2 mints and freezes the bound onto the row', F({ retry: Retry.BOUNDED_N, retryMaxAttempts: 2 }).retryMaxAttempts === 2);
 }
 
 // ── 8. return primitive-only; telemetry fixed codes; contained faults; Symbol keying ──

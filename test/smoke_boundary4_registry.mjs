@@ -31,6 +31,7 @@
 //      zero traces + input untouched; flag-on branded + verdict UNOBSERVED +
 //      scope stamped; never throws out.
 // =====================================================================
+import { readFileSync } from 'node:fs';
 import { buildBoundary4Registry, boundary4Rows, makeBoundary4Observers } from '../src/transport/boundary4Registry.js';
 import { setShadowEnabled } from '../src/registry/index.js';
 import { certify } from '../src/registry/snapshotMint.js';
@@ -195,8 +196,8 @@ console.log('\nREF-1.1 S4c — Boundary-4 (bridge administration) registry\n');
 
   // F2 — turn-refresh is the bounded, non-idempotent retry; note names the bound + fresh credential.
   const tref = by['bridge:turn-refresh'];
-  check('FR2. F2: turn-refresh retry=BOUNDED_N (not NATURAL/NONE); note names TURN_REFRESH_MAX_TRIES + the fresh-credential-per-attempt',
-    tref.retry === 'BOUNDED_N' && /TURN_REFRESH_MAX_TRIES/.test(tref.note) && /fresh/i.test(tref.note));
+  check('FR2. F2/F5: turn-refresh retry=BOUNDED_N with STRUCTURAL retryMaxAttempts===3 (not comment-only); note names TURN_REFRESH_MAX_TRIES + fresh-credential-per-attempt + at most 2 retries',
+    tref.retry === 'BOUNDED_N' && tref.retryMaxAttempts === 3 && /TURN_REFRESH_MAX_TRIES/.test(tref.note) && /fresh/i.test(tref.note) && /2 retries/.test(tref.note));
 
   // F3 — version-gate types minPeerVersion as a string in the table…
   check('FR3. F3: version-gate schema.types.minPeerVersion === "string"',
@@ -215,6 +216,13 @@ console.log('\nREF-1.1 S4c — Boundary-4 (bridge administration) registry\n');
   const plr = by['bridge:peer-list-request'];
   check('FR5. F4: peer-list-request note names the ADDITIVE onPeerList ingest (never removes) and does NOT claim a "full replace"',
     /additive/i.test(plr.note) && /onPeerList/.test(plr.note) && /never removes/i.test(plr.note) && !/full replace/i.test(plr.note));
+
+  // F6 — the FILE-HEADER admission-guard decision block now names the flagDayFloor stage,
+  // not just the row. Read the module source and check the header (pre-import) narrative.
+  const src = readFileSync(new URL('../src/transport/boundary4Registry.js', import.meta.url), 'utf8');
+  const header = src.slice(0, src.indexOf('\nimport {'));
+  check('FR6. F6: the file-header ADMISSION-GUARD decision block names flagDayFloor (stale two-stage narrative retired)',
+    /ADMISSION GUARD, NOT AUTH GUARD/.test(header) && /flagDayFloor/.test(header));
 }
 
 // ── D. FLAG-OFF IDENTITY (inert wrap) ─────────────────────────────────
