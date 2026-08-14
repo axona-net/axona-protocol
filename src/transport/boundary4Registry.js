@@ -256,15 +256,18 @@ export function buildBoundary4Registry({ sink = () => {}, enabled, now, sampleEv
   return reg;
 }
 
-// ── S4c increment 2 (NOT YET WIRED): the LIVE observe side-channel ────────────
+// ── S4c increment 2 (WIRED into web/index.js signaling.dispatch): the LIVE observe side-channel ──
 // makeBoundary4Observers returns `observe(wire, scope, body)` — a pure side-
-// channel (never receives/wraps/returns the handler). Flag-off it returns
-// immediately (byte-identical). Flag-on it certifies a snapshot of `body` and a
-// certified (empty) meta, and emits a shape-only trace (verdict 'unobserved'; NO
-// handler runs). Boundary-4 rows carry NO projection.meta (all correlation is on
-// the payload leg — ping/pong's `t`), so the meta is always {} and `scope` (the
-// bridge session id the observation ran under) is only STAMPED onto the trace,
-// mirroring B3's scope stamping for its no-meta discovery wires.
+// channel (never receives/wraps/returns the handler), called before the three
+// kernel-ingested bridge-admin handlers (version-gate / pong / turn). Flag-off it
+// returns immediately (byte-identical). Flag-on it certifies a snapshot of `body`
+// and a certified (empty) meta, and emits a shape-only trace (verdict 'unobserved';
+// NO handler runs). Boundary-4 rows carry NO projection.meta (all correlation is on
+// the payload leg — ping/pong's `t`), so the meta is always {} and `scope` is only
+// STAMPED onto the trace, never certified as a field. Every live B4 site passes
+// scope=null — bridge administration is session-wide, with no per-frame subject —
+// so the stamped scope is null on the wired path; the parameter is kept for observer
+// symmetry with B2/B3, which stamp a per-frame subject (connId / signalling peer).
 export function makeBoundary4Observers({ sink = () => {}, now, sampleEvery } = {}) {
   let curScope = null;
   const reg = buildBoundary4Registry({ sink: (r) => sink({ ...r, scope: curScope }), now, sampleEvery });

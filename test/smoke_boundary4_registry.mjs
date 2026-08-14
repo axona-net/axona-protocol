@@ -274,10 +274,15 @@ console.log('\nREF-1.1 S4c — Boundary-4 (bridge administration) registry\n');
 // ── L. LIVE TRANSPORT WIRING (S4c increment 2 — the 3 kernel-ingested frames) ──
 // Drive a real webTransport{frameRegistry:true} over a fake WebSocket. version-gate /
 // pong / turn arrive via signaling.dispatch (bare non-`axona` socket frames) and are
-// observed BEFORE their unchanged handlers. Flag-on each observes (verdict UNOBSERVED);
-// runtime flag-off emits ZERO B4 traces (byte-identical live path); frameRegistry:false
-// builds no B4 shadow. The four peer-SENT frames (client-hello/ping/turn-refresh/
-// peer-list-request) have NO kernel ingress and are deliberately NOT wired.
+// observed BEFORE their unchanged handlers. This is a HANDLER-IDENTITY DIFFERENTIAL,
+// not a label check (Aster/Vega S4c increment-2 F1/F2): under flag-on we pin EXACTLY
+// one fully-branded record per site (registered/schemaOk/verdict='unobserved'/
+// scope===null) AND prove the real handlers still ran (pong updated the RTT surface;
+// turn reached mesh.setTurnConfig with the exact credential); we saturate the live
+// ring past 1024 and require drop-oldest at exactly 1024 (F2); and under runtime
+// flag-off we require ZERO B4 traces WHILE the same handlers still run byte-identically.
+// frameRegistry:false builds no B4 shadow. The four peer-SENT frames (client-hello/
+// ping/turn-refresh/peer-list-request) have NO kernel ingress and are NOT wired.
 {
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   let liveSockets = [];
@@ -305,26 +310,58 @@ console.log('\nREF-1.1 S4c — Boundary-4 (bridge administration) registry\n');
     return { t, sock };
   };
 
+  const TURN_CRED = (u) => ({ urls: ['turn:t.example:3478'], username: u, credential: 'c-' + u });
+  // composite.mesh IS the same object signaling.dispatch closed over (web/index.js
+  // `composite.mesh = mesh`), so mutating this method intercepts the REAL live call.
+  const spyTurn = (t) => { const calls = []; const orig = t.mesh.setTurnConfig; t.mesh.setTurnConfig = function (cfg) { calls.push(cfg); return orig.call(this, cfg); }; return calls; };
+  const WIRED = ['bridge:version-gate', 'bridge:pong', 'bridge:turn'];
+
+  // L1 — flag-on HANDLER-IDENTITY DIFFERENTIAL: exactly one fully-branded record per
+  // wired site, AND the real handlers still ran (RTT surface + setTurnConfig).
   setShadowEnabled(true);
   { const { t, sock } = await bringUp('c-b4', 'nB4');
+    const turnCalls = spyTurn(t);
     sock.deliver({ type: 'version-gate', minPeerVersion: '4', serverT: 1 });
-    sock.deliver({ type: 'pong',         t: 123, serverT: 2 });
-    sock.deliver({ type: 'turn',         turn: null, serverT: 3 });
+    sock.deliver({ type: 'pong',         t: Date.now() - 5, serverT: 2 });
+    sock.deliver({ type: 'turn',         turn: TURN_CRED('on'), serverT: 3 });
     const b4 = t.frameRegistryShadow().b4;
-    const tys = b4.traces.map((x) => x.type);
-    check('L1. live flag-on: the 3 kernel-ingested B4 wires observed via signaling.dispatch (version-gate, pong, turn)',
-      ['bridge:version-gate', 'bridge:pong', 'bridge:turn'].every((ty) => tys.includes(ty)), `\n   got: ${tys.join(',')}`);
-    const pong = b4.traces.find((x) => x.type === 'bridge:pong');
-    check('L2. live pong: verdict UNOBSERVED (shape-only, never a handler-claim)', pong && pong.verdict === 'unobserved', `\n   ${JSON.stringify(pong)}`);
+    const bySite = new Map(b4.traces.map((x) => [x.type, x]));
+    check('L1. live flag-on: EXACTLY one trace per wired site (version-gate, pong, turn) — no extras, none missed',
+      b4.traces.length === 3 && WIRED.every((ty) => bySite.has(ty)), `\n   got: ${b4.traces.map((x) => x.type).join(',')} (n=${b4.traces.length})`);
+    check('L1b. live flag-on: EVERY record registered=true, schemaOk=true, verdict UNOBSERVED, scope===null (a real shape-only observation, not a bare type label; a schema-invalid body could not pass this)',
+      WIRED.every((ty) => { const r = bySite.get(ty); return r && r.registered === true && r.schemaOk === true && r.verdict === 'unobserved' && r.scope === null; }),
+      `\n   ${JSON.stringify(b4.traces)}`);
+    check('L1c. live flag-on: the unchanged pong handler STILL ran — RTT surface updated (bridgeRtt/bridgeRttAvg numeric)',
+      typeof t.bridgeRtt === 'number' && t.bridgeRtt >= 0 && typeof t.bridgeRttAvg === 'number');
+    check('L1d. live flag-on: the unchanged turn handler STILL ran — setTurnConfig installed the EXACT credential (observe is a side-channel, not a replacement)',
+      turnCalls.length === 1 && turnCalls[0] && turnCalls[0].username === 'on' && Array.isArray(turnCalls[0].urls));
     try { t.socket?.close?.(1000); } catch { /* */ } }
 
-  // runtime flag OFF (registry still built): the handlers RUN, observe() short-circuits → ZERO B4 traces.
+  // L5 — the 1024 drop-oldest ring is PINNED at the live site (Aster F2): a
+  // distinguishable oldest entry, then 1024 more, must evict the oldest at cap.
+  { const { t, sock } = await bringUp('c-sat', 'nSat');
+    const b4 = t.frameRegistryShadow().b4;
+    sock.deliver({ type: 'version-gate', minPeerVersion: '4', serverT: 0 });   // the OLDEST observation
+    check('L5a. saturation precondition: the oldest live observation is a version-gate',
+      b4.traces.length === 1 && b4.traces[0].type === 'bridge:version-gate');
+    for (let i = 0; i < 1024; i++) sock.deliver({ type: 'pong', t: 1000 + i, serverT: i });   // 1024 more → 1025 total
+    check('L5b. live saturation: ring pinned at EXACTLY 1024 (drop-oldest, not unbounded growth)',
+      b4.traces.length === 1024, `\n   len=${b4.traces.length}`);
+    check('L5c. live saturation: the oldest entry (version-gate) was EVICTED — only the last 1024 (all pong) remain',
+      b4.traces.every((x) => x.type === 'bridge:pong'), `\n   first=${b4.traces[0]?.type}`);
+    try { t.socket?.close?.(1000); } catch { /* */ } }
+
+  // L3 — runtime flag-off: ZERO B4 traces though the registry is built, AND the
+  // same handlers still run byte-identically (RTT + setTurnConfig both fire).
   { setShadowEnabled(false);
     const { t, sock } = await bringUp('c-off', 'nOff');
-    sock.deliver({ type: 'pong', t: 1, serverT: 2 });
-    sock.deliver({ type: 'turn', turn: null, serverT: 3 });
-    check('L3. runtime flag-off: ZERO B4 traces though the registry is built (byte-identical live path)',
-      t.frameRegistryShadow().b4.traces.length === 0);
+    const turnCalls = spyTurn(t);
+    sock.deliver({ type: 'pong', t: Date.now() - 3, serverT: 2 });
+    sock.deliver({ type: 'turn', turn: TURN_CRED('off'), serverT: 3 });
+    check('L3. runtime flag-off: ZERO B4 traces though the registry is built (observe short-circuits before any work)',
+      t.frameRegistryShadow().b4.traces.length === 0, `\n   len=${t.frameRegistryShadow().b4.traces.length}`);
+    check('L3b. runtime flag-off: the real handlers STILL run — RTT updated AND setTurnConfig installed the credential (byte-identical live path)',
+      typeof t.bridgeRtt === 'number' && turnCalls.length === 1 && turnCalls[0].username === 'off');
     try { t.socket?.close?.(1000); } catch { /* */ } }
 
   // frameRegistry:false — no B4 shadow constructed at all.
