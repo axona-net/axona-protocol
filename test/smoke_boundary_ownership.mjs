@@ -16,6 +16,12 @@
 //     UNRESOLVED unless it matches a narrowly-keyed MECHANISM_EXEMPT entry.
 //   · a registration METHOD REFERENCED but not directly called (alias:
 //     const r = x.onNotification; r(...)) → UNRESOLVED.
+//   · a registration METHOD DESTRUCTURED out of any object
+//     (const { onNotification: r } = x; r(...)) → UNRESOLVED: the bound local
+//     is called with no MemberExpression, so its call site cannot be tracked.
+//   · a COMPUTED DYNAMIC-METHOD callee (x[expr](...) where expr is not a string
+//     literal, e.g. const m='onNotification'; x[m](...)) → UNRESOLVED: expr
+//     cannot be proven not to be onNotification/onRoutedMessage. (Aster recut-4 F1.)
 //   · on(T.X,…) → B1 routed (wire from T); signaling.dispatch switch-case string
 //     labels → bridge-ws.
 //   · a file that fails to parse → a hard parse-error (INV0c), so source coverage
@@ -107,8 +113,25 @@ function discover(fileList) {
         if (typeof w === 'string' && w) sites.push({ surface: 'routed', wire: w, site: `${fp} on(T.${NAME})` });
         else unresolved.push(`${fp} on(T.${NAME}) — T.${NAME} does not resolve`);
       }
+      // A registration method DESTRUCTURED out of any object binds a bare local
+      // that is then called with no MemberExpression — untrackable, so fail closed.
+      if (n.type === 'ObjectPattern') {
+        for (const pr of n.properties) {
+          if (pr.type !== 'Property') continue;
+          const kn = !pr.computed && pr.key?.type === 'Identifier' ? pr.key.name
+            : (pr.computed && pr.key?.type === 'Literal' && typeof pr.key.value === 'string' ? pr.key.value : null);
+          if (kn && METHODS.has(kn)) unresolved.push(`${fp} { ${kn} } — registration method destructured out; call site is an untrackable bare local`);
+        }
+      }
       if (n.type === 'MemberExpression') { const mn = methodName(n); if (mn && METHODS.has(mn)) members.push(n); }
       if (n.type === 'CallExpression' && n.callee?.type === 'MemberExpression') {
+        // A COMPUTED callee whose property is not a string literal (x[expr](...)) can
+        // resolve to a registration method at runtime and cannot be proven otherwise —
+        // fail closed. (Bracket-property x['onNotification'] is a string Literal and is
+        // handled as a normal site by methodName below.)
+        if (n.callee.computed && !(n.callee.property?.type === 'Literal' && typeof n.callee.property.value === 'string')) {
+          unresolved.push(`${fp} ${receiverLabel(n.callee.object)}[${n.callee.property?.type || 'expr'}](…) — computed dynamic-method call, cannot prove non-registration`);
+        }
         const mn = methodName(n.callee);
         if (mn && METHODS.has(mn)) {
           called.add(n.callee);
@@ -165,7 +188,7 @@ check('INV0c. source coverage: EVERY src file parsed as a JavaScript AST (no par
   check('INV0. fail-closed: every discovered registration site is classified in-scope or documented-exclusion',
     unclassified.length === 0, `\n   unclassified: ${unclassified.map((e) => e.site).join(', ')}`);
 }
-check('INV0b. fail-closed: every registration CALL resolves to a string-literal wire, and every referenced registration method is directly called — else unresolved; only the FOUR documented MECHANISM_EXEMPT shims are allowed non-literal',
+check('INV0b. fail-closed: every registration CALL resolves to a string-literal wire; every referenced registration method is directly called (no alias, no destructuring); and no computed dynamic-method callee exists — else unresolved; only the FOUR documented MECHANISM_EXEMPT shims are allowed non-literal',
   unresolved.length === 0, `\n   unresolved: ${unresolved.join(', ')}`);
 
 const L = sites.map((e) => ({ e, c: classify(e) })).filter((x) => Array.isArray(x.c))
@@ -242,6 +265,19 @@ check('NEG2. a wrong reassignment (pong B4→B2) FAILS INV1', L.map((x) => x.key
   };
   const noSite = Object.values(traps).every((code) => { const d = discover([{ path: 'src/__t__.js', code }]); return d.sites.length === 0 && d.unresolved.length === 0 && d.parseErrors.length === 0; });
   check('NEG7. a commented-out registration and a regex literal are NOT call nodes → the AST creates no site and no false unresolved (proves the parser does not hallucinate registrations)', noSite);
+}
+// NEG8: method extraction (ObjectPattern) and computed dynamic-method callees each
+// FAIL closed as unresolved — the two forms methodName() alone could not see. (Aster recut-4 F1.)
+{
+  const fails = {
+    'destructure-rename':     "const { onNotification: register } = transport; register('__gv__', () => {});",
+    'destructure-shorthand':  "const { onRoutedMessage } = dht; onRoutedMessage('__gv__', () => {});",
+    'destructure-computed':   "const { ['onNotification']: reg } = transport; reg('__gv__', () => {});",
+    'computed-const-method':  "const method = 'onNotification'; transport[method]('__gv__', () => {});",
+    'computed-member-callee': "transport[names.reg]('__gv__', () => {});",
+  };
+  const allFail = Object.entries(fails).every(([, code]) => discover([{ path: 'src/__d__.js', code }]).unresolved.length >= 1);
+  check('NEG8. ObjectPattern method extraction ({onNotification: r}, {onRoutedMessage}, {[\'onNotification\']: r}) and computed dynamic-method callees (transport[method](…)) each FAIL closed as unresolved (Aster recut-4 F1)', allFail);
 }
 
 console.log(`\nResult: ${passed} passed, ${failed} failed\n`);
