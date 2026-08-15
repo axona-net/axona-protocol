@@ -424,24 +424,49 @@ function verdictOf(r) {
 }
 
 // REF-1.1 M1b: the ONE canonical canary invariant over a frameRegistrySummary()
-// (peer- or manager-level). The telemetry-only canary passes iff the registry is
-// ARMED and observed no fault: built===true AND faults===0 AND no 'threw'/
-// 'trace-fault' verdict. Both the faults counter AND the verdict check are
-// required — a wrap that threw records verdict 'threw' but can leave faults[]
-// empty, so faults alone is insufficient (council carry-forward, Vega/Aster).
-// `built===false` is NOT-ARMED / not-ready and is never a clean pass. Pure over a
-// summary object; every consumer (ops drain, tests) reads THIS, never a re-impl.
+// (peer- or manager-level). FAIL-CLOSED safety predicate — the single rollout
+// gate, so it must reject invalid telemetry and both blind and dirty windows, and
+// never reinterpret garbage as clean. Passes iff ALL hold:
+//   built===true      — the registry object was constructed;
+//   observing===true  — the runtime shadow gate (AXONA_REGISTRY_SHADOW) is ON, so
+//                       the wrap actually emits traces. built without observing is
+//                       a BLIND window: zero traces, faults:0 — looks clean but
+//                       observed nothing (council F1, Aster/Vega). BOTH gates.
+//   faults===0        — a present, non-negative safe integer, and zero;
+//   no 'threw'/'trace-fault' verdict — a threw can carry an empty faults[], so the
+//                       faults counter alone is insufficient (council carry-forward).
+// Telemetry validation (council F2, Aster/Vega): summary must be a plain object;
+// faults a non-negative safe integer; verdicts a plain counter object; each checked
+// verdict count, when present, a non-negative safe integer. Missing / null /
+// negative / non-finite / wrong-typed fields → pass:false with an invalid-summary
+// reason, NOT a coerced clean pass. Pure; every consumer (ops drain, canary slot,
+// tests) reads THIS, never a re-impl.
 // Returns { pass:boolean, ready:boolean, reasons:string[] }.
 export function frameRegistryCanaryVerdict(summary) {
-  const s = summary || {};
+  if (summary === null || typeof summary !== 'object' || Array.isArray(summary)) {
+    return { pass: false, ready: false, reasons: ['invalid-summary: not an object'] };
+  }
+  const isCount = (x) => Number.isSafeInteger(x) && x >= 0;
   const reasons = [];
-  const ready = s.built === true;
-  if (!ready) reasons.push('not-armed (built!==true)');
-  const faults = Number.isFinite(s.faults) ? s.faults : 0;
-  if (faults > 0) reasons.push(`faults=${faults}`);
-  const v = s.verdicts || {};
-  if (v.threw) reasons.push(`threw=${v.threw}`);
-  if (v['trace-fault']) reasons.push(`trace-fault=${v['trace-fault']}`);
+  const built = summary.built === true;
+  const observing = summary.observing === true;   // runtime shadow gate is on
+  if (!built)     reasons.push('not-armed (built!==true)');
+  if (!observing) reasons.push('not-observing (shadow gate off — blind window)');
+  // faults MUST be present and a valid count; absence/garbage is rejected, not clean.
+  if (!isCount(summary.faults)) reasons.push(`invalid-summary: faults=${JSON.stringify(summary.faults)}`);
+  else if (summary.faults > 0)  reasons.push(`faults=${summary.faults}`);
+  // verdicts MUST be a plain counter object; checked counts, when present, valid.
+  const v = summary.verdicts;
+  if (v === null || typeof v !== 'object' || Array.isArray(v)) {
+    reasons.push(`invalid-summary: verdicts=${JSON.stringify(v)}`);
+  } else {
+    for (const key of ['threw', 'trace-fault']) {
+      if (!Object.prototype.hasOwnProperty.call(v, key)) continue;
+      if (!isCount(v[key])) reasons.push(`invalid-summary: ${key}=${JSON.stringify(v[key])}`);
+      else if (v[key] > 0)  reasons.push(`${key}=${v[key]}`);
+    }
+  }
+  const ready = built && observing;
   return { pass: ready && reasons.length === 0, ready, reasons };
 }
 

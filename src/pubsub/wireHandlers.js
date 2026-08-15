@@ -23,6 +23,7 @@ import { verifyEnvelope, checkFreshness } from './envelope.js';
 import { verifyKill } from './kill.js';
 import { deriveTopicIdBig } from './post.js';
 import { signAckProof, verifyAckProof, PURPOSE, OP } from './ackProof.js';
+import { shadowEnabled } from '../registry/index.js';
 
 export const wireHandlersMethods = {
   _registerHandlers() {
@@ -108,11 +109,16 @@ export const wireHandlersMethods = {
   frameRegistrySummary() {
     const L = this._frameLifetime;
     if (!this._frameRegistry || !L) {
-      return { built: false, rows: 0, total: 0, faults: 0, dropped: 0,
+      return { built: false, observing: false, rows: 0, total: 0, faults: 0, dropped: 0,
         faultKinds: {}, verdicts: {}, byType: {}, ringSize: 0 };
     }
     return {
       built: true,
+      // observing = the runtime shadow gate is ON, so the wrap actually emits
+      // traces. built without observing is a BLIND window (council F1): the canary
+      // verdict requires observing===true, not merely built. See
+      // frameRegistryCanaryVerdict.
+      observing: shadowEnabled(),
       rows: this._frameRegistry.size(),
       total: L.total,       // lifetime — survives rollover
       faults: L.faults,     // lifetime — MUST be 0 for the canary to pass

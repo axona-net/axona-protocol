@@ -29,7 +29,7 @@ import { NeuronNode }               from '../src/dht/NeuronNode.js';
 import { SimNetwork, simTransport } from '../src/transport/sim/index.js';
 import { createNodeIdentity }       from '../src/identity/index.js';
 import { fromHex }                  from '../src/utils/hexid.js';
-import { frameRegistryCanaryVerdict } from '../src/registry/index.js';
+import { frameRegistryCanaryVerdict, shadowEnabled, setShadowEnabled } from '../src/registry/index.js';
 
 let passed = 0, failed = 0;
 const check = (label, cond, extra = '') => { if (cond) { console.log(`  ✓ ${label}`); passed++; } else { console.log(`  ✗ ${label} ${extra}`); failed++; } };
@@ -117,26 +117,63 @@ console.log('\nREF-1.1 M1 — frame-registry canary surface (shadow)\n');
 }
 
 // ── G. THE CANARY INVARIANT helper (REF-1.1 M1b): frameRegistryCanaryVerdict —
-//    the ONE canonical pass/fail every consumer reads. Pass iff armed AND
-//    faults===0 AND no threw/trace-fault. Both checks required: a threw can carry
-//    an empty faults[], so faults alone would false-pass (council carry-forward). ──
+//    the ONE canonical FAIL-CLOSED pass/fail every consumer reads. Pass iff
+//    built===true AND observing===true AND faults===0 AND no threw/trace-fault,
+//    over VALID telemetry. Both blind windows (F1) and malformed summaries (F2)
+//    must fail closed, never coerce to clean (council: Aster seq 1073, Vega 1074). ──
 {
-  const clean = frameRegistryCanaryVerdict({ built: true, faults: 0, verdicts: { passed: 5 } });
-  check('G. clean armed window → pass:true, ready:true, no reasons',
+  const clean = frameRegistryCanaryVerdict({ built: true, observing: true, faults: 0, verdicts: { passed: 5 } });
+  check('G. clean armed+observing window → pass:true, ready:true, no reasons',
     clean.pass === true && clean.ready === true && clean.reasons.length === 0);
-  const unarmed = frameRegistryCanaryVerdict({ built: false, faults: 0, verdicts: {} });
+  const unarmed = frameRegistryCanaryVerdict({ built: false, observing: false, faults: 0, verdicts: {} });
   check('G. built:false → NOT ready, pass:false (never a clean pass)',
     unarmed.pass === false && unarmed.ready === false);
-  const faulted = frameRegistryCanaryVerdict({ built: true, faults: 2, verdicts: { passed: 1 } });
+  // F1 — built but shadow gate OFF: zero traces, looks clean, but observed nothing.
+  const blind = frameRegistryCanaryVerdict({ built: true, observing: false, faults: 0, verdicts: {} });
+  check('G/F1. built:true but observing:false → pass:false, ready:false (blind window)',
+    blind.pass === false && blind.ready === false && blind.reasons.some(r => r.includes('not-observing')));
+  const faulted = frameRegistryCanaryVerdict({ built: true, observing: true, faults: 2, verdicts: { passed: 1 } });
   check('G. faults>0 → pass:false', faulted.pass === false && faulted.reasons.some(r => r.includes('faults=2')));
-  // The key case: a wrap that threw with an EMPTY faults[] — faults alone reads clean.
-  const threwEmpty = frameRegistryCanaryVerdict({ built: true, faults: 0, verdicts: { threw: 1 } });
+  // A wrap that threw with an EMPTY faults[] — faults alone reads clean.
+  const threwEmpty = frameRegistryCanaryVerdict({ built: true, observing: true, faults: 0, verdicts: { threw: 1 } });
   check('G. threw verdict with empty faults[] → pass:false (both checks, not faults alone)',
     threwEmpty.pass === false && threwEmpty.reasons.some(r => r.includes('threw')));
-  const traceFault = frameRegistryCanaryVerdict({ built: true, faults: 0, verdicts: { 'trace-fault': 1 } });
+  const traceFault = frameRegistryCanaryVerdict({ built: true, observing: true, faults: 0, verdicts: { 'trace-fault': 1 } });
   check('G. trace-fault verdict → pass:false', traceFault.pass === false);
-  // The peer summary at rest (armed, no traffic) is a real clean-window input.
+  // F2 — malformed / truncated telemetry must FAIL CLOSED, not coerce to clean.
+  const f2 = [
+    ['null summary',           null],
+    ['array summary',          []],
+    ['missing faults',         { built: true, observing: true, verdicts: {} }],
+    ['faults null',            { built: true, observing: true, faults: null, verdicts: {} }],
+    ['faults negative',        { built: true, observing: true, faults: -1, verdicts: {} }],
+    ['faults non-finite',      { built: true, observing: true, faults: Infinity, verdicts: {} }],
+    ['verdicts null',          { built: true, observing: true, faults: 0, verdicts: null }],
+    ['threw wrong-typed',      { built: true, observing: true, faults: 0, verdicts: { threw: '1' } }],
+  ];
+  let f2AllFail = true;
+  for (const [, s] of f2) { if (frameRegistryCanaryVerdict(s).pass !== false) f2AllFail = false; }
+  check('G/F2. malformed telemetry (null/array/missing/negative/non-finite/wrong-typed) → all pass:false',
+    f2AllFail === true);
+  check('G/F2. an invalid summary reports an invalid-summary reason (not silently clean)',
+    frameRegistryCanaryVerdict({ built: true, observing: true, faults: null, verdicts: {} })
+      .reasons.some(r => r.includes('invalid-summary')));
 }
+
+// ── G2. observing reflects the LIVE runtime shadow gate on a real manager ──
+{
+  const prior = shadowEnabled();
+  const am = new AxonaManager({ dht: fakeDht(), frameRegistry: true });
+  setShadowEnabled(true);
+  check('G2. armed manager + shadow ON → summary.observing===true, verdict ready',
+    am.frameRegistrySummary().observing === true && frameRegistryCanaryVerdict(am.frameRegistrySummary()).ready === true);
+  setShadowEnabled(false);
+  check('G2. armed manager + shadow OFF → summary.observing===false, verdict pass:false (blind)',
+    am.frameRegistrySummary().observing === false && frameRegistryCanaryVerdict(am.frameRegistrySummary()).pass === false);
+  setShadowEnabled(prior);   // restore global flag
+}
+
+// ── D/E. PEER THREADING over a real SimTransport peer ──
 
 // ── D/E. PEER THREADING over a real SimTransport peer ──
 async function makePeer(net, domain, lat, lng, opts) {
