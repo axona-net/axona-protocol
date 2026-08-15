@@ -75,34 +75,52 @@ export const wireHandlersMethods = {
     };
   },
 
-  // REF-1.1 M1 canary telemetry: fold the bounded Boundary-1 trace ring into the
-  // shadow INVARIANT counters — the numbers the telemetry-only canary reports over
-  // live traffic. The invariant holds iff `faults === 0` and no verdict is 'threw'
-  // or 'trace-fault' (an observer that faulted or a handler the wrap could not
-  // observe). `verdicts`/`byType` give the distribution; nothing here reads or
-  // changes dispatch. Pure over the ring copy; safe to call any time.
+  // REF-1.1 M1a: the single ingestion path for Boundary-1 shadow traces (the
+  // registry sink calls this). Updates the MONOTONIC lifetime counters FIRST —
+  // they survive ring eviction — then pushes into the bounded 1024-entry ring,
+  // counting any eviction as `dropped`. Keeping ingestion in one named method
+  // (vs. an inline sink closure) lets the canary regression drive it directly.
+  // No effect on dispatch.
+  _ingestFrameTrace(rec) {
+    const L = this._frameLifetime;
+    if (L) {
+      L.total++;
+      const v = rec && typeof rec.verdict === 'string' ? rec.verdict : 'unknown';
+      L.verdicts[v] = (L.verdicts[v] || 0) + 1;
+      const ty = rec && typeof rec.type === 'string' ? rec.type : 'unknown';
+      L.byType[ty] = (L.byType[ty] || 0) + 1;
+      const f = rec && Array.isArray(rec.faults) ? rec.faults : [];
+      if (f.length) { L.faults++; for (const k of f) L.faultKinds[k] = (L.faultKinds[k] || 0) + 1; }
+    }
+    const b = this._frameTraces;
+    if (b) { if (b.length >= 1024) { b.shift(); if (L) L.dropped++; } b.push(rec); }
+  },
+
+  // REF-1.1 M1 canary telemetry: the shadow INVARIANT counters the telemetry-only
+  // canary reports over live traffic. These are the MONOTONIC lifetime tallies
+  // maintained at ingestion (_ingestFrameTrace) — they DO NOT reset on ring
+  // rollover, so a fault that scrolled out of the 1024-entry ring is still counted
+  // (council F1: the ring suffix alone can report a clean window over a dirty one).
+  // The invariant holds iff `faults === 0` and no verdict is 'threw' or
+  // 'trace-fault'. `dropped` = ring evictions; `ringSize` = recent-sample window.
+  // `built:false` means NOT ARMED — the canary must read it as not-ready, NEVER a
+  // clean pass. Nothing here reads or changes dispatch.
   frameRegistrySummary() {
-    const traces = this._frameTraces ? this._frameTraces : [];
-    const verdicts = Object.create(null);
-    const byType = Object.create(null);
-    const faultKinds = Object.create(null);
-    let faults = 0;
-    for (const t of traces) {
-      const v = t && typeof t.verdict === 'string' ? t.verdict : 'unknown';
-      verdicts[v] = (verdicts[v] || 0) + 1;
-      const ty = t && typeof t.type === 'string' ? t.type : 'unknown';
-      byType[ty] = (byType[ty] || 0) + 1;
-      const f = t && Array.isArray(t.faults) ? t.faults : [];
-      if (f.length) { faults++; for (const k of f) faultKinds[k] = (faultKinds[k] || 0) + 1; }
+    const L = this._frameLifetime;
+    if (!this._frameRegistry || !L) {
+      return { built: false, rows: 0, total: 0, faults: 0, dropped: 0,
+        faultKinds: {}, verdicts: {}, byType: {}, ringSize: 0 };
     }
     return {
-      built: !!this._frameRegistry,
-      rows: this._frameRegistry ? this._frameRegistry.size() : 0,
-      total: traces.length,
-      faults,           // MUST be 0 for the canary to pass
-      faultKinds,
-      verdicts,
-      byType,
+      built: true,
+      rows: this._frameRegistry.size(),
+      total: L.total,       // lifetime — survives rollover
+      faults: L.faults,     // lifetime — MUST be 0 for the canary to pass
+      dropped: L.dropped,   // ring evictions since arm (observability)
+      faultKinds: { ...L.faultKinds },
+      verdicts: { ...L.verdicts },
+      byType: { ...L.byType },
+      ringSize: this._frameTraces ? this._frameTraces.length : 0,
     };
   },
 

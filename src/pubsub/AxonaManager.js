@@ -208,10 +208,19 @@ export class AxonaManager {
     // (byte-identical). Traces land in a bounded ring for inspection. Must be
     // constructed BEFORE _registerHandlers() so the wrap map is available.
     this._frameTraces = frameRegistry ? [] : null;
+    // REF-1.1 M1a recut (council F1): MONOTONIC lifetime counters, updated at
+    // ingestion BEFORE the bounded ring may evict a trace — so a fault that
+    // scrolls out of the 1024-entry ring is still counted. The canary invariant
+    // reads THESE, not the ring suffix; the ring stays only for the recent sample.
+    // `dropped` counts ring evictions. Null unless the registry is armed.
+    this._frameLifetime = frameRegistry
+      ? { total: 0, faults: 0, dropped: 0,
+          faultKinds: Object.create(null), verdicts: Object.create(null), byType: Object.create(null) }
+      : null;
     this._frameRegistry = frameRegistry
       ? buildBoundary1Registry({
           enabled: shadowEnabled,
-          sink: (rec) => { const b = this._frameTraces; if (b.length >= 1024) b.shift(); b.push(rec); },
+          sink: (rec) => this._ingestFrameTrace(rec),
         })
       : null;
 

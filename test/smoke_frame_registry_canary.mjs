@@ -8,9 +8,12 @@
 //   1. THREADING — AxonaPeer accepts `frameRegistry` (DEFAULT-OFF) and threads it
 //      into its default AxonaManager, so a relay/standalone peer (not just the web
 //      transport) can arm Boundary-1. Default-off ≡ unarmed.
-//   2. THE FOLD — AxonaManager.frameRegistrySummary() folds the bounded trace ring
-//      into the invariant counters { total, faults, faultKinds, verdicts, byType }.
-//      The canary passes iff faults===0 and no 'threw'/'trace-fault' verdict.
+//   2. THE FOLD — AxonaManager.frameRegistrySummary() reports MONOTONIC lifetime
+//      counters { total, faults, dropped, faultKinds, verdicts, byType } maintained
+//      at ingestion (_ingestFrameTrace), so a fault that scrolls out of the bounded
+//      1024-entry ring is STILL counted (council F1 blocker regression). The canary
+//      passes iff faults===0 and no 'threw'/'trace-fault' verdict; built===false is
+//      not-ready, never a clean pass.
 //
 // This is a shadow surface: nothing here reads or changes dispatch. The verdict
 // EQUIVALENCE (flag-on ≡ flag-off, byte-identical) is owned by
@@ -57,19 +60,20 @@ console.log('\nREF-1.1 M1 — frame-registry canary surface (shadow)\n');
     su.built === true && su.rows === sh.rows && su.total === 0 && su.faults === 0);
 }
 
-// ── C. THE FOLD: synthetic traces fold into the exact invariant counters ──
+// ── C. THE FOLD: traces driven through the real ingestion path fold into the
+//    exact invariant counters. Drive via _ingestFrameTrace (the registry sink's
+//    single path), NOT a raw ring push, so lifetime counters are exercised. ──
 {
   const am = new AxonaManager({ dht: fakeDht(), frameRegistry: true });
-  // Push directly into the ring the wrap would fill. Mix clean + fault + a
-  // verdict that BREAKS the invariant (an observer that threw), so we prove the
-  // fold surfaces a violation rather than hiding it.
-  am._frameTraces.push(
+  // Mix clean + fault + a verdict that BREAKS the invariant (an observer that
+  // threw), so we prove the fold surfaces a violation rather than hiding it.
+  for (const r of [
     { type: 'pubsub:SUB',  verdict: 'passed',   faults: [] },
     { type: 'pubsub:PUB',  verdict: 'consumed', faults: [] },
     { type: 'pubsub:PUB',  verdict: 'passed',   faults: [] },
     { type: 'pubsub:SUB',  verdict: 'other',    faults: ['unregistered'] },
     { type: 'pubsub:KILL', verdict: 'threw',    faults: ['schema:type-mismatch'] },
-  );
+  ]) am._ingestFrameTrace(r);
   const s = am.frameRegistrySummary();
   check('C. fold: total counts every trace (5)', s.total === 5);
   check('C. fold: faults counts traces with non-empty faults[] (2) — the canary-fail signal',
@@ -84,6 +88,30 @@ console.log('\nREF-1.1 M1 — frame-registry canary surface (shadow)\n');
   // is VIOLATED — prove the fold makes that visible.
   const invariantHolds = s.faults === 0 && !s.verdicts['threw'] && !s.verdicts['trace-fault'];
   check('C. invariant: a fault + a threw verdict → invariant does NOT hold (fold surfaces it)',
+    invariantHolds === false);
+}
+
+// ── F. RING-ROLLOVER (council F1 BLOCKER regression): one fault, then MORE than
+//    1024 clean traces, evicts the fault from the bounded ring. The lifetime
+//    counters MUST still report it — otherwise the canary false-passes a dirty
+//    window. Proves faults/verdicts survive rollover and dropped/ringSize track. ──
+{
+  const am = new AxonaManager({ dht: fakeDht(), frameRegistry: true });
+  am._ingestFrameTrace({ type: 'pubsub:KILL', verdict: 'threw', faults: ['schema:type-mismatch'] });
+  for (let i = 0; i < 1030; i++) am._ingestFrameTrace({ type: 'pubsub:PUB', verdict: 'passed', faults: [] });
+  const ring = am.frameRegistryShadow();
+  const s = am.frameRegistrySummary();
+  // The ring alone lost the fault — the exact false-pass the council reproduced.
+  const ringFaults = ring.traces.filter((t) => Array.isArray(t.faults) && t.faults.length).length;
+  check('F. ring evicted the early fault (ring capped at 1024, fault gone from the suffix)',
+    ring.traces.length === 1024 && ringFaults === 0);
+  check('F. lifetime total counts every trace (1031), not just the ring', s.total === 1031);
+  check('F. lifetime faults STILL reports the evicted fault (1) — no false-pass', s.faults === 1);
+  check('F. lifetime verdicts.threw survives rollover (1)', s.verdicts['threw'] === 1);
+  check('F. dropped counts the ring evictions (7 = 1031 - 1024); ringSize === 1024',
+    s.dropped === 7 && s.ringSize === 1024);
+  const invariantHolds = s.faults === 0 && !s.verdicts['threw'] && !s.verdicts['trace-fault'];
+  check('F. invariant correctly FAILS the dirty window despite the clean ring suffix',
     invariantHolds === false);
 }
 
@@ -121,6 +149,12 @@ async function main() {
     esh.built === false && esh.rows === 0);
   check('E. default-off peer summary inert (built:false, total:0, faults:0)',
     esu.built === false && esu.total === 0 && esu.faults === 0);
+  // Council F1 requirement: an unarmed/not-yet-built summary is NOT a clean pass.
+  // The canary readiness gate is built===true; built===false means not-ready and
+  // must never be read as faults:0 == healthy.
+  const canaryReady = (sm) => sm.built === true;
+  check('E. built:false reads as NOT-ARMED / not-ready, never a clean pass',
+    canaryReady(esu) === false && canaryReady(dsu) === true);
 
   try { await armed.peer.leave?.(); } catch { /* */ }
   try { await off.peer.leave?.(); } catch { /* */ }
