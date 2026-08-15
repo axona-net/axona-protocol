@@ -2665,10 +2665,15 @@ export class AxonaPeer extends DHT {
   // REF-1.1 M1 canary surface. Delegates to the peer's AxonaManager. Both are
   // read-only shadow inspectors — no effect on dispatch. `frameRegistryShadow()`
   // returns { built, rows, traces } (built=false unless constructed with
-  // frameRegistry:true); `frameRegistrySummary()` folds the trace ring into the
-  // shadow INVARIANT counters { built, rows, total, faults, faultKinds, verdicts,
-  // byType } — the numbers the telemetry-only canary reports (invariant holds iff
+  // frameRegistry:true); `frameRegistrySummary()` returns the shadow INVARIANT
+  // counters { built, rows, total, faults, dropped, faultKinds, verdicts, byType,
+  // ringSize } — the numbers the telemetry-only canary reports (invariant holds iff
   // faults===0 and no 'threw'/'trace-fault' verdict). Empty/inert if not armed.
+  //
+  // The pre-lazy-build fallbacks below MUST return the SAME key set the built
+  // manager returns (council F2, 6dd4344): a canary reading summary.dropped before
+  // _requireAxonaManager must get 0, not undefined. Keep these shapes in lockstep
+  // with AxonaManager.frameRegistryShadow / frameRegistrySummary.
   frameRegistryShadow() {
     const am = this._axonaManager;
     return (am && typeof am.frameRegistryShadow === 'function')
@@ -2680,7 +2685,7 @@ export class AxonaPeer extends DHT {
     const am = this._axonaManager;
     return (am && typeof am.frameRegistrySummary === 'function')
       ? am.frameRegistrySummary()
-      : { built: false, rows: 0, total: 0, faults: 0, faultKinds: {}, verdicts: {}, byType: {} };
+      : { built: false, rows: 0, total: 0, faults: 0, dropped: 0, faultKinds: {}, verdicts: {}, byType: {}, ringSize: 0 };
   }
 
   health() {

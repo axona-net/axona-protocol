@@ -155,6 +155,21 @@ async function main() {
   const canaryReady = (sm) => sm.built === true;
   check('E. built:false reads as NOT-ARMED / not-ready, never a clean pass',
     canaryReady(esu) === false && canaryReady(dsu) === true);
+  // Council F2 (6dd4344): the PEER fallback (before the lazy manager build, when
+  // this._axonaManager is still null) MUST return the SAME key set as the built
+  // manager summary — so a canary reading summary.dropped / .ringSize pre-build
+  // gets 0, not undefined. Exercise that exact branch by nulling the manager.
+  const keysOf = (o) => Object.keys(o).sort().join(',');
+  const armedPeer = armed.peer;
+  const savedAm = armedPeer._axonaManager;
+  armedPeer._axonaManager = null;                 // simulate pre-lazy-build
+  const fb = armedPeer.frameRegistrySummary();    // hits the peer fallback branch
+  const fbShadow = armedPeer.frameRegistryShadow();
+  armedPeer._axonaManager = savedAm;              // restore
+  check('F2. peer fallback summary shape === built summary shape (dropped/ringSize present, ===0)',
+    keysOf(fb) === keysOf(dsu) && fb.dropped === 0 && fb.ringSize === 0 && fb.built === false);
+  check('F2. peer fallback shadow is inert (built:false, rows 0, no traces)',
+    fbShadow.built === false && fbShadow.rows === 0 && fbShadow.traces.length === 0);
 
   try { await armed.peer.leave?.(); } catch { /* */ }
   try { await off.peer.leave?.(); } catch { /* */ }
