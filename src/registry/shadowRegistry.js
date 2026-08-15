@@ -436,23 +436,52 @@ function verdictOf(r) {
 //   no 'threw'/'trace-fault' verdict — a threw can carry an empty faults[], so the
 //                       faults counter alone is insufficient (council carry-forward).
 // Telemetry validation (council F2, Aster/Vega): summary must be a plain object;
-// faults a non-negative safe integer; verdicts a plain counter object; each checked
-// verdict count, when present, a non-negative safe integer. Missing / null /
-// negative / non-finite / wrong-typed fields → pass:false with an invalid-summary
-// reason, NOT a coerced clean pass. Pure; every consumer (ops drain, canary slot,
-// tests) reads THIS, never a re-impl.
+// faults a non-negative safe integer; verdicts a plain counter object; each own
+// verdict count a non-negative safe integer. Missing / null / negative / non-finite
+// / wrong-typed fields → pass:false with an invalid-summary reason, NOT a coerced
+// clean pass. Pure; every consumer (ops drain, canary slot, tests) reads THIS.
+//
+// TOTAL over arbitrary input (council F3, Aster/Vega): the advertised contract is
+// that this NEVER throws — a rollout gate that raises on a hostile value is worse
+// than one that fails closed. Totality is delivered by TWO layers so it does not
+// rest on any single line:
+//   (1) an OUTER fail-closed boundary: any reflection trap (a Proxy getPrototypeOf
+//       / ownKeys trap that throws) or any unforeseen fault returns
+//       pass:false/ready:false. This alone makes the sentence true.
+//   (2) DESCRIPTOR-based field reads (Object.getOwnPropertyDescriptor +
+//       Reflect.ownKeys): only OWN DATA properties are read; an accessor (getter)
+//       is never invoked and is rejected as invalid; a Symbol key in verdicts is
+//       seen by Reflect.ownKeys (Object.keys hides it) and rejected, so it cannot
+//       bypass the string→count contract. No JSON.stringify / coercion of
+//       untrusted values; only static, field-specific reasons.
 // Returns { pass:boolean, ready:boolean, reasons:string[] }.
 export function frameRegistryCanaryVerdict(summary) {
-  // TOTAL over arbitrary input: this predicate must NEVER throw on malformed
-  // telemetry (council F2, Aster) — a rollout gate that raises is worse than one
-  // that fails closed. So no JSON.stringify / coercion of untrusted values; only
-  // static, field-specific reasons.
+  try {
+    return _frameRegistryCanaryVerdict(summary);
+  } catch {
+    // A reflection trap (throwing getPrototypeOf/ownKeys) is unreachable from an
+    // honest frameRegistrySummary(), but the predicate is advertised TOTAL and is
+    // the single rollout gate: an escape must fail closed, never propagate.
+    return { pass: false, ready: false, reasons: ['invalid-summary: reflection fault (fail-closed)'] };
+  }
+}
+
+function _frameRegistryCanaryVerdict(summary) {
   // isCount rejects bigint, string, NaN, Infinity, negative, and fractional —
   // typeof===number FIRST so a BigInt (typeof 'bigint') can never reach a throw.
   const isCount = (x) => typeof x === 'number' && Number.isSafeInteger(x) && x >= 0;
-  // A plain counter record: own-enumerable string→count map, prototype
-  // Object.prototype or null. Rejects Array, Date, Map, and other exotics that
-  // are typeof 'object' but not records (council F2.2).
+  // Own DATA-property read. Returns {value} for an own data property, {absent:true}
+  // when there is no own property, {accessor:true} for a getter/setter (NEVER
+  // invoked). getOwnPropertyDescriptor does not run accessors, so a throwing getter
+  // is reported, not triggered (council F3, Aster/Vega).
+  const ownData = (o, key) => {
+    const d = Object.getOwnPropertyDescriptor(o, key);
+    if (!d) return { absent: true };
+    if (!('value' in d)) return { accessor: true };
+    return { value: d.value };
+  };
+  // A plain counter record: prototype Object.prototype or null, not an Array.
+  // getPrototypeOf on a Proxy can trap+throw — caught by the outer boundary.
   const isPlainRecord = (o) => {
     if (o === null || typeof o !== 'object' || Array.isArray(o)) return false;
     const p = Object.getPrototypeOf(o);
@@ -462,26 +491,43 @@ export function frameRegistryCanaryVerdict(summary) {
     return { pass: false, ready: false, reasons: ['invalid-summary: not a plain object'] };
   }
   const reasons = [];
-  const built = summary.built === true;
-  const observing = summary.observing === true;   // runtime shadow gate is on
+  const builtD = ownData(summary, 'built');
+  const obsD = ownData(summary, 'observing');
+  if (builtD.accessor || obsD.accessor) {
+    return { pass: false, ready: false, reasons: ['invalid-summary: accessor field (built/observing)'] };
+  }
+  const built = builtD.value === true;
+  const observing = obsD.value === true;   // runtime shadow gate is on
   if (!built)     reasons.push('not-armed (built!==true)');
   if (!observing) reasons.push('not-observing (shadow gate off — blind window)');
-  // faults MUST be present and a valid count; absence/garbage is rejected, not clean.
-  if (!isCount(summary.faults)) reasons.push('invalid-summary: faults not a non-negative safe integer');
-  else if (summary.faults > 0)  reasons.push(`faults=${summary.faults}`);   // faults is a safe integer here
-  // verdicts MUST be a plain record AND every own counter value valid — not just
-  // the two the invariant reads. Only then apply the threw/trace-fault check.
-  const v = summary.verdicts;
-  if (!isPlainRecord(v)) {
+  // faults MUST be a present own-data valid count; accessor/absence/garbage rejected.
+  const faultsD = ownData(summary, 'faults');
+  if (faultsD.accessor)            reasons.push('invalid-summary: faults is an accessor');
+  else if (!isCount(faultsD.value)) reasons.push('invalid-summary: faults not a non-negative safe integer');
+  else if (faultsD.value > 0)       reasons.push(`faults=${faultsD.value}`);
+  // verdicts MUST be an own-data plain record AND every OWN key a string mapping to
+  // a valid count via an own data property — Reflect.ownKeys so a Symbol key cannot
+  // slip past (council F3.2). Only then read threw/trace-fault.
+  const vD = ownData(summary, 'verdicts');
+  if (vD.accessor) {
+    reasons.push('invalid-summary: verdicts is an accessor');
+  } else if (!isPlainRecord(vD.value)) {
     reasons.push('invalid-summary: verdicts not a plain counter object');
   } else {
-    let allCounts = true;
-    for (const key of Object.keys(v)) { if (!isCount(v[key])) { allCounts = false; break; } }
-    if (!allCounts) {
-      reasons.push('invalid-summary: verdicts has a non-integer counter');
+    const v = vD.value;
+    let bad = false;
+    for (const key of Reflect.ownKeys(v)) {
+      if (typeof key === 'symbol') { bad = true; break; }   // Symbol key violates string→count shape
+      const cD = ownData(v, key);
+      if (cD.accessor || !isCount(cD.value)) { bad = true; break; }
+    }
+    if (bad) {
+      reasons.push('invalid-summary: verdicts has a non-integer or non-string-keyed counter');
     } else {
-      if (v.threw > 0)          reasons.push(`threw=${v.threw}`);
-      if (v['trace-fault'] > 0) reasons.push(`trace-fault=${v['trace-fault']}`);
+      const threw = ownData(v, 'threw').value;             // validated count or absent(undefined)
+      const traceFault = ownData(v, 'trace-fault').value;
+      if (threw > 0)      reasons.push(`threw=${threw}`);
+      if (traceFault > 0) reasons.push(`trace-fault=${traceFault}`);
     }
   }
   const ready = built && observing;

@@ -172,6 +172,40 @@ console.log('\nREF-1.1 M1 — frame-registry canary surface (shadow)\n');
   totalPassFalse('Date verdicts',             { built: true, observing: true, faults: 0, verdicts: new Date(0) });
   totalPassFalse('Map verdicts',              { built: true, observing: true, faults: 0, verdicts: new Map() });
   totalPassFalse('invalid sibling counter',   { built: true, observing: true, faults: 0, verdicts: { passed: 'five' } });
+
+  // F3 (Aster CHANGES-REQUIRED 507ed5f; Vega 1085): the predicate is advertised
+  // TOTAL — it must NEVER throw, even on HOSTILE JavaScript values (reflection
+  // traps, throwing accessors, Symbol keys). These cannot come out of an honest
+  // frameRegistrySummary(), but this is the single rollout gate, so an escape must
+  // fail closed. Two layers close it: an outer try/catch, and descriptor-based
+  // reads (own DATA props only; Reflect.ownKeys so a Symbol key can't slip past).
+  // F3.1 — reflection traps / throwing accessors → non-throwing pass:false.
+  const proxyProtoThrow = new Proxy(
+    { built: true, observing: true, faults: 0, verdicts: {} },
+    { getPrototypeOf() { throw new Error('trap'); } });
+  totalPassFalse('Proxy getPrototypeOf trap throws', proxyProtoThrow);
+
+  const faultsGetterThrow = { built: true, observing: true, verdicts: {} };
+  Object.defineProperty(faultsGetterThrow, 'faults', { enumerable: true, configurable: true, get() { throw new Error('boom'); } });
+  totalPassFalse('throwing faults getter (accessor field)', faultsGetterThrow);
+
+  const builtGetterThrow = { observing: true, faults: 0, verdicts: {} };
+  Object.defineProperty(builtGetterThrow, 'built', { enumerable: true, configurable: true, get() { throw new Error('boom'); } });
+  totalPassFalse('throwing built getter (accessor field)', builtGetterThrow);
+
+  const vGetterThrow = Object.create(null);
+  Object.defineProperty(vGetterThrow, 'threw', { enumerable: true, configurable: true, get() { throw new Error('boom'); } });
+  totalPassFalse('verdicts w/ throwing enumerable counter getter', { built: true, observing: true, faults: 0, verdicts: vGetterThrow });
+
+  const vOwnKeysThrow = new Proxy({}, { ownKeys() { throw new Error('trap'); } });
+  totalPassFalse('verdicts Proxy ownKeys trap throws', { built: true, observing: true, faults: 0, verdicts: vOwnKeysThrow });
+
+  // F3.2 — a Symbol-key verdict sibling carrying a non-counter value. Object.keys
+  // (the 507ed5f impl) skipped it → false pass:true; Reflect.ownKeys catches it.
+  totalPassFalse('Symbol-key verdict sibling', { built: true, observing: true, faults: 0, verdicts: { [Symbol('x')]: 'five' } });
+  const symOnly = frameRegistryCanaryVerdict({ built: true, observing: true, faults: 0, verdicts: { [Symbol('x')]: 5 } });
+  check('G/F3.2. clean-looking window with only a Symbol-key verdict → pass:false (no Object.keys bypass)',
+    symOnly.pass === false && symOnly.reasons.some(r => r.includes('invalid-summary')));
 }
 
 // ── G2. observing reflects the LIVE runtime shadow gate on a real manager ──
