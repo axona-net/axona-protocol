@@ -48,6 +48,22 @@ function admit(a, b) {
   ok('disconnect() resolves', true);
 }
 
+// ── 1b. connect({ frameRegistry }) threads the shadow registry (REF-1.1 M1b code) ──
+{
+  console.log('\n── connect({ frameRegistry }) threading ──');
+  const on = await simPeer({ frameRegistry: true });
+  on.peer._requireAxonaManager('smoke');   // force the lazy default-manager build
+  const sOn = on.peer.frameRegistryShadow();
+  ok('connect({frameRegistry:true}) arms the default Boundary-1 registry (built===true, rows>0)',
+    sOn.built === true && sOn.rows > 0);
+  await on.disconnect();
+  const off = await simPeer();
+  off.peer._requireAxonaManager('smoke');
+  ok('connect() default → registry unarmed (built===false)',
+    off.peer.frameRegistryShadow().built === false);
+  await off.disconnect();
+}
+
 // ── 2. Author variants ───────────────────────────────────────────────
 {
   console.log('\n── author variants ──');

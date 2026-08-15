@@ -29,6 +29,7 @@ import { NeuronNode }               from '../src/dht/NeuronNode.js';
 import { SimNetwork, simTransport } from '../src/transport/sim/index.js';
 import { createNodeIdentity }       from '../src/identity/index.js';
 import { fromHex }                  from '../src/utils/hexid.js';
+import { frameRegistryCanaryVerdict } from '../src/registry/index.js';
 
 let passed = 0, failed = 0;
 const check = (label, cond, extra = '') => { if (cond) { console.log(`  ✓ ${label}`); passed++; } else { console.log(`  ✗ ${label} ${extra}`); failed++; } };
@@ -113,6 +114,28 @@ console.log('\nREF-1.1 M1 — frame-registry canary surface (shadow)\n');
   const invariantHolds = s.faults === 0 && !s.verdicts['threw'] && !s.verdicts['trace-fault'];
   check('F. invariant correctly FAILS the dirty window despite the clean ring suffix',
     invariantHolds === false);
+}
+
+// ── G. THE CANARY INVARIANT helper (REF-1.1 M1b): frameRegistryCanaryVerdict —
+//    the ONE canonical pass/fail every consumer reads. Pass iff armed AND
+//    faults===0 AND no threw/trace-fault. Both checks required: a threw can carry
+//    an empty faults[], so faults alone would false-pass (council carry-forward). ──
+{
+  const clean = frameRegistryCanaryVerdict({ built: true, faults: 0, verdicts: { passed: 5 } });
+  check('G. clean armed window → pass:true, ready:true, no reasons',
+    clean.pass === true && clean.ready === true && clean.reasons.length === 0);
+  const unarmed = frameRegistryCanaryVerdict({ built: false, faults: 0, verdicts: {} });
+  check('G. built:false → NOT ready, pass:false (never a clean pass)',
+    unarmed.pass === false && unarmed.ready === false);
+  const faulted = frameRegistryCanaryVerdict({ built: true, faults: 2, verdicts: { passed: 1 } });
+  check('G. faults>0 → pass:false', faulted.pass === false && faulted.reasons.some(r => r.includes('faults=2')));
+  // The key case: a wrap that threw with an EMPTY faults[] — faults alone reads clean.
+  const threwEmpty = frameRegistryCanaryVerdict({ built: true, faults: 0, verdicts: { threw: 1 } });
+  check('G. threw verdict with empty faults[] → pass:false (both checks, not faults alone)',
+    threwEmpty.pass === false && threwEmpty.reasons.some(r => r.includes('threw')));
+  const traceFault = frameRegistryCanaryVerdict({ built: true, faults: 0, verdicts: { 'trace-fault': 1 } });
+  check('G. trace-fault verdict → pass:false', traceFault.pass === false);
+  // The peer summary at rest (armed, no traffic) is a real clean-window input.
 }
 
 // ── D/E. PEER THREADING over a real SimTransport peer ──

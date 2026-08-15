@@ -423,4 +423,26 @@ function verdictOf(r) {
   return 'object';
 }
 
+// REF-1.1 M1b: the ONE canonical canary invariant over a frameRegistrySummary()
+// (peer- or manager-level). The telemetry-only canary passes iff the registry is
+// ARMED and observed no fault: built===true AND faults===0 AND no 'threw'/
+// 'trace-fault' verdict. Both the faults counter AND the verdict check are
+// required — a wrap that threw records verdict 'threw' but can leave faults[]
+// empty, so faults alone is insufficient (council carry-forward, Vega/Aster).
+// `built===false` is NOT-ARMED / not-ready and is never a clean pass. Pure over a
+// summary object; every consumer (ops drain, tests) reads THIS, never a re-impl.
+// Returns { pass:boolean, ready:boolean, reasons:string[] }.
+export function frameRegistryCanaryVerdict(summary) {
+  const s = summary || {};
+  const reasons = [];
+  const ready = s.built === true;
+  if (!ready) reasons.push('not-armed (built!==true)');
+  const faults = Number.isFinite(s.faults) ? s.faults : 0;
+  if (faults > 0) reasons.push(`faults=${faults}`);
+  const v = s.verdicts || {};
+  if (v.threw) reasons.push(`threw=${v.threw}`);
+  if (v['trace-fault']) reasons.push(`trace-fault=${v['trace-fault']}`);
+  return { pass: ready && reasons.length === 0, ready, reasons };
+}
+
 export default ShadowRegistry;
