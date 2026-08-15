@@ -75,6 +75,37 @@ export const wireHandlersMethods = {
     };
   },
 
+  // REF-1.1 M1 canary telemetry: fold the bounded Boundary-1 trace ring into the
+  // shadow INVARIANT counters — the numbers the telemetry-only canary reports over
+  // live traffic. The invariant holds iff `faults === 0` and no verdict is 'threw'
+  // or 'trace-fault' (an observer that faulted or a handler the wrap could not
+  // observe). `verdicts`/`byType` give the distribution; nothing here reads or
+  // changes dispatch. Pure over the ring copy; safe to call any time.
+  frameRegistrySummary() {
+    const traces = this._frameTraces ? this._frameTraces : [];
+    const verdicts = Object.create(null);
+    const byType = Object.create(null);
+    const faultKinds = Object.create(null);
+    let faults = 0;
+    for (const t of traces) {
+      const v = t && typeof t.verdict === 'string' ? t.verdict : 'unknown';
+      verdicts[v] = (verdicts[v] || 0) + 1;
+      const ty = t && typeof t.type === 'string' ? t.type : 'unknown';
+      byType[ty] = (byType[ty] || 0) + 1;
+      const f = t && Array.isArray(t.faults) ? t.faults : [];
+      if (f.length) { faults++; for (const k of f) faultKinds[k] = (faultKinds[k] || 0) + 1; }
+    }
+    return {
+      built: !!this._frameRegistry,
+      rows: this._frameRegistry ? this._frameRegistry.size() : 0,
+      total: traces.length,
+      faults,           // MUST be 0 for the canary to pass
+      faultKinds,
+      verdicts,
+      byType,
+    };
+  },
+
   // Decide what a topic-targeted message (SUB/PUB) should do at this node.
   //   'handle'  — this is the node that should act on it (the via waypoint, or,
   //               for a bare-topic message, the routing terminus = the root)
