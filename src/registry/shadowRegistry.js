@@ -443,27 +443,45 @@ function verdictOf(r) {
 // tests) reads THIS, never a re-impl.
 // Returns { pass:boolean, ready:boolean, reasons:string[] }.
 export function frameRegistryCanaryVerdict(summary) {
-  if (summary === null || typeof summary !== 'object' || Array.isArray(summary)) {
-    return { pass: false, ready: false, reasons: ['invalid-summary: not an object'] };
+  // TOTAL over arbitrary input: this predicate must NEVER throw on malformed
+  // telemetry (council F2, Aster) — a rollout gate that raises is worse than one
+  // that fails closed. So no JSON.stringify / coercion of untrusted values; only
+  // static, field-specific reasons.
+  // isCount rejects bigint, string, NaN, Infinity, negative, and fractional —
+  // typeof===number FIRST so a BigInt (typeof 'bigint') can never reach a throw.
+  const isCount = (x) => typeof x === 'number' && Number.isSafeInteger(x) && x >= 0;
+  // A plain counter record: own-enumerable string→count map, prototype
+  // Object.prototype or null. Rejects Array, Date, Map, and other exotics that
+  // are typeof 'object' but not records (council F2.2).
+  const isPlainRecord = (o) => {
+    if (o === null || typeof o !== 'object' || Array.isArray(o)) return false;
+    const p = Object.getPrototypeOf(o);
+    return p === Object.prototype || p === null;
+  };
+  if (!isPlainRecord(summary)) {
+    return { pass: false, ready: false, reasons: ['invalid-summary: not a plain object'] };
   }
-  const isCount = (x) => Number.isSafeInteger(x) && x >= 0;
   const reasons = [];
   const built = summary.built === true;
   const observing = summary.observing === true;   // runtime shadow gate is on
   if (!built)     reasons.push('not-armed (built!==true)');
   if (!observing) reasons.push('not-observing (shadow gate off — blind window)');
   // faults MUST be present and a valid count; absence/garbage is rejected, not clean.
-  if (!isCount(summary.faults)) reasons.push(`invalid-summary: faults=${JSON.stringify(summary.faults)}`);
-  else if (summary.faults > 0)  reasons.push(`faults=${summary.faults}`);
-  // verdicts MUST be a plain counter object; checked counts, when present, valid.
+  if (!isCount(summary.faults)) reasons.push('invalid-summary: faults not a non-negative safe integer');
+  else if (summary.faults > 0)  reasons.push(`faults=${summary.faults}`);   // faults is a safe integer here
+  // verdicts MUST be a plain record AND every own counter value valid — not just
+  // the two the invariant reads. Only then apply the threw/trace-fault check.
   const v = summary.verdicts;
-  if (v === null || typeof v !== 'object' || Array.isArray(v)) {
-    reasons.push(`invalid-summary: verdicts=${JSON.stringify(v)}`);
+  if (!isPlainRecord(v)) {
+    reasons.push('invalid-summary: verdicts not a plain counter object');
   } else {
-    for (const key of ['threw', 'trace-fault']) {
-      if (!Object.prototype.hasOwnProperty.call(v, key)) continue;
-      if (!isCount(v[key])) reasons.push(`invalid-summary: ${key}=${JSON.stringify(v[key])}`);
-      else if (v[key] > 0)  reasons.push(`${key}=${v[key]}`);
+    let allCounts = true;
+    for (const key of Object.keys(v)) { if (!isCount(v[key])) { allCounts = false; break; } }
+    if (!allCounts) {
+      reasons.push('invalid-summary: verdicts has a non-integer counter');
+    } else {
+      if (v.threw > 0)          reasons.push(`threw=${v.threw}`);
+      if (v['trace-fault'] > 0) reasons.push(`trace-fault=${v['trace-fault']}`);
     }
   }
   const ready = built && observing;

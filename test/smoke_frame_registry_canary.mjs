@@ -158,6 +158,20 @@ console.log('\nREF-1.1 M1 — frame-registry canary surface (shadow)\n');
   check('G/F2. an invalid summary reports an invalid-summary reason (not silently clean)',
     frameRegistryCanaryVerdict({ built: true, observing: true, faults: null, verdicts: {} })
       .reasons.some(r => r.includes('invalid-summary')));
+  // F2 recut-2 (Aster/Vega): the predicate must be TOTAL — never throw on malformed
+  // telemetry — and verdicts must be a plain record with EVERY own count valid, not
+  // just the two named keys. Each case must return pass:false WITHOUT throwing.
+  const totalPassFalse = (label, s) => {
+    let res;
+    try { res = frameRegistryCanaryVerdict(s); }
+    catch (e) { check(`G/F2b. ${label} → non-throwing`, false, `threw ${e}`); return; }
+    check(`G/F2b. ${label} → non-throwing pass:false`, res.pass === false);
+  };
+  totalPassFalse('BigInt faults (1n)',        { built: true, observing: true, faults: 1n, verdicts: {} });
+  totalPassFalse('BigInt verdict count',      { built: true, observing: true, faults: 0, verdicts: { threw: 1n } });
+  totalPassFalse('Date verdicts',             { built: true, observing: true, faults: 0, verdicts: new Date(0) });
+  totalPassFalse('Map verdicts',              { built: true, observing: true, faults: 0, verdicts: new Map() });
+  totalPassFalse('invalid sibling counter',   { built: true, observing: true, faults: 0, verdicts: { passed: 'five' } });
 }
 
 // ── G2. observing reflects the LIVE runtime shadow gate on a real manager ──
