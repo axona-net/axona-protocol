@@ -38,7 +38,7 @@ import { deriveTopicIdBig } from '../src/pubsub/post.js';
 import { createNodeIdentity, createAuthorIdentity } from '../src/identity/index.js';
 import { regionCenter } from '../src/utils/region-names.js';
 import { buildBoundary1Registry, boundary1Rows, rowDefs } from '../src/pubsub/boundary1Registry.js';
-import { setShadowEnabled } from '../src/registry/index.js';
+import { setShadowEnabled, frameRegistryCanaryVerdict } from '../src/registry/index.js';
 import { certify, certifyBigint } from '../src/registry/snapshotMint.js';
 import { encode } from '../src/transport/wire.js';
 import { T } from '../src/pubsub/constants.js';
@@ -134,8 +134,11 @@ async function runScenario({ frameRegistry, shadowOn, certifyInTransit = false }
   };
   const traces = [];
   for (const n of nodes) traces.push(...n.am.frameRegistryShadow().traces);
+  // Capture the M1c coverage summaries WHILE shadow is still on (observing reflects
+  // the live gate). Each node's frameRegistrySummary carries total/covered/unobserved.
+  const summaries = nodes.map((n) => n.am.frameRegistrySummary());
   setShadowEnabled(false);
-  return { outcome, traces };
+  return { outcome, traces, summaries };
 }
 
 async function main() {
@@ -221,8 +224,28 @@ async function main() {
     JSON.stringify(on.outcome) === JSON.stringify(base.outcome), `\n   off=${JSON.stringify(base.outcome)}\n   on =${JSON.stringify(on.outcome)}`);
   check('D2. scenario is non-trivial (a body was delivered and one was killed)',
     base.outcome.rootTombs.length === 1 && base.outcome.nodes.some((x) => x.got.length > 0));
-  check('D3. flag-on (unbranded live traffic) emits traces on the pubsub+dht boundary',
-    on.traces.length > 0 && on.traces.every((r) => r.boundary === 'pubsub+dht'));
+  // D3 (M1c): flag-on LIVE traffic is now CERTIFIED at the wrap via the mintLive
+  // re-encoder — the frames that used to read 'unbranded-source' (the M1 canary
+  // finding) are minted from a canonical bigint-faithful re-encode and OBSERVED.
+  check('D3. flag-on live traffic emits traces on the pubsub+dht boundary, NONE unbranded (M1c mint covers the live path)',
+    on.traces.length > 0 && on.traces.every((r) => r.boundary === 'pubsub+dht')
+    && !on.traces.some((r) => Array.isArray(r.faults) && r.faults.includes('unbranded-source')));
+  // D3b (M1c live-path regression, the Decision-1 unit): a real routed pubsub frame
+  // reaches a certified snapshot and exercises its schema — covered>0, unobserved===0
+  // on the observing node — and the canary predicate PASSES over that summary. This
+  // is the fix the M1 canary asked for: the live path is no longer 100% unbranded.
+  const covd = on.summaries.filter((s) => s.total > 0);
+  check('D3b. M1c live path: a node observed frames, all COVERED (covered===total, unobserved===0), schema exercised',
+    covd.length > 0 && covd.every((s) => s.unobserved === 0 && s.covered === s.total)
+    && on.traces.some((r) => typeof r.type === 'string' && r.type.startsWith('pubsub:') && r.schemaOk === true),
+    `\n   summaries=${JSON.stringify(on.summaries.map((s) => ({ t: s.total, c: s.covered, u: s.unobserved })))}`);
+  // A clean+live node (total>0, faults===0) must PASS the predicate — proving the
+  // M1c coverage gate no longer blocks a covered window (the pre-M1c live path was
+  // 100% unobserved → the predicate could never pass on real traffic).
+  const cleanLive = covd.filter((s) => s.faults === 0);
+  check('D3c. M1c: a clean+live covered summary PASSES frameRegistryCanaryVerdict',
+    cleanLive.length > 0 && cleanLive.every((s) => frameRegistryCanaryVerdict(s).pass === true),
+    `\n   clean=${cleanLive.length} verdicts=${JSON.stringify(cleanLive.map((s) => frameRegistryCanaryVerdict(s).reasons))}`);
   check('D4. registry-on but flag-OFF is byte-identical AND emits ZERO traces (inert wrap)',
     JSON.stringify(inert.outcome) === JSON.stringify(base.outcome) && inert.traces.length === 0);
   // D5 (F6): certified frames through the REAL handlers stay byte-identical AND are observed as BRANDED.

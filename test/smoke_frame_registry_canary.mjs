@@ -122,8 +122,10 @@ console.log('\nREF-1.1 M1 — frame-registry canary surface (shadow)\n');
 //    over VALID telemetry. Both blind windows (F1) and malformed summaries (F2)
 //    must fail closed, never coerce to clean (council: Aster seq 1073, Vega 1074). ──
 {
-  const clean = frameRegistryCanaryVerdict({ built: true, observing: true, faults: 0, verdicts: { passed: 5 } });
-  check('G. clean armed+observing window → pass:true, ready:true, no reasons',
+  // A clean PASS window now also requires COVERAGE (M1c): total>0 and covered===total
+  // (unobserved===0). A summary without them fails the coverage gate.
+  const clean = frameRegistryCanaryVerdict({ built: true, observing: true, faults: 0, unobserved: 0, total: 5, verdicts: { passed: 5 } });
+  check('G. clean armed+observing+covered window → pass:true, ready:true, no reasons',
     clean.pass === true && clean.ready === true && clean.reasons.length === 0);
   const unarmed = frameRegistryCanaryVerdict({ built: false, observing: false, faults: 0, verdicts: {} });
   check('G. built:false → NOT ready, pass:false (never a clean pass)',
@@ -206,6 +208,33 @@ console.log('\nREF-1.1 M1 — frame-registry canary surface (shadow)\n');
   const symOnly = frameRegistryCanaryVerdict({ built: true, observing: true, faults: 0, verdicts: { [Symbol('x')]: 5 } });
   check('G/F3.2. clean-looking window with only a Symbol-key verdict → pass:false (no Object.keys bypass)',
     symOnly.pass === false && symOnly.reasons.some(r => r.includes('invalid-summary')));
+
+  // ── G/COV. COVERAGE gate (REF-1.1 M1c — Decision-1 synthesis, Aster + Vega). The
+  //    predicate must fail a window that observed NO contracts even with faults===0.
+  //    total>0 (liveness, now IN the predicate) and unobserved===0 (covered===total).
+  //    This is what makes splitting 'unbranded-source' out of `faults` safe: an
+  //    all-unbranded window still fails — F1 cannot be renamed. ──
+  const covClean = frameRegistryCanaryVerdict({ built: true, observing: true, faults: 0, total: 3, unobserved: 0, verdicts: { passed: 3 } });
+  check('G/COV. covered live window (total>0, unobserved:0, faults:0) → pass:true',
+    covClean.pass === true && covClean.reasons.length === 0);
+  const covEmpty = frameRegistryCanaryVerdict({ built: true, observing: true, faults: 0, total: 0, unobserved: 0, verdicts: {} });
+  check('G/COV. total===0 (no traffic) → pass:false (liveness now in the predicate, not just the script)',
+    covEmpty.pass === false && covEmpty.reasons.some(r => r.includes('no-traffic')));
+  // The exact M1 canary window BEFORE the mint: total>0, faults:0, but every frame
+  // unobserved (unbranded). Splitting unbranded out of faults must NOT let this pass.
+  const covUncovered = frameRegistryCanaryVerdict({ built: true, observing: true, faults: 0, total: 1250, unobserved: 1250, verdicts: { unobserved: 1250 } });
+  check('G/COV. all-unbranded window (total>0, faults:0, unobserved===total) → pass:false (F1 not renamed)',
+    covUncovered.pass === false && covUncovered.reasons.some(r => r.includes('uncovered')));
+  const covPartial = frameRegistryCanaryVerdict({ built: true, observing: true, faults: 0, total: 10, unobserved: 3, verdicts: { passed: 7, unobserved: 3 } });
+  check('G/COV. partial coverage (covered<total) → pass:false',
+    covPartial.pass === false && covPartial.reasons.some(r => r.includes('uncovered')));
+  const covMissing = frameRegistryCanaryVerdict({ built: true, observing: true, faults: 0, total: 5, verdicts: { passed: 5 } });
+  check('G/COV. missing unobserved field → invalid-summary (fail-closed on the coverage field)',
+    covMissing.pass === false && covMissing.reasons.some(r => r.includes('invalid-summary') && r.includes('unobserved')));
+  const covTotAcc = { built: true, observing: true, faults: 0, unobserved: 0, verdicts: { passed: 1 } };
+  Object.defineProperty(covTotAcc, 'total', { enumerable: true, configurable: true, get() { throw new Error('boom'); } });
+  check('G/COV. total is a throwing accessor → non-throwing pass:false (fail-closed)',
+    frameRegistryCanaryVerdict(covTotAcc).pass === false);
 }
 
 // ── G2. observing reflects the LIVE runtime shadow gate on a real manager ──
