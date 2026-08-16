@@ -77,16 +77,17 @@ function rowDefs() {
 // Mint the Boundary-5 rows (defineRow-branded). Throws if any def fails validation.
 function boundary5Rows() { return rowDefs().map(defineRow); }
 
-// The wiring map: (wire, transportKind) -> { type, transportKind }. Keyed by the
-// composite so a wire bound on more than one primitive stays distinct; every
-// Boundary-5 wire is single-primitive, but the key shape matches Boundary-6 and
-// registerFrame's (wire, transportKind) resolution.
+// The wiring map: wire -> { type, transportKind }. Every Boundary-5 wire is
+// single-primitive, so it keys by the BARE wire, like Boundary-1 — the composite
+// (wire, transportKind) key is scoped to Boundary-6 alone, where two axona:direct
+// sites collide on one wire (Aster ASTER-E2-KEY-SCOPE: "make the composite lookup
+// change only in B6"). registerFrame resolves a bare-wire key when the caller
+// omits transportKind, and reads transportKind off the row to select the primitive.
 function frameWiring(defs) {
   const out = new Map();
   for (const d of defs) {
-    const key = frameWiringKey(d.wire, d.transportKind);
-    if (out.has(key)) throw new Error(`boundary5Registry: duplicate (wire,transportKind) ${d.wire}/${d.transportKind}`);
-    out.set(key, { type: d.type, transportKind: d.transportKind });
+    if (out.has(d.wire)) throw new Error(`boundary5Registry: duplicate wire ${d.wire} (Boundary-5 is single-primitive per wire)`);
+    out.set(d.wire, { type: d.type, transportKind: d.transportKind });
   }
   return out;
 }
