@@ -86,6 +86,39 @@ if (args.includes('--write')) {
 }
 
 // ── B. wire-literal gate [V2] ──
+//
+// NORMATIVE [V2] SCOPE (enshrined after council review — Aster d309de5f, Vega
+// 4d46c0ff, Orion 52be28fc). [V2] is INTENTIONALLY A DIRECT NAME-BINDING RESOLVER.
+// It answers one decidable question: does a callee name resolve, through DIRECT
+// binding introductions, to registerFrame — and if so, is its `wire` argument a
+// string literal or T.<name>?
+//
+// It binds the door across the finite set of name-introducer AST node types, each
+// handled WHEREVER it occurs:
+//   (a) import specifiers — named (ImportSpecifier imported.name === 'registerFrame',
+//       any source module, NOT a resolved re-export graph) / default (registerFrame.js)
+//       / namespace (registerFrame.js or the barrel registry/index.js);
+//   (b) VariableDeclarator;
+//   (c) AssignmentExpression '=';
+//   (d) AssignmentPattern — parameter default AND destructuring default, any nesting.
+// Targets: Identifier and ObjectPattern. RHS resolves ONLY when it is DIRECTLY an
+// already-bound Identifier or a recognized door-namespace member. Const-alias chains
+// close under fixpoint. Plain and optional call forms are matched. Flow-insensitive,
+// once-bound-stays-bound — the correct fail-closed over-approximation for a gate.
+//
+// This is a SCOPED claim, not an absolute one (Aster d309de5f): [V2] does NOT assert
+// there is no further syntax. Everything that would need VALUE-FLOW analysis rather
+// than direct name resolution is OUTSIDE [V2] by design — the E3 runtime capability
+// boundary's job, structurally closed there:
+//   - a value-preserving RHS expression: `const f = cond ? registerFrame : g`,
+//     `registerFrame || fallback`, a SequenceExpression, a call/IIFE return;
+//   - value flow through a container: `const [f] = [registerFrame]`;
+//   - computed member access ns['registerFrame'] (and its optional form) — [Q1];
+//   - a dynamic-import handle `(await import(...)).registerFrame` — [Q2];
+//   - a third-party re-exporter's namespace that is neither the definition module
+//     nor the barrel.
+// [V2] is the build-time direct-name-binding gate for the E1-E3 window; soundness is
+// the E3 closure-captured capability, not this gate.
 function wireLiteralViolations(fileList) {
   const bad = [];
   for (const { path: fp, code } of fileList) {
@@ -259,6 +292,9 @@ const synth = (code) => discover([{ path: 'src/__synth__.js', code }], { methods
   // Vega 4d46c0ff: AssignmentPattern also nests in destructuring defaults — same node type (d), not in params.
   const destrDefault = wireLiteralViolations([{ path: 'src/__wl_destrdefault__.js', code: "import { registerFrame } from '../registry/index.js'; const { f = registerFrame } = opts; const w = 'sub'; f(recv, w, () => {});" }]);
   destrDefault.length === 1 ? pass('NEG-B18. destructuring default `const { f = registerFrame } = x; f(recv, var, h)` FAILS the gate') : fail(`NEG-B18. destructuring-default binding not caught (${destrDefault.length})`);
+  // Vega f041e2fb: the header names the ARRAY-destructuring default too (same AssignmentPattern node) — prove it.
+  const arrDefault = wireLiteralViolations([{ path: 'src/__wl_arrdefault__.js', code: "import { registerFrame } from '../registry/index.js'; const [ f = registerFrame ] = arr; const w = 'sub'; f(recv, w, () => {});" }]);
+  arrDefault.length === 1 ? pass('NEG-B19. array-destructuring default `const [ f = registerFrame ] = x; f(recv, var, h)` FAILS the gate') : fail(`NEG-B19. array-destructuring-default binding not caught (${arrDefault.length})`);
 }
 
 // keep T imported-and-used (the wire-literal gate references the T namespace by design)
