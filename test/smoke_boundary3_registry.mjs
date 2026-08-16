@@ -84,7 +84,7 @@ const SIGNAL = { offer: { kind: 'sdp-offer', sdp: SDP }, answer: { kind: 'sdp-an
 const META = { 'peer-list': {}, 'peer-joined': {}, 'peer-left': {}, 'hello': { meshId: 'm1' }, 'hello-sig': { meshId: 'm1' } };
 const SIG_META = { from: 'aa1' };   // signal's required meta leg
 // non-variant wires drive the R sweep; signal is exercised in the V block
-const WIRES = ['peer-list', 'peer-joined', 'peer-left', 'hello', 'hello-sig'];
+const WIRES = ['peer-list', 'peer-joined', 'peer-left', 'hello', 'hello-sig'];   // mesh-establishment observe-sweep wires (mesh:signal-routed is swept separately: routed carrier, meta.targetId)
 
 console.log('\nREF-1.1 S4b — Boundary-3 (WebRTC signalling + mesh-auth) registry\n');
 
@@ -93,9 +93,9 @@ console.log('\nREF-1.1 S4b — Boundary-3 (WebRTC signalling + mesh-auth) regist
   const rows = boundary3Rows();
   const by = Object.fromEntries(rows.map((r) => [r.variant ? `${r.type}:${r.variant}` : r.type, r]));
   const types = new Set(rows.map((r) => r.type));
-  check('T1. TABLE: 8 rows over 6 types (peer-list/joined/left, signal×3 offer/answer/candidate, hello, hello-sig)',
-    rows.length === 8 && types.size === 6
-    && ['mesh:peer-list', 'mesh:peer-joined', 'mesh:peer-left', 'mesh:signal', 'mesh:hello', 'mesh:hello-sig'].every((t) => types.has(t))
+  check('T1. TABLE: 9 rows over 7 types (peer-list/joined/left, signal×3 offer/answer/candidate, hello, hello-sig, mesh:signal-routed E2.0)',
+    rows.length === 9 && types.size === 7
+    && ['mesh:peer-list', 'mesh:peer-joined', 'mesh:peer-left', 'mesh:signal', 'mesh:hello', 'mesh:hello-sig', 'mesh:signal-routed'].every((t) => types.has(t))
     && by['mesh:signal:offer'] && by['mesh:signal:answer'] && by['mesh:signal:candidate']);
 
   check('T2. kinds + outcomes: discovery UNSOLICITED_EVENT/PEER_*; signal ONE_WAY/*_APPLIED; hello ONE_WAY/NONCE_EXCHANGED; hello-sig ONE_WAY/CHANNEL_AUTHENTICATED',
@@ -158,9 +158,11 @@ console.log('\nREF-1.1 S4b — Boundary-3 (WebRTC signalling + mesh-auth) regist
 {
   const reg = buildBoundary3Registry({ enabled: false });
   const sig = reg.wiring.get('signal');
-  check('W1. WIRING: 8 rows; 6 wires; signal has value-gated variantBy on payload.kind (sdp-offer/sdp-answer/ice); every other wire maps to a single row, no variant split',
-    reg.size() === 8 && reg.wiring.size === 6
+  const msr = reg.wiring.get('mesh:signal');   // E2.0: distinct routed carrier, keyed by bare wire, transportKind routed, no variant
+  check('W1. WIRING: 9 rows; 7 wires; signal has value-gated variantBy on payload.kind (sdp-offer/sdp-answer/ice); mesh:signal is a routed carrier (no variant); every other wire maps to a single row, no variant split',
+    reg.size() === 9 && reg.wiring.size === 7
     && WIRES.every((w) => reg.wiring.get(w) && !reg.wiring.get(w).variantBy)
+    && msr && msr.type === 'mesh:signal-routed' && msr.transportKind === 'routed' && !msr.variantBy
     && sig && sig.type === 'mesh:signal' && sig.variantBy && sig.variantBy.path === 'kind'
     && sig.variantBy.cases['sdp-offer'] === 'offer' && sig.variantBy.cases['sdp-answer'] === 'answer' && sig.variantBy.cases['ice'] === 'candidate');
 }

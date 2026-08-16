@@ -220,7 +220,7 @@ const IN_SCOPE = new Map([
   ['bridge-notif|hello', ['B2', 'hello']], ['bridge-notif|hello-ack', ['B2', 'hello-ack']],
   ['webrtc-notif|hello', ['B3', 'hello']], ['webrtc-notif|hello-sig', ['B3', 'hello-sig']],
   ['webrtc-notif|cap-attest', ['B2', 'cap-attest']],
-  ['routed-dht|mesh:signal', ['B3', 'signal']],
+  ['routed-dht|mesh:signal', ['B3', 'mesh:signal']],   // E2.0 (Aster ASTER-E2-KEY-SCOPE): distinct routed wire, no longer folded onto `signal`
 ]);
 const OUT_OF_SCOPE = new Map([
   ['routed-dht|__tunneled_direct__', 'direct-messaging tunnel plane'],
@@ -266,8 +266,10 @@ const TABLE_ONLY = new Set(['B4:client-hello', 'B4:ping', 'B4:turn-refresh', 'B4
   for (const [b, wires] of Object.entries(REG)) for (const w of wires) if (!liveByB[b]?.has(w) && !TABLE_ONLY.has(`${b}:${w}`)) miss.push(`${b}:${w}`);
   check('INV2. backward: every registry wire is a live in-scope endpoint OR a documented TABLE_ONLY frame', miss.length === 0, `\n   miss: ${miss.join(', ')}`);
 }
-check('INV3. B3 `signal` has TWO endpoints pinned by surface: bridge-ws|signal AND routed-dht|mesh:signal, both → B3 wire signal',
-  A('bridge-ws', 'signal') && A('routed-dht', 'mesh:signal') && L.find((x) => x.surface === 'routed-dht' && x.wire === 'mesh:signal')?.regWire === 'signal' && REG.B3.has('signal'));
+check('INV3. B3 signalling endpoints now map to DISTINCT wires (E2.0, Aster ASTER-E2-KEY-SCOPE: do not reuse signal): bridge-ws|signal → B3 wire `signal`; routed-dht|mesh:signal → B3 wire `mesh:signal`',
+  A('bridge-ws', 'signal') && L.find((x) => x.surface === 'bridge-ws' && x.wire === 'signal')?.regWire === 'signal'
+  && A('routed-dht', 'mesh:signal') && L.find((x) => x.surface === 'routed-dht' && x.wire === 'mesh:signal')?.regWire === 'mesh:signal'
+  && REG.B3.has('signal') && REG.B3.has('mesh:signal'));
 check('INV4. hello is TWO endpoints pinned by surface: bridge-notif|hello→B2 AND webrtc-notif|hello→B3',
   L.find((x) => x.key === 'bridge-notif|hello')?.boundary === 'B2' && L.find((x) => x.key === 'webrtc-notif|hello')?.boundary === 'B3' && REG.B2.has('hello') && REG.B3.has('hello'));
 {
