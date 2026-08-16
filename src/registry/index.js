@@ -15,7 +15,7 @@ export {
   Retry, NOT_APPLICABLE, ConversationRole, PairSide,
 } from './types.js';
 export { ShadowRegistry, shadowEnabled, setShadowEnabled, frameRegistryCanaryVerdict } from './shadowRegistry.js';
-export { registerFrame } from './registerFrame.js';   // REF-1.1 E1: the one canonical frame-registration door
+export { registerFrame, frameWiringKey } from './registerFrame.js';   // REF-1.1 E1: the one canonical frame-registration door; E2.0: (wire,transportKind) key
 // NOTE: the snapshot mint (certify) is deliberately NOT re-exported, and its
 // subpath is blocked in package.json. That is API ENCAPSULATION / hygiene, NOT a
 // security boundary — a consumer can still resolve the file by URL (Aster S1g).

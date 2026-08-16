@@ -1,0 +1,106 @@
+// boundary5Registry.js — REF-1.1 E2.0: the Boundary-5 (DHT routing / core)
+// frame-contract registry TABLE plus the (wire, transportKind) wiring map that
+// E2.5 will route through registerFrame. Boundary-5 is one of the two new
+// registries E2.0 adds to home the E0 orphan set (council: David ruled two;
+// Aster ASTER-E2-SITE-IDENTITY, Vega 4b66abe0): it owns the ten A1 DHT-core
+// frames that no B1–B4 registry declared.
+//
+// SHADOW / CONTRACT-DECLARATION ONLY (E2.0). No handler moves here; this file
+// declares the ten routing frames so registerFrame and the ownership fence will
+// accept the E2.5 migration. Every flag-off path stays byte-identical; there is
+// no live observer wired to Boundary-5 yet.
+//
+// THE TEN FRAMES (AxonaPeer.start, verified against the E0 manifest):
+//   onRequest      lookup_step (:465) lookahead_probe (:483) local_probe (:598)
+//                  find_closest_set (:622) route_msg (:648)
+//   onNotification reinforce (:498) triadic_introduce (:526) hop_cache (:535)
+//                  lateral_spread (:536) peer-leaving (:563)
+// Each wire is bound on exactly ONE primitive, so unlike Boundary-6 there is no
+// same-wire collision inside this boundary.
+//
+// DELIBERATE MODELING DECISIONS (flagged for review):
+//   * KIND IS ONE_WAY, INCLUDING THE onRequest RPCs. lookup_step / lookahead_probe
+//     / local_probe / find_closest_set / route_msg return a value over the
+//     transport's request/response leg, but FrameKind.REQUEST_RESPONSE forces a
+//     `correlation` subject, and none of the CorrelationSubjectKinds
+//     (LegacyAuthorityRef / IngressRef / HolderRef / AuthorLaneRef) models a DHT
+//     lookup RPC — the reply is a transport-level return value, not a separately
+//     dispatched wire frame with a payload correlation key. This is the same
+//     impedance Boundary-2 hit with mutual-auth hello (ONE_WAY + documented). If
+//     the council wants the request/response nature captured, it needs a new
+//     CorrelationSubjectKind, not a forced fit here. `transportKind:'request'`
+//     still selects onRequest at registration; only the semantic KIND is ONE_WAY.
+//   * No new wire fields. Rows describe the EXISTING frames.
+//   * owningService groups the ten by plane: DhtRouting (the iterative lookup /
+//     route legs), SynaptomeLearning (synapse maintenance), PeerLifecycle.
+
+import { defineRow, FrameKind, Retry, NOT_APPLICABLE as NA, ShadowRegistry, frameWiringKey } from '../registry/index.js';
+
+const V = { min: 4, max: 4 };                 // Kernel-4 wire version (matches B1)
+
+// The Boundary-5 row DEFINITIONS. `wire` (the transport registration label) and
+// `transportKind` (the dispatch primitive) are carried on the def so the wiring
+// map derives from these; defineRow drops both as unknown keys.
+function rowDefs() {
+  const routing = (type, wire, transportKind, owningService, note) => ({
+    type, wire, transportKind, kind: FrameKind.ONE_WAY, owningService, versionRange: V,
+    retry: Retry.NONE, topicProfile: NA, eventIdScheme: NA, replayCursorType: NA, orderingModel: NA,
+    admissionGuard: NA, placementGuard: NA, note,
+  });
+  return [
+    // ── iterative lookup / routing legs (onRequest) ──
+    routing('dht:lookup_step',      'lookup_step',      'request', 'DhtRouting',
+      'one hop of the iterative lookup: given a target, return this node\'s closest known peers. Request/response over the transport leg; ONE_WAY semantic (no payload correlation subject).'),
+    routing('dht:lookahead_probe',  'lookahead_probe',  'request', 'DhtRouting',
+      'speculative next-hop probe used to prime the routing table ahead of the walk.'),
+    routing('dht:local_probe',      'local_probe',      'request', 'DhtRouting',
+      'liveness/identity probe of a directly-known peer; D-4 trimmed its disclosure.'),
+    routing('dht:find_closest_set', 'find_closest_set', 'request', 'DhtRouting',
+      'return the K closest known peers to a target id (K clamp is issue #433, out of scope here).'),
+    routing('dht:route_msg',        'route_msg',        'request', 'DhtRouting',
+      'forward an application/routed payload one hop toward its destination id.'),
+    // ── synaptome learning (onNotification) ──
+    routing('dht:reinforce',        'reinforce',        'notification', 'SynaptomeLearning',
+      'strengthen an EXISTING first-party synapse (capped weight); does not create table entries.'),
+    routing('dht:triadic_introduce','triadic_introduce','notification', 'SynaptomeLearning',
+      'gossip a candidate peer into the introduction pool, not directly into the table.'),
+    routing('dht:hop_cache',        'hop_cache',        'notification', 'SynaptomeLearning',
+      'cache a freshly-observed hop for later reuse; shares its handler with lateral_spread.'),
+    routing('dht:lateral_spread',   'lateral_spread',   'notification', 'SynaptomeLearning',
+      'lateral propagation of a hop observation; same handler as hop_cache.'),
+    // ── peer lifecycle (onNotification) ──
+    routing('dht:peer-leaving',     'peer-leaving',     'notification', 'PeerLifecycle',
+      'a peer announces departure; we delete its synapse and drop it from the table.'),
+  ];
+}
+
+// Mint the Boundary-5 rows (defineRow-branded). Throws if any def fails validation.
+function boundary5Rows() { return rowDefs().map(defineRow); }
+
+// The wiring map: (wire, transportKind) -> { type, transportKind }. Keyed by the
+// composite so a wire bound on more than one primitive stays distinct; every
+// Boundary-5 wire is single-primitive, but the key shape matches Boundary-6 and
+// registerFrame's (wire, transportKind) resolution.
+function frameWiring(defs) {
+  const out = new Map();
+  for (const d of defs) {
+    const key = frameWiringKey(d.wire, d.transportKind);
+    if (out.has(key)) throw new Error(`boundary5Registry: duplicate (wire,transportKind) ${d.wire}/${d.transportKind}`);
+    out.set(key, { type: d.type, transportKind: d.transportKind });
+  }
+  return out;
+}
+
+// Build a Boundary-5 ShadowRegistry with every row registered, plus the wiring
+// the E2.5 migration site will read. `enabled` gates observation (default-off).
+// Construction throws if any row fails defineRow validation.
+export function buildBoundary5Registry({ sink = () => {}, enabled, now, sampleEvery } = {}) {
+  const defs = rowDefs();
+  const reg = new ShadowRegistry({ boundary: 'dht-routing', sink, enabled, now, sampleEvery });
+  for (const d of defs) reg.register(defineRow(d));
+  reg.wiring = frameWiring(defs);
+  return reg;
+}
+
+export { boundary5Rows, rowDefs, frameWiring };
+export default buildBoundary5Registry;
