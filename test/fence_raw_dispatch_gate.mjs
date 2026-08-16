@@ -92,26 +92,50 @@ function wireLiteralViolations(fileList) {
     let ast;
     try { ast = acorn.parse(code, { ecmaVersion: 'latest', sourceType: 'module', allowHashBang: true, locations: true }); }
     catch { try { ast = acorn.parse(code, { ecmaVersion: 'latest', sourceType: 'script', allowHashBang: true, allowReturnOutsideFunction: true, locations: true }); } catch { continue; } }
-    // WALK THE BINDING (Vega E1 review): a call reaches registerFrame under its
-    // imported name, an import alias (import { registerFrame as rf }), or a const
-    // alias (const rf = registerFrame). Collect every local name bound to it so
-    // `rf(recv, computed, h)` is not invisible to [V2].
-    const bound = new Set(['registerFrame']);
+    // WALK THE BINDING (Vega E1 review, extended for the [V2] residual): a call
+    // reaches registerFrame under its imported name, a named import alias
+    // (import { registerFrame as rf }), a const alias (const rf = registerFrame),
+    // a DEFAULT import (import rf from '.../registerFrame.js'), or a NAMESPACE
+    // member callee (import * as ns from '.../registerFrame.js'; ns.registerFrame).
+    // registerFrame.js default-exports, so the last two are real reach paths; a
+    // narrower NEG-B3 does not cover the whole alias space. Collect every local
+    // name bound to it (Identifier callees) and every namespace binder (member
+    // callees) so none of `rf(recv, computed, h)` / `ns.registerFrame(recv, computed, h)`
+    // is invisible to [V2].
+    const isDoorSource = (v) => typeof v === 'string' && /(^|\/)registerFrame\.js$/.test(v);
+    const bound = new Set(['registerFrame']); // Identifier callees
+    const nsBinders = new Set();               // `import * as ns` from the door module
+    walk(ast, (n) => {
+      if (n.type !== 'ImportDeclaration') return;
+      const fromDoor = isDoorSource(n.source?.value);
+      for (const s of n.specifiers || []) {
+        if (s.type === 'ImportSpecifier' && s.imported?.name === 'registerFrame' && s.local?.name) bound.add(s.local.name);
+        if (s.type === 'ImportDefaultSpecifier' && fromDoor && s.local?.name) bound.add(s.local.name);
+        if (s.type === 'ImportNamespaceSpecifier' && fromDoor && s.local?.name) nsBinders.add(s.local.name);
+      }
+    });
     let grew = true;
     while (grew) { // fixpoint: const g = rf; const h = g; …
       grew = false;
       walk(ast, (n) => {
-        if (n.type === 'ImportSpecifier' && n.imported?.name === 'registerFrame' && n.local?.name && !bound.has(n.local.name)) { bound.add(n.local.name); grew = true; }
         if (n.type === 'VariableDeclarator' && n.id?.type === 'Identifier' && n.init?.type === 'Identifier' && bound.has(n.init.name) && !bound.has(n.id.name)) { bound.add(n.id.name); grew = true; }
       });
     }
+    const doorCallLabel = (callee) => callee.type === 'Identifier' ? callee.name
+      : `${callee.object.name}.${callee.property.name}`;
     walk(ast, (n) => {
-      if (n.type !== 'CallExpression' || n.callee?.type !== 'Identifier' || !bound.has(n.callee.name)) return;
+      if (n.type !== 'CallExpression') return;
+      const c = n.callee;
+      const idCall = c?.type === 'Identifier' && bound.has(c.name);
+      const nsCall = c?.type === 'MemberExpression' && !c.computed
+        && c.object?.type === 'Identifier' && nsBinders.has(c.object.name)
+        && c.property?.type === 'Identifier' && c.property.name === 'registerFrame';
+      if (!idCall && !nsCall) return;
       const a1 = n.arguments[1];
       const literalString = a1 && a1.type === 'Literal' && typeof a1.value === 'string';
       const tConst = a1 && a1.type === 'MemberExpression' && !a1.computed
         && a1.object?.type === 'Identifier' && a1.object.name === 'T' && a1.property?.type === 'Identifier';
-      if (!literalString && !tConst) bad.push(`${fp}:${n.loc?.start?.line ?? '?'} ${n.callee.name}(…, ${a1 ? a1.type : 'none'}, …) — wire must be a string literal or T.<name>`);
+      if (!literalString && !tConst) bad.push(`${fp}:${n.loc?.start?.line ?? '?'} ${doorCallLabel(c)}(…, ${a1 ? a1.type : 'none'}, …) — wire must be a string literal or T.<name>`);
     });
   }
   return bad;
@@ -146,6 +170,15 @@ const synth = (code) => discover([{ path: 'src/__synth__.js', code }], { methods
   // Vega E1 review: an IMPORT ALIAS or const alias of registerFrame must not hide a variable wire.
   const aliased = wireLiteralViolations([{ path: 'src/__wl_alias__.js', code: "import { registerFrame as rf } from '../registry/index.js'; const w = 'sub'; rf(recv, w, () => {});" }]);
   aliased.length === 1 ? pass('NEG-B3. an import-aliased registerFrame with a variable wire FAILS the gate (binding walked)') : fail(`NEG-B3. aliased registerFrame variable wire not caught (${aliased.length})`);
+  // Vega E1 review [V2] residual: registerFrame.js DEFAULT-exports, so a default import
+  // and a namespace member callee are real reach paths. Neither may hide a variable wire.
+  const defImp = wireLiteralViolations([{ path: 'src/__wl_default__.js', code: "import rf from '../registry/registerFrame.js'; const w = 'sub'; rf(recv, w, () => {});" }]);
+  defImp.length === 1 ? pass('NEG-B4. a DEFAULT-imported registerFrame with a variable wire FAILS the gate') : fail(`NEG-B4. default-imported registerFrame variable wire not caught (${defImp.length})`);
+  const nsImp = wireLiteralViolations([{ path: 'src/__wl_ns__.js', code: "import * as ns from '../registry/registerFrame.js'; const w = 'sub'; ns.registerFrame(recv, w, () => {});" }]);
+  nsImp.length === 1 ? pass('NEG-B5. a NAMESPACE member callee ns.registerFrame with a variable wire FAILS the gate') : fail(`NEG-B5. namespace member-callee variable wire not caught (${nsImp.length})`);
+  // Source-scoped: a default/namespace import from a NON-door module must NOT be bound (no false positive).
+  const notDoor = wireLiteralViolations([{ path: 'src/__wl_notdoor__.js', code: "import rf from './somethingElse.js'; import * as ns from './other.js'; const w = 'sub'; rf(recv, w, () => {}); ns.registerFrame(recv, w, () => {});" }]);
+  notDoor.length === 0 ? pass('NEG-B6. default/namespace imports from a non-door module are NOT bound (no false positive)') : fail(`NEG-B6. non-door import wrongly flagged (${notDoor.length})`);
 }
 
 // keep T imported-and-used (the wire-literal gate references the T namespace by design)
