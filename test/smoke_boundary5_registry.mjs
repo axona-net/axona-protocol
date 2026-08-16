@@ -35,29 +35,33 @@ check('T3. owningService planes: DhtRouting (5 routing legs), SynaptomeLearning 
 check('W1. wiring: 10 bare-wire keys; each value carries { wire, transportKind }; no composite keys',
   w.size === 10 && [...w.entries()].every(([k, v]) => v.wire === k && (v.transportKind === 'request' || v.transportKind === 'notification')));
 
-// registerFrame binds every B5 wire — bare-wire resolution (single-primitive), with OR without an explicit transportKind.
+// registerFrame binds every B5 wire via the BARE wire (transportKind OMITTED). B5
+// is single-primitive and bare-keyed, so under the STRICT composite/bare partition
+// (Aster E2.0 re-review 2795636a cond.2, correction a767b880) a SUPPLIED
+// transportKind is composite-only and ALWAYS refuses here — bind only by omitting.
 const recv = { onRequest: (wire) => `req:${wire}`, onNotification: (wire) => `notif:${wire}` };
 const reg = buildBoundary5Registry();
-let boundOk = 0;
+const threw = (fn) => { try { fn(); return false; } catch { return true; } };
+let boundOk = 0, suppliedRefused = 0;
 for (const d of defs) {
-  const got = registerFrame(recv, d.wire, () => {}, { registry: reg, transportKind: d.transportKind });
-  const bare = registerFrame(recv, d.wire, () => {}, { registry: reg });   // no transportKind → still resolves (single-primitive)
-  if (got.endsWith(`:${d.wire}`) && bare.endsWith(`:${d.wire}`)) boundOk++;
+  const bare = registerFrame(recv, d.wire, () => {}, { registry: reg });   // OMITTED → binds via the bare wire
+  if (bare.endsWith(`:${d.wire}`)) boundOk++;
+  // SUPPLIED — even the row's OWN kind — is composite-only, so it misses (B5 has no
+  // composite keys) and refuses. No bare-row-of-matching-kind fallback.
+  if (threw(() => registerFrame(recv, d.wire, () => {}, { registry: reg, transportKind: d.transportKind }))) suppliedRefused++;
 }
-check('R1. registerFrame binds all 10 wires via the correct primitive — with AND without an explicit transportKind', boundOk === 10, `\n   ${boundOk}/10`);
-check('R2. an undeclared wire is refused', (() => { try { registerFrame(recv, 'not_a_dht_wire', () => {}, { registry: reg, transportKind: 'request' }); return false; } catch { return true; } })());
-// STRICT KIND (Aster ASTER-E2-STRICT-KIND, Vega a42549d1): a supplied transportKind
-// that MISMATCHES a bare-wire row's own kind must REFUSE — it must not fall through
-// and dispatch the bare row's primitive. lookup_step is a request; naming it
-// notification must refuse (regression proof for the composite-miss fall-through).
-{
-  const threw = (fn) => { try { fn(); return false; } catch { return true; } };
-  check('R3. a MISMATCHED supplied transportKind refuses — lookup_step(request) named as notification does NOT fall through to the request row',
-    threw(() => registerFrame(recv, 'lookup_step', () => {}, { registry: reg, transportKind: 'notification' })));
-  check('R4. reinforce(notification) named as request refuses too — no bare-wire fall-through for either direction',
-    threw(() => registerFrame(recv, 'reinforce', () => {}, { registry: reg, transportKind: 'request' })));
-  check('R5. a malformed transportKind is rejected', threw(() => registerFrame(recv, 'lookup_step', () => {}, { registry: reg, transportKind: 'bogus' })));
-}
+check('R1. registerFrame binds all 10 wires via the BARE wire when transportKind is OMITTED', boundOk === 10, `\n   ${boundOk}/10`);
+check('R1b. a SUPPLIED transportKind — even the row\'s OWN kind — refuses on all 10 wires (strict composite-only; B5 is bare-keyed, no fallback)', suppliedRefused === 10, `\n   ${suppliedRefused}/10`);
+check('R2. an undeclared wire is refused', threw(() => registerFrame(recv, 'not_a_dht_wire', () => {}, { registry: reg })));
+// STRICT COMPOSITE-ONLY (Aster 2795636a cond.2 + correction a767b880): a supplied
+// transportKind takes the composite key ONLY; a miss refuses with NO bare-row
+// fallback — NOT EVEN when the bare row's own kind matches. That matching-bare-row
+// path was the alternate lookup Aster refused; these prove it is gone.
+check('R3. lookup_step named as its OWN kind (request) REFUSES — the matching-bare-row fallback path is gone',
+  threw(() => registerFrame(recv, 'lookup_step', () => {}, { registry: reg, transportKind: 'request' })));
+check('R4. lookup_step named as a MISMATCHED kind (notification) refuses too — composite miss, no fallback in either direction',
+  threw(() => registerFrame(recv, 'lookup_step', () => {}, { registry: reg, transportKind: 'notification' })));
+check('R5. a malformed transportKind is rejected', threw(() => registerFrame(recv, 'lookup_step', () => {}, { registry: reg, transportKind: 'bogus' })));
 
 console.log(`\nResult: ${passed} passed, ${failed} failed\n`);
 process.exit(failed === 0 ? 0 : 1);

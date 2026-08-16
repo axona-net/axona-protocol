@@ -20,12 +20,13 @@
 // sites on two DIFFERENT registries, which registerFrame already disambiguates by
 // the registry it is handed — not a door change.
 //
-// DELIBERATE MODELING DECISIONS (flagged for review):
-//   * KIND IS ONE_WAY, including the onRequest `axona:direct` leg — same reasoning
-//     as Boundary-5: the reply is a transport-level return value, no
-//     CorrelationSubjectKind models an app direct-message RPC, and
-//     FrameKind.REQUEST_RESPONSE would force a correlation subject. transportKind
-//     'request' still selects onRequest at registration.
+// MODELING (council-ratified, Aster ASTER-E2-CHANNEL-SUBJECT / Vega / Orion):
+//   * The axona:direct REQUEST leg is REQUEST_RESPONSE carrying the
+//     CorrelationSubjectKind.TransportRpcRef channel subject — the reply obligation
+//     is the transport request-return pair, not a payload field (empty requires +
+//     fixed transportScope 'request-return'). The notify + tunneled routed legs are
+//     fire-and-forget → ONE_WAY. transportKind 'request' still selects onRequest at
+//     registration.
 //   * No new wire fields. Rows describe the EXISTING frames.
 
 import { defineRow, FrameKind, Retry, NOT_APPLICABLE as NA, ShadowRegistry, frameWiringKey, CorrelationSubjectKind } from '../registry/index.js';

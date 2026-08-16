@@ -56,7 +56,7 @@ function rowDefs() {
   return [
     // ── iterative lookup / routing legs (onRequest) ──
     routing('dht:lookup_step',      'lookup_step',      'request', 'DhtRouting',
-      'one hop of the iterative lookup: given a target, return this node\'s closest known peers. Request/response over the transport leg; ONE_WAY semantic (no payload correlation subject).'),
+      'one hop of the iterative lookup: given a target, return this node\'s closest known peers. REQUEST_RESPONSE carrying the TransportRpcRef channel subject: the reply is the transport return, associated by the request-return pair, not a payload correlation.'),
     routing('dht:lookahead_probe',  'lookahead_probe',  'request', 'DhtRouting',
       'speculative next-hop probe used to prime the routing table ahead of the walk.'),
     routing('dht:local_probe',      'local_probe',      'request', 'DhtRouting',

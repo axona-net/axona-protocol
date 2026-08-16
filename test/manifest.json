@@ -894,6 +894,11 @@
       "file": "smoke_transport_rpc_ref.mjs",
       "class": "default",
       "note": "REF-1.1 E2.0 TransportRpcRef channel subject (Aster ASTER-E2-CHANNEL-SUBJECT, Vega, Orion ee0d0e13). The onRequest RPC reply obligation is FrameKind.REQUEST_RESPONSE + CorrelationSubjectKind.TransportRpcRef \u2014 a CHANNEL subject: the request-return pairing is the transport RPC channel, not a payload field. defineRow permits empty requires + fixed transportScope 'request-return' ONLY for REQUEST_RESPONSE+TransportRpcRef; rejects it for every other kind/subject (no generic empty-requires hatch). S1 mints; S2 rejects on wrong kind; S3 rejects empty-requires on IngressRef; S4 rejects transportScope on non-TransportRpcRef; S5/S6 (b) reject missing/invalid transportScope; S7 (c) reject a payload projection claimed as correlation id (non-empty requires); S8 (a) zero payload correlation keys => concurrent same-target requests stay distinct via the transport channel; S9/S10 the live B5 5 request legs + B6 axona:direct request carry it, notify/routed legs stay ONE_WAY. 10 checks."
+    },
+    {
+      "file": "smoke_strict_door_boundaries.mjs",
+      "class": "default",
+      "note": "REF-1.1 E2.0 strict composite/bare door proven SEPARATELY in each B1\u2013B5 registry + B6 (Aster E2.0 re-review 2795636a cond.2, correction a767b880). transportKind SUPPLIED => composite-key lookup ONLY, a miss REFUSES with no bare-row fallback (not even a matching-kind bare row); OMITTED => bare-wire lookup only. B1\u2013B5 are bare-keyed single-primitive, so a supplied transportKind ALWAYS refuses there (all 3 kinds, on a real declared wire); omitting binds. B6 is the sole composite registry: a named primitive binds via the composite key, an omitted kind refuses, a routed axona:direct refuses. 19 checks."
     }
   ]
 }

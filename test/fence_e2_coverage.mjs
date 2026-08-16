@@ -1,33 +1,35 @@
 // =====================================================================
-// fence_e2_coverage.mjs — REF-1.1 E2.0 site-identity coverage BIJECTION.
+// fence_e2_coverage.mjs — REF-1.1 E2.0 source-site → row coverage, proven as an
+// EXACT SET EQUALITY over a GENERATED artifact (Aster E2.0 re-review 2795636a
+// cond.3 + correction a767b880; Vega e7b1d3aa; Orion c927a0e7).
 //
-// Council spec (Aster ASTER-E2-SITE-IDENTITY / ASTER-E2-KEY-SCOPE /
-// ASTER-E2-REVIEW, Vega 4b66abe0 / b524f5af, Orion concurrence): before E2.1
-// migration, prove every E0 migration-target SOURCE SITE is owned by exactly one
-// boundary registry row — a one-to-one map, keyed by stable SOURCE-SITE identity
-// (source file:line + wire + transportKind), NOT by a count of (wire,transportKind).
+// Aster requires the coverage proof to be a GENERATED ARTIFACT mapping each
+// IMMUTABLE source-site identity to its intended boundary row, with exact
+// source-site-to-intended-row SET EQUALITY asserted. The distinct
+// (boundary, wire, transportKind) triples are only an injection implementation-
+// check — NOT a substitute for the source-site-to-row mapping.
 //
-// WHY A BIJECTION, NOT A COUNT (Aster ASTER-E2-REVIEW pt.1): an earlier cut keyed
-// the census by (wire, transportKind) and asserted #E0-sites === #declaring-
-// boundaries. That is a COUNT, not a bijection: count-equality can hide a
-// substitution among same-key sites, and it never proves WHICH source call-site is
-// owned. This gate instead resolves each of the 38 source sites to its INTENDED
-// boundary and asserts:
-//   (a) exactly 38 distinct source sites (file:line);
-//   (b) each site's intended boundary DECLARES its (wire, transportKind) row;
-//   (c) the 38 (boundary, wire, transportKind) ownership triples are DISTINCT —
-//       an injection: no two source sites claim the same boundary row;
-//   (d) every migration-target row the two NEW registries (B5, B6) declare is
-//       claimed by a source site — a surjection onto B5/B6: no dangling rows.
-// (wire, transportKind) is retained ONLY for B6 runtime lookup, never as the
-// census identity. The site→boundary map is DERIVED from the generated E0
-// manifest's per-site boundary label (disambiguating the two `hello` sites by
-// receiver), not asserted by hand.
+// So this gate does NOT re-derive a count. It:
+//   (1) loads test/REF-1.1-E2-coverage-manifest.json (the generated artifact);
+//   (2) re-runs the generator in memory and asserts the committed artifact is
+//       byte-identical — the artifact can never drift from the E0 sites or the
+//       registries (a set equality on the whole mapping);
+//   (3) asserts the 38 IMMUTABLE site identities are distinct (a real site set);
+//   (4) OWNERSHIP: every mapped (boundary, wire, transportKind) → rowType is
+//       actually declared by that boundary registry;
+//   (5) INJECTION: the 38 mapped (boundary, rowType) are distinct;
+//   (6) EXACT SET EQUALITY on the two NEW registries: the set of rowTypes the
+//       sites map into B5 (resp. B6) EQUALS the set of rowTypes B5 (resp. B6)
+//       declares — both directions, no missing row, no dangling row;
+//   (7) the two multiplicity cases proven by site identity (hello → B2+B3;
+//       axona:direct → B6 on two primitives);
+//   (8) the B1–B3 differential audit (B5-last soundness) unchanged.
 //
 // Run: node test/fence_e2_coverage.mjs
 // =====================================================================
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
+import { generate } from './gen_e2_coverage_manifest.mjs';
 import { rowDefs as r1, frameWiring as f1 } from '../src/pubsub/boundary1Registry.js';
 import { rowDefs as r2, frameWiring as f2 } from '../src/transport/boundary2Registry.js';
 import { rowDefs as r3, frameWiring as f3 } from '../src/transport/boundary3Registry.js';
@@ -37,86 +39,70 @@ import { rowDefs as r6, frameWiring as f6 } from '../src/dht/boundary6Registry.j
 
 let passed = 0, failed = 0;
 const check = (label, ok, extra = '') => { console.log(`  ${ok ? '✓' : '✗'} ${label}${ok ? '' : ' ' + extra}`); ok ? passed++ : failed++; };
+const setEqual = (a, b) => a.size === b.size && [...a].every((x) => b.has(x));
 
-console.log('\nREF-1.1 E2.0 — site-identity coverage bijection (38 E0 sites ↔ B1–B6 rows)\n');
+console.log('\nREF-1.1 E2.0 — source-site → row coverage as exact set equality (generated artifact)\n');
 
-// ── the 38 E0 migration-target SOURCE SITES, from the generated manifest ──
-const manifest = JSON.parse(readFileSync(fileURLToPath(new URL('./REF-1.1-E0-manifest.json', import.meta.url)), 'utf8'));
-const targets = manifest.rows.filter((r) => r.classification === 'migration-target');
-const TK = { onRequest: 'request', onNotification: 'notification', onRoutedMessage: 'routed', 'on(T.*)': 'routed' };
+// ── (1) load the GENERATED artifact ──
+const artifactPath = fileURLToPath(new URL('./REF-1.1-E2-coverage-manifest.json', import.meta.url));
+const committedText = readFileSync(artifactPath, 'utf8');
+const artifact = JSON.parse(committedText);
+const sites = artifact.sites;
 
-// Resolve each site's INTENDED E2.0 boundary from its manifest boundary label. The
-// only ambiguous label is `B2/B3` — the two `hello` sites (bridge auth → B2, mesh
-// auth → B3), disambiguated by the manifest's receiver tag. This map is the S4
-// ownership assignment; the gate proves the registries realize it.
-function intendedBoundary(row) {
-  const b = row.boundary;
-  if (b === 'B1' || b === 'B2' || b === 'B3') return b;
-  if (b === 'dht:transport') return 'B5';
-  if (b === 'direct') return 'B6';
-  if (b === 'B2/B3') return row.receiver === 'bridge' ? 'B2' : row.receiver === 'webrtc' ? 'B3' : null;
-  return null;
-}
-const sites = targets.map((row) => ({
-  id: `${row.file}:${row.line}`, wire: row.wire, tk: TK[row.callee], boundary: intendedBoundary(row),
-}));
+// ── (2) DRIFT GUARD: the committed artifact must equal a fresh regeneration ──
+const fresh = generate();
+const freshText = JSON.stringify(fresh, null, 2) + '\n';
+check('C1. the committed coverage artifact is byte-identical to a fresh regeneration from E0 + the registries — it cannot drift',
+  committedText === freshText, `\n   run: node test/gen_e2_coverage_manifest.mjs --write`);
+check('C2. exactly 38 migration-target source sites in the artifact', sites.length === 38, `\n   got ${sites.length}`);
+check('C3. every site carries an immutable identity, a transportKind, an intended boundary, and a resolved rowType',
+  sites.every((s) => s.identity && s.transportKind && s.boundary && s.rowType),
+  `\n   incomplete: ${sites.filter((s) => !(s.identity && s.transportKind && s.boundary && s.rowType)).map((s) => s.site).join(', ')}`);
 
-check('C1. exactly 38 migration-target source sites', sites.length === 38, `\n   got ${sites.length}`);
-check('C2. every site resolves a transportKind AND an unambiguous intended boundary',
-  sites.every((s) => s.tk && s.boundary),
-  `\n   unresolved: ${sites.filter((s) => !s.tk || !s.boundary).map((s) => `${s.id} ${s.wire}`).join(', ')}`);
-check('C3. the 38 source-site ids (file:line) are DISTINCT — a real set of call sites',
-  new Set(sites.map((s) => s.id)).size === 38);
+// ── (3) the 38 IMMUTABLE site identities are distinct — a real set of call sites ──
+check('C4. the 38 immutable source-site identities (file ‖ wire ‖ transportKind ‖ receiver) are DISTINCT',
+  new Set(sites.map((s) => s.identity)).size === 38,
+  `\n   distinct=${new Set(sites.map((s) => s.identity)).size}`);
 
-// ── declared (wire, transportKind) rows per boundary, from the live registries ──
+// ── the live registries, keyed by intended-boundary label ──
 const REG = { B1: f1(r1()), B2: f2(r2()), B3: f3(r3()), B4: f4(r4()), B5: f5(r5()), B6: f6(r6()) };
-// A boundary's wiring is keyed by the BARE wire (B1–B5) or by a composite (B6);
-// every value carries transportKind, and B6 values also carry .wire. So the wire
-// of a row is (value.wire ?? its map key), uniformly.
-const declares = (boundary, wire, tk) => {
-  for (const [key, v] of REG[boundary]) if ((v.wire ?? key) === wire && v.transportKind === tk) return true;
-  return false;
+const resolveType = (boundary, wire, tk) => {
+  for (const [key, v] of REG[boundary]) if ((v.wire ?? key) === wire && v.transportKind === tk) return v.type;
+  return null;
 };
 
-// (b) OWNERSHIP: each site's intended boundary declares its (wire, transportKind).
-const unowned = sites.filter((s) => s.boundary && !declares(s.boundary, s.wire, s.tk));
-check('C4. OWNERSHIP: every source site\'s intended boundary declares its (wire, transportKind) row',
-  unowned.length === 0, `\n   ${unowned.map((s) => `${s.id} → ${s.boundary} lacks (${s.wire},${s.tk})`).join('\n   ')}`);
+// ── (4) OWNERSHIP: each mapped (boundary, wire, transportKind) → rowType is really declared ──
+const unowned = sites.filter((s) => resolveType(s.boundary, s.wire, s.transportKind) !== s.rowType);
+check('C5. OWNERSHIP: every mapped site (boundary, wire, transportKind) resolves in that registry to EXACTLY the artifact\'s rowType',
+  unowned.length === 0,
+  `\n   ${unowned.map((s) => `${s.site} → ${s.boundary}(${s.wire},${s.transportKind}) got ${resolveType(s.boundary, s.wire, s.transportKind)} ≠ ${s.rowType}`).join('\n   ')}`);
 
-// (c) INJECTION: the 38 (boundary, wire, transportKind) ownership triples are distinct.
-const triples = sites.map((s) => `${s.boundary}|${s.tk}|${s.wire}`);
-const dupTriples = triples.filter((t, i) => triples.indexOf(t) !== i);
-check('C5. INJECTION: the 38 (boundary, wire, transportKind) ownership triples are DISTINCT — no two source sites claim the same boundary row',
-  new Set(triples).size === 38, `\n   collisions: ${[...new Set(dupTriples)].join(', ')}`);
+// ── (5) INJECTION: the 38 mapped (boundary, rowType) are distinct — no two sites share a row ──
+const rowKeys = sites.map((s) => `${s.boundary}|${s.rowType}`);
+check('C6. INJECTION: the 38 mapped (boundary, rowType) targets are DISTINCT — no two source sites claim the same row',
+  new Set(rowKeys).size === 38,
+  `\n   collisions: ${[...new Set(rowKeys.filter((k, i) => rowKeys.indexOf(k) !== i))].join(', ')}`);
 
-// (a)+(b)+(c) together: a bijection between the 38 sites and 38 distinct owning rows.
-check('C6. BIJECTION: 38 distinct source sites map one-to-one onto 38 distinct owning boundary rows',
-  sites.length === 38 && new Set(triples).size === 38 && unowned.length === 0);
+// ── (6) EXACT SET EQUALITY on the two NEW registries (B5, B6): mapped rowTypes ↔ declared rowTypes ──
+for (const b of ['B5', 'B6']) {
+  const declared = new Set([...REG[b].values()].map((v) => v.type));
+  const mapped = new Set(sites.filter((s) => s.boundary === b).map((s) => s.rowType));
+  check(`C7.${b} EXACT SET EQUALITY: the rowTypes the sites map into ${b} EQUAL the rowTypes ${b} declares (no missing, no dangling)`,
+    setEqual(mapped, declared),
+    `\n   declared=[${[...declared].sort()}]\n   mapped=[${[...mapped].sort()}]`);
+}
 
-// (d) SURJECTION onto the two NEW registries: every migration-target row B5/B6
-// declares is claimed by a source site (no dangling new-registry rows). B5=10 dht
-// sites, B6=3 direct sites (axona:direct×2 + tunneled).
-const ownedTriples = new Set(triples);
-const danglingIn = (boundary) => [...REG[boundary].entries()]
-  .filter(([key, v]) => !ownedTriples.has(`${boundary}|${v.transportKind}|${v.wire ?? key}`))
-  .map(([key, v]) => `${v.wire ?? key}/${v.transportKind}`);
-check('C7. Boundary-5 declares EXACTLY the DHT-routing target rows — every B5 row is claimed by a site, none dangling',
-  REG.B5.size === sites.filter((s) => s.boundary === 'B5').length && danglingIn('B5').length === 0,
-  `\n   B5 rows=${REG.B5.size} sites=${sites.filter((s) => s.boundary === 'B5').length} dangling=${danglingIn('B5')}`);
-check('C8. Boundary-6 declares EXACTLY the direct-messaging target rows (axona:direct×2 + tunneled), none dangling',
-  REG.B6.size === sites.filter((s) => s.boundary === 'B6').length && danglingIn('B6').length === 0,
-  `\n   B6 rows=${REG.B6.size} sites=${sites.filter((s) => s.boundary === 'B6').length} dangling=${danglingIn('B6')}`);
-
-// The two multiplicity cases are NOW proven by site identity, not by count:
-check('C9. hello is TWO distinct source sites owned by DIFFERENT registries — bridge(B2) and webrtc(B3), same wire+kind, distinct rows',
+// ── (7) the two multiplicity cases, by SITE IDENTITY not count ──
+check('C8. hello is TWO distinct sites owned by DIFFERENT registries — B2 (bridge) and B3 (webrtc), disambiguated by receiver',
   sites.filter((s) => s.wire === 'hello').length === 2
-  && new Set(sites.filter((s) => s.wire === 'hello').map((s) => s.boundary)).size === 2);
-check('C10. axona:direct is TWO distinct source sites in ONE registry (B6) on different primitives — request + notification',
+  && new Set(sites.filter((s) => s.wire === 'hello').map((s) => s.boundary)).size === 2
+  && new Set(sites.filter((s) => s.wire === 'hello').map((s) => s.receiver)).size === 2);
+check('C9. axona:direct is TWO distinct sites in ONE registry (B6) on different primitives — request + notification',
   sites.filter((s) => s.wire === 'axona:direct').length === 2
   && sites.filter((s) => s.wire === 'axona:direct').every((s) => s.boundary === 'B6')
-  && new Set(sites.filter((s) => s.wire === 'axona:direct').map((s) => s.tk)).size === 2);
+  && new Set(sites.filter((s) => s.wire === 'axona:direct').map((s) => s.transportKind)).size === 2);
 
-// ── B1–B3 differential dependency audit (Aster/Vega: is B5-last sound?) ──
+// ── (8) B1–B3 differential dependency audit (Aster/Vega: is B5-last sound?) ──
 const DIFF_SMOKES = ['smoke_boundary1_registry.mjs', 'smoke_boundary2_registry.mjs', 'smoke_boundary3_registry.mjs'];
 const B5_WIRES = new Set(sites.filter((s) => s.boundary === 'B5').map((s) => s.wire));
 const leak = [];
@@ -125,7 +111,7 @@ for (const f of DIFF_SMOKES) {
   if (/boundary5Registry/.test(src)) leak.push(`${f} imports boundary5Registry`);
   for (const w of B5_WIRES) if (src.includes(`'${w}'`) || src.includes(`"${w}"`)) leak.push(`${f} references B5 wire ${w}`);
 }
-check('C11. B1–B3 differential audit: no B1–B3 smoke imports B5 or names a DHT-routing wire — B5-last is sound', leak.length === 0, `\n   ${leak.join('\n   ')}`);
+check('C10. B1–B3 differential audit: no B1–B3 smoke imports B5 or names a DHT-routing wire — B5-last is sound', leak.length === 0, `\n   ${leak.join('\n   ')}`);
 
 console.log(`\nResult: ${passed} passed, ${failed} failed\n`);
 process.exit(failed === 0 ? 0 : 1);
