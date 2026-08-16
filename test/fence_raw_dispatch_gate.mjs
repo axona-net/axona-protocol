@@ -124,11 +124,33 @@ function wireLiteralViolations(fileList) {
         if (s.type === 'ImportNamespaceSpecifier' && isNsDoorSource(src) && s.local?.name) nsBinders.add(s.local.name);
       }
     });
+    // extract `registerFrame` off a door namespace `ns` into an Identifier: matches
+    // both `ns.registerFrame` (member) and `{ registerFrame: x }` (ObjectPattern key).
+    const nsExtractName = (init, id) => {
+      if (init?.type === 'MemberExpression' && !init.computed
+          && init.object?.type === 'Identifier' && nsBinders.has(init.object.name)
+          && init.property?.type === 'Identifier' && init.property.name === 'registerFrame'
+          && id?.type === 'Identifier') return id.name; // (5) const rf = ns.registerFrame
+      return null;
+    };
     let grew = true;
-    while (grew) { // fixpoint: const g = rf; const h = g; …
+    while (grew) { // fixpoint (Aster/Vega V2 enum): Identifier→Identifier copy, plus the two
+                   // namespace-extraction hops 5 & 6 that copy a member/destructure into an Identifier
       grew = false;
       walk(ast, (n) => {
-        if (n.type === 'VariableDeclarator' && n.id?.type === 'Identifier' && n.init?.type === 'Identifier' && bound.has(n.init.name) && !bound.has(n.id.name)) { bound.add(n.id.name); grew = true; }
+        if (n.type !== 'VariableDeclarator') return;
+        // Identifier -> Identifier copy: const g = rf; const h = g; …
+        if (n.id?.type === 'Identifier' && n.init?.type === 'Identifier' && bound.has(n.init.name) && !bound.has(n.id.name)) { bound.add(n.id.name); grew = true; }
+        // (5) const rf = ns.registerFrame  (door-namespace member copied to an Identifier)
+        const m = nsExtractName(n.init, n.id);
+        if (m && !bound.has(m)) { bound.add(m); grew = true; }
+        // (6) const { registerFrame: rf } = ns  (door-namespace destructured to an Identifier)
+        if (n.id?.type === 'ObjectPattern' && n.init?.type === 'Identifier' && nsBinders.has(n.init.name)) {
+          for (const p of n.id.properties || []) {
+            if (p.type === 'Property' && !p.computed && p.key?.type === 'Identifier' && p.key.name === 'registerFrame'
+                && p.value?.type === 'Identifier' && !bound.has(p.value.name)) { bound.add(p.value.name); grew = true; }
+          }
+        }
       });
     }
     const doorCallLabel = (callee) => callee.type === 'Identifier' ? callee.name
@@ -195,6 +217,21 @@ const synth = (code) => discover([{ path: 'src/__synth__.js', code }], { methods
   barrelNs.length === 1 ? pass('NEG-B7. a barrel-namespace callee ns.registerFrame (registry/index.js) with a variable wire FAILS the gate') : fail(`NEG-B7. barrel-namespace member-callee variable wire not caught (${barrelNs.length})`);
   const barrelDir = wireLiteralViolations([{ path: 'src/__wl_barreldir__.js', code: "import * as ns from '../registry'; const w = 'sub'; ns.registerFrame(recv, w, () => {});" }]);
   barrelDir.length === 1 ? pass('NEG-B8. a bare-directory barrel namespace (../registry) callee with a variable wire FAILS the gate') : fail(`NEG-B8. bare-directory barrel namespace not caught (${barrelDir.length})`);
+  // Aster bf095d87 = Vega 725a61f0: the two namespace-EXTRACTION hops that copy a door
+  // namespace member/destructure into an Identifier, then call it. Fold into the fixpoint.
+  const nsMember = wireLiteralViolations([{ path: 'src/__wl_nsmember__.js', code: "import * as ns from '../registry/index.js'; const f = ns.registerFrame; const w = 'sub'; f(recv, w, () => {});" }]);
+  nsMember.length === 1 ? pass('NEG-B9. `const f = ns.registerFrame; f(recv, var, h)` (shape 5) FAILS the gate') : fail(`NEG-B9. ns-member extraction not caught (${nsMember.length})`);
+  const nsDestr = wireLiteralViolations([{ path: 'src/__wl_nsdestr__.js', code: "import * as ns from '../registry/index.js'; const { registerFrame: f } = ns; const w = 'sub'; f(recv, w, () => {});" }]);
+  nsDestr.length === 1 ? pass('NEG-B10. `const { registerFrame: f } = ns; f(recv, var, h)` (shape 6) FAILS the gate') : fail(`NEG-B10. ns-destructure extraction not caught (${nsDestr.length})`);
+  // no false positive: the same extraction hops off a NON-door namespace must NOT bind.
+  const nsExtractNotDoor = wireLiteralViolations([{ path: 'src/__wl_nsx_notdoor__.js', code: "import * as ns from './other.js'; const f = ns.registerFrame; const { registerFrame: g } = ns; const w = 'sub'; f(recv, w, () => {}); g(recv, w, () => {});" }]);
+  nsExtractNotDoor.length === 0 ? pass('NEG-B11. extraction hops off a NON-door namespace are NOT bound (no false positive)') : fail(`NEG-B11. non-door extraction wrongly flagged (${nsExtractNotDoor.length})`);
+  // Vega 7e3232d6: OptionalCallExpression — f?.(…) and ns.registerFrame?.(…) — is a
+  // CallExpression the walk must still match (statically decidable). Add teeth.
+  const optIdent = wireLiteralViolations([{ path: 'src/__wl_optident__.js', code: "import { registerFrame as f } from '../registry/index.js'; const w = 'sub'; f?.(recv, w, () => {});" }]);
+  optIdent.length === 1 ? pass('NEG-B12. an optional call f?.(recv, var, h) on a bound name FAILS the gate') : fail(`NEG-B12. optional identifier call not caught (${optIdent.length})`);
+  const optNs = wireLiteralViolations([{ path: 'src/__wl_optns__.js', code: "import * as ns from '../registry/index.js'; const w = 'sub'; ns.registerFrame?.(recv, w, () => {});" }]);
+  optNs.length === 1 ? pass('NEG-B13. an optional barrel-namespace call ns.registerFrame?.(recv, var, h) FAILS the gate') : fail(`NEG-B13. optional ns member call not caught (${optNs.length})`);
 }
 
 // keep T imported-and-used (the wire-literal gate references the T namespace by design)
