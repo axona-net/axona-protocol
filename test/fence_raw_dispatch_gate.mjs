@@ -133,23 +133,35 @@ function wireLiteralViolations(fileList) {
           && id?.type === 'Identifier') return id.name; // (5) const rf = ns.registerFrame
       return null;
     };
+    // Bind a target (LHS pattern) from an rhs, covering: Identifier<-Identifier copy (2),
+    // Identifier<-ns.registerFrame member (5), and { registerFrame: x }<-door-ns destructure (6).
+    // Applied to BOTH VariableDeclarator (const/let init) and AssignmentExpression (Vega e89779e9
+    // shape 7: `let f; f = ns.registerFrame` / `f = registerFrame`). Flow-insensitive: once a name
+    // is ever bound to the door it stays bound — fail-closed over-approximation, correct for a gate.
+    const tryBind = (target, rhs) => {
+      let g = false;
+      if (target?.type === 'Identifier' && !bound.has(target.name)) {
+        if (rhs?.type === 'Identifier' && bound.has(rhs.name)) { bound.add(target.name); g = true; }
+        const m = nsExtractName(rhs, target);
+        if (m && !bound.has(m)) { bound.add(m); g = true; }
+      }
+      if (target?.type === 'ObjectPattern' && rhs?.type === 'Identifier' && nsBinders.has(rhs.name)) {
+        for (const p of target.properties || []) {
+          if (p.type === 'Property' && !p.computed && p.key?.type === 'Identifier' && p.key.name === 'registerFrame'
+              && p.value?.type === 'Identifier' && !bound.has(p.value.name)) { bound.add(p.value.name); g = true; }
+        }
+      }
+      return g;
+    };
     let grew = true;
-    while (grew) { // fixpoint (Aster/Vega V2 enum): Identifier→Identifier copy, plus the two
-                   // namespace-extraction hops 5 & 6 that copy a member/destructure into an Identifier
+    while (grew) { // fixpoint (Aster/Vega V2 enum): shapes 2, 5, 6, 7 — declaration + assignment forms
       grew = false;
       walk(ast, (n) => {
-        if (n.type !== 'VariableDeclarator') return;
-        // Identifier -> Identifier copy: const g = rf; const h = g; …
-        if (n.id?.type === 'Identifier' && n.init?.type === 'Identifier' && bound.has(n.init.name) && !bound.has(n.id.name)) { bound.add(n.id.name); grew = true; }
-        // (5) const rf = ns.registerFrame  (door-namespace member copied to an Identifier)
-        const m = nsExtractName(n.init, n.id);
-        if (m && !bound.has(m)) { bound.add(m); grew = true; }
-        // (6) const { registerFrame: rf } = ns  (door-namespace destructured to an Identifier)
-        if (n.id?.type === 'ObjectPattern' && n.init?.type === 'Identifier' && nsBinders.has(n.init.name)) {
-          for (const p of n.id.properties || []) {
-            if (p.type === 'Property' && !p.computed && p.key?.type === 'Identifier' && p.key.name === 'registerFrame'
-                && p.value?.type === 'Identifier' && !bound.has(p.value.name)) { bound.add(p.value.name); grew = true; }
-          }
+        if (n.type === 'VariableDeclarator') { if (tryBind(n.id, n.init)) grew = true; }
+        else if (n.type === 'AssignmentExpression' && n.operator === '=') { if (tryBind(n.left, n.right)) grew = true; }
+        // parameter default: function g(f = registerFrame) / (f = ns.registerFrame) — AssignmentPattern in params.
+        else if (n.type === 'FunctionDeclaration' || n.type === 'FunctionExpression' || n.type === 'ArrowFunctionExpression') {
+          for (const p of n.params || []) if (p?.type === 'AssignmentPattern' && tryBind(p.left, p.right)) grew = true;
         }
       });
     }
@@ -232,6 +244,17 @@ const synth = (code) => discover([{ path: 'src/__synth__.js', code }], { methods
   optIdent.length === 1 ? pass('NEG-B12. an optional call f?.(recv, var, h) on a bound name FAILS the gate') : fail(`NEG-B12. optional identifier call not caught (${optIdent.length})`);
   const optNs = wireLiteralViolations([{ path: 'src/__wl_optns__.js', code: "import * as ns from '../registry/index.js'; const w = 'sub'; ns.registerFrame?.(recv, w, () => {});" }]);
   optNs.length === 1 ? pass('NEG-B13. an optional barrel-namespace call ns.registerFrame?.(recv, var, h) FAILS the gate') : fail(`NEG-B13. optional ns member call not caught (${optNs.length})`);
+  // Vega e89779e9 (shape 7): AssignmentExpression to the door — the fixpoint reads assignments too.
+  const asgnIdent = wireLiteralViolations([{ path: 'src/__wl_asgnident__.js', code: "import { registerFrame } from '../registry/index.js'; let f; f = registerFrame; const w = 'sub'; f(recv, w, () => {});" }]);
+  asgnIdent.length === 1 ? pass('NEG-B14. `let f; f = registerFrame; f(recv, var, h)` (shape 7, identifier) FAILS the gate') : fail(`NEG-B14. assignment of bound identifier not caught (${asgnIdent.length})`);
+  const asgnNs = wireLiteralViolations([{ path: 'src/__wl_asgnns__.js', code: "import * as ns from '../registry/index.js'; let f; f = ns.registerFrame; const w = 'sub'; f(recv, w, () => {});" }]);
+  asgnNs.length === 1 ? pass('NEG-B15. `let f; f = ns.registerFrame; f(recv, var, h)` (shape 7, ns member) FAILS the gate') : fail(`NEG-B15. assignment of ns member not caught (${asgnNs.length})`);
+  // no false positive: assigning a NON-door value must NOT bind.
+  const asgnNotDoor = wireLiteralViolations([{ path: 'src/__wl_asgn_notdoor__.js', code: "import * as ns from './other.js'; let f; f = ns.registerFrame; f = somethingElse; const w = 'sub'; f(recv, w, () => {});" }]);
+  asgnNotDoor.length === 0 ? pass('NEG-B16. assignment of a NON-door value is NOT bound (no false positive)') : fail(`NEG-B16. non-door assignment wrongly flagged (${asgnNotDoor.length})`);
+  // Structural closure: parameter default (AssignmentPattern) is the last name-introducer node type.
+  const paramDefault = wireLiteralViolations([{ path: 'src/__wl_paramdefault__.js', code: "import { registerFrame } from '../registry/index.js'; function g(f = registerFrame) { const w = 'sub'; f(recv, w, () => {}); }" }]);
+  paramDefault.length === 1 ? pass('NEG-B17. parameter default `g(f = registerFrame){ f(recv, var, h) }` FAILS the gate') : fail(`NEG-B17. parameter-default binding not caught (${paramDefault.length})`);
 }
 
 // keep T imported-and-used (the wire-literal gate references the T namespace by design)
