@@ -17,8 +17,15 @@ const defs = rowDefs();
 const rows = boundary6Rows();
 const w = frameWiring(defs);
 
-check('T1. exactly 3 rows, all minted, all ONE_WAY, owningService DirectMessaging, versionRange {4,4}',
-  rows.length === 3 && rows.every((r) => r.kind === 'ONE_WAY' && r.owningService === 'DirectMessaging' && r.versionRange.min === 4 && r.versionRange.max === 4));
+const byType6 = Object.fromEntries(rows.map((r) => [r.type, r]));
+check('T1. exactly 3 rows, all minted, owningService DirectMessaging, versionRange {4,4}; the axona:direct REQUEST leg is REQUEST_RESPONSE (TransportRpcRef), notify + tunneled are ONE_WAY',
+  rows.length === 3 && rows.every((r) => r.owningService === 'DirectMessaging' && r.versionRange.min === 4 && r.versionRange.max === 4)
+  && byType6['direct:axona-direct-request'].kind === 'REQUEST_RESPONSE'
+  && byType6['direct:axona-direct-request'].correlation?.kind === 'TransportRpcRef'
+  && byType6['direct:axona-direct-request'].correlation.requires.length === 0
+  && byType6['direct:axona-direct-request'].correlation.transportScope === 'request-return'
+  && byType6['direct:axona-direct-notify'].kind === 'ONE_WAY'
+  && byType6['direct:tunneled'].kind === 'ONE_WAY');
 check('T2. axona:direct is ONE wire on TWO primitives (request + notification); __tunneled_direct__ is routed',
   defs.filter((d) => d.wire === 'axona:direct').length === 2
   && new Set(defs.filter((d) => d.wire === 'axona:direct').map((d) => d.transportKind)).size === 2

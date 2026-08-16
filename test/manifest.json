@@ -889,6 +889,11 @@
       "file": "smoke_boundary6_registry.mjs",
       "class": "default",
       "note": "REF-1.1 E2.0 Boundary-6 (direct messaging) row-contract smoke + NEGATIVE proofs (Aster ASTER-E2-REVIEW pt.2). 3 rows (DirectMessaging ONE_WAY versionRange{4,4}): axona:direct is ONE wire on TWO primitives (onRequest :2599 + onNotification :2615), __tunneled_direct__ routed (:3131). Wiring = 3 COMPOSITE keys. registerFrame binds each leg to the right primitive (R1-R3); bare axona:direct REFUSED (R4); wrong-primitive-for-recv fails closed (R5); each leg resolves ONLY via its own transportKind (R6); axona:direct/routed REFUSED - no such row, no bare fallback (R7); __tunneled_direct__ on request/notification REFUSED (R8); malformed transportKind rejected (R9). 12 checks. Contract-only."
+    },
+    {
+      "file": "smoke_transport_rpc_ref.mjs",
+      "class": "default",
+      "note": "REF-1.1 E2.0 TransportRpcRef channel subject (Aster ASTER-E2-CHANNEL-SUBJECT, Vega, Orion ee0d0e13). The onRequest RPC reply obligation is FrameKind.REQUEST_RESPONSE + CorrelationSubjectKind.TransportRpcRef \u2014 a CHANNEL subject: the request-return pairing is the transport RPC channel, not a payload field. defineRow permits empty requires + fixed transportScope 'request-return' ONLY for REQUEST_RESPONSE+TransportRpcRef; rejects it for every other kind/subject (no generic empty-requires hatch). S1 mints; S2 rejects on wrong kind; S3 rejects empty-requires on IngressRef; S4 rejects transportScope on non-TransportRpcRef; S5/S6 (b) reject missing/invalid transportScope; S7 (c) reject a payload projection claimed as correlation id (non-empty requires); S8 (a) zero payload correlation keys => concurrent same-target requests stay distinct via the transport channel; S9/S10 the live B5 5 request legs + B6 axona:direct request carry it, notify/routed legs stay ONE_WAY. 10 checks."
     }
   ]
 }

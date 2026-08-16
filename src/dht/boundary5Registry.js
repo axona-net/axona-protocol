@@ -18,23 +18,21 @@
 // Each wire is bound on exactly ONE primitive, so unlike Boundary-6 there is no
 // same-wire collision inside this boundary.
 //
-// DELIBERATE MODELING DECISIONS (flagged for review):
-//   * KIND IS ONE_WAY, INCLUDING THE onRequest RPCs. lookup_step / lookahead_probe
-//     / local_probe / find_closest_set / route_msg return a value over the
-//     transport's request/response leg, but FrameKind.REQUEST_RESPONSE forces a
-//     `correlation` subject, and none of the CorrelationSubjectKinds
-//     (LegacyAuthorityRef / IngressRef / HolderRef / AuthorLaneRef) models a DHT
-//     lookup RPC — the reply is a transport-level return value, not a separately
-//     dispatched wire frame with a payload correlation key. This is the same
-//     impedance Boundary-2 hit with mutual-auth hello (ONE_WAY + documented). If
-//     the council wants the request/response nature captured, it needs a new
-//     CorrelationSubjectKind, not a forced fit here. `transportKind:'request'`
-//     still selects onRequest at registration; only the semantic KIND is ONE_WAY.
+// MODELING (council-ratified, Aster ASTER-E2-CHANNEL-SUBJECT / Vega / Orion):
+//   * THE onRequest RPCs ARE REQUEST_RESPONSE, NOT ONE_WAY. lookup_step /
+//     lookahead_probe / local_probe / find_closest_set / route_msg return a value
+//     over the transport request/response leg, so the contract must record the
+//     reply obligation. They carry CorrelationSubjectKind.TransportRpcRef — a
+//     CHANNEL subject: the request↔return pairing is the transport RPC channel, not
+//     a payload field, so correlation.requires is EMPTY and transportScope is the
+//     fixed 'request-return'. The onNotification legs (reinforce, triadic_introduce,
+//     hop_cache, lateral_spread, peer-leaving) are genuinely fire-and-forget →
+//     ONE_WAY. `transportKind:'request'` still selects onRequest at registration.
 //   * No new wire fields. Rows describe the EXISTING frames.
 //   * owningService groups the ten by plane: DhtRouting (the iterative lookup /
 //     route legs), SynaptomeLearning (synapse maintenance), PeerLifecycle.
 
-import { defineRow, FrameKind, Retry, NOT_APPLICABLE as NA, ShadowRegistry, frameWiringKey } from '../registry/index.js';
+import { defineRow, FrameKind, Retry, NOT_APPLICABLE as NA, ShadowRegistry, frameWiringKey, CorrelationSubjectKind } from '../registry/index.js';
 
 const V = { min: 4, max: 4 };                 // Kernel-4 wire version (matches B1)
 
@@ -42,11 +40,19 @@ const V = { min: 4, max: 4 };                 // Kernel-4 wire version (matches 
 // `transportKind` (the dispatch primitive) are carried on the def so the wiring
 // map derives from these; defineRow drops both as unknown keys.
 function rowDefs() {
-  const routing = (type, wire, transportKind, owningService, note) => ({
-    type, wire, transportKind, kind: FrameKind.ONE_WAY, owningService, versionRange: V,
-    retry: Retry.NONE, topicProfile: NA, eventIdScheme: NA, replayCursorType: NA, orderingModel: NA,
-    admissionGuard: NA, placementGuard: NA, note,
-  });
+  // A request leg is REQUEST_RESPONSE with a TransportRpcRef channel subject (the
+  // reply is the transport return); a notification leg is ONE_WAY (Aster
+  // ASTER-E2-CHANNEL-SUBJECT — the contract must record the reply obligation).
+  const routing = (type, wire, transportKind, owningService, note) => {
+    const isRequest = transportKind === 'request';
+    return {
+      type, wire, transportKind,
+      kind: isRequest ? FrameKind.REQUEST_RESPONSE : FrameKind.ONE_WAY, owningService, versionRange: V,
+      ...(isRequest ? { correlation: { kind: CorrelationSubjectKind.TransportRpcRef, requires: [], transportScope: 'request-return' } } : {}),
+      retry: Retry.NONE, topicProfile: NA, eventIdScheme: NA, replayCursorType: NA, orderingModel: NA,
+      admissionGuard: NA, placementGuard: NA, note,
+    };
+  };
   return [
     // ── iterative lookup / routing legs (onRequest) ──
     routing('dht:lookup_step',      'lookup_step',      'request', 'DhtRouting',

@@ -19,8 +19,13 @@ const w = frameWiring(defs);
 const REQUEST = ['dht:lookup_step', 'dht:lookahead_probe', 'dht:local_probe', 'dht:find_closest_set', 'dht:route_msg'];
 const NOTIFY = ['dht:reinforce', 'dht:triadic_introduce', 'dht:hop_cache', 'dht:lateral_spread', 'dht:peer-leaving'];
 
-check('T1. exactly 10 rows, all minted (defineRow-valid), all ONE_WAY, versionRange {4,4}',
-  rows.length === 10 && rows.every((r) => r.kind === 'ONE_WAY' && r.versionRange.min === 4 && r.versionRange.max === 4));
+check('T1. exactly 10 rows, all minted (defineRow-valid), versionRange {4,4}; request legs are REQUEST_RESPONSE, notification legs ONE_WAY',
+  rows.length === 10 && rows.every((r) => r.versionRange.min === 4 && r.versionRange.max === 4)
+  && REQUEST.every((t) => byType[t].kind === 'REQUEST_RESPONSE')
+  && NOTIFY.every((t) => byType[t].kind === 'ONE_WAY'));
+check('T1b. each request leg carries the TransportRpcRef channel subject — REQUEST_RESPONSE with empty requires + transportScope "request-return" (the reply obligation, Aster ASTER-E2-CHANNEL-SUBJECT)',
+  REQUEST.every((t) => byType[t].correlation?.kind === 'TransportRpcRef'
+    && byType[t].correlation.requires.length === 0 && byType[t].correlation.transportScope === 'request-return'));
 check('T2. 5 request legs + 5 notification legs (from the raw defs\' transportKind)',
   defs.filter((d) => d.transportKind === 'request').length === 5 && defs.filter((d) => d.transportKind === 'notification').length === 5);
 check('T3. owningService planes: DhtRouting (5 routing legs), SynaptomeLearning (4), PeerLifecycle (1)',

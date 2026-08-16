@@ -28,16 +28,24 @@
 //     'request' still selects onRequest at registration.
 //   * No new wire fields. Rows describe the EXISTING frames.
 
-import { defineRow, FrameKind, Retry, NOT_APPLICABLE as NA, ShadowRegistry, frameWiringKey } from '../registry/index.js';
+import { defineRow, FrameKind, Retry, NOT_APPLICABLE as NA, ShadowRegistry, frameWiringKey, CorrelationSubjectKind } from '../registry/index.js';
 
 const V = { min: 4, max: 4 };                 // Kernel-4 wire version (matches B1)
 
 function rowDefs() {
-  const direct = (type, wire, transportKind, note) => ({
-    type, wire, transportKind, kind: FrameKind.ONE_WAY, owningService: 'DirectMessaging', versionRange: V,
-    retry: Retry.NONE, topicProfile: NA, eventIdScheme: NA, replayCursorType: NA, orderingModel: NA,
-    admissionGuard: NA, placementGuard: NA, note,
-  });
+  // The axona:direct REQUEST leg awaits a reply on the transport leg → REQUEST_RESPONSE
+  // with a TransportRpcRef channel subject (Aster ASTER-E2-CHANNEL-SUBJECT). The
+  // notify leg and the tunneled routed leg are fire-and-forget → ONE_WAY.
+  const direct = (type, wire, transportKind, note) => {
+    const isRequest = transportKind === 'request';
+    return {
+      type, wire, transportKind,
+      kind: isRequest ? FrameKind.REQUEST_RESPONSE : FrameKind.ONE_WAY, owningService: 'DirectMessaging', versionRange: V,
+      ...(isRequest ? { correlation: { kind: CorrelationSubjectKind.TransportRpcRef, requires: [], transportScope: 'request-return' } } : {}),
+      retry: Retry.NONE, topicProfile: NA, eventIdScheme: NA, replayCursorType: NA, orderingModel: NA,
+      admissionGuard: NA, placementGuard: NA, note,
+    };
+  };
   return [
     // ── axona:direct — ONE wire, TWO primitives (the (wire, transportKind) case) ──
     direct('direct:axona-direct-request', 'axona:direct', 'request',
