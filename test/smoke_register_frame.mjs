@@ -23,8 +23,6 @@
 // =====================================================================
 import { buildBoundary1Registry } from '../src/pubsub/boundary1Registry.js';
 import { registerFrame, setShadowEnabled } from '../src/registry/index.js';
-import { certifyBigint } from '../src/registry/snapshotMint.js';
-import { encode } from '../src/transport/wire.js';
 import { T } from '../src/pubsub/constants.js';
 
 let passed = 0, failed = 0;
@@ -32,9 +30,9 @@ const check = (label, cond, extra = '') => { if (cond) { console.log(`  ✓ ${la
 
 console.log('\nREF-1.1 E1 — registerFrame canonical door (proven on Boundary-1)\n');
 
-// The boundary's live-path certifier — the same one wireHandlers threads (M1c):
-// re-encode through the canonical bigint-faithful codec, certify the TEXT.
-const mintLive = (x) => certifyBigint(encode(x));
+// The observation certifier is REGISTRY-OWNED (Aster E1 review F1) —
+// buildBoundary1Registry sets reg.mintLive. Tests read it off the registry; no
+// caller passes it to registerFrame.
 
 // A capturing receiver: records every (wire -> wrapped handler) installed on the
 // routed primitive, standing in for the DHT adapter. Boundary-1 registers through
@@ -85,7 +83,7 @@ const SUB_META = { fromId: 'n0', type: T.SUB };
   const reg = buildBoundary1Registry({ enabled: true, sink: (r) => traces.push(r) });
   const recv = makeRecv();
   const seen = [];
-  registerFrame(recv, T.SUB, (p, m) => { seen.push([p, m]); return { ok: true, echo: p }; }, { registry: reg, mintLive });
+  registerFrame(recv, T.SUB, (p, m) => { seen.push([p, m]); return { ok: true, echo: p }; }, { registry: reg });
   const wrapped = recv.installed.get(T.SUB);
   const out = wrapped(SUB_PAYLOAD, SUB_META);
   check('OFF1. wrapped handler returns the original return value verbatim', out && out.ok === true && out.echo === SUB_PAYLOAD);
@@ -100,7 +98,7 @@ const SUB_META = { fromId: 'n0', type: T.SUB };
   const reg = buildBoundary1Registry({ enabled: true, sink: (r) => traces.push(r) });
   const recv = makeRecv();
   const seen = [];
-  registerFrame(recv, T.SUB, (p, m) => { seen.push([p, m]); return { ok: true, echo: p }; }, { registry: reg, mintLive });
+  registerFrame(recv, T.SUB, (p, m) => { seen.push([p, m]); return { ok: true, echo: p }; }, { registry: reg });
   const wrapped = recv.installed.get(T.SUB);
   const out = wrapped(SUB_PAYLOAD, SUB_META);
   check('ON1. handler still returns the original value verbatim under observation', out && out.ok === true && out.echo === SUB_PAYLOAD);
@@ -115,13 +113,38 @@ const SUB_META = { fromId: 'n0', type: T.SUB };
   const reg = buildBoundary1Registry({ enabled: true, sink: () => {} });
   const recv = makeRecv();
   const handler = (p) => ({ doubled: p.since + p.since });
-  registerFrame(recv, T.SUB, handler, { registry: reg, mintLive });
+  registerFrame(recv, T.SUB, handler, { registry: reg });
   const viaDoor = recv.installed.get(T.SUB);
   const wire = reg.wiring.get(T.SUB);
-  const viaWrap = reg.wrap(wire.type, handler, { mintLive });
+  const viaWrap = reg.wrap(wire.type, handler, { mintLive: reg.mintLive });
   const a = viaDoor({ topicId: 'aa', subscriberId: 'bb', since: 21 }, SUB_META);
   const b = viaWrap({ topicId: 'aa', subscriberId: 'bb', since: 21 }, SUB_META);
   check('EQ1. registerFrame I/O equals a direct registry.wrap of the same handler', a && b && a.doubled === 42 && b.doubled === 42);
+}
+
+// ── F1 (Aster E1 review): the certifier is registry-owned; a caller cannot inject
+// one, and a public call is shadow-only. ──
+{
+  setShadowEnabled(false);
+  const traces = [];
+  const reg = buildBoundary1Registry({ enabled: true, sink: (r) => traces.push(r) });
+  const recv = makeRecv();
+  let callerCertifierUsed = false;
+  registerFrame(recv, T.SUB, (p) => p, { registry: reg, mintLive: () => { callerCertifierUsed = true; return 'x'; } });
+  recv.installed.get(T.SUB)(SUB_PAYLOAD, SUB_META);
+  check('F1a. a public registerFrame call is shadow-only with the flag off (zero traces)', traces.length === 0);
+  check('F1b. a caller-supplied mintLive is IGNORED — no public path to the live certifier', callerCertifierUsed === false);
+}
+{
+  setShadowEnabled(true);
+  const traces = [];
+  const reg = buildBoundary1Registry({ enabled: true, sink: (r) => traces.push(r) });
+  const recv = makeRecv();
+  let callerCertifierUsed = false;
+  registerFrame(recv, T.SUB, (p) => p, { registry: reg, mintLive: () => { callerCertifierUsed = true; return 'x'; } });
+  recv.installed.get(T.SUB)(SUB_PAYLOAD, SUB_META);
+  check('F1c. with the flag on, only the REGISTRY certifier is used, never a caller-supplied one', traces.length >= 1 && callerCertifierUsed === false);
+  setShadowEnabled(false);
 }
 
 console.log(`\nResult: ${passed} passed, ${failed} failed\n`);

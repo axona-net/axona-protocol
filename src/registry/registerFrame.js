@@ -12,7 +12,7 @@
 // criterion 1 (one canonical path), the shadow-wrap reuse [V5], and the
 // registration-time ownership refuse (exit criterion 4).
 //
-//   registerFrame(recv, wire, handler, { registry, mintLive })
+//   registerFrame(recv, wire, handler, { registry })
 //
 // - `recv`     the receiver carrying the raw dispatch primitive (e.g. the DHT
 //              adapter for Boundary-1; a transport for Boundary-2/3/4 at E2).
@@ -20,16 +20,22 @@
 //              that call sites pass a literal / frozen-constant here; this function
 //              enforces at runtime that the registry declares it.
 // - `handler`  the frame handler; wrapped by the shared ShadowRegistry.wrap [V5].
-// - registry   the boundary ShadowRegistry (carries `.wiring` wire->row and
-//              `.wrap`). The row's `transportKind` selects the primitive INTERNALLY
-//              — one door, not two (exit criterion 1 [V2]).
-// - mintLive   the boundary's live-path certifier, threaded into the wrap (M1c).
+// - registry   the boundary ShadowRegistry (carries `.wiring` wire->row, `.wrap`,
+//              and `.mintLive`). The row's `transportKind` selects the primitive
+//              INTERNALLY — one door, not two (exit criterion 1 [V2]).
+//
+// THE OBSERVATION CERTIFIER IS REGISTRY-OWNED, NOT A CALLER ARGUMENT (Aster E1
+// review F1). Each boundary registry carries its own `mintLive` (B1 =
+// certifyBigint∘encode); registerFrame reads it from the registry and threads it
+// into the wrap. There is NO public caller-supplied path to live-observation
+// certification. And observation itself only fires when the runtime shadow flag is
+// on (default off), so a public registerFrame call is shadow-only regardless.
 //
 // SHADOW-MODE ONLY, wire unchanged, WIRE_VERSION 4.0. When the shadow flag is off
 // (default) the wrap runs the handler verbatim, so flag-off is byte-identical.
 // =====================================================================
 
-export function registerFrame(recv, wire, handler, { registry, mintLive } = {}) {
+export function registerFrame(recv, wire, handler, { registry } = {}) {
   if (!recv || (typeof recv !== 'object' && typeof recv !== 'function')) {
     throw new TypeError('registerFrame: recv (an object carrying the dispatch primitive) required');
   }
@@ -50,6 +56,11 @@ export function registerFrame(recv, wire, handler, { registry, mintLive } = {}) 
   if (!row) {
     throw new Error(`registerFrame: no registry row declares wire "${wire}" — refusing an undeclared (recv, wire) binding`);
   }
+
+  // The observation certifier is REGISTRY-OWNED (Aster F1): read it from the
+  // registry, never from a caller argument. undefined is fine (the wrap treats a
+  // missing mintLive as the unbranded-source path).
+  const mintLive = registry.mintLive;
 
   // [V5] Reuse the EXISTING shadow wrap — not a second wrapper. Flag-off it runs
   // the handler verbatim (byte-identical); flag-on it observes a certified snapshot
