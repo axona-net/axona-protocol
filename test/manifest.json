@@ -28,6 +28,11 @@
       "note": "REF-1.1 E1 — the canonical registerFrame door proven on Boundary-1's rows: registration-time ownership refuse (undeclared wire / missing primitive / non-fn handler throw), internal primitive selection from the row transportKind (routed -> onRoutedMessage), flag-off byte-identical handler I/O + zero traces, flag-on observes while preserving I/O, and I/O-equal to a direct registry.wrap ([V5] wrap reuse, no second wrapper). No migration (E2), no sealing (E3); wire unchanged, shadow default-off."
     },
     {
+      "file": "smoke_direct_fence.mjs",
+      "class": "default",
+      "note": "REF-1.1 E1 — the direct_* admissible-type fence (council-cleared design; David: registration-time allowlist; Vega ffdba957 hardening). A RUNTIME capability check at the single parameterized registrar for the computed direct_${type} wire, gating BOTH sides (sendDirect + onDirectMessage) on a construction-time directMessageTypes allowlist. Cases: omitted allowlist dormant; malformed type (non-string/empty/direct_-prefixed) fail-closed in both phases; OBSERVE (E1) records would-refuse + installs byte-identical; ENFORCE (E4) throws + installs nothing; omitted != empty Set (empty admits zero); construct-time copy [R1]; single-registrar (one raw onNotification per type). Enforcement arms at E4 with the cutover."
+    },
+    {
       "file": "fence_e0_manifest.mjs",
       "class": "default",
       "note": "REF-1.1 E0 — the generated, machine-checkable frame-registration inventory (Aster carry-forward #2, Vega/Orion concurring), after a hand-count of the E0 table diverged from the tree in three places (A4 pub/sub 19 not 16, cap-attest, shim 3090). Default run = CI gate: it re-derives every sealed-primitive site via the shared acorn walk (test/lib/registrationScan.mjs, the S5 fence's discovery) and fails if the tree drifts from test/REF-1.1-E0-manifest.json — a raw registration cannot silently escape, and a hand-count cannot drift unnoticed. --write regenerates. Fail-closed on any unresolved/aliased/computed registration and on parse-coverage loss."

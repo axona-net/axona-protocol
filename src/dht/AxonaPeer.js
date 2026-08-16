@@ -108,7 +108,7 @@ export class AxonaPeer extends DHT {
    *        signed publishes (the default).  Apps that only call
    *        `peer.pub(topic, message, { sign: false })` can omit it.
    */
-  constructor({ engine = null, domain = null, node, axonaManager = null, nodeIdentity = null, transport = null, persist = null, maxPublishBytes = null, synaptomeMaintain = null, rootReplicas = null, frameRegistry = false }) {
+  constructor({ engine = null, domain = null, node, axonaManager = null, nodeIdentity = null, transport = null, persist = null, maxPublishBytes = null, synaptomeMaintain = null, rootReplicas = null, frameRegistry = false, directMessageTypes = undefined, enforceDirectMessageTypes = false }) {
     super();
     if (!node) throw new Error('AxonaPeer: node is required');
     // Singleton-root replication fan-out (kernel v4.9.2). null → kernel default (2).
@@ -120,6 +120,18 @@ export class AxonaPeer extends DHT {
     // then gates whether the wrap observes or runs the handler verbatim). The M1
     // telemetry-only canary sets this so a relay peer can report the shadow invariant.
     this._armFrameRegistry = frameRegistry === true;
+    // REF-1.1 E1 direct_* admissible-type fence (council-cleared design; David:
+    // registration-time allowlist; Vega ffdba957 hardening). The construction-time
+    // admissible set for direct-message `type`s. OMITTED (undefined/null) = dormant
+    // (no allowlist to check). An explicit Set — INCLUDING an empty Set (= this
+    // deployment admits ZERO direct types) — is an active policy. Copy at construct
+    // [R1]: new Set() snapshots the caller's iterable so later caller mutation cannot
+    // change the peer's admissible set. Immutable for the peer's lifetime; no hot-swap.
+    this._directMessageTypes = (directMessageTypes == null) ? null : new Set(directMessageTypes);
+    // Phased like the cutover: OBSERVE at E1-E3 (record would-refuse, allow), ENFORCE
+    // at E4 (throw = fail closed). Default OBSERVE. Malformed types are refused in
+    // BOTH phases (a corrupt wire is not an allowlist question).
+    this._enforceDirectMessageTypes = enforceDirectMessageTypes === true;
     // Synaptome maintenance (Synaptome-Maintenance-v0.1): continuously refill the
     // K_NEAR XOR-nearest "successor" quota so greedy routing's last-mile descent
     // always completes through churn. OPT-IN (default off) — when omitted the peer
@@ -4151,6 +4163,35 @@ export class AxonaPeer extends DHT {
   }
 
   /**
+   * REF-1.1 E1 direct_* admissible-type fence. Gates BOTH sides of the direct-message
+   * capability (sendDirect + onDirectMessage) on the construction-time allowlist, so
+   * the door is whole (Vega ffdba957: "E4 fail-closed is half a door if send is open").
+   *
+   * Malformed `type` — non-string, empty, or already `direct_`-prefixed — is a corrupt
+   * wire, not an allowlist question: refused in BOTH phases, throwing always.
+   *
+   * When an allowlist is configured (this._directMessageTypes !== null) and `type` is
+   * not in it: ENFORCE (E4) throws = fail closed; OBSERVE (E1, default) records a
+   * would-refuse trace and returns (byte-identical for well-formed types). Omitted
+   * allowlist = dormant (well-formed types pass untouched).
+   *
+   * Throws on refusal; returns void on admit/observe.
+   */
+  _gateDirectType(type, op) {
+    if (typeof type !== 'string' || type.length === 0 || type.startsWith('direct_')) {
+      throw new TypeError(`peer.${op}: malformed direct-message type ${JSON.stringify(type)} — must be a non-empty string, not 'direct_'-prefixed`);
+    }
+    const allow = this._directMessageTypes;
+    if (allow === null || allow.has(type)) return;      // dormant, or admitted
+    if (this._enforceDirectMessageTypes) {              // E4: fail closed
+      const err = new Error(`peer.${op}: direct-message type '${type}' is not in the directMessageTypes allowlist`);
+      err.code = 'ERR_DIRECT_TYPE_INADMISSIBLE';
+      throw err;
+    }
+    this._emitLog?.('warn', 'direct-fence-would-refuse', { type, op });  // E1: observe
+  }
+
+  /**
    * Fire-and-forget direct notification to one peer.  `type` is the
    * application name; the wire type is `direct_${type}`.
    */
@@ -4158,6 +4199,9 @@ export class AxonaPeer extends DHT {
     if (typeof peerId !== 'bigint') {
       throw new TypeError(`peer.sendDirect: peerId must be bigint, got ${typeof peerId}`);
     }
+    // Fence the send side (outside the try/catch below so a capability/malformed
+    // refusal surfaces to the caller instead of being swallowed as `return false`).
+    this._gateDirectType(type, 'sendDirect');
     const fromNode = this._node;
     if (!fromNode?.alive || !fromNode.transport) return false;
     try {
@@ -4229,6 +4273,11 @@ export class AxonaPeer extends DHT {
    * transport.onNotification listener on `direct_${type}`.
    */
   onDirectMessage(type, handler) {
+    // REF-1.1 E1 direct_* fence (receive side). Malformed/enforce-refuse throws →
+    // nothing installed (fail closed). Observe-refuse records + returns → install
+    // proceeds byte-identical. This is the single parameterized registrar for the
+    // computed `direct_${type}` wire; the fence is the check, it adds no new site.
+    this._gateDirectType(type, 'onDirectMessage');
     const node = this._node;
     const wireType = `direct_${type}`;
     if (!this._directHandlers.has(type)) {
