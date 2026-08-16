@@ -29,25 +29,7 @@ import { join, relative, dirname } from 'node:path';
 import { execSync } from 'node:child_process';
 import * as acorn from 'acorn';
 import { discover, walk } from './lib/registrationScan.mjs';
-
-const SEALED = new Set(['onRequest', 'onNotification', 'onRoutedMessage']);
-
-// Documented non-literal registrations, keyed (file, recv, method, arg) and TAGGED
-// with the manifest class. A NEW computed registration anywhere else is NOT in this
-// list, so discover() reports it UNRESOLVED and the run fails closed.
-const MECHANISM_EXEMPT = [
-  { file: 'pubsub/wireHandlers.js', recv: 'dht',       method: 'onRoutedMessage', arg: 'type',     class: 'registration-helper',   why: 'B1 on() helper; the concrete pub/sub wires resolve from on(T.X)' },
-  { file: 'dht/AxonaPeer.js',       recv: 'peer',      method: 'onRoutedMessage', arg: 'type',     class: 'mechanism-shim',        why: 'default-DHT adapter passthrough (AxonaPeer.js:3089)' },
-  { file: 'web/composite.js',       recv: 't',         method: 'onRequest',       arg: 'type',     class: 'mechanism-shim',        why: 'CompositeTransport onRequest fan-out/replay over recorded handlers' },
-  { file: 'web/composite.js',       recv: 't',         method: 'onNotification',  arg: 'type',     class: 'mechanism-shim',        why: 'CompositeTransport onNotification fan-out/replay over recorded handlers' },
-  { file: 'dht/AxonaPeer.js',       recv: 'transport', method: 'onNotification',  arg: 'wireType', class: 'parameterized-registrar', why: 'onDirectMessage direct_${type} family — own E1 fence, tracked here as one site' },
-  // REF-1.1 E1: the canonical registerFrame door — the allowlisted holder of the
-  // raw primitives (design exit criterion 2, keyed by module identity). Reaches
-  // them by NAME with the `wire` param; not a migration-target, the door itself.
-  { file: 'registry/registerFrame.js', recv: 'recv', method: 'onRoutedMessage', arg: 'wire', class: 'canonical-door', why: 'registerFrame routed dispatch (named access)' },
-  { file: 'registry/registerFrame.js', recv: 'recv', method: 'onNotification',  arg: 'wire', class: 'canonical-door', why: 'registerFrame notification dispatch (named access)' },
-  { file: 'registry/registerFrame.js', recv: 'recv', method: 'onRequest',       arg: 'wire', class: 'canonical-door', why: 'registerFrame request dispatch (named access)' },
-];
+import { SEALED, RAW_DISPATCH_ALLOWLIST as MECHANISM_EXEMPT } from './lib/e0Allowlist.mjs';
 
 // Wire → boundary hint for migration-target rows (context, not the classification).
 const BOUNDARY = new Map([

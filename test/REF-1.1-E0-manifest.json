@@ -5,7 +5,7 @@
     "onNotification",
     "onRoutedMessage"
   ],
-  "treeHash": "38fc02b2a52b0b9cead4bb0003a645598a20d097",
+  "treeHash": "93fcf3cff7560e66c42d22761cd22a87f9a60319",
   "filesScanned": 74,
   "summary": {
     "migration-target": 38,
@@ -218,7 +218,7 @@
       "wire": "<wireType>",
       "classification": "parameterized-registrar",
       "boundary": "—",
-      "why": "onDirectMessage direct_${type} family — own E1 fence, tracked here as one site"
+      "why": "onDirectMessage direct_${type} family — own E1 fence, tracked as one site"
     },
     {
       "file": "pubsub/wireHandlers.js",

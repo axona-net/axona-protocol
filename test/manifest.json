@@ -18,6 +18,11 @@
   "generated": "2026-07-29 — classes MEASURED by running every test against kernel 4.49.0, not inferred. 11 never-wired tests passed and were promoted; 24 failed against removed internals and were retired with the missing symbol named in each reason.",
   "tests": [
     {
+      "file": "fence_raw_dispatch_gate.mjs",
+      "class": "default",
+      "note": "REF-1.1 E1 enforcement gates. (A) baseline-diff identifier gate [R3]: raw dispatch primitives {onRequest,onNotification,onRoutedMessage} discovered by the shared acorn walk; existing refs frozen in REF-1.1-raw-dispatch-baseline.json (38 at E1); build FAILS on any NEW non-baseline raw reference, a baseline ref may be removed (E2 shrink); fail-closed on alias/computed/re-export/loose method-name literal outside the one shared allowlist (lib/e0Allowlist.mjs). (B) wire-literal gate [V2]: registerFrame(recv, wire, …) wire must be a string literal or T.<name>, a variable fails. NEG teeth: new direct/aliased/loose-literal raw ref + variable wire each turn the build red. --write refreshes the baseline. Registration discipline only; shadow default-off; 4.63.0."
+    },
+    {
       "file": "smoke_register_frame.mjs",
       "class": "default",
       "note": "REF-1.1 E1 — the canonical registerFrame door proven on Boundary-1's rows: registration-time ownership refuse (undeclared wire / missing primitive / non-fn handler throw), internal primitive selection from the row transportKind (routed -> onRoutedMessage), flag-off byte-identical handler I/O + zero traces, flag-on observes while preserving I/O, and I/O-equal to a direct registry.wrap ([V5] wrap reuse, no second wrapper). No migration (E2), no sealing (E3); wire unchanged, shadow default-off."
