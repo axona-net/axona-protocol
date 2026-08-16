@@ -76,6 +76,13 @@ const MECHANISM_EXEMPT = [
   { file: 'dht/AxonaPeer.js',       recv: 'peer',      method: 'onRoutedMessage', arg: 'type',     why: 'transport-adapter delegation shim' },
   { file: 'web/composite.js',       recv: 't',         method: 'onNotification',  arg: 'type',     why: 'CompositeTransport fan-out over recorded handlers' },
   { file: 'dht/AxonaPeer.js',       recv: 'transport', method: 'onNotification',  arg: 'wireType', why: 'direct-messaging direct_<type> family, out of scope' },
+  // REF-1.1 E1: the canonical registerFrame door is the ALLOWLISTED holder of the
+  // raw primitives (design exit criterion 2, keyed by module identity). It reaches
+  // them by NAME with the `wire` param as the frame-type arg. This is the
+  // enforcement S5's escape-boundary note deferred to; adding the door is the
+  // sanctioned fifth entry, a reviewed change.
+  { file: 'registry/registerFrame.js', recv: 'recv', method: 'onRoutedMessage', arg: 'wire', why: 'canonical registerFrame door — routed dispatch, named access' },
+  { file: 'registry/registerFrame.js', recv: 'recv', method: 'onNotification',  arg: 'wire', why: 'canonical registerFrame door — notification dispatch, named access' },
 ];
 const isMechanism = (fp, recv, method, arg) => MECHANISM_EXEMPT.some((x) => fp.endsWith(x.file) && recv === x.recv && method === x.method && arg === x.arg);
 
@@ -241,7 +248,7 @@ check('INV0c. source coverage: EVERY src file parsed as a JavaScript AST (no par
   check('INV0. fail-closed: every discovered registration site is classified in-scope or documented-exclusion',
     unclassified.length === 0, `\n   unclassified: ${unclassified.map((e) => e.site).join(', ')}`);
 }
-check('INV0b. fail-closed within the SOUNDLY-CHECKED envelope: a registration-method name never appears as a loose string literal (closes every literal-name form); no registration method is aliased or destructured out (static alias, ObjectPattern extraction, computed-key destructure); no computed dynamic-method callee; a computed-member-derived local (bound by const/let init OR assignment) is not invoked directly nor via .call/.apply/.bind; registration CALLs resolve to a string-literal wire; on() resolves to a literal T.<name> — else unresolved; only the FOUR documented MECHANISM_EXEMPT shims are allowed non-literal. ESCAPE BOUNDARY (this scanner is not a points-to analysis, so these are NOT claimed closed and are a recorded governance surface, measured absent in src): a computed-member value re-aliased through a further binding (const g=r; g()), invoked via Reflect.apply, passed as an argument to an invoker, or threaded across object/array/return indirection. A SOUND no-alias guarantee requires the canonical-registrar enforcement (part of the held cutover), not a syntactic scan.',
+check('INV0b. fail-closed within the SOUNDLY-CHECKED envelope: a registration-method name never appears as a loose string literal (closes every literal-name form); no registration method is aliased or destructured out (static alias, ObjectPattern extraction, computed-key destructure); no computed dynamic-method callee; a computed-member-derived local (bound by const/let init OR assignment) is not invoked directly nor via .call/.apply/.bind; registration CALLs resolve to a string-literal wire; on() resolves to a literal T.<name> — else unresolved; only the documented MECHANISM_EXEMPT shims plus the REF-1.1 E1 canonical registerFrame door are allowed non-literal. ESCAPE BOUNDARY (this scanner is not a points-to analysis, so these are NOT claimed closed and are a recorded governance surface, measured absent in src): a computed-member value re-aliased through a further binding (const g=r; g()), invoked via Reflect.apply, passed as an argument to an invoker, or threaded across object/array/return indirection. A SOUND no-alias guarantee requires the canonical-registrar enforcement (part of the held cutover), not a syntactic scan.',
   unresolved.length === 0, `\n   unresolved: ${unresolved.join(', ')}`);
 
 const L = sites.map((e) => ({ e, c: classify(e) })).filter((x) => Array.isArray(x.c))

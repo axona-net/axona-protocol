@@ -357,10 +357,14 @@ function frameWiring(defs) {
   }
   const out = new Map();
   for (const [wire, info] of byWire) {
+    // REF-1.1 E1: `transportKind` selects the raw dispatch primitive registerFrame
+    // uses (routed -> onRoutedMessage). Every Boundary-1 frame is routed (registered
+    // via the DHT adapter's onRoutedMessage in wireHandlers). Additive: the existing
+    // wrap site reads only .type/.variantBy.
     if (info.variants) {
-      out.set(wire, { type: info.type, variantBy: { path: 'sig', valueType: 'string', whenPresent: 'signed', whenAbsent: 'legacy' } });
+      out.set(wire, { type: info.type, transportKind: 'routed', variantBy: { path: 'sig', valueType: 'string', whenPresent: 'signed', whenAbsent: 'legacy' } });
     } else {
-      out.set(wire, { type: info.type });
+      out.set(wire, { type: info.type, transportKind: 'routed' });
     }
   }
   return out;

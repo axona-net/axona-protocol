@@ -41,6 +41,12 @@ const MECHANISM_EXEMPT = [
   { file: 'web/composite.js',       recv: 't',         method: 'onRequest',       arg: 'type',     class: 'mechanism-shim',        why: 'CompositeTransport onRequest fan-out/replay over recorded handlers' },
   { file: 'web/composite.js',       recv: 't',         method: 'onNotification',  arg: 'type',     class: 'mechanism-shim',        why: 'CompositeTransport onNotification fan-out/replay over recorded handlers' },
   { file: 'dht/AxonaPeer.js',       recv: 'transport', method: 'onNotification',  arg: 'wireType', class: 'parameterized-registrar', why: 'onDirectMessage direct_${type} family — own E1 fence, tracked here as one site' },
+  // REF-1.1 E1: the canonical registerFrame door — the allowlisted holder of the
+  // raw primitives (design exit criterion 2, keyed by module identity). Reaches
+  // them by NAME with the `wire` param; not a migration-target, the door itself.
+  { file: 'registry/registerFrame.js', recv: 'recv', method: 'onRoutedMessage', arg: 'wire', class: 'canonical-door', why: 'registerFrame routed dispatch (named access)' },
+  { file: 'registry/registerFrame.js', recv: 'recv', method: 'onNotification',  arg: 'wire', class: 'canonical-door', why: 'registerFrame notification dispatch (named access)' },
+  { file: 'registry/registerFrame.js', recv: 'recv', method: 'onRequest',       arg: 'wire', class: 'canonical-door', why: 'registerFrame request dispatch (named access)' },
 ];
 
 // Wire → boundary hint for migration-target rows (context, not the classification).
@@ -121,6 +127,7 @@ const summary = {
   'migration-target': count('migration-target'),
   'registration-helper': count('registration-helper'),
   'mechanism-shim': count('mechanism-shim'),
+  'canonical-door': count('canonical-door'),
   'parameterized-registrar': count('parameterized-registrar'),
   'primitive-definition': count('primitive-definition'),
   'bridge-ws-dispatch': count('bridge-ws-dispatch'),

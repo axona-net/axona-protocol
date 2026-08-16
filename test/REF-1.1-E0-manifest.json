@@ -5,12 +5,13 @@
     "onNotification",
     "onRoutedMessage"
   ],
-  "treeHash": "1edb1fd71c591de5e3aa741533db0049d5e392d6",
-  "filesScanned": 73,
+  "treeHash": "38fc02b2a52b0b9cead4bb0003a645598a20d097",
+  "filesScanned": 74,
   "summary": {
     "migration-target": 38,
     "registration-helper": 1,
     "mechanism-shim": 5,
+    "canonical-door": 3,
     "parameterized-registrar": 1,
     "primitive-definition": 13,
     "bridge-ws-dispatch": 8,
@@ -399,6 +400,36 @@
       "wire": "pubsub:metricson",
       "classification": "migration-target",
       "boundary": "B1"
+    },
+    {
+      "file": "registry/registerFrame.js",
+      "line": 71,
+      "callee": "onRoutedMessage",
+      "receiver": "recv",
+      "wire": "<wire>",
+      "classification": "canonical-door",
+      "boundary": "—",
+      "why": "registerFrame routed dispatch (named access)"
+    },
+    {
+      "file": "registry/registerFrame.js",
+      "line": 74,
+      "callee": "onNotification",
+      "receiver": "recv",
+      "wire": "<wire>",
+      "classification": "canonical-door",
+      "boundary": "—",
+      "why": "registerFrame notification dispatch (named access)"
+    },
+    {
+      "file": "registry/registerFrame.js",
+      "line": 77,
+      "callee": "onRequest",
+      "receiver": "recv",
+      "wire": "<wire>",
+      "classification": "canonical-door",
+      "boundary": "—",
+      "why": "registerFrame request dispatch (named access)"
     },
     {
       "file": "transport/node/wstransport.js",
