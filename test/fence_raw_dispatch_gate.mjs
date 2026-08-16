@@ -159,10 +159,11 @@ function wireLiteralViolations(fileList) {
       walk(ast, (n) => {
         if (n.type === 'VariableDeclarator') { if (tryBind(n.id, n.init)) grew = true; }
         else if (n.type === 'AssignmentExpression' && n.operator === '=') { if (tryBind(n.left, n.right)) grew = true; }
-        // parameter default: function g(f = registerFrame) / (f = ns.registerFrame) — AssignmentPattern in params.
-        else if (n.type === 'FunctionDeclaration' || n.type === 'FunctionExpression' || n.type === 'ArrowFunctionExpression') {
-          for (const p of n.params || []) if (p?.type === 'AssignmentPattern' && tryBind(p.left, p.right)) grew = true;
-        }
+        // AssignmentPattern (Vega 4d46c0ff): the default-binding node — appears in function
+        // params `g(f = registerFrame)` AND in destructuring defaults `const { f = registerFrame } = x`
+        // / `const [f = registerFrame] = x`. Walk visits every AssignmentPattern, so one case
+        // covers node type (d) wherever it occurs, not only in params.
+        else if (n.type === 'AssignmentPattern') { if (tryBind(n.left, n.right)) grew = true; }
       });
     }
     const doorCallLabel = (callee) => callee.type === 'Identifier' ? callee.name
@@ -255,6 +256,9 @@ const synth = (code) => discover([{ path: 'src/__synth__.js', code }], { methods
   // Structural closure: parameter default (AssignmentPattern) is the last name-introducer node type.
   const paramDefault = wireLiteralViolations([{ path: 'src/__wl_paramdefault__.js', code: "import { registerFrame } from '../registry/index.js'; function g(f = registerFrame) { const w = 'sub'; f(recv, w, () => {}); }" }]);
   paramDefault.length === 1 ? pass('NEG-B17. parameter default `g(f = registerFrame){ f(recv, var, h) }` FAILS the gate') : fail(`NEG-B17. parameter-default binding not caught (${paramDefault.length})`);
+  // Vega 4d46c0ff: AssignmentPattern also nests in destructuring defaults — same node type (d), not in params.
+  const destrDefault = wireLiteralViolations([{ path: 'src/__wl_destrdefault__.js', code: "import { registerFrame } from '../registry/index.js'; const { f = registerFrame } = opts; const w = 'sub'; f(recv, w, () => {});" }]);
+  destrDefault.length === 1 ? pass('NEG-B18. destructuring default `const { f = registerFrame } = x; f(recv, var, h)` FAILS the gate') : fail(`NEG-B18. destructuring-default binding not caught (${destrDefault.length})`);
 }
 
 // keep T imported-and-used (the wire-literal gate references the T namespace by design)
