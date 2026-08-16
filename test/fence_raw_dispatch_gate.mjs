@@ -102,16 +102,26 @@ function wireLiteralViolations(fileList) {
     // name bound to it (Identifier callees) and every namespace binder (member
     // callees) so none of `rf(recv, computed, h)` / `ns.registerFrame(recv, computed, h)`
     // is invisible to [V2].
-    const isDoorSource = (v) => typeof v === 'string' && /(^|\/)registerFrame\.js$/.test(v);
+    // Default-import door source = the DEFINITION module (registerFrame.js default-exports).
+    const isDefaultDoorSource = (v) => typeof v === 'string' && /(^|\/)registerFrame\.js$/.test(v);
+    // Namespace door sources (Vega 5aa39c82) = the definition module AND the public
+    // barrel registry/index.js, which re-exports registerFrame — so `import * as ns
+    // from '../registry/index.js'; ns.registerFrame(...)` is a real public reach path.
+    // Cover extensionless and bare-directory import forms of the barrel too.
+    const isNsDoorSource = (v) => typeof v === 'string' && (
+      /(^|\/)registerFrame\.js$/.test(v)
+      || /(^|\/)registry\/index(\.js)?$/.test(v)
+      || /(^|\/)registry$/.test(v)
+    );
     const bound = new Set(['registerFrame']); // Identifier callees
-    const nsBinders = new Set();               // `import * as ns` from the door module
+    const nsBinders = new Set();               // `import * as ns` from a door module (definition or barrel)
     walk(ast, (n) => {
       if (n.type !== 'ImportDeclaration') return;
-      const fromDoor = isDoorSource(n.source?.value);
+      const src = n.source?.value;
       for (const s of n.specifiers || []) {
         if (s.type === 'ImportSpecifier' && s.imported?.name === 'registerFrame' && s.local?.name) bound.add(s.local.name);
-        if (s.type === 'ImportDefaultSpecifier' && fromDoor && s.local?.name) bound.add(s.local.name);
-        if (s.type === 'ImportNamespaceSpecifier' && fromDoor && s.local?.name) nsBinders.add(s.local.name);
+        if (s.type === 'ImportDefaultSpecifier' && isDefaultDoorSource(src) && s.local?.name) bound.add(s.local.name);
+        if (s.type === 'ImportNamespaceSpecifier' && isNsDoorSource(src) && s.local?.name) nsBinders.add(s.local.name);
       }
     });
     let grew = true;
@@ -179,6 +189,12 @@ const synth = (code) => discover([{ path: 'src/__synth__.js', code }], { methods
   // Source-scoped: a default/namespace import from a NON-door module must NOT be bound (no false positive).
   const notDoor = wireLiteralViolations([{ path: 'src/__wl_notdoor__.js', code: "import rf from './somethingElse.js'; import * as ns from './other.js'; const w = 'sub'; rf(recv, w, () => {}); ns.registerFrame(recv, w, () => {});" }]);
   notDoor.length === 0 ? pass('NEG-B6. default/namespace imports from a non-door module are NOT bound (no false positive)') : fail(`NEG-B6. non-door import wrongly flagged (${notDoor.length})`);
+  // Vega 5aa39c82: the public barrel registry/index.js re-exports registerFrame, so a
+  // barrel-namespace member callee is a real reach path and must be bound too.
+  const barrelNs = wireLiteralViolations([{ path: 'src/__wl_barrel__.js', code: "import * as ns from '../registry/index.js'; const w = 'sub'; ns.registerFrame(recv, w, () => {});" }]);
+  barrelNs.length === 1 ? pass('NEG-B7. a barrel-namespace callee ns.registerFrame (registry/index.js) with a variable wire FAILS the gate') : fail(`NEG-B7. barrel-namespace member-callee variable wire not caught (${barrelNs.length})`);
+  const barrelDir = wireLiteralViolations([{ path: 'src/__wl_barreldir__.js', code: "import * as ns from '../registry'; const w = 'sub'; ns.registerFrame(recv, w, () => {});" }]);
+  barrelDir.length === 1 ? pass('NEG-B8. a bare-directory barrel namespace (../registry) callee with a variable wire FAILS the gate') : fail(`NEG-B8. bare-directory barrel namespace not caught (${barrelDir.length})`);
 }
 
 // keep T imported-and-used (the wire-literal gate references the T namespace by design)
