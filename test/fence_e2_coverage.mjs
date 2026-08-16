@@ -55,14 +55,28 @@ const freshText = JSON.stringify(fresh, null, 2) + '\n';
 check('C1. the committed coverage artifact is byte-identical to a fresh regeneration from E0 + the registries — it cannot drift',
   committedText === freshText, `\n   run: node test/gen_e2_coverage_manifest.mjs --write`);
 check('C2. exactly 38 migration-target source sites in the artifact', sites.length === 38, `\n   got ${sites.length}`);
-check('C3. every site carries an immutable identity, a transportKind, an intended boundary, and a resolved rowType',
-  sites.every((s) => s.identity && s.transportKind && s.boundary && s.rowType),
-  `\n   incomplete: ${sites.filter((s) => !(s.identity && s.transportKind && s.boundary && s.rowType)).map((s) => s.site).join(', ')}`);
+check('C3. every entry carries the CALL-SITE locator (file:line) + source primitive, an immutable identity, a transportKind, an intended boundary, and a resolved rowType',
+  sites.every((s) => s.callSite && s.primitive && s.identity && s.transportKind && s.boundary && s.rowType),
+  `\n   incomplete: ${sites.filter((s) => !(s.callSite && s.primitive && s.identity && s.transportKind && s.boundary && s.rowType)).map((s) => s.callSite || '(no callSite)').join(', ')}`);
 
-// ── (3) the 38 IMMUTABLE site identities are distinct — a real set of call sites ──
-check('C4. the 38 immutable source-site identities (file ‖ wire ‖ transportKind ‖ receiver) are DISTINCT',
+// ── (3) the 38 IMMUTABLE call-site identities are distinct, and each maps to
+// EXACTLY ONE intended boundary row (Aster a6f19517 / Vega 20191473: the identity
+// must carry the actual call-site LOCATOR, not just a descriptor set — a file is
+// not a call-site; file:line pins the exact registration call) ──
+check('C4. the 38 immutable identities (file:line ‖ wire ‖ transportKind ‖ receiver — LOCATOR-led) are DISTINCT',
   new Set(sites.map((s) => s.identity)).size === 38,
   `\n   distinct=${new Set(sites.map((s) => s.identity)).size}`);
+{
+  const m = new Map();
+  let multi = 0;
+  for (const s of sites) {
+    const rk = `${s.boundary}|${s.rowType}`;
+    if (m.has(s.identity) && m.get(s.identity) !== rk) multi++;
+    m.set(s.identity, rk);
+  }
+  check('C4b. each immutable call-site identity maps to EXACTLY ONE intended boundary row — asserted once onto its row',
+    m.size === 38 && multi === 0, `\n   distinctIdentities=${m.size} multiMapped=${multi}`);
+}
 
 // ── the live registries, keyed by intended-boundary label ──
 const REG = { B1: f1(r1()), B2: f2(r2()), B3: f3(r3()), B4: f4(r4()), B5: f5(r5()), B6: f6(r6()) };
