@@ -5,8 +5,8 @@
     "onNotification",
     "onRoutedMessage"
   ],
-  "treeHash": "9859fff854d31dcfb25e3710cb883957d7917591",
-  "filesScanned": 74,
+  "treeHash": "45db62939cd894080649fcb3b2a7171be60db346",
+  "filesScanned": 76,
   "summary": {
     "migration-target": 38,
     "registration-helper": 1,
@@ -403,7 +403,7 @@
     },
     {
       "file": "registry/registerFrame.js",
-      "line": 82,
+      "line": 102,
       "callee": "onRoutedMessage",
       "receiver": "recv",
       "wire": "<wire>",
@@ -413,7 +413,7 @@
     },
     {
       "file": "registry/registerFrame.js",
-      "line": 85,
+      "line": 105,
       "callee": "onNotification",
       "receiver": "recv",
       "wire": "<wire>",
@@ -423,7 +423,7 @@
     },
     {
       "file": "registry/registerFrame.js",
-      "line": 88,
+      "line": 108,
       "callee": "onRequest",
       "receiver": "recv",
       "wire": "<wire>",

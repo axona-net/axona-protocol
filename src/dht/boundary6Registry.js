@@ -61,7 +61,7 @@ function frameWiring(defs) {
   for (const d of defs) {
     const key = frameWiringKey(d.wire, d.transportKind);
     if (out.has(key)) throw new Error(`boundary6Registry: duplicate (wire,transportKind) ${d.wire}/${d.transportKind}`);
-    out.set(key, { type: d.type, transportKind: d.transportKind });
+    out.set(key, { type: d.type, wire: d.wire, transportKind: d.transportKind });
   }
   return out;
 }

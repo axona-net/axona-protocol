@@ -87,7 +87,7 @@ function frameWiring(defs) {
   const out = new Map();
   for (const d of defs) {
     if (out.has(d.wire)) throw new Error(`boundary5Registry: duplicate wire ${d.wire} (Boundary-5 is single-primitive per wire)`);
-    out.set(d.wire, { type: d.type, transportKind: d.transportKind });
+    out.set(d.wire, { type: d.type, wire: d.wire, transportKind: d.transportKind });
   }
   return out;
 }
