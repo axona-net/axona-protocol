@@ -883,7 +883,7 @@
     {
       "file": "smoke_boundary5_registry.mjs",
       "class": "default",
-      "note": "REF-1.1 E2.0 Boundary-5 (DHT routing/core) row-contract smoke: the 10 A1 DHT-core frames fully specified (type/wire/transportKind/kind/owningService) \u2014 5 request legs (lookup_step/lookahead_probe/local_probe/find_closest_set/route_msg, DhtRouting) + 5 notification (reinforce/triadic_introduce/hop_cache/lateral_spread SynaptomeLearning, peer-leaving PeerLifecycle), all ONE_WAY versionRange{4,4}. Wiring keys by the BARE wire (single-primitive; composite keying is scoped to B6). registerFrame binds every wire via the correct primitive with AND without an explicit transportKind; an undeclared wire is refused. 6 checks. Contract-only, no dispatch."
+      "note": "REF-1.1 E2.0 Boundary-5 (DHT routing/core) row-contract smoke: the 10 A1 DHT-core frames fully specified (type/wire/transportKind/kind/owningService) \u2014 5 request legs (lookup_step/lookahead_probe/local_probe/find_closest_set/route_msg, DhtRouting) + 5 notification (reinforce/triadic_introduce/hop_cache/lateral_spread SynaptomeLearning, peer-leaving PeerLifecycle), all ONE_WAY versionRange{4,4}. Wiring keys by the BARE wire (single-primitive; composite keying is scoped to B6). registerFrame binds every wire via the correct primitive with AND without an explicit transportKind; an undeclared wire is refused. 9 checks (adds STRICT-KIND negatives R3-R5: a mismatched supplied transportKind refuses instead of falling through to the bare-wire row, both directions; malformed kind rejected). Contract-only, no dispatch."
     },
     {
       "file": "smoke_boundary6_registry.mjs",

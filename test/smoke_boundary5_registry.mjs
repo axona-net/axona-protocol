@@ -41,6 +41,18 @@ for (const d of defs) {
 }
 check('R1. registerFrame binds all 10 wires via the correct primitive — with AND without an explicit transportKind', boundOk === 10, `\n   ${boundOk}/10`);
 check('R2. an undeclared wire is refused', (() => { try { registerFrame(recv, 'not_a_dht_wire', () => {}, { registry: reg, transportKind: 'request' }); return false; } catch { return true; } })());
+// STRICT KIND (Aster ASTER-E2-STRICT-KIND, Vega a42549d1): a supplied transportKind
+// that MISMATCHES a bare-wire row's own kind must REFUSE — it must not fall through
+// and dispatch the bare row's primitive. lookup_step is a request; naming it
+// notification must refuse (regression proof for the composite-miss fall-through).
+{
+  const threw = (fn) => { try { fn(); return false; } catch { return true; } };
+  check('R3. a MISMATCHED supplied transportKind refuses — lookup_step(request) named as notification does NOT fall through to the request row',
+    threw(() => registerFrame(recv, 'lookup_step', () => {}, { registry: reg, transportKind: 'notification' })));
+  check('R4. reinforce(notification) named as request refuses too — no bare-wire fall-through for either direction',
+    threw(() => registerFrame(recv, 'reinforce', () => {}, { registry: reg, transportKind: 'request' })));
+  check('R5. a malformed transportKind is rejected', threw(() => registerFrame(recv, 'lookup_step', () => {}, { registry: reg, transportKind: 'bogus' })));
+}
 
 console.log(`\nResult: ${passed} passed, ${failed} failed\n`);
 process.exit(failed === 0 ? 0 : 1);
