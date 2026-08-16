@@ -18,6 +18,11 @@
   "generated": "2026-07-29 — classes MEASURED by running every test against kernel 4.49.0, not inferred. 11 never-wired tests passed and were promoted; 24 failed against removed internals and were retired with the missing symbol named in each reason.",
   "tests": [
     {
+      "file": "fence_e0_manifest.mjs",
+      "class": "default",
+      "note": "REF-1.1 E0 — the generated, machine-checkable frame-registration inventory (Aster carry-forward #2, Vega/Orion concurring), after a hand-count of the E0 table diverged from the tree in three places (A4 pub/sub 19 not 16, cap-attest, shim 3090). Default run = CI gate: it re-derives every sealed-primitive site via the shared acorn walk (test/lib/registrationScan.mjs, the S5 fence's discovery) and fails if the tree drifts from test/REF-1.1-E0-manifest.json — a raw registration cannot silently escape, and a hand-count cannot drift unnoticed. --write regenerates. Fail-closed on any unresolved/aliased/computed registration and on parse-coverage loss."
+    },
+    {
       "file": "fence_pull_outcome.mjs",
       "class": "default",
       "note": "Q1 — requestPull must distinguish response/empty-response/timeout/invalid-response instead of collapsing all four to null. Verified RED against the pre-fix tree (empty, timeout and malformed were all null and indistinguishable). Drives the real requestPull + _onPullResp path; nothing stubbed."
