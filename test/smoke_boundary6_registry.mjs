@@ -40,5 +40,18 @@ check('R4. a bare axona:direct (no transportKind) is REFUSED — cannot silently
 check('R5. axona:direct on the WRONG primitive for a recv lacking it still resolves the row then fails on the missing primitive (fail-closed)',
   threw(() => registerFrame({ onRequest: () => 'x' }, 'axona:direct', () => {}, { registry: reg, transportKind: 'notification' })));
 
+// ── NEGATIVE (Aster ASTER-E2-REVIEW pt.2): each leg resolves ONLY with its own ──
+// transportKind; a valid-but-undeclared kind refuses; a malformed kind is rejected.
+check('R6. axona:direct/request resolves ONLY via request — the notify recv path is never taken',
+  registerFrame({ onRequest: () => 'REQ-ONLY', onNotification: () => { throw new Error('wrong leg'); } },
+    'axona:direct', () => {}, { registry: reg, transportKind: 'request' }) === 'REQ-ONLY');
+check('R7. axona:direct/routed is REFUSED — B6 declares no routed axona:direct row (kind mismatch, no bare fallback)',
+  threw(() => registerFrame(recv, 'axona:direct', () => {}, { registry: reg, transportKind: 'routed' })));
+check('R8. __tunneled_direct__ on the WRONG kind (request/notification) is REFUSED — only routed is declared',
+  threw(() => registerFrame(recv, '__tunneled_direct__', () => {}, { registry: reg, transportKind: 'request' }))
+  && threw(() => registerFrame(recv, '__tunneled_direct__', () => {}, { registry: reg, transportKind: 'notification' })));
+check('R9. a MALFORMED transportKind (not routed|notification|request) is rejected by registerFrame',
+  threw(() => registerFrame(recv, 'axona:direct', () => {}, { registry: reg, transportKind: 'garbage' })));
+
 console.log(`\nResult: ${passed} passed, ${failed} failed\n`);
 process.exit(failed === 0 ? 0 : 1);
