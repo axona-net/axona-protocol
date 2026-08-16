@@ -42,10 +42,13 @@ const BASELINE = join(dirname(fileURLToPath(import.meta.url)), 'REF-1.1-raw-disp
 function listJs(dir) { const o = []; for (const n of readdirSync(dir)) { const p = join(dir, n); const s = statSync(p); if (s.isDirectory()) o.push(...listJs(p)); else if (n.endsWith('.js')) o.push(p); } return o; }
 const files = listJs(SRC).map((p) => ({ path: relative(SRC, p), code: readFileSync(p, 'utf8') }));
 
-// A raw reference key is stable across line moves: file | primitive | wire. The
-// bridge-ws `dispatch` switch is a different registration style (not one of the
-// three sealed primitives) — excluded, like the E0 manifest.
-const keyOf = (s) => `${s.file}|${s.callee}|${s.wire}`;
+// A raw reference key is stable across line moves: file | receiver | primitive |
+// wire. RECEIVER is in the key (Vega E1 review): transport/web/index.js has
+// bridge.onNotification('hello') AND webrtc.onNotification('hello') — without the
+// receiver the two collapse to one key and a third hello would not fail the diff.
+// The bridge-ws `dispatch` switch is a different registration style (not one of
+// the three sealed primitives) — excluded, like the E0 manifest.
+const keyOf = (s) => `${s.file}|${s.recv}|${s.callee}|${s.wire}`;
 const rawKeys = (sites) => sites.filter((s) => s.callee !== 'dispatch').map(keyOf).sort();
 
 let ok = true;
@@ -89,13 +92,26 @@ function wireLiteralViolations(fileList) {
     let ast;
     try { ast = acorn.parse(code, { ecmaVersion: 'latest', sourceType: 'module', allowHashBang: true, locations: true }); }
     catch { try { ast = acorn.parse(code, { ecmaVersion: 'latest', sourceType: 'script', allowHashBang: true, allowReturnOutsideFunction: true, locations: true }); } catch { continue; } }
+    // WALK THE BINDING (Vega E1 review): a call reaches registerFrame under its
+    // imported name, an import alias (import { registerFrame as rf }), or a const
+    // alias (const rf = registerFrame). Collect every local name bound to it so
+    // `rf(recv, computed, h)` is not invisible to [V2].
+    const bound = new Set(['registerFrame']);
+    let grew = true;
+    while (grew) { // fixpoint: const g = rf; const h = g; …
+      grew = false;
+      walk(ast, (n) => {
+        if (n.type === 'ImportSpecifier' && n.imported?.name === 'registerFrame' && n.local?.name && !bound.has(n.local.name)) { bound.add(n.local.name); grew = true; }
+        if (n.type === 'VariableDeclarator' && n.id?.type === 'Identifier' && n.init?.type === 'Identifier' && bound.has(n.init.name) && !bound.has(n.id.name)) { bound.add(n.id.name); grew = true; }
+      });
+    }
     walk(ast, (n) => {
-      if (n.type !== 'CallExpression' || n.callee?.type !== 'Identifier' || n.callee.name !== 'registerFrame') return;
+      if (n.type !== 'CallExpression' || n.callee?.type !== 'Identifier' || !bound.has(n.callee.name)) return;
       const a1 = n.arguments[1];
       const literalString = a1 && a1.type === 'Literal' && typeof a1.value === 'string';
       const tConst = a1 && a1.type === 'MemberExpression' && !a1.computed
         && a1.object?.type === 'Identifier' && a1.object.name === 'T' && a1.property?.type === 'Identifier';
-      if (!literalString && !tConst) bad.push(`${fp}:${n.loc?.start?.line ?? '?'} registerFrame(…, ${a1 ? a1.type : 'none'}, …) — wire must be a string literal or T.<name>`);
+      if (!literalString && !tConst) bad.push(`${fp}:${n.loc?.start?.line ?? '?'} ${n.callee.name}(…, ${a1 ? a1.type : 'none'}, …) — wire must be a string literal or T.<name>`);
     });
   }
   return bad;
@@ -127,6 +143,9 @@ const synth = (code) => discover([{ path: 'src/__synth__.js', code }], { methods
   bad.length === 1 ? pass('NEG-B1. registerFrame with a variable wire FAILS the wire-literal gate') : fail(`NEG-B1. variable wire not caught (${bad.length})`);
   const good = wireLiteralViolations([{ path: 'src/__wl_ok__.js', code: "registerFrame(recv, 'sub', () => {}); registerFrame(recv, T.PUB, () => {});" }]);
   good.length === 0 ? pass('NEG-B2. registerFrame with a string literal / T.<name> wire PASSES') : fail(`NEG-B2. literal/T.<name> wire wrongly flagged (${good.length})`);
+  // Vega E1 review: an IMPORT ALIAS or const alias of registerFrame must not hide a variable wire.
+  const aliased = wireLiteralViolations([{ path: 'src/__wl_alias__.js', code: "import { registerFrame as rf } from '../registry/index.js'; const w = 'sub'; rf(recv, w, () => {});" }]);
+  aliased.length === 1 ? pass('NEG-B3. an import-aliased registerFrame with a variable wire FAILS the gate (binding walked)') : fail(`NEG-B3. aliased registerFrame variable wire not caught (${aliased.length})`);
 }
 
 // keep T imported-and-used (the wire-literal gate references the T namespace by design)
