@@ -20,8 +20,8 @@
 // Plus the REAL-TREE checks: with an EMPTY door table the grammar is inert (zero
 // doors, whatever the tree holds); with the DEFAULT table (E2.1 B1 landed) the migrated
 // tree yields EXACTLY B1's 19 door sites, all bound to wireHandlersMethods.
-// _registerHandlers, and the 19 raw on(T.*) sites are gone — the registrations moved
-// raw→door, conserved (raw XOR door).
+// _registerHandlers, and ZERO residual raw registration remains for any B1 wire (raw
+// XOR door) — proven with teeth by an injected-residual negative (P2b-neg).
 //
 // Run: node test/smoke_e2_door_grammar.mjs
 // =====================================================================
@@ -160,11 +160,32 @@ for (const [name, body] of Object.entries(ctxNeg)) {
   check('P2. MIGRATED: the default (B1) table discovers EXACTLY 19 B1 doors, all bound to wireHandlersMethods._registerHandlers',
     b1doors.length === 19 && b1doors.every((d) => d.context === 'wireHandlersMethods._registerHandlers'),
     `\n   b1doors=${b1doors.length} contexts=${[...new Set(migd.doors.map((d) => d.context))].join(',')}`);
-  check('P2b. CONSERVED: no raw on(T.*) site remains on the real tree — the 19 wires moved raw→door (raw XOR door)',
-    migd.sites.filter((s) => s.callee === 'on(T.*)').length === 0,
-    `\n   residual raw on(T.*) = ${migd.sites.filter((s) => s.callee === 'on(T.*)').length}`);
+  // P2b (Vega a901bc92): the prior check filtered callee==='on(T.*)', which is trivially
+  // zero once the on() helper is deleted — discover() emits that callee only for a live
+  // on(T.X) call, so the filter passed on ANY migrated tree and guarded nothing (a raw
+  // this.dht.onRoutedMessage('sub', h) — callee 'onRoutedMessage' — would slip past it).
+  // The substantive property is ZERO RESIDUAL RAW: no B1 wire is registered raw ANYWHERE
+  // (B1 raw sites === 0), and wireHandlers.js holds zero residual raw registration sites
+  // (any callee). Every B1 wire lives at a door — raw XOR door, proven fail-closed.
+  const b1Wires = new Set(b1doors.map((d) => d.wire));
+  const b1RawSites = migd.sites.filter((s) => b1Wires.has(s.wire));
+  const wireHandlersRaw = migd.sites.filter((s) => s.file && s.file.endsWith('pubsub/wireHandlers.js'));
+  check('P2b. ZERO-RESIDUAL RAW: no B1 wire is registered raw anywhere (B1 raw sites === 0) AND wireHandlers.js holds zero residual raw registration sites — every B1 wire lives at a door (raw XOR door)',
+    b1RawSites.length === 0 && wireHandlersRaw.length === 0,
+    `\n   b1RawSites=${JSON.stringify(b1RawSites.map((s) => s.site))} wireHandlersRaw=${JSON.stringify(wireHandlersRaw.map((s) => s.site))}`);
   check('P2c. no door-grammar false unresolved on the real tree under the default (B1) table',
     discoverDoors(files).unresolved.length === 0, `\n   unresolved=${JSON.stringify(discoverDoors(files).unresolved)}`);
+  // P2b-neg (Vega a901bc92): prove the zero-residual guard has TEETH — it is not vacuous
+  // the way the old callee==='on(T.*)' filter was. Inject a residual raw
+  // this.dht.onRoutedMessage('sub', …) (a B1 wire) beside the door; discover() must surface
+  // it as a wireHandlers raw site, so P2b's b1RawSites/wireHandlersRaw would be non-zero and
+  // P2b would FAIL. (The old filter counted only on(T.*) and would have passed this.)
+  {
+    const resid = discover([{ path: 'pubsub/wireHandlers.js', code: IMP + `const Mgr = { _registerHandlers() { registerFrame(this.dht, T.SUB, h, { registry: this._frameDoor }); this.dht.onRoutedMessage('sub', h2); } };` }], METH);
+    const wh = resid.sites.filter((s) => s.file && s.file.endsWith('pubsub/wireHandlers.js') && s.wire === 'sub');
+    check('P2b-neg. the zero-residual guard has TEETH: a residual raw dht.onRoutedMessage(\'sub\', …) beside the door IS discovered as a wireHandlers raw site — P2b would FAIL (not vacuous)',
+      wh.length >= 1, `\n   wireHandlers raw sites=${JSON.stringify(resid.sites.map((s) => s.site))}`);
+  }
 }
 
 console.log(`\nResult: ${passed} passed, ${failed} failed\n`);
