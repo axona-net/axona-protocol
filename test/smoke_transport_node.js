@@ -10,6 +10,15 @@ import {
   clientTransport,
 }                                from '../src/transport/node/index.js';
 import { TransportError, ErrorCodes } from '../src/errors.js';
+import { registerFrame }         from '../src/registry/index.js';
+import { makeTestRegistry }      from './lib/testRegistry.mjs';
+
+// REF-1.1 E3: the WebSocketTransport is sealed — onRequest/onNotification are no
+// longer public methods. A handler is registered through the canonical door.
+const WS_REG = makeTestRegistry([
+  { wire: 'tick', transportKind: 'notification' },
+  { wire: 'echo', transportKind: 'request' },
+]);
 
 let passed = 0, failed = 0;
 function check(label, condition) {
@@ -184,10 +193,10 @@ async function testServerFactory() {
   // attach.message routes axona-typed frames to handleIncoming.
   let receivedFrom = null;
   let receivedType = null;
-  transport.onNotification('tick', (from, body) => {
+  registerFrame(transport, 'tick', (from, body) => {
     receivedFrom = from;
     receivedType = body?.n;
-  });
+  }, { registry: WS_REG });
   attach.added('conn-1');
   attach.message('conn-1', { type: 'axona', payload: { k: 'ntf', type: 'tick', body: { n: 7 } } });
   check('notification routed via attach.message',

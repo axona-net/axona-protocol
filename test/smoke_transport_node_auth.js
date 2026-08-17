@@ -14,6 +14,12 @@
 
 import { WebSocketTransport, serverTransport } from '../src/transport/node/index.js';
 import { createNodeIdentity }                       from '../src/identity/index.js';
+import { registerFrame }                            from '../src/registry/index.js';
+import { makeTestRegistry }                         from './lib/testRegistry.mjs';
+
+// REF-1.1 E3: the WebSocketTransport is sealed — a request handler is registered
+// through the canonical door, not a public onRequest method.
+const AUTH_REG = makeTestRegistry([{ wire: 'echo', transportKind: 'request' }]);
 
 let passed = 0, failed = 0;
 function check(label, cond) {
@@ -85,7 +91,7 @@ async function testMutualAuthHappyPath() {
 
   // Proven binding means app traffic now routes by the real nodeId.
   let got = null;
-  tb.onRequest('echo', (from, body) => { got = { from, body }; return { pong: body?.v }; });
+  registerFrame(tb, 'echo', (from, body) => { got = { from, body }; return { pong: body?.v }; }, { registry: AUTH_REG });
   const res = await ta.send(bob.id, 'echo', { v: 42 });
   check('app request routes over the authenticated link', res?.pong === 42);
   check('receiver sees the authenticated sender id', got?.from === alice.id);

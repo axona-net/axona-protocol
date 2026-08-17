@@ -5,7 +5,7 @@
     "onNotification",
     "onRoutedMessage"
   ],
-  "treeHash": "86d953d200eb53b05b6ceec50d82db05c3422ff6",
+  "treeHash": "6aa4934177cec1b88e6e0e4a180a24fd1a2a2ea9",
   "filesScanned": 76,
   "summary": {
     "migration-target": 38,
@@ -13,7 +13,7 @@
     "mechanism-shim": 5,
     "canonical-door": 3,
     "parameterized-registrar": 1,
-    "primitive-definition": 13,
+    "primitive-definition": 11,
     "bridge-ws-dispatch": 8,
     "wrapper-passthrough": 2,
     "public-api-out-of-scope": 3
@@ -396,7 +396,7 @@
     },
     {
       "file": "registry/registerFrame.js",
-      "line": 117,
+      "line": 184,
       "callee": "onRoutedMessage",
       "receiver": "recv",
       "wire": "<wire>",
@@ -406,7 +406,7 @@
     },
     {
       "file": "registry/registerFrame.js",
-      "line": 120,
+      "line": 191,
       "callee": "onNotification",
       "receiver": "recv",
       "wire": "<wire>",
@@ -416,31 +416,13 @@
     },
     {
       "file": "registry/registerFrame.js",
-      "line": 123,
+      "line": 198,
       "callee": "onRequest",
       "receiver": "recv",
       "wire": "<wire>",
       "classification": "canonical-door",
       "boundary": "—",
       "why": "registerFrame request dispatch (named access)"
-    },
-    {
-      "file": "transport/node/wstransport.js",
-      "line": 371,
-      "callee": "onRequest",
-      "receiver": "def",
-      "wire": "—",
-      "classification": "primitive-definition",
-      "boundary": "—"
-    },
-    {
-      "file": "transport/node/wstransport.js",
-      "line": 378,
-      "callee": "onNotification",
-      "receiver": "def",
-      "wire": "—",
-      "classification": "primitive-definition",
-      "boundary": "—"
     },
     {
       "file": "transport/sim/transport.js",

@@ -44,6 +44,54 @@
 // when the caller omits transportKind and the wire is unambiguous (the B1–B5 case,
 // keyed by plain wire), so single-primitive migrations are unchanged.
 const DISPATCH_KINDS = new Set(['routed', 'notification', 'request']);
+
+// =====================================================================
+// REF-1.1 E3 (SEAL) — the capability channel.
+//
+// The seal removes the ability to reach a transport's raw dispatch primitive
+// (onRequest / onNotification / onRoutedMessage) without going through this door.
+// A sealed transport no longer carries the primitive as a public method; instead
+// its constructor DEPOSITS the three dispatch closures into this module-private
+// WeakMap, keyed by the transport instance. registerFrame is the ONLY reader.
+//
+// "READ SOLELY BY registerFrame" (Aster ASTER-E3-DESIGN condition 1) is structural
+// here, not merely allowlisted: the WeakMap is module-private state of this file
+// and no read accessor is exported. Transports receive a WRITE-ONLY deposit; they
+// cannot read their own capability back. E3a introduces the channel and seals one
+// transport (the node WebSocket transport); E3b seals the rest + the Transport.js
+// contract, at which point the transitional named fallback below is removed.
+// =====================================================================
+const DISPATCH_CAPABILITY = new WeakMap();
+
+/**
+ * Deposit a sealed receiver's raw dispatch closures into the capability channel.
+ * Called by a sealed transport's constructor with the subset of dispatch slots it
+ * carries, keyed by transport KIND — { request?, notification?, routed? } — NOT by
+ * the public method names. The slot keys are the row.transportKind values, so the
+ * seal genuinely removes the onRequest/onNotification/onRoutedMessage names from the
+ * running program: they survive nowhere, not even as channel property keys. Each
+ * closure is this-bound at construction, so registerFrame calls it bare.
+ * WRITE ONLY: there is no companion reader export — the channel is read solely by
+ * registerFrame, in this module.
+ */
+export function depositDispatchCapability(recv, caps) {
+  if (!recv || (typeof recv !== 'object' && typeof recv !== 'function')) {
+    throw new TypeError('depositDispatchCapability: recv (the sealed receiver) required');
+  }
+  if (!caps || typeof caps !== 'object') {
+    throw new TypeError('depositDispatchCapability: caps ({ request?, notification?, routed? }) required');
+  }
+  const channel = {};
+  for (const slot of ['request', 'notification', 'routed']) {
+    if (caps[slot] == null) continue;
+    if (typeof caps[slot] !== 'function') {
+      throw new TypeError(`depositDispatchCapability: caps.${slot} must be a function`);
+    }
+    channel[slot] = caps[slot];
+  }
+  DISPATCH_CAPABILITY.set(recv, channel);
+}
+
 export const frameWiringKey = (wire, transportKind) => `${transportKind}\0${wire}`;
 
 export function registerFrame(recv, wire, handler, { registry, transportKind } = {}) {
@@ -107,18 +155,45 @@ export function registerFrame(recv, wire, handler, { registry, transportKind } =
 
   // Select the raw dispatch primitive INTERNALLY from the row's transport kind —
   // one door, not two (exit criterion 1 [V2]). This module is the ALLOWLISTED
-  // holder of the raw primitives, keyed by module identity in the AST gate: it
-  // reaches them by NAME here (never by computed access, the shape the runtime
-  // boundary forbids), and at E3 these named methods become the closure capability
-  // this door closes over. No other module may name them once E3 seals them.
+  // holder of the raw primitives, keyed by module identity in the AST gate.
+  //
+  // REF-1.1 E3 (SEAL): a SEALED receiver deposited its dispatch closures into the
+  // module-private capability channel (DISPATCH_CAPABILITY); registerFrame reads
+  // that closure and calls it. It is a this-bound closure, so it is called bare.
+  // An UNSEALED receiver (E3a transitional — every transport but the node WS one,
+  // plus the Transport.js contract, until E3b) still carries the primitive as a
+  // public method; registerFrame reaches it by literal NAME (never by computed
+  // access, the shape the runtime boundary forbids) via a normal method call that
+  // preserves `this = recv`. E3b seals the remainder and removes this fallback.
+  // The capability channel is keyed by transport KIND (request|notification|routed),
+  // matching row.transportKind — a sealed receiver's closures were deposited under
+  // those slots, NOT under the public method names. registerFrame reads the slot
+  // literally (never `cap[row.transportKind]`, which would be a computed access) and
+  // calls the this-bound closure bare. An UNSEALED receiver has no channel entry, so
+  // the fallback reaches the still-public primitive by literal NAME via a normal
+  // method call that preserves `this = recv`. E3b seals the rest and drops the
+  // fallback; the sealed slot then becomes the only path.
+  const cap = DISPATCH_CAPABILITY.get(recv);
   switch (row.transportKind) {
     case 'routed':
+      if (cap) {
+        if (typeof cap.routed !== 'function') throw new TypeError(`registerFrame(${wire}): sealed recv has no routed dispatch capability`);
+        return cap.routed(wire, wrapped);
+      }
       if (typeof recv.onRoutedMessage !== 'function') throw new TypeError(`registerFrame(${wire}): recv has no onRoutedMessage() primitive`);
       return recv.onRoutedMessage(wire, wrapped);
     case 'notification':
+      if (cap) {
+        if (typeof cap.notification !== 'function') throw new TypeError(`registerFrame(${wire}): sealed recv has no notification dispatch capability`);
+        return cap.notification(wire, wrapped);
+      }
       if (typeof recv.onNotification !== 'function') throw new TypeError(`registerFrame(${wire}): recv has no onNotification() primitive`);
       return recv.onNotification(wire, wrapped);
     case 'request':
+      if (cap) {
+        if (typeof cap.request !== 'function') throw new TypeError(`registerFrame(${wire}): sealed recv has no request dispatch capability`);
+        return cap.request(wire, wrapped);
+      }
       if (typeof recv.onRequest !== 'function') throw new TypeError(`registerFrame(${wire}): recv has no onRequest() primitive`);
       return recv.onRequest(wire, wrapped);
     default:
