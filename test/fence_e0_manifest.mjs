@@ -162,7 +162,7 @@ summary['migration-target'] === 38 ? pass('migration-target frames = 38') : fail
 // no inherited dispatch name is reachable on any subclass (Aster's absence
 // invariant), dropping primitive-definition 11 → 9. E3b.2 seals the remaining
 // concrete transports + AxonaPeer's routed primitive, driving this toward 0.
-summary['primitive-definition'] === 9 ? pass('primitive definitions = 9 (E3a WS transport + E3b.1 base Transport contract sealed)') : fail(`primitive-definition = ${summary['primitive-definition']}, expected 9`);
+summary['primitive-definition'] === 7 ? pass('primitive definitions = 7 (E3a WS + E3b.1 base contract + E3b.2a sim transport sealed)') : fail(`primitive-definition = ${summary['primitive-definition']}, expected 7`);
 summary['parameterized-registrar'] === 1 ? pass('parameterized registrar (onDirectMessage direct_*) = 1') : fail(`parameterized-registrar = ${summary['parameterized-registrar']}, expected 1`);
 
 const args = process.argv.slice(2);

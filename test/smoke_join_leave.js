@@ -9,6 +9,12 @@ import { SimNetwork, simTransport }   from '../src/transport/sim/index.js';
 import { createNodeIdentity }         from '../src/identity/index.js';
 import { TransportError }             from '../src/errors.js';
 import { fromHex }                    from '../src/utils/hexid.js';
+import { registerFrame }             from '../src/registry/index.js';
+import { makeTestRegistry }          from './lib/testRegistry.mjs';
+
+// REF-1.1 E3: SimTransport is sealed — this observer registers the peer-leaving
+// notification through the canonical door.
+const LEAVE_REG = makeTestRegistry([{ wire: 'peer-leaving', transportKind: 'notification' }]);
 
 let passed = 0, failed = 0;
 function check(label, condition) {
@@ -117,9 +123,9 @@ async function testLeaveNotify() {
   await alice.peer.join(bob.id.id);
 
   const peerLeavings = [];
-  bob.transport.onNotification('peer-leaving', (fromId, body) => {
+  registerFrame(bob.transport, 'peer-leaving', (fromId, body) => {
     peerLeavings.push({ fromId, body });
-  });
+  }, { registry: LEAVE_REG });
 
   await alice.peer.leave({ drain: false, notify: true });
   // notify is async via microtask; let it drain.
@@ -176,7 +182,7 @@ async function testLeaveSilent() {
   await alice.peer.join(bob.id.id);
 
   const peerLeavings = [];
-  bob.transport.onNotification('peer-leaving', () => peerLeavings.push(1));
+  registerFrame(bob.transport, 'peer-leaving', () => peerLeavings.push(1), { registry: LEAVE_REG });
 
   await alice.peer.leave({ drain: false, notify: false });
   await new Promise(r => setTimeout(r, 20));

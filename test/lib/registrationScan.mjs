@@ -99,7 +99,7 @@ export const DEFAULT_MECHANISM_EXEMPT = [
   // in wireHandlers fails closed.)
   { file: 'dht/AxonaPeer.js',       recv: 'peer',      method: 'onRoutedMessage', arg: 'type',     why: 'transport-adapter delegation shim' },
   { file: 'web/composite.js',       recv: 't',         method: 'onNotification',  arg: 'type',     why: 'CompositeTransport fan-out over recorded handlers' },
-  { file: 'dht/AxonaPeer.js',       recv: 'transport', method: 'onNotification',  arg: 'wireType', why: 'direct-messaging direct_<type> family, out of scope' },
+  { file: 'registry/registerDirectFrame.js', recv: 'recv', method: 'onNotification', arg: 'wire', why: 'registerDirectFrame direct_<type> family — the ONE named direct registrar (E3 decision 2); transitional named fallback, removed when E3b seals every transport' },
 ];
 
 // ── AST helpers ──

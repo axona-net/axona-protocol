@@ -5,15 +5,15 @@
     "onNotification",
     "onRoutedMessage"
   ],
-  "treeHash": "18d2d47a32cf9890e0bc7a85c9c526e6688c6b4a",
-  "filesScanned": 76,
+  "treeHash": "e8bdaf9e5ce99af3b2ba2403fd481205d866d274",
+  "filesScanned": 77,
   "summary": {
     "migration-target": 38,
     "registration-helper": 0,
     "mechanism-shim": 5,
     "canonical-door": 3,
     "parameterized-registrar": 1,
-    "primitive-definition": 9,
+    "primitive-definition": 7,
     "bridge-ws-dispatch": 8,
     "wrapper-passthrough": 2,
     "public-api-out-of-scope": 3
@@ -22,7 +22,7 @@
   "rows": [
     {
       "file": "dht/AxonaPeer.js",
-      "line": 492,
+      "line": 503,
       "callee": "registerFrame",
       "receiver": "this._b5door",
       "wire": "lookup_step",
@@ -31,7 +31,7 @@
     },
     {
       "file": "dht/AxonaPeer.js",
-      "line": 510,
+      "line": 521,
       "callee": "registerFrame",
       "receiver": "this._b5door",
       "wire": "lookahead_probe",
@@ -40,7 +40,7 @@
     },
     {
       "file": "dht/AxonaPeer.js",
-      "line": 525,
+      "line": 536,
       "callee": "registerFrame",
       "receiver": "this._b5door",
       "wire": "reinforce",
@@ -49,7 +49,7 @@
     },
     {
       "file": "dht/AxonaPeer.js",
-      "line": 553,
+      "line": 564,
       "callee": "registerFrame",
       "receiver": "this._b5door",
       "wire": "triadic_introduce",
@@ -58,7 +58,7 @@
     },
     {
       "file": "dht/AxonaPeer.js",
-      "line": 562,
+      "line": 573,
       "callee": "registerFrame",
       "receiver": "this._b5door",
       "wire": "hop_cache",
@@ -67,7 +67,7 @@
     },
     {
       "file": "dht/AxonaPeer.js",
-      "line": 563,
+      "line": 574,
       "callee": "registerFrame",
       "receiver": "this._b5door",
       "wire": "lateral_spread",
@@ -76,7 +76,7 @@
     },
     {
       "file": "dht/AxonaPeer.js",
-      "line": 590,
+      "line": 601,
       "callee": "registerFrame",
       "receiver": "this._b5door",
       "wire": "peer-leaving",
@@ -85,7 +85,7 @@
     },
     {
       "file": "dht/AxonaPeer.js",
-      "line": 625,
+      "line": 636,
       "callee": "registerFrame",
       "receiver": "this._b5door",
       "wire": "local_probe",
@@ -94,7 +94,7 @@
     },
     {
       "file": "dht/AxonaPeer.js",
-      "line": 649,
+      "line": 660,
       "callee": "registerFrame",
       "receiver": "this._b5door",
       "wire": "find_closest_set",
@@ -103,7 +103,7 @@
     },
     {
       "file": "dht/AxonaPeer.js",
-      "line": 675,
+      "line": 686,
       "callee": "registerFrame",
       "receiver": "this._b5door",
       "wire": "route_msg",
@@ -112,7 +112,7 @@
     },
     {
       "file": "dht/AxonaPeer.js",
-      "line": 756,
+      "line": 767,
       "callee": "registerFrame",
       "receiver": "this._b3door",
       "wire": "mesh:signal",
@@ -121,7 +121,7 @@
     },
     {
       "file": "dht/AxonaPeer.js",
-      "line": 2613,
+      "line": 2624,
       "callee": "onMessage",
       "receiver": "def",
       "wire": "—",
@@ -130,7 +130,7 @@
     },
     {
       "file": "dht/AxonaPeer.js",
-      "line": 2626,
+      "line": 2637,
       "callee": "registerFrame",
       "receiver": "this._b6door",
       "wire": "axona:direct",
@@ -140,7 +140,7 @@
     },
     {
       "file": "dht/AxonaPeer.js",
-      "line": 2642,
+      "line": 2653,
       "callee": "registerFrame",
       "receiver": "this._b6door",
       "wire": "axona:direct",
@@ -150,7 +150,7 @@
     },
     {
       "file": "dht/AxonaPeer.js",
-      "line": 3128,
+      "line": 3139,
       "callee": "onRoutedMessage",
       "receiver": "peer",
       "wire": "<type>",
@@ -160,7 +160,7 @@
     },
     {
       "file": "dht/AxonaPeer.js",
-      "line": 3129,
+      "line": 3140,
       "callee": "onDirectMessage",
       "receiver": "peer",
       "wire": "<type>",
@@ -169,7 +169,7 @@
     },
     {
       "file": "dht/AxonaPeer.js",
-      "line": 3158,
+      "line": 3169,
       "callee": "registerFrame",
       "receiver": "peer._b6door",
       "wire": "__tunneled_direct__",
@@ -179,7 +179,7 @@
     },
     {
       "file": "dht/AxonaPeer.js",
-      "line": 4294,
+      "line": 4305,
       "callee": "onRoutedMessage",
       "receiver": "def",
       "wire": "—",
@@ -188,22 +188,12 @@
     },
     {
       "file": "dht/AxonaPeer.js",
-      "line": 4302,
+      "line": 4313,
       "callee": "onDirectMessage",
       "receiver": "def",
       "wire": "—",
       "classification": "wrapper-passthrough",
       "boundary": "direct"
-    },
-    {
-      "file": "dht/AxonaPeer.js",
-      "line": 4311,
-      "callee": "onNotification",
-      "receiver": "transport",
-      "wire": "<wireType>",
-      "classification": "parameterized-registrar",
-      "boundary": "—",
-      "why": "onDirectMessage direct_${type} family — own E1 fence, tracked as one site"
     },
     {
       "file": "pubsub/wireHandlers.js",
@@ -377,8 +367,18 @@
       "boundary": "B1"
     },
     {
+      "file": "registry/registerDirectFrame.js",
+      "line": 61,
+      "callee": "onNotification",
+      "receiver": "recv",
+      "wire": "<wire>",
+      "classification": "parameterized-registrar",
+      "boundary": "—",
+      "why": "registerDirectFrame direct_${type} family — the ONE named direct registrar (E3 decision 2); transitional named fallback for an unsealed transport, removed when E3b seals every transport"
+    },
+    {
       "file": "registry/registerFrame.js",
-      "line": 184,
+      "line": 198,
       "callee": "onRoutedMessage",
       "receiver": "recv",
       "wire": "<wire>",
@@ -388,7 +388,7 @@
     },
     {
       "file": "registry/registerFrame.js",
-      "line": 191,
+      "line": 205,
       "callee": "onNotification",
       "receiver": "recv",
       "wire": "<wire>",
@@ -398,31 +398,13 @@
     },
     {
       "file": "registry/registerFrame.js",
-      "line": 198,
+      "line": 212,
       "callee": "onRequest",
       "receiver": "recv",
       "wire": "<wire>",
       "classification": "canonical-door",
       "boundary": "—",
       "why": "registerFrame request dispatch (named access)"
-    },
-    {
-      "file": "transport/sim/transport.js",
-      "line": 380,
-      "callee": "onRequest",
-      "receiver": "def",
-      "wire": "—",
-      "classification": "primitive-definition",
-      "boundary": "—"
-    },
-    {
-      "file": "transport/sim/transport.js",
-      "line": 387,
-      "callee": "onNotification",
-      "receiver": "def",
-      "wire": "—",
-      "classification": "primitive-definition",
-      "boundary": "—"
     },
     {
       "file": "transport/web/bridge.js",

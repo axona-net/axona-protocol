@@ -61,10 +61,21 @@ import { AxonaError, PublishError, SubscribeError, KillError, TouchError, PullEr
 // Boundary-3 registry. The routed mesh:signal handler registers through registerFrame
 // (transportKind 'routed' resolved from the B3 row) instead of the raw onRoutedMessage
 // primitive; observation is default-off, so flag-off dispatch is byte-identical.
-import { registerFrame, shadowEnabled } from '../registry/index.js';
+import { registerFrame, registerDirectFrame, readDispatchCapability, shadowEnabled } from '../registry/index.js';
 import { buildBoundary3Registry } from '../transport/boundary3Registry.js';
 import { buildBoundary6Registry } from './boundary6Registry.js';
 import { buildBoundary5Registry } from './boundary5Registry.js';
+
+// REF-1.1 E3: a transport can receive dispatch either through the legacy
+// public primitive (unsealed transport) OR through a deposited capability
+// (sealed transport, read via the module-private channel). The old install
+// guards keyed on `typeof transport.onRequest === 'function'`; after E3 seals
+// a transport that predicate is false even though registerFrame binds the
+// handler fine via the capability channel — so the guard must accept both.
+function _canReceiveDispatch(recv) {
+  if (!recv) return false;
+  return typeof recv.onRequest === 'function' || readDispatchCapability(recv) !== undefined;
+}
 
 // ── B-3 (eclipse prevention) tunables ───────────────────────────────
 // Max concurrent verification probes triggered by gossip introductions —
@@ -335,7 +346,7 @@ export class AxonaPeer extends DHT {
     // in dht-sim sets node.transport from network.makeTransport
     // before constructing the peer, so the receive path is wired
     // either way).
-    if (this._node?.transport && typeof this._node.transport.onRequest === 'function') {
+    if (this._node?.transport && _canReceiveDispatch(this._node.transport)) {
       this._installRoutingHandlers();
     }
 
@@ -2621,7 +2632,7 @@ export class AxonaPeer extends DHT {
   _installDirectHandlers() {
     if (this._directHandlersInstalled) return;
     const t = this._transport;
-    if (!t || typeof t.onRequest !== 'function') return;
+    if (!t || !_canReceiveDispatch(t)) return;
 
     registerFrame(t, 'axona:direct', async (fromId, payload) => {
       const h = this._directMessageHandler;
@@ -4306,9 +4317,12 @@ export class AxonaPeer extends DHT {
     // computed `direct_${type}` wire; the fence is the check, it adds no new site.
     this._gateDirectType(type, 'onDirectMessage');
     const node = this._node;
-    const wireType = `direct_${type}`;
     if (!this._directHandlers.has(type)) {
-      node.transport.onNotification(wireType, (fromId, payload) => {
+      // REF-1.1 E3 decision 2: register the computed direct_${type} wire through the
+      // ONE named registrar (registerDirectFrame), not a raw transport.onNotification.
+      // It reads the sealed transport's capability (or falls back, transitionally),
+      // and enforces the direct_-prefix shape so no computed wire escapes the seal.
+      registerDirectFrame(node.transport, type, (fromId, payload) => {
         const h = this._directHandlers.get(type);
         if (!h) return;
         const fromHex = (typeof fromId === 'bigint') ? nodeIdToHex(fromId) : fromId;

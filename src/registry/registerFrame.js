@@ -92,6 +92,20 @@ export function depositDispatchCapability(recv, caps) {
   DISPATCH_CAPABILITY.set(recv, channel);
 }
 
+// REF-1.1 E3b — the allowlisted capability READER for the enumerated mechanism-shim
+// set (Aster ASTER-E3-DESIGN decision 3: the surviving shims are frozen by MODULE
+// IDENTITY). registerFrame reads the module-private WeakMap directly; the mechanism
+// shims that legitimately replay/forward a sealed primitive read through this export:
+//   - the CompositeTransport fan-out (replays a handler to each sub-transport),
+//   - the AxonaPeer routed demux (delegates onRoutedMessage to the peer),
+//   - registerDirectFrame (the onDirectMessage direct_* parameterized registrar).
+// The S5 ownership fence freezes the SET of importers to exactly those modules; a new
+// importer fails closed. Returns { request?, notification?, routed? } (kind-keyed, the
+// same channel registerFrame reads) or undefined for an unsealed receiver.
+export function readDispatchCapability(recv) {
+  return DISPATCH_CAPABILITY.get(recv);
+}
+
 export const frameWiringKey = (wire, transportKind) => `${transportKind}\0${wire}`;
 
 export function registerFrame(recv, wire, handler, { registry, transportKind } = {}) {

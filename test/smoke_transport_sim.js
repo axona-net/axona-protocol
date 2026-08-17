@@ -7,6 +7,21 @@
 
 import { SimNetwork, simTransport } from '../src/transport/sim/index.js';
 import { TransportError, ErrorCodes } from '../src/errors.js';
+import { registerFrame }            from '../src/registry/index.js';
+import { makeTestRegistry }         from './lib/testRegistry.mjs';
+
+// REF-1.1 E3: SimTransport is sealed — onRequest/onNotification are not public
+// methods. Contract handlers register through the canonical door. Two registries
+// (one per kind) because 'boom' is exercised as both a request and a notification.
+const SIM_REQ = makeTestRegistry([
+  { wire: 'echo', transportKind: 'request' },
+  { wire: 'boom', transportKind: 'request' },
+  { wire: 'relay', transportKind: 'request' },
+]);
+const SIM_NTF = makeTestRegistry([
+  { wire: 'tick', transportKind: 'notification' },
+  { wire: 'boom', transportKind: 'notification' },
+]);
 
 let passed = 0, failed = 0;
 function check(label, condition) {
@@ -105,10 +120,10 @@ async function testSend() {
   await alice.openConnection(BOB_ID);
 
   let receivedFrom = null;
-  bob.onRequest('echo', (fromId, payload) => {
+  registerFrame(bob, 'echo', (fromId, payload) => {
     receivedFrom = fromId;
     return { echoed: payload, by: BOB_ID };
-  });
+  }, { registry: SIM_REQ });
 
   const reply = await alice.send(BOB_ID, 'echo', { msg: 'hello' });
   check('send returns remote handler value',
@@ -117,7 +132,7 @@ async function testSend() {
     receivedFrom === ALICE_ID);
 
   // Handler throw propagates.
-  bob.onRequest('boom', () => { throw new Error('kaboom'); });
+  registerFrame(bob, 'boom', () => { throw new Error('kaboom'); }, { registry: SIM_REQ });
   let threw = null;
   try { await alice.send(BOB_ID, 'boom', null); }
   catch (e) { threw = e; }
@@ -154,10 +169,10 @@ async function testNotify() {
 
   let count = 0;
   let lastFrom = null;
-  bob.onNotification('tick', (fromId, payload) => {
+  registerFrame(bob, 'tick', (fromId, payload) => {
     count++;
     lastFrom = fromId;
-  });
+  }, { registry: SIM_NTF });
 
   await alice.notify(BOB_ID, 'tick', { n: 1 });
   await alice.notify(BOB_ID, 'tick', { n: 2 });
@@ -168,7 +183,7 @@ async function testNotify() {
   check('notify resolves before delivery (does not await)', true);
 
   // Handler throw is swallowed.
-  bob.onNotification('boom', () => { throw new Error('swallowed'); });
+  registerFrame(bob, 'boom', () => { throw new Error('swallowed'); }, { registry: SIM_NTF });
   await alice.notify(BOB_ID, 'boom', null);
   await new Promise(r => setTimeout(r, 10));
   check('notify handler throw does not crash caller', true);
@@ -239,8 +254,8 @@ async function testFullSurface() {
   check('alice connected to carol', alice.isConnected(CAROL_ID));
   check('bob connected to carol',   bob.isConnected(CAROL_ID));
 
-  bob.onRequest('relay', (from, payload) => `bob-relayed-${payload.via}`);
-  carol.onRequest('relay', (from, payload) => `carol-relayed-${payload.via}`);
+  registerFrame(bob, 'relay', (from, payload) => `bob-relayed-${payload.via}`, { registry: SIM_REQ });
+  registerFrame(carol, 'relay', (from, payload) => `carol-relayed-${payload.via}`, { registry: SIM_REQ });
 
   const fromBob   = await alice.send(BOB_ID, 'relay', { via: 'bob' });
   const fromCarol = await alice.send(CAROL_ID, 'relay', { via: 'carol' });

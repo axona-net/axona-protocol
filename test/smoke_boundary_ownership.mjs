@@ -89,7 +89,7 @@ const MECHANISM_EXEMPT = [
   // dht.onRoutedMessage(type) in wireHandlers now fails closed under this fence too.)
   { file: 'dht/AxonaPeer.js',       recv: 'peer',      method: 'onRoutedMessage', arg: 'type',     why: 'transport-adapter delegation shim' },
   { file: 'web/composite.js',       recv: 't',         method: 'onNotification',  arg: 'type',     why: 'CompositeTransport fan-out over recorded handlers' },
-  { file: 'dht/AxonaPeer.js',       recv: 'transport', method: 'onNotification',  arg: 'wireType', why: 'direct-messaging direct_<type> family, out of scope' },
+  { file: 'registry/registerDirectFrame.js', recv: 'recv', method: 'onNotification', arg: 'wire', why: 'registerDirectFrame — the ONE named direct_<type> registrar (E3 decision 2), frozen by module identity; transitional named fallback removed when E3b seals every transport' },
   // REF-1.1 E1: the canonical registerFrame door is the ALLOWLISTED holder of the
   // raw primitives (design exit criterion 2, keyed by module identity). It reaches
   // them by NAME with the `wire` param as the frame-type arg. This is the
