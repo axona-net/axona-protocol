@@ -48,7 +48,7 @@ function listJs(dir) { const o = []; for (const n of readdirSync(dir)) { const p
 const files = listJs(SRC).map((p) => ({ path: relative(SRC, p), code: readFileSync(p, 'utf8') }));
 
 // ── PRIMARY: the sealed-primitive scan (fail-closed) ──
-const { sites, unresolved, parseErrors, mechanisms } = discover(files, { methods: SEALED, mechanismExempt: MECHANISM_EXEMPT });
+const { sites, unresolved, parseErrors, mechanisms, doors } = discover(files, { methods: SEALED, mechanismExempt: MECHANISM_EXEMPT });
 
 // migration-targets: literal/T.<name>-wired registrations of a sealed primitive.
 // Exclude the bridge-ws `dispatch` switch — it is a separate registration style,
@@ -56,6 +56,16 @@ const { sites, unresolved, parseErrors, mechanisms } = discover(files, { methods
 const migration = sites.filter((s) => s.callee !== 'dispatch').map((s) => ({
   file: s.file, line: s.line, callee: s.callee, receiver: s.recv, wire: s.wire,
   classification: 'migration-target', boundary: boundaryOf(s.callee, s.wire, s.recv),
+}));
+// REF-1.1 E2 (council 389be28f / eb71240a / e2200e2b): a MIGRATED site is a
+// canonical registerFrame door, discovered by the ONE shared grammar
+// (discover→discoverDoors). It is a migration-target exactly like the raw site it
+// replaced — the target MOVED from raw to door, the count is unchanged. Empty until
+// a boundary migrates → zero door rows on the unmigrated tree, so the manifest + all
+// counts are byte-identical (parity). receiver carries the canonical registry expr.
+const doorRows = doors.map((d) => ({
+  file: d.file, line: d.line, callee: 'registerFrame', receiver: d.registry, wire: d.wire,
+  classification: 'migration-target', boundary: d.boundary,
 }));
 const dispatch = sites.filter((s) => s.callee === 'dispatch').map((s) => ({
   file: s.file, line: s.line, callee: 'dispatch', receiver: s.recv, wire: s.wire,
@@ -101,7 +111,7 @@ for (const { path: fp, code } of files) {
 }
 
 // ── assemble ──
-const rows = [...migration, ...mechRows, ...defRows, ...dispatch, ...secondary]
+const rows = [...migration, ...doorRows, ...mechRows, ...defRows, ...dispatch, ...secondary]
   .sort((a, b) => a.file === b.file ? a.line - b.line : a.file.localeCompare(b.file));
 
 const count = (c) => rows.filter((r) => r.classification === c).length;
@@ -116,7 +126,7 @@ const summary = {
   'wrapper-passthrough': count('wrapper-passthrough'),
   'public-api-out-of-scope': count('public-api-out-of-scope'),
 };
-const b1 = migration.filter((r) => r.boundary === 'B1').length;
+const b1 = [...migration, ...doorRows].filter((r) => r.boundary === 'B1').length;   // raw B1 + door B1 (a B1 target migrated from raw to door stays counted)
 
 let treeHash = 'UNKNOWN';
 try { treeHash = execSync('git rev-parse HEAD', { cwd: REPO }).toString().trim(); } catch { /* detached / no git */ }

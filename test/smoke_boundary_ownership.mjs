@@ -56,6 +56,7 @@ import { buildBoundary2Registry } from '../src/transport/boundary2Registry.js';
 import { buildBoundary3Registry } from '../src/transport/boundary3Registry.js';
 import { buildBoundary4Registry } from '../src/transport/boundary4Registry.js';
 import { T } from '../src/pubsub/constants.js';
+import { discoverDoors, DEFAULT_DOOR_REGISTRIES } from './lib/registrationScan.mjs';
 
 let passed = 0, failed = 0;
 const check = (label, cond, extra = '') => { if (cond) { console.log(`  ✓ ${label}`); passed++; } else { console.log(`  ✗ ${label} ${extra}`); failed++; } };
@@ -239,6 +240,16 @@ const SRC = fileURLToPath(new URL('../src/', import.meta.url));
 function listJs(dir) { const o = []; for (const n of readdirSync(dir)) { const p = join(dir, n); const s = statSync(p); if (s.isDirectory()) o.push(...listJs(p)); else if (n.endsWith('.js')) o.push(p); } return o; }
 const realFiles = listJs(SRC).map((p) => ({ path: relative(SRC, p), code: readFileSync(p, 'utf8') }));
 const { sites, unresolved, parseErrors } = discover(realFiles);
+// REF-1.1 E2 (council: Aster 389be28f / Vega eb71240a / Orion e2200e2b): recognize
+// canonical registerFrame DOOR sites through the ONE SHARED grammar (discoverDoors
+// in test/lib/registrationScan.mjs), so a migrated registration counts as a live
+// endpoint under raw XOR door. The inline scanner above is the S5-hardened RAW scan;
+// the door grammar is the single shared migration-aware addition both gates consume.
+// DEFAULT_DOOR_REGISTRIES is empty until a boundary migrates → zero doors on the
+// unmigrated tree, so L is unchanged and every ownership check is byte-identical
+// (parity). Door fail-closed findings join the INV0b unresolved set.
+const { doors: doorSites, unresolved: doorUnresolved } = discoverDoors(realFiles, { doorRegistries: DEFAULT_DOOR_REGISTRIES });
+unresolved.push(...doorUnresolved);
 
 // ── INV0c parse coverage / INV0 classification / INV0b resolvable ──
 check('INV0c. source coverage: EVERY src file parsed as a JavaScript AST (no parse errors) — coverage is proven, not assumed',
@@ -253,8 +264,23 @@ check('INV0b. fail-closed within the SOUNDLY-CHECKED envelope: a registration-me
 
 const L = sites.map((e) => ({ e, c: classify(e) })).filter((x) => Array.isArray(x.c))
   .map((x) => ({ key: `${x.e.surface}|${x.e.wire}`, boundary: x.c[0], regWire: x.c[1], surface: x.e.surface, wire: x.e.wire }));
+// REF-1.1 E2 migration-aware: a canonical door site is a LIVE in-scope endpoint for
+// its boundary+wire, exactly like a raw site — the registration MOVED from raw to
+// door, it did not vanish. Zero doors on the unmigrated tree, so L is unchanged (parity).
+// INV1 forward then also proves each door's registry OWNS its wire (wrong-boundary
+// door → REG[boundary] lacks the wire → INV1 fails); INV2 backward stays satisfied
+// after a boundary migrates because its door endpoints keep the wires live.
+const doorL = doorSites.map((d) => ({ key: `door|${d.wire}`, boundary: d.boundary, regWire: d.wire, surface: 'door', wire: d.wire }));
+L.push(...doorL);
+// raw XOR door: no E0 target may be registered BOTH ways (a half-migrated site).
+{
+  const rawKeys = new Set(L.filter((x) => x.surface !== 'door').map((x) => `${x.boundary}|${x.regWire}`));
+  const both = doorL.filter((x) => rawKeys.has(`${x.boundary}|${x.regWire}`));
+  check('INVdoor. raw XOR door: no (boundary, wire) is registered BOTH raw and through the door (a half-migrated site FAILS)',
+    both.length === 0, `\n   both: ${both.map((x) => `${x.boundary}:${x.regWire}`).join(', ')}`);
+}
 const A = (s, w) => L.some((x) => x.surface === s && x.wire === w);
-check(`A1. AST-walked ${realFiles.length} src files; ${sites.length} registration sites → ${L.length} in-scope + ${sites.length - L.length} documented exclusions (routed B1=${L.filter((x) => x.boundary === 'B1').length})`,
+check(`A1. AST-walked ${realFiles.length} src files; ${sites.length} raw sites + ${doorL.length} door sites → ${L.length} in-scope endpoints (B1=${L.filter((x) => x.boundary === 'B1').length}, raw XOR door)`,
   realFiles.length >= 60 && L.filter((x) => x.boundary === 'B1').length === 19 && L.length >= 33);
 
 check('INV1. forward: every live in-scope endpoint’s boundary registry contains its mapped wire',

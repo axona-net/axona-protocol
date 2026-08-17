@@ -25,6 +25,39 @@ import { T } from '../../src/pubsub/constants.js';
 
 export const DEFAULT_METHODS = new Set(['onRoutedMessage', 'onNotification']);
 
+// REF-1.1 E2 MIGRATION-AWARE door discovery (council: Aster 389be28f, Vega
+// eb71240a, Orion e2200e2b). A migrated registration is a registerFrame call, no
+// longer a raw sealed-primitive call. The ONE canonical door grammar, enforced by
+// this shared scanner (NOT by [V2] alone — [V2] decides only the wire argument;
+// this decides the callee binding, the registry argument, the options shape, and
+// rejects every wrapper):
+//   registerFrame(recv, T.NAME, handler, { registry: <canonical boundary registry> })
+// with a DIRECT registerFrame callee (no alias/wrapper), a literal T.NAME (or string)
+// wire, and an options ObjectExpression whose `registry` is one of the explicit
+// canonical registry references below — nothing else. Any deviation (aliased/wrapped
+// registerFrame, computed/aliased wire, aliased/computed/spread registry, indirect
+// options) is a NONCANONICAL look-alike and fails closed, exactly as an aliased raw
+// primitive does — this is what preserves S5's closed soundness claim.
+//
+// DEFAULT_DOOR_REGISTRIES maps (file, registry-expr) → boundary. It is EMPTY until a
+// boundary migrates: on the unmigrated tree src carries zero registerFrame calls
+// (E1 landed the door; E2 migrates the sites), so discovery is byte-identical to the
+// pre-E2 raw scan (parity). B1 adds { 'pubsub/wireHandlers.js', 'this._frameDoor',
+// 'B1' } when it lands.
+export const DEFAULT_DOOR_REGISTRIES = [];
+
+// Render a registry-argument expression to its explicit canonical source string, or
+// null if it is not one of the two allowed explicit forms (this.<name> | <id>.<name>).
+// A bare Identifier ({ registry: reg }) is an ALIAS → null → noncanonical → fail
+// closed. Computed member, call, spread, anything else → null likewise.
+export function canonicalRegistryExpr(node) {
+  if (node && node.type === 'MemberExpression' && !node.computed && node.property?.type === 'Identifier') {
+    if (node.object?.type === 'ThisExpression') return `this.${node.property.name}`;
+    if (node.object?.type === 'Identifier') return `${node.object.name}.${node.property.name}`;
+  }
+  return null;
+}
+
 // Non-literal registration calls that are DOCUMENTED mechanisms/planes, keyed by
 // (file, receiver, method, arg) so a NEW computed registration anywhere else fails.
 // `class`/`why` are metadata the E0 manifest reads; S5's default list omits them.
@@ -61,7 +94,7 @@ export function receiverLabel(o) {
 const lineOf = (n) => n?.loc?.start?.line ?? 0;
 
 // ── discover: AST-parse a file list → { sites, unresolved, parseErrors, mechanisms } ──
-export function discover(fileList, { methods = DEFAULT_METHODS, mechanismExempt = DEFAULT_MECHANISM_EXEMPT } = {}) {
+export function discover(fileList, { methods = DEFAULT_METHODS, mechanismExempt = DEFAULT_MECHANISM_EXEMPT, doorRegistries = DEFAULT_DOOR_REGISTRIES } = {}) {
   const METHODS = methods;
   const exemptOf = (fp, recv, method, arg) => mechanismExempt.find((x) => fp.endsWith(x.file) && recv === x.recv && method === x.method && arg === x.arg) || null;
   const sites = [], unresolved = [], parseErrors = [], mechanisms = [];
@@ -163,5 +196,86 @@ export function discover(fileList, { methods = DEFAULT_METHODS, mechanismExempt 
     for (const m of members) if (!called.has(m) && !typeofGuarded.has(m)) unresolved.push(`${fp} ${receiverLabel(m.object)}.${methodName(m)} — referenced/aliased, not directly called`);
     for (const [name] of memberBoundLocals) if (calledIdents.has(name)) unresolved.push(`${fp} const ${name} = x[expr]; ${name}(…) — computed-member-derived local is invoked; cannot prove it is not a registration method`);
   }
-  return { sites, unresolved, parseErrors, mechanisms };
+  const dd = discoverDoors(fileList, { doorRegistries });
+  return { sites, unresolved: unresolved.concat(dd.unresolved), parseErrors, mechanisms, doors: dd.doors };
+}
+
+// discoverDoors — the SHARED canonical registerFrame DOOR grammar (council: Aster
+// 389be28f / Vega eb71240a / Orion e2200e2b), factored so BOTH gates recognize a
+// door through ONE grammar: fence_e0_manifest via discover() (which merges this),
+// smoke_boundary_ownership (the S5 fence) by calling it directly. A door is
+// registerFrame(recv, T.NAME, handler, { registry: R }) with a DIRECT registerFrame
+// callee, a literal T.NAME/string wire, and an inline { registry: <explicit
+// this.X|id.X> } naming a canonical boundary registry in doorRegistries. Every
+// indirection FAILS CLOSED (→ unresolved) — aliased/wrapped door, computed/aliased
+// wire, aliased/computed/spread registry, non-inline options — which is what
+// preserves S5's closed soundness; [V2] decides ONLY the wire arg (Vega). On the
+// unmigrated tree no src file imports the door, so this yields zero doors and
+// discovery is byte-identical to the raw scan (parity).
+export function discoverDoors(fileList, { doorRegistries = DEFAULT_DOOR_REGISTRIES } = {}) {
+  const doorOf = (fp, registry) => doorRegistries.find((d) => fp.endsWith(d.file) && d.registry === registry) || null;
+  const doors = [], unresolved = [], parseErrors = [];
+  for (const { path: fp, code } of fileList) {
+    let ast;
+    try { ast = acorn.parse(code, { ecmaVersion: 'latest', sourceType: 'module', allowHashBang: true, locations: true }); }
+    catch { try { ast = acorn.parse(code, { ecmaVersion: 'latest', sourceType: 'script', allowHashBang: true, allowReturnOutsideFunction: true, locations: true }); }
+      catch (e) { parseErrors.push(`${fp}: ${e.message}`); continue; } }
+    // Canonical door binding = a plain named `import { registerFrame }` whose local
+    // name is exactly 'registerFrame'. An aliased import, a default/namespace handle,
+    // or a `const x = registerFrame` rebinding is NON-canonical: calls through it fail closed.
+    let canonicalDoor = null;
+    const doorAliases = new Set();
+    walk(ast, (n) => {
+      if (n.type === 'ImportDeclaration') {
+        const fromDoorModule = /(^|\/)registerFrame\.js$/.test(n.source?.value || '') || /(^|\/)registry\/index\.js$/.test(n.source?.value || '');
+        for (const sp of n.specifiers) {
+          if (sp.type === 'ImportSpecifier' && sp.imported?.name === 'registerFrame') {
+            if (sp.local.name === 'registerFrame') canonicalDoor = 'registerFrame';
+            else doorAliases.add(sp.local.name);                       // import { registerFrame as rf }
+          } else if ((sp.type === 'ImportDefaultSpecifier' || sp.type === 'ImportNamespaceSpecifier') && fromDoorModule) {
+            doorAliases.add(sp.local.name);                            // default / * as ns handle to the door
+          }
+        }
+      }
+      if (n.type === 'VariableDeclarator' && n.id?.type === 'Identifier' && n.init?.type === 'Identifier' && n.init.name === 'registerFrame') doorAliases.add(n.id.name);
+      if (n.type === 'AssignmentExpression' && n.operator === '=' && n.left?.type === 'Identifier' && n.right?.type === 'Identifier' && n.right.name === 'registerFrame') doorAliases.add(n.left.name);
+    });
+    const doorNames = new Set([canonicalDoor, ...doorAliases].filter(Boolean));
+    if (!doorNames.size) continue;
+    walk(ast, (n) => {
+      // door.call/.apply/.bind(...) — an indirect invoke → fail closed.
+      if (n.type === 'CallExpression' && n.callee?.type === 'MemberExpression' && !n.callee.computed
+        && n.callee.object?.type === 'Identifier' && doorNames.has(n.callee.object.name)
+        && ['call', 'apply', 'bind'].includes(n.callee.property?.name)) {
+        unresolved.push(`${fp} ${n.callee.object.name}.${n.callee.property.name}(…) — indirect registerFrame invoke, not a canonical door call`); return;
+      }
+      // <nsHandle>.registerFrame(...) — a namespace/default door handle invoked by
+      // member access is NOT the canonical direct call → fail closed.
+      if (n.type === 'CallExpression' && n.callee?.type === 'MemberExpression' && !n.callee.computed
+        && n.callee.object?.type === 'Identifier' && doorAliases.has(n.callee.object.name)
+        && n.callee.property?.name === 'registerFrame') {
+        unresolved.push(`${fp} ${n.callee.object.name}.registerFrame(…) — namespace/default door handle, not the canonical direct registerFrame call`); return;
+      }
+      if (n.type !== 'CallExpression' || n.callee?.type !== 'Identifier' || !doorNames.has(n.callee.name)) return;
+      if (n.callee.name !== canonicalDoor) { unresolved.push(`${fp} ${n.callee.name}(…) — registerFrame called through an alias, not the canonical direct name`); return; }
+      // canonical direct registerFrame(recv, wire, handler, options)
+      const wireArg = n.arguments[1], optsArg = n.arguments[3];
+      let wire = null;
+      if (wireArg?.type === 'MemberExpression' && !wireArg.computed && wireArg.object?.type === 'Identifier' && wireArg.object.name === 'T' && wireArg.property?.type === 'Identifier') wire = (typeof T[wireArg.property.name] === 'string') ? T[wireArg.property.name] : null;
+      else if (wireArg?.type === 'Literal' && typeof wireArg.value === 'string') wire = wireArg.value;
+      if (wire == null) { unresolved.push(`${fp} registerFrame(…) — wire arg is not a literal T.<name>/string (noncanonical door)`); return; }
+      let registryProp = null, hasSpread = false;
+      if (optsArg?.type === 'ObjectExpression') for (const p of optsArg.properties) {
+        if (p.type === 'SpreadElement') hasSpread = true;
+        else if (p.type === 'Property' && !p.computed && ((p.key?.type === 'Identifier' && p.key.name === 'registry') || (p.key?.type === 'Literal' && p.key.value === 'registry'))) registryProp = p;
+      }
+      if (!optsArg || optsArg.type !== 'ObjectExpression' || hasSpread || !registryProp) { unresolved.push(`${fp} registerFrame('${wire}', …) — options must be an inline { registry: … } object with no spread (noncanonical door)`); return; }
+      const registryExpr = canonicalRegistryExpr(registryProp.value);
+      if (registryExpr == null) { unresolved.push(`${fp} registerFrame('${wire}', { registry: <non-explicit> }) — registry must be an explicit this.<name>/<id>.<name>, not an alias/computed (noncanonical door)`); return; }
+      const entry = doorOf(fp, registryExpr);
+      if (!entry) { unresolved.push(`${fp} registerFrame('${wire}', { registry: ${registryExpr} }) — not a canonical boundary registry for this file (wrong-boundary / unlisted)`); return; }
+      doors.push({ surface: 'door', wire, site: `${fp} registerFrame('${wire}', { registry: ${registryExpr} })`, file: fp, line: lineOf(n), callee: 'registerFrame', registry: registryExpr, boundary: entry.boundary });
+    });
+  }
+  return { doors, unresolved, parseErrors };
 }
