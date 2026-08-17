@@ -27,8 +27,8 @@ export const SEALED = Object.freeze(new Set(['onRequest', 'onNotification', 'onR
 
 export const RAW_DISPATCH_ALLOWLIST = Object.freeze([
   { file: 'dht/AxonaPeer.js',       recv: 'peer',      method: 'onRoutedMessage', arg: 'type',     class: 'mechanism-shim',         why: 'default-DHT adapter passthrough (AxonaPeer.js:3089)' },
-  { file: 'web/composite.js',       recv: 't',         method: 'onRequest',       arg: 'type',     class: 'mechanism-shim',         why: 'CompositeTransport onRequest fan-out/replay over recorded handlers' },
-  { file: 'web/composite.js',       recv: 't',         method: 'onNotification',  arg: 'type',     class: 'mechanism-shim',         why: 'CompositeTransport onNotification fan-out/replay over recorded handlers' },
+  { file: 'web/composite.js',       recv: 't',         method: 'onRequest',       arg: 'type',     class: 'mechanism-shim',         why: 'CompositeTransport request fan-out (E3b.2b: cap-first via readDispatchCapability; this literal-method call is the TRANSITIONAL fallback for an unsealed sub, removed in E3b.2c)' },
+  { file: 'web/composite.js',       recv: 't',         method: 'onNotification',  arg: 'type',     class: 'mechanism-shim',         why: 'CompositeTransport notification fan-out (E3b.2b: cap-first via readDispatchCapability; this literal-method call is the TRANSITIONAL fallback for an unsealed sub, removed in E3b.2c)' },
   { file: 'registry/registerDirectFrame.js', recv: 'recv', method: 'onNotification', arg: 'wire', class: 'parameterized-registrar', why: 'registerDirectFrame direct_${type} family — the ONE named direct registrar (E3 decision 2); transitional named fallback for an unsealed transport, removed when E3b seals every transport' },
   // REF-1.1 E1: the canonical registerFrame door — the allowlisted holder of the
   // raw primitives (exit criterion 2, keyed by module identity). Reaches them by

@@ -160,9 +160,12 @@ summary['migration-target'] === 38 ? pass('migration-target frames = 38') : fail
 // REF-1.1 E3a sealed the node WebSocketTransport (13 → 11). E3b.1 seals the base
 // Transport.js contract: its onRequest/onNotification throwing stubs are removed so
 // no inherited dispatch name is reachable on any subclass (Aster's absence
-// invariant), dropping primitive-definition 11 → 9. E3b.2 seals the remaining
-// concrete transports + AxonaPeer's routed primitive, driving this toward 0.
-summary['primitive-definition'] === 7 ? pass('primitive definitions = 7 (E3a WS + E3b.1 base contract + E3b.2a sim transport sealed)') : fail(`primitive-definition = ${summary['primitive-definition']}, expected 7`);
+// invariant), dropping primitive-definition 11 → 9. E3b.2a sealed the sim
+// transport (→7); E3b.2b seals the three web transports (bridge, webrtc,
+// composite) (→1). The ONE remaining primitive definition is
+// AxonaPeer.onRoutedMessage — the routed dispatch primitive E3b.2c seals last,
+// driving this to 0.
+summary['primitive-definition'] === 1 ? pass('primitive definitions = 1 (only AxonaPeer.onRoutedMessage remains — the E3b.2c target)') : fail(`primitive-definition = ${summary['primitive-definition']}, expected 1`);
 summary['parameterized-registrar'] === 1 ? pass('parameterized registrar (onDirectMessage direct_*) = 1') : fail(`parameterized-registrar = ${summary['parameterized-registrar']}, expected 1`);
 
 const args = process.argv.slice(2);

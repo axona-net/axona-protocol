@@ -23,6 +23,14 @@ import { TransportError, ErrorCodes } from '../src/errors.js';
 import { fromHex } from '../src/utils/hexid.js';
 import { createNodeIdentity } from '../src/identity/index.js';
 import { buildAuthHello, cbvFromNonces } from '../src/transport/handshake-auth.js';
+import { registerFrame } from '../src/registry/index.js';
+import { makeTestRegistry } from './lib/testRegistry.mjs';
+
+// REF-1.1 E3b.2b: CompositeTransport is sealed — register through the canonical
+// door. (The FakeSubTransport doubles below keep public methods on purpose, so
+// the composite's transitional cap-miss fan-out fallback is exercised too.)
+const FULL_REQ = makeTestRegistry([{ wire: 'lookup', transportKind: 'request' }]);
+const FULL_NTF = makeTestRegistry([{ wire: 'tick',   transportKind: 'notification' }]);
 
 let passed = 0, failed = 0;
 function check(label, condition) {
@@ -237,11 +245,11 @@ async function testCompositeHandlerFanout() {
   composite.addSubtransport(subB);
 
   const handler = () => {};
-  composite.onRequest('lookup', handler);
+  registerFrame(composite, 'lookup', handler, { registry: FULL_REQ });
   check('onRequest registered on subA', subA._reqHandlers.get('lookup') === handler);
   check('onRequest registered on subB', subB._reqHandlers.get('lookup') === handler);
 
-  composite.onNotification('tick', handler);
+  registerFrame(composite, 'tick', handler, { registry: FULL_NTF });
   check('onNotification registered on subA', subA._ntfHandlers.get('tick') === handler);
   check('onNotification registered on subB', subB._ntfHandlers.get('tick') === handler);
 
@@ -255,7 +263,7 @@ async function testCompositeLateAdd() {
   const composite = new CompositeTransport({ localNodeId: ALICE });
 
   const handler = () => {};
-  composite.onRequest('lookup', handler);
+  registerFrame(composite, 'lookup', handler, { registry: FULL_REQ });
 
   const sub = new FakeSubTransport('late', BRIDGE);
   composite.addSubtransport(sub);

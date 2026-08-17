@@ -5,15 +5,15 @@
     "onNotification",
     "onRoutedMessage"
   ],
-  "treeHash": "e8bdaf9e5ce99af3b2ba2403fd481205d866d274",
+  "treeHash": "7b640c4c18ac05e877a015ec9dfaebdf82cda7f7",
   "filesScanned": 77,
   "summary": {
     "migration-target": 38,
     "registration-helper": 0,
-    "mechanism-shim": 5,
+    "mechanism-shim": 3,
     "canonical-door": 3,
     "parameterized-registrar": 1,
-    "primitive-definition": 7,
+    "primitive-definition": 1,
     "bridge-ws-dispatch": 8,
     "wrapper-passthrough": 2,
     "public-api-out-of-scope": 3
@@ -407,80 +407,24 @@
       "why": "registerFrame request dispatch (named access)"
     },
     {
-      "file": "transport/web/bridge.js",
-      "line": 286,
-      "callee": "onRequest",
-      "receiver": "def",
-      "wire": "—",
-      "classification": "primitive-definition",
-      "boundary": "—"
-    },
-    {
-      "file": "transport/web/bridge.js",
-      "line": 291,
-      "callee": "onNotification",
-      "receiver": "def",
-      "wire": "—",
-      "classification": "primitive-definition",
-      "boundary": "—"
-    },
-    {
       "file": "transport/web/composite.js",
-      "line": 70,
+      "line": 86,
       "callee": "onRequest",
       "receiver": "t",
       "wire": "<type>",
       "classification": "mechanism-shim",
       "boundary": "—",
-      "why": "CompositeTransport onRequest fan-out/replay over recorded handlers"
+      "why": "CompositeTransport request fan-out (E3b.2b: cap-first via readDispatchCapability; this literal-method call is the TRANSITIONAL fallback for an unsealed sub, removed in E3b.2c)"
     },
     {
       "file": "transport/web/composite.js",
-      "line": 71,
+      "line": 92,
       "callee": "onNotification",
       "receiver": "t",
       "wire": "<type>",
       "classification": "mechanism-shim",
       "boundary": "—",
-      "why": "CompositeTransport onNotification fan-out/replay over recorded handlers"
-    },
-    {
-      "file": "transport/web/composite.js",
-      "line": 222,
-      "callee": "onRequest",
-      "receiver": "def",
-      "wire": "—",
-      "classification": "primitive-definition",
-      "boundary": "—"
-    },
-    {
-      "file": "transport/web/composite.js",
-      "line": 224,
-      "callee": "onRequest",
-      "receiver": "t",
-      "wire": "<type>",
-      "classification": "mechanism-shim",
-      "boundary": "—",
-      "why": "CompositeTransport onRequest fan-out/replay over recorded handlers"
-    },
-    {
-      "file": "transport/web/composite.js",
-      "line": 227,
-      "callee": "onNotification",
-      "receiver": "def",
-      "wire": "—",
-      "classification": "primitive-definition",
-      "boundary": "—"
-    },
-    {
-      "file": "transport/web/composite.js",
-      "line": 229,
-      "callee": "onNotification",
-      "receiver": "t",
-      "wire": "<type>",
-      "classification": "mechanism-shim",
-      "boundary": "—",
-      "why": "CompositeTransport onNotification fan-out/replay over recorded handlers"
+      "why": "CompositeTransport notification fan-out (E3b.2b: cap-first via readDispatchCapability; this literal-method call is the TRANSITIONAL fallback for an unsealed sub, removed in E3b.2c)"
     },
     {
       "file": "transport/web/index.js",
@@ -610,29 +554,11 @@
     },
     {
       "file": "transport/web/webrtc.js",
-      "line": 145,
+      "line": 160,
       "callee": "onMessage",
       "receiver": "?",
       "wire": "—",
       "classification": "public-api-out-of-scope",
-      "boundary": "—"
-    },
-    {
-      "file": "transport/web/webrtc.js",
-      "line": 400,
-      "callee": "onRequest",
-      "receiver": "def",
-      "wire": "—",
-      "classification": "primitive-definition",
-      "boundary": "—"
-    },
-    {
-      "file": "transport/web/webrtc.js",
-      "line": 407,
-      "callee": "onNotification",
-      "receiver": "def",
-      "wire": "—",
-      "classification": "primitive-definition",
       "boundary": "—"
     }
   ]

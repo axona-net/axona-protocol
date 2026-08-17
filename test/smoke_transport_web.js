@@ -10,6 +10,22 @@
 import { WebRTCTransport } from '../src/transport/web/index.js';
 import { TransportError, ErrorCodes } from '../src/errors.js';
 import { fromHex } from '../src/utils/hexid.js';
+import { registerFrame } from '../src/registry/index.js';
+import { makeTestRegistry } from './lib/testRegistry.mjs';
+
+// REF-1.1 E3b.2b: WebRTCTransport is sealed — register through the canonical
+// door. Request wires and notification wires live in separate registries
+// because the wiring map is keyed by wire alone ('boom' is used as both).
+const WEB_REQ = makeTestRegistry([
+  { wire: 'echo', transportKind: 'request' },
+  { wire: 'boom', transportKind: 'request' },
+  { wire: 'slow', transportKind: 'request' },
+]);
+const WEB_NTF = makeTestRegistry([
+  { wire: 'tick',  transportKind: 'notification' },
+  { wire: 'boom',  transportKind: 'notification' },
+  { wire: 'hello', transportKind: 'notification' },
+]);
 
 let passed = 0, failed = 0;
 function check(label, condition) {
@@ -170,10 +186,10 @@ async function testSendRequest() {
   bob  .bindPeer(ALICE, ALICE_MESH);
 
   let receivedFromNodeId = null;
-  bob.onRequest('echo', (fromNodeId, payload) => {
+  registerFrame(bob, 'echo', (fromNodeId, payload) => {
     receivedFromNodeId = fromNodeId;
     return { echoed: payload, by: BOB };
-  });
+  }, { registry: WEB_REQ });
 
   const reply = await alice.send(BOB, 'echo', { msg: 'hello' });
   check('send returns remote handler value',
@@ -182,7 +198,7 @@ async function testSendRequest() {
     receivedFromNodeId === ALICE);
 
   // Handler throw → caller's send rejects.
-  bob.onRequest('boom', () => { throw new Error('kaboom'); });
+  registerFrame(bob, 'boom', () => { throw new Error('kaboom'); }, { registry: WEB_REQ });
   let threw = null;
   try { await alice.send(BOB, 'boom', null); }
   catch (e) { threw = e; }
@@ -227,10 +243,10 @@ async function testSendTimeout() {
   bob  .bindPeer(ALICE, ALICE_MESH);
 
   // Bob registers a slow handler.
-  bob.onRequest('slow', async () => {
+  registerFrame(bob, 'slow', async () => {
     await new Promise(r => setTimeout(r, 500));
     return 'eventually';
-  });
+  }, { registry: WEB_REQ });
 
   let err = null;
   try { await alice.send(BOB, 'slow', null); }
@@ -249,10 +265,10 @@ async function testNotify() {
 
   let count = 0;
   let lastFrom = null;
-  bob.onNotification('tick', (from, body) => {
+  registerFrame(bob, 'tick', (from, body) => {
     count++;
     lastFrom = from;
-  });
+  }, { registry: WEB_NTF });
 
   await alice.notify(BOB, 'tick', { n: 1 });
   await alice.notify(BOB, 'tick', { n: 2 });
@@ -261,7 +277,7 @@ async function testNotify() {
   check('notify fromNodeId correct',       lastFrom === ALICE);
 
   // Handler throw → swallowed.
-  bob.onNotification('boom', () => { throw new Error('eaten'); });
+  registerFrame(bob, 'boom', () => { throw new Error('eaten'); }, { registry: WEB_NTF });
   await alice.notify(BOB, 'boom', null);
   check('notify handler throw does not propagate', true);
 
@@ -300,7 +316,7 @@ async function testPendingRejectionOnDeath() {
   alice.bindPeer(BOB,   BOB_MESH);
   bob  .bindPeer(ALICE, ALICE_MESH);
 
-  bob.onRequest('slow', () => new Promise(() => {}));   // never resolves
+  registerFrame(bob, 'slow', () => new Promise(() => {}), { registry: WEB_REQ });   // never resolves
 
   const sendPromise = alice.send(BOB, 'slow', null);
   // Kill the link mid-send.
@@ -321,7 +337,7 @@ async function testStopRejectsPending() {
   alice.bindPeer(BOB,   BOB_MESH);
   bob  .bindPeer(ALICE, ALICE_MESH);
 
-  bob.onRequest('slow', () => new Promise(() => {}));
+  registerFrame(bob, 'slow', () => new Promise(() => {}), { registry: WEB_REQ });
 
   const sendPromise = alice.send(BOB, 'slow', null);
   await alice.stop();
@@ -345,7 +361,7 @@ async function testUnboundFromIsNull() {
   bob.bindPeer(ALICE, ALICE_MESH);
 
   let receivedFrom = null;
-  alice.onNotification('hello', (from, body) => { receivedFrom = from; });
+  registerFrame(alice, 'hello', (from, body) => { receivedFrom = from; }, { registry: WEB_NTF });
   await bob.notify(ALICE, 'hello', { iAm: BOB });
 
   // notify is async-microtask; drain.
