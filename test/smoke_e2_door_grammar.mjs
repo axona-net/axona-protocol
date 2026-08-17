@@ -96,6 +96,32 @@ for (const [name, f] of Object.entries(neg)) {
     r.doors.length === 0 && r.unresolved.length === 0, `\n   doors=${JSON.stringify(r.doors)} unresolved=${JSON.stringify(r.unresolved)}`);
 }
 
+// ── RECEIVER-CONTEXT BINDING (Aster 067e1bde / Vega da6cbdb4 / Orion fee0355a): a
+// door entry may bind this.<field> to its exact lexical context <container>.<method>.
+// this._frameDoor is B1's canonical reference ONLY inside that receiver context; a
+// SAME-SPELLED field in another method/class (Vega's "two classes in one file" gap),
+// peer._frameDoor, or the nullable canary this._frameRegistry must refuse. ──
+const CTX = [{ file: 'fx.js', context: 'Mgr._registerHandlers', registry: 'this._frameDoor', boundary: 'B1' }];
+const runCtx = (body) => discoverDoors([{ path: 'src/fx.js', code: IMP + body }], { doorRegistries: CTX });
+{
+  const r = runCtx(`const Mgr = { _registerHandlers() { registerFrame(this.dht, T.${NAME}, h, { registry: this._frameDoor }); } };`);
+  check('R1. context-bound: this._frameDoor inside the allowlisted Mgr._registerHandlers → one B1 door, zero unresolved',
+    r.doors.length === 1 && r.doors[0].boundary === 'B1' && r.doors[0].context === 'Mgr._registerHandlers' && r.unresolved.length === 0,
+    `\n   doors=${JSON.stringify(r.doors)} unresolved=${JSON.stringify(r.unresolved)}`);
+}
+const ctxNeg = {
+  'R2 same field, wrong method (Mgr._other)':       `const Mgr = { _other() { registerFrame(this.dht, T.${NAME}, h, { registry: this._frameDoor }); } };`,
+  'R3 same field, ANOTHER class same file (Vega)':  `const Mgr = { _registerHandlers() {} }; class Other { _registerHandlers() { registerFrame(this.dht, T.${NAME}, h, { registry: this._frameDoor }); } }`,
+  'R4 peer._frameDoor (wrong receiver)':            `const Mgr = { _registerHandlers() { registerFrame(this.dht, T.${NAME}, h, { registry: peer._frameDoor }); } };`,
+  'R5 nullable canary this._frameRegistry':         `const Mgr = { _registerHandlers() { registerFrame(this.dht, T.${NAME}, h, { registry: this._frameRegistry }); } };`,
+  'R6 top-level, no enclosing context':             `registerFrame(this.dht, T.${NAME}, h, { registry: this._frameDoor });`,
+};
+for (const [name, body] of Object.entries(ctxNeg)) {
+  const r = runCtx(body);
+  check(`${name} → FAILS CLOSED vs the context-bound B1 entry (no door, ≥1 unresolved)`, r.doors.length === 0 && r.unresolved.length >= 1,
+    `\n   doors=${JSON.stringify(r.doors)} unresolved=${JSON.stringify(r.unresolved)}`);
+}
+
 // ── PARITY on the real unmigrated src tree: migration-aware discover() with the
 // default (empty) door table yields ZERO doors and the unchanged raw site set. ──
 {

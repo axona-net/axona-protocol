@@ -213,7 +213,14 @@ export function discover(fileList, { methods = DEFAULT_METHODS, mechanismExempt 
 // unmigrated tree no src file imports the door, so this yields zero doors and
 // discovery is byte-identical to the raw scan (parity).
 export function discoverDoors(fileList, { doorRegistries = DEFAULT_DOOR_REGISTRIES } = {}) {
-  const doorOf = (fp, registry) => doorRegistries.find((d) => fp.endsWith(d.file) && d.registry === registry) || null;
+  // A door binds only to an entry with the matching FILE, canonical registry
+  // EXPRESSION, and — when the entry names one — the exact enclosing lexical CONTEXT
+  // (<container>.<method>). The context field is what makes `this._frameDoor` bind to
+  // B1's actual receiver and refuse a same-spelled field in another class/method or
+  // file (Aster 067e1bde / Vega da6cbdb4 / Orion fee0355a): (file, spelled-expr)
+  // alone cannot tell two classes in one file apart.
+  const doorOf = (fp, registry, ctx) => doorRegistries.find((d) =>
+    fp.endsWith(d.file) && d.registry === registry && (d.context == null || d.context === ctx)) || null;
   const doors = [], unresolved = [], parseErrors = [];
   for (const { path: fp, code } of fileList) {
     let ast;
@@ -242,7 +249,19 @@ export function discoverDoors(fileList, { doorRegistries = DEFAULT_DOOR_REGISTRI
     });
     const doorNames = new Set([canonicalDoor, ...doorAliases].filter(Boolean));
     if (!doorNames.size) continue;
-    walk(ast, (n) => {
+    // Context-threading walk: carry the enclosing <container>.<method> lexical path so
+    // a door binds only in its allowlisted receiver context. A same-spelled
+    // this._frameDoor in another method/class/file, peer._frameDoor, an alias,
+    // computed access, or the nullable canary this._frameRegistry all miss the
+    // (file, context, registry) entry and refuse (Aster/Vega/Orion, 2026-08-17).
+    const containerName = (nd) =>
+      ((nd.type === 'ClassDeclaration' || nd.type === 'ClassExpression') && nd.id?.name) ? nd.id.name
+      : (nd.type === 'VariableDeclarator' && nd.id?.type === 'Identifier' && (nd.init?.type === 'ObjectExpression' || nd.init?.type === 'ClassExpression')) ? nd.id.name
+      : null;
+    const enclosingMethod = (nd) => (nd.type === 'MethodDefinition' || (nd.type === 'Property' && nd.method))
+      ? (nd.key?.type === 'Identifier' ? nd.key.name : (nd.key?.type === 'Literal' && typeof nd.key.value === 'string' ? nd.key.value : null))
+      : null;
+    const inspectDoor = (n, ctx) => {
       // door.call/.apply/.bind(...) — an indirect invoke → fail closed.
       if (n.type === 'CallExpression' && n.callee?.type === 'MemberExpression' && !n.callee.computed
         && n.callee.object?.type === 'Identifier' && doorNames.has(n.callee.object.name)
@@ -272,10 +291,24 @@ export function discoverDoors(fileList, { doorRegistries = DEFAULT_DOOR_REGISTRI
       if (!optsArg || optsArg.type !== 'ObjectExpression' || hasSpread || !registryProp) { unresolved.push(`${fp} registerFrame('${wire}', …) — options must be an inline { registry: … } object with no spread (noncanonical door)`); return; }
       const registryExpr = canonicalRegistryExpr(registryProp.value);
       if (registryExpr == null) { unresolved.push(`${fp} registerFrame('${wire}', { registry: <non-explicit> }) — registry must be an explicit this.<name>/<id>.<name>, not an alias/computed (noncanonical door)`); return; }
-      const entry = doorOf(fp, registryExpr);
-      if (!entry) { unresolved.push(`${fp} registerFrame('${wire}', { registry: ${registryExpr} }) — not a canonical boundary registry for this file (wrong-boundary / unlisted)`); return; }
-      doors.push({ surface: 'door', wire, site: `${fp} registerFrame('${wire}', { registry: ${registryExpr} })`, file: fp, line: lineOf(n), callee: 'registerFrame', registry: registryExpr, boundary: entry.boundary });
-    });
+      const entry = doorOf(fp, registryExpr, ctx);
+      if (!entry) { unresolved.push(`${fp} registerFrame('${wire}', { registry: ${registryExpr} }) @ ${ctx || '<top>'} — not a canonical (file, context, registry) boundary door (wrong receiver/context, wrong-boundary, or unlisted)`); return; }
+      doors.push({ surface: 'door', wire, site: `${fp} registerFrame('${wire}', { registry: ${registryExpr} })`, file: fp, line: lineOf(n), callee: 'registerFrame', registry: registryExpr, context: ctx, boundary: entry.boundary });
+    };
+    const walkDoors = (node, ctx) => {
+      if (!node || typeof node.type !== 'string') return;
+      let childCtx = ctx;
+      const cn = containerName(node); if (cn) childCtx = cn;                  // enter a named object/class
+      const mn = enclosingMethod(node); if (mn) childCtx = (ctx ? ctx + '.' : '') + mn;   // enter a method → container.method
+      inspectDoor(node, childCtx);
+      for (const k of Object.keys(node)) {
+        if (k === 'loc' || k === 'start' || k === 'end' || k === 'range') continue;
+        const v = node[k];
+        if (Array.isArray(v)) { for (const c of v) walkDoors(c, childCtx); }
+        else if (v && typeof v.type === 'string') walkDoors(v, childCtx);
+      }
+    };
+    walkDoors(ast, null);
   }
   return { doors, unresolved, parseErrors };
 }
