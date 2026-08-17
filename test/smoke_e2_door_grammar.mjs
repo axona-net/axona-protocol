@@ -201,6 +201,51 @@ for (const [name, body] of Object.entries(ctxNeg)) {
   }
 }
 
+// ── G-family: the ROUTED AxonaPeer CONTEXT FENCE (E2.3 B3, Aster ASTER-E23-B3-AUTH-REVIEW).
+// The routed mesh:signal door lives in dht/AxonaPeer.js, context 'AxonaPeer._installRoutingHandlers',
+// on this._b3door. B3 added NO new scanner branch — a class method resolves through the existing
+// container/method threading (same machinery as B1's wireHandlersMethods._registerHandlers) — so
+// this family makes the fail-closed binding of that SPECIFIC routed context explicit and
+// source-backed: the intended context binds; a different method, a different class, top-level, and
+// the wrong file all REFUSE. (Flag-off byte-identical equivalence for these B3 wires — including
+// mesh:signal — is owned by smoke_boundary3_registry.mjs's D. FLAG-OFF IDENTITY block, 39/39.)
+{
+  const PFILE = 'dht/AxonaPeer.js';
+  const PCTX = 'AxonaPeer._installRoutingHandlers';
+  const PREG = 'this._b3door';
+  const B3PEER = [{ file: PFILE, context: PCTX, registry: PREG, boundary: 'B3' }];
+  const DOORCALL = `registerFrame(this, 'mesh:signal', h, { registry: ${PREG} });`;
+  const runP = (src, path = 'src/' + PFILE, doorRegistries = B3PEER) =>
+    discoverDoors([{ path, code: IMP + src }], { doorRegistries });
+
+  {
+    const r = runP(`class AxonaPeer { _installRoutingHandlers(){ ${DOORCALL} } }`);
+    check("G1. INTENDED: mesh:signal door in `class AxonaPeer { _installRoutingHandlers(){…} }` binds context 'AxonaPeer._installRoutingHandlers' → ONE B3 routed door, zero unresolved",
+      r.doors.length === 1 && r.doors[0].boundary === 'B3' && r.doors[0].context === PCTX && r.doors[0].wire === 'mesh:signal' && r.unresolved.length === 0,
+      `\n   doors=${JSON.stringify(r.doors)} unresolved=${JSON.stringify(r.unresolved)}`);
+  }
+  {
+    const r = runP(`class AxonaPeer { someOtherMethod(){ ${DOORCALL} } }`);
+    check("G2. WRONG METHOD: the same door in `AxonaPeer.someOtherMethod(){…}` → context ≠ '…._installRoutingHandlers' → ZERO doors, refused",
+      r.doors.length === 0 && r.unresolved.length === 1, `\n   doors=${JSON.stringify(r.doors)} unresolved=${JSON.stringify(r.unresolved)}`);
+  }
+  {
+    const r = runP(`class Other { _installRoutingHandlers(){ ${DOORCALL} } }`);
+    check("G3. WRONG CLASS: the same method name in `class Other` → context 'Other._installRoutingHandlers' → ZERO doors, refused",
+      r.doors.length === 0 && r.unresolved.length === 1, `\n   doors=${JSON.stringify(r.doors)} unresolved=${JSON.stringify(r.unresolved)}`);
+  }
+  {
+    const r = runP(DOORCALL);
+    check("G4. TOP-LEVEL: the same door at top level (no class/method) → context <top> (null) → ZERO doors, refused",
+      r.doors.length === 0 && r.unresolved.length === 1, `\n   doors=${JSON.stringify(r.doors)} unresolved=${JSON.stringify(r.unresolved)}`);
+  }
+  {
+    const r = runP(`class AxonaPeer { _installRoutingHandlers(){ ${DOORCALL} } }`, 'src/pubsub/wireHandlers.js');
+    check("G5. WRONG FILE: the intended AxonaPeer routed door in a DIFFERENT file (pubsub/wireHandlers.js) → file mismatch → ZERO doors, refused",
+      r.doors.length === 0 && r.unresolved.length === 1, `\n   doors=${JSON.stringify(r.doors)} unresolved=${JSON.stringify(r.unresolved)}`);
+  }
+}
+
 // ── REAL TREE: (P1) with an EMPTY door table the grammar is inert — zero doors,
 // whatever the tree holds; (P2) with the DEFAULT (B1) table the migrated tree yields
 // EXACTLY B1's 19 doors, all in wireHandlersMethods._registerHandlers, and the 19 raw
