@@ -23,6 +23,14 @@
 // _registerHandlers, and ZERO residual raw registration remains for any B1 wire (raw
 // XOR door) — proven with teeth by an injected-residual negative (P2b-neg).
 //
+// E2.2 B2 EVIDENCE (2026-08-17, Aster 3527d5b0 / Vega 572106bb, on David's confirmation
+// 8241855e): the F-family proves the FunctionDeclaration container widening (containerName
+// now names `function webTransport(){…}`) fails closed — intended context binds, an
+// unrelated function / a same-spelled method / a top-level lookalike / a wrong file / a
+// same-named arrow all REFUSE. The P3-family proves B2-scoped ZERO-RESIDUAL RAW: the 3
+// migrated (recv,wire) pairs hold zero raw sites, scoped by RECEIVER so B3's shared-wire
+// webrtc 'hello'/'hello-sig' (deferred to E2.3) are not miscounted, with a teeth negative.
+//
 // Run: node test/smoke_e2_door_grammar.mjs
 // =====================================================================
 import { readFileSync, readdirSync, statSync } from 'node:fs';
@@ -143,6 +151,56 @@ for (const [name, body] of Object.entries(ctxNeg)) {
     r.doors.length === 0 && r.unresolved.length >= 1, `\n   doors=${JSON.stringify(r.doors)} unresolved=${JSON.stringify(r.unresolved)}`);
 }
 
+// ── F-family: the FunctionDeclaration CONTAINER FENCE (E2.2 B2 shared-scanner change).
+// containerName now names a bare `function foo(){…}` so a door registered directly in
+// `export function webTransport(){…}` resolves to context 'webTransport' and can bind the
+// B2 entry. Aster (3527d5b0) required this widening to be proven fail-closed: the INTENDED
+// function context PASSES, while (F2) an unrelated function, (F3) a same-spelled METHOD in
+// another container, (F4) a top-level lookalike, (F5) the same function in the wrong file,
+// and (F6) a same-named arrow/const (NOT a FunctionDeclaration) all REFUSE. This shows the
+// new branch widens the lexical-container surface by exactly one node kind and nothing more.
+{
+  const B2FILE = 'transport/web/index.js';           // the real B2 site file
+  const B2REG  = 'composite._b2door';                // the real B2 door registry expr
+  const B2DOORS = [{ file: B2FILE, context: 'webTransport', registry: B2REG, boundary: 'B2' }];
+  // 'hello' is a real bare-keyed B2 wire (a string literal, not T.<name> — B2 is bare-keyed).
+  const DOORCALL = `registerFrame(bridge, 'hello', h, { registry: ${B2REG} });`;
+  const runRaw = (src, path = 'src/' + B2FILE, doorRegistries = B2DOORS) =>
+    discoverDoors([{ path, code: IMP + src }], { doorRegistries });
+
+  {
+    const r = runRaw(`export function webTransport(){ ${DOORCALL} }`);
+    check("F1. INTENDED: a door in `export function webTransport(){…}` binds to context 'webTransport' → ONE B2 door, zero unresolved (the widening's positive case)",
+      r.doors.length === 1 && r.doors[0].boundary === 'B2' && r.doors[0].context === 'webTransport' && r.doors[0].wire === 'hello' && r.unresolved.length === 0,
+      `\n   doors=${JSON.stringify(r.doors)} unresolved=${JSON.stringify(r.unresolved)}`);
+  }
+  {
+    const r = runRaw(`export function otherFn(){ ${DOORCALL} }`);
+    check("F2. UNRELATED FUNCTION: the SAME door shape in `function otherFn(){…}` → context 'otherFn' ≠ 'webTransport' → ZERO doors, refused (fails closed)",
+      r.doors.length === 0 && r.unresolved.length === 1, `\n   doors=${JSON.stringify(r.doors)} unresolved=${JSON.stringify(r.unresolved)}`);
+  }
+  {
+    const r = runRaw(`class Composite { webTransport(){ ${DOORCALL} } }`);
+    check("F3. SAME-SPELLED METHOD: `class Composite { webTransport(){…} }` → context 'Composite.webTransport' ≠ 'webTransport' → ZERO doors, refused (a method must not collide with the bare function)",
+      r.doors.length === 0 && r.unresolved.length === 1, `\n   doors=${JSON.stringify(r.doors)} unresolved=${JSON.stringify(r.unresolved)}`);
+  }
+  {
+    const r = runRaw(DOORCALL);
+    check("F4. TOP-LEVEL LOOKALIKE: the SAME door shape at top level (no container) → context <top> (null) → ZERO doors, refused",
+      r.doors.length === 0 && r.unresolved.length === 1, `\n   doors=${JSON.stringify(r.doors)} unresolved=${JSON.stringify(r.unresolved)}`);
+  }
+  {
+    const r = runRaw(`export function webTransport(){ ${DOORCALL} }`, 'src/transport/node/index.js');
+    check("F5. WRONG FILE: the intended `webTransport(){…}` door in a DIFFERENT file (node, not web) → file mismatch → ZERO doors, refused",
+      r.doors.length === 0 && r.unresolved.length === 1, `\n   doors=${JSON.stringify(r.doors)} unresolved=${JSON.stringify(r.unresolved)}`);
+  }
+  {
+    const r = runRaw(`const webTransport = () => { ${DOORCALL} };`);
+    check("F6. NARROWNESS: a same-named arrow `const webTransport = () => {…}` is NOT a FunctionDeclaration → no container → context <top> → ZERO doors, refused (the branch widens by exactly one node kind)",
+      r.doors.length === 0 && r.unresolved.length === 1, `\n   doors=${JSON.stringify(r.doors)} unresolved=${JSON.stringify(r.unresolved)}`);
+  }
+}
+
 // ── REAL TREE: (P1) with an EMPTY door table the grammar is inert — zero doors,
 // whatever the tree holds; (P2) with the DEFAULT (B1) table the migrated tree yields
 // EXACTLY B1's 19 doors, all in wireHandlersMethods._registerHandlers, and the 19 raw
@@ -185,6 +243,45 @@ for (const [name, body] of Object.entries(ctxNeg)) {
     const wh = resid.sites.filter((s) => s.file && s.file.endsWith('pubsub/wireHandlers.js') && s.wire === 'sub');
     check('P2b-neg. the zero-residual guard has TEETH: a residual raw dht.onRoutedMessage(\'sub\', …) beside the door IS discovered as a wireHandlers raw site — P2b would FAIL (not vacuous)',
       wh.length >= 1, `\n   wireHandlers raw sites=${JSON.stringify(resid.sites.map((s) => s.site))}`);
+  }
+}
+
+// ── REAL TREE — B2 (E2.2, Vega: B2-scoped zero-residual). The 3 auth doors exist, and
+// NONE of the 3 migrated B2 (recv, wire) pairs — (bridge,'hello'), (bridge,'hello-ack'),
+// (webrtc,'cap-attest') — remains a raw site, WITHOUT miscounting the B3 webrtc
+// hello/hello-sig sites that share the 'hello' wire and STAY RAW until E2.3. The scope
+// is (recv, wire), not wire alone: 'hello' belongs to BOTH the migrated bridge door (B2)
+// and the deferred webrtc raw site (B3); a wire-only filter would false-positive on B3. ──
+{
+  const SRC = fileURLToPath(new URL('../src/', import.meta.url));
+  const listJs = (dir) => { const o = []; for (const n of readdirSync(dir)) { const p = join(dir, n); const s = statSync(p); if (s.isDirectory()) o.push(...listJs(p)); else if (n.endsWith('.js')) o.push(p); } return o; };
+  const files = listJs(SRC).map((p) => ({ path: relative(SRC, p), code: readFileSync(p, 'utf8') }));
+  const METH = { methods: new Set(['onRequest', 'onNotification', 'onRoutedMessage']) };
+  const migd = discover(files, METH);
+  const b2doors = migd.doors.filter((d) => d.boundary === 'B2');
+  const b2Wires = ['hello', 'hello-ack', 'cap-attest'];
+  check('P3. MIGRATED B2: the default table discovers EXACTLY 3 B2 doors (hello, hello-ack, cap-attest), all bound to context webTransport',
+    b2doors.length === 3 && b2Wires.every((w) => b2doors.some((d) => d.wire === w)) && b2doors.every((d) => d.context === 'webTransport'),
+    `\n   b2doors=${JSON.stringify(b2doors.map((d) => ({ wire: d.wire, ctx: d.context })))}`);
+  // The 3 migrated B2 receiver/wire identities. Scoping by (recv, wire) is what makes
+  // this correct against the shared 'hello' wire (Vega's finding).
+  const isB2Raw = (s) => (s.recv === 'bridge' && (s.wire === 'hello' || s.wire === 'hello-ack')) || (s.recv === 'webrtc' && s.wire === 'cap-attest');
+  const b2Raw = migd.sites.filter(isB2Raw);
+  check("P3b. ZERO-RESIDUAL RAW (B2-scoped): none of the 3 migrated B2 (recv,wire) pairs — (bridge,hello),(bridge,hello-ack),(webrtc,cap-attest) — remains a raw site (raw XOR door, scoped by RECEIVER so the B3 webrtc 'hello' is not miscounted)",
+    b2Raw.length === 0, `\n   b2Raw=${JSON.stringify(b2Raw.map((s) => s.site))}`);
+  // NON-OVER-CLAIM: B2 migrated only the bridge hello/hello-ack + webrtc cap-attest; the
+  // B3 webrtc hello + hello-sig raw sites (deferred to E2.3) MUST still be present raw.
+  const b3Raw = migd.sites.filter((s) => s.recv === 'webrtc' && (s.wire === 'hello' || s.wire === 'hello-sig'));
+  check("P3c. B2 did NOT swallow B3: the webrtc hello + hello-sig raw sites (B3, deferred to E2.3) are STILL present as raw — the shared 'hello' wire is scoped correctly, not swept",
+    b3Raw.length === 2, `\n   b3Raw=${JSON.stringify(b3Raw.map((s) => s.site))}`);
+  // P3b-neg: TEETH — inject a residual raw bridge.onNotification('hello', …) beside the
+  // B2 door; discover() surfaces it as recv='bridge' wire='hello' → b2Raw non-zero →
+  // P3b would FAIL. (Also self-checks the recv='bridge' label the scope relies on.)
+  {
+    const resid = discover([{ path: 'transport/web/index.js', code: IMP + `export function webTransport(){ registerFrame(bridge, 'hello', h, { registry: composite._b2door }); bridge.onNotification('hello', h2); }` }], METH);
+    const injected = resid.sites.filter((s) => s.recv === 'bridge' && s.wire === 'hello');
+    check("P3b-neg. the B2 zero-residual guard has TEETH: a residual raw bridge.onNotification('hello', …) beside the door IS discovered (recv=bridge, wire=hello) → P3b would FAIL (not vacuous)",
+      injected.length >= 1, `\n   sites=${JSON.stringify(resid.sites.map((s) => s.site))}`);
   }
 }
 
