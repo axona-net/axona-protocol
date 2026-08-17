@@ -35,7 +35,7 @@ const TK = { onRequest: 'request', onNotification: 'notification', onRoutedMessa
 // `hello` sites) split by the manifest receiver tag (bridge → B2, webrtc → B3).
 function intendedBoundary(row) {
   const b = row.boundary;
-  if (b === 'B1' || b === 'B2' || b === 'B3' || b === 'B6') return b;
+  if (b === 'B1' || b === 'B2' || b === 'B3' || b === 'B5' || b === 'B6') return b;
   if (b === 'dht:transport') return 'B5';
   if (b === 'direct') return 'B6';
   if (b === 'B2/B3') return row.receiver === 'bridge' ? 'B2' : row.receiver === 'webrtc' ? 'B3' : null;

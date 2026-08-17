@@ -62,6 +62,12 @@ export const DEFAULT_DOOR_REGISTRIES = [
   // The routed B3 site mesh:signal lives in AxonaPeer._installRoutingHandlers with its own
   // door holder this._b3door (transportKind 'routed' resolved from the B3 row).
   { file: 'dht/AxonaPeer.js', context: 'AxonaPeer._installRoutingHandlers', registry: 'this._b3door', boundary: 'B3' },
+  // E2.5 B5: the ten dht:transport routing frames register through registerFrame with
+  // { registry: this._b5door } inside AxonaPeer._installRoutingHandlers — the SAME
+  // file+context as the B3 mesh:signal door, disambiguated purely by the registry
+  // expression (this._b5door vs this._b3door). B5 is bare-keyed single-primitive, so the
+  // sites OMIT transportKind (each row's own transportKind selects onRequest/onNotification).
+  { file: 'dht/AxonaPeer.js', context: 'AxonaPeer._installRoutingHandlers', registry: 'this._b5door', boundary: 'B5' },
   // E2.4 B6 (2026-08-17): direct messaging. axona:direct binds TWO primitives on ONE wire
   // (onRequest + onNotification) inside _installDirectHandlers on this._b6door; the routed
   // __tunneled_direct__ leg registers inside _buildDefaultAxonaManager on peer._b6door (peer===this).

@@ -64,6 +64,7 @@ import { AxonaError, PublishError, SubscribeError, KillError, TouchError, PullEr
 import { registerFrame, shadowEnabled } from '../registry/index.js';
 import { buildBoundary3Registry } from '../transport/boundary3Registry.js';
 import { buildBoundary6Registry } from './boundary6Registry.js';
+import { buildBoundary5Registry } from './boundary5Registry.js';
 
 // ── B-3 (eclipse prevention) tunables ───────────────────────────────
 // Max concurrent verification probes triggered by gossip introductions —
@@ -139,6 +140,13 @@ export class AxonaPeer extends DHT {
     // each handler verbatim (byte-identical). Reachable at both direct-handler sites
     // (this._b6door) and the tunneled site in _buildDefaultAxonaManager (peer === this).
     this._b6door = buildBoundary6Registry({ enabled: shadowEnabled });
+    // REF-1.1 E2.5: the Boundary-5 door for the ten dht:transport routing frames
+    // (built unconditionally, same discipline as _b3door/_b6door). B5 is BARE-KEYED
+    // single-primitive — each row keys on the plain wire and carries its own
+    // transportKind — so the 10 migration sites OMIT transportKind (the row selects
+    // onRequest vs onNotification). Reachable in _installRoutingHandlers on this._b5door,
+    // alongside the B3 mesh:signal door (this._b3door), disambiguated by the registry.
+    this._b5door = buildBoundary5Registry({ enabled: shadowEnabled });
     // REF-1.1 E1 direct_* admissible-type fence (council-cleared design; David:
     // registration-time allowlist; Vega ffdba957 hardening). The construction-time
     // admissible set for direct-message `type`s. OMITTED (undefined/null) = dormant
@@ -481,7 +489,7 @@ export class AxonaPeer extends DHT {
     // coercion the second hop in any multi-hop walk throws
     // "ctx.queried.add is not a function" and the lookup short-
     // circuits to found=false.
-    transport.onRequest('lookup_step', async (_fromId, payload) => {
+    registerFrame(transport, 'lookup_step', async (_fromId, payload) => {
       const queried = payload?.queried instanceof Set
         ? payload.queried
         : Array.isArray(payload?.queried)
@@ -496,10 +504,10 @@ export class AxonaPeer extends DHT {
         queried,
         totalTimeMs: payload.totalTimeMs,
       });
-    });
+    }, { registry: this._b5door });
 
     // ── lookahead_probe — AP-best forward synapse to target ─────────
-    transport.onRequest('lookahead_probe', async (_fromId, payload) => {
+    registerFrame(transport, 'lookahead_probe', async (_fromId, payload) => {
       const target   = payload.target;
       const fromDist = payload.fromDist;
       const fwd = [];
@@ -511,10 +519,10 @@ export class AxonaPeer extends DHT {
       }
       const best = node.bestByAP(fwd, target, 0);
       return { peerId: best.peerId, latency: best.latency, terminal: false };
-    });
+    }, { registry: this._b5door });
 
     // ── reinforce — LTP weight bump on a used synapse ───────────────
-    transport.onNotification('reinforce', (_fromId, payload) => {
+    registerFrame(transport, 'reinforce', (_fromId, payload) => {
       const syn = node.synaptome.get(payload.synapsePeerId);
       if (!syn) return;
       // B-3: on identity-binding transports, only reinforce a synapse whose
@@ -535,24 +543,24 @@ export class AxonaPeer extends DHT {
       // eligible for vitality-based eviction protection.
       syn.reinforce(domain.simEpoch, domain.INERTIA_DURATION ?? 8);
       syn.useCount = (syn.useCount ?? 0) + 1;
-    });
+    }, { registry: this._b5door });
 
     // ── triadic_introduce — observer-driven candidate ──────────────
     // B-3: an introduced peer is a *candidate*, not a table entry.  On
     // identity-binding transports it is admitted only after first-party
     // verification (see _considerCandidate); a forged introduction can no
     // longer poison the synaptome.
-    transport.onNotification('triadic_introduce', async (_fromId, payload) => {
+    registerFrame(transport, 'triadic_introduce', async (_fromId, payload) => {
       await this._considerCandidate(payload.peerId, 'triadic');
-    });
+    }, { registry: this._b5door });
 
     // ── hop_cache + lateral_spread — observed-path candidates ──────
     const hopCacheHandler = async (_fromId, payload) => {
       const source = (payload.depth ?? 0) === 0 ? 'hopCache' : 'lateralSpread';
       await this._considerCandidate(payload.target, source);
     };
-    transport.onNotification('hop_cache',      hopCacheHandler);
-    transport.onNotification('lateral_spread', hopCacheHandler);
+    registerFrame(transport, 'hop_cache',      hopCacheHandler, { registry: this._b5door });
+    registerFrame(transport, 'lateral_spread', hopCacheHandler, { registry: this._b5door });
 
     // ── peer-leaving — graceful-departure fast path ─────────────────
     // A peer (e.g. the bridge on a `systemctl restart`) announces that
@@ -579,7 +587,7 @@ export class AxonaPeer extends DHT {
     // early-returns before re-anchoring, so it can't be used as a
     // refreshTick-amplification lever.  Additive + backward-compatible:
     // peers that never receive this behave exactly as before.
-    transport.onNotification('peer-leaving', (fromId, _payload) => {
+    registerFrame(transport, 'peer-leaving', (fromId, _payload) => {
       try {
         let leaving =
           (typeof fromId === 'bigint')                  ? fromId :
@@ -604,7 +612,7 @@ export class AxonaPeer extends DHT {
         // Re-anchor now rather than waiting for the 10 s refreshTick.
         Promise.resolve(this._axonaManager?.refreshTick?.()).catch(() => {});
       } catch { /* best-effort resilience path */ }
-    });
+    }, { registry: this._b5door });
 
     // ── Phase 7 handlers ────────────────────────────────────────────
 
@@ -614,7 +622,7 @@ export class AxonaPeer extends DHT {
     // when a synapse goes dead.  Reply: the synaptome peerIds,
     // excluding the requestor itself (otherwise they'd see themselves
     // as a candidate — useless).
-    transport.onRequest('local_probe', async (fromId, _payload) => {
+    registerFrame(transport, 'local_probe', async (fromId, _payload) => {
       const fromBig = asId(fromId);   // wire→internal id gate
       const peerIds = [];
       for (const syn of node.synaptome.values()) {
@@ -632,13 +640,13 @@ export class AxonaPeer extends DHT {
         peerIds.length = LOCAL_PROBE_MAX;
       }
       return peerIds;
-    });
+    }, { registry: this._b5door });
 
     // ── find_closest_set — top-K closest peers from local synaptome
     // Used by AxonaManager's findKClosest (pub/sub) and by iterative
     // discovery.  Insertion-sorted scan; cheap because synaptome is
     // bounded by MAX_SYNAPTOME.  Caller merges results across rounds.
-    transport.onRequest('find_closest_set', async (_fromId, payload) => {
+    registerFrame(transport, 'find_closest_set', async (_fromId, payload) => {
       const targetBig = asId(payload.target);   // wire→internal id gate
       const K = payload.K ?? domain._k;
       const top = [];
@@ -656,7 +664,7 @@ export class AxonaPeer extends DHT {
         }
       }
       return top.map(t => t.peerId);
-    });
+    }, { registry: this._b5door });
 
     // ── route_msg — recursive routed-message forwarder ──────────────
     // Receiver runs greedy 1-hop scan over its own synaptome (closer
@@ -664,7 +672,7 @@ export class AxonaPeer extends DHT {
     // local routed handler for `type` (if any).  Returns 'consumed' /
     // 'terminal' / 'exhausted', or forwards to nextHop via another
     // route_msg request and bubbles the downstream reply unchanged.
-    transport.onRequest('route_msg', async (fromId, msg) => {
+    registerFrame(transport, 'route_msg', async (fromId, msg) => {
       const { type, payload, targetId, hops, originId } = msg;
       const targetBig = asId(targetId);   // wire→internal id gate
 
@@ -732,7 +740,7 @@ export class AxonaPeer extends DHT {
       } catch {
         return { consumed: false, atNode: meId, hops, exhausted: true };
       }
-    });
+    }, { registry: this._b5door });
 
     // ── mesh:signal — peer-relayed WebRTC signaling (bridgeless connect) ──
     // A routed message carrying an opaque SDP/ICE payload toward a target

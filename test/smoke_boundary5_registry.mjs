@@ -63,5 +63,28 @@ check('R4. lookup_step named as a MISMATCHED kind (notification) refuses too —
   threw(() => registerFrame(recv, 'lookup_step', () => {}, { registry: reg, transportKind: 'notification' })));
 check('R5. a malformed transportKind is rejected', threw(() => registerFrame(recv, 'lookup_step', () => {}, { registry: reg, transportKind: 'bogus' })));
 
+// ── D. FLAG-OFF IDENTITY (the migration's byte-identical property) ──────────
+// R1–R5 prove registerFrame ROUTES each bare wire to the right primitive. This block
+// proves the leg it wires runs the ORIGINAL handler VERBATIM with ZERO traces when the
+// shadow flag is off — the property the E2.5 migration must not break. A capturing recv
+// hands back the wrapped handler; enabled:false → the wrap is inert (byte-identical).
+{
+  const tr = [];
+  const reg5 = buildBoundary5Registry({ enabled: false, sink: (t) => tr.push(t) });
+  const capture = { onRequest: (wire, h) => h, onNotification: (wire, h) => h };
+  let allVerbatim = true, allRethrow = true;
+  for (const d of defs) {
+    const wrapped = registerFrame(capture, d.wire, (a, b) => `ran:${d.wire}:${a}`, { registry: reg5 });   // bare — transportKind OMITTED
+    if (wrapped('X', 'Y') !== `ran:${d.wire}:X`) allVerbatim = false;
+    let rethrew = false;
+    const boom = registerFrame(capture, d.wire, () => { throw new Error(`boom:${d.wire}`); }, { registry: reg5 });
+    try { boom('Z'); } catch (e) { rethrew = e.message === `boom:${d.wire}`; }
+    if (!rethrew) allRethrow = false;
+  }
+  check('D1. flag-off: EVERY B5 leg (all 10 wires) runs its handler VERBATIM (return identical)', allVerbatim);
+  check('D2. flag-off: a throwing handler on every leg rethrows VERBATIM', allRethrow);
+  check('D3. flag-off: ZERO traces emitted across all legs and invocations (inert wrap, byte-identical)', tr.length === 0, `traces=${tr.length}`);
+}
+
 console.log(`\nResult: ${passed} passed, ${failed} failed\n`);
 process.exit(failed === 0 ? 0 : 1);
