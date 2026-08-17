@@ -157,12 +157,12 @@ parseErrors.length === 0 ? pass(`source coverage: all ${files.length} src files 
 unresolved.length === 0 ? pass('no unresolved (aliased/computed/loose-literal/escaped) sealed registration') : fail(`unresolved sites:\n     ${unresolved.join('\n     ')}`);
 b1 === 19 ? pass('B1 pub/sub migration-targets = 19 (matches the S5 fence assertion)') : fail(`B1 pub/sub = ${b1}, expected 19`);
 summary['migration-target'] === 38 ? pass('migration-target frames = 38') : fail(`migration-target = ${summary['migration-target']}, expected 38`);
-// REF-1.1 E3a: the node WebSocketTransport is SEALED — its onRequest + onNotification
-// are no longer public method definitions (the dispatch closures moved into the
-// module-private capability channel keyed by transport kind), so the primitive-
-// definition inventory drops 13 → 11. E3b seals the remaining transports + the
-// Transport.js contract, driving this toward 0.
-summary['primitive-definition'] === 11 ? pass('primitive definitions = 11 (E3a sealed the node WS transport: onRequest+onNotification removed)') : fail(`primitive-definition = ${summary['primitive-definition']}, expected 11`);
+// REF-1.1 E3a sealed the node WebSocketTransport (13 → 11). E3b.1 seals the base
+// Transport.js contract: its onRequest/onNotification throwing stubs are removed so
+// no inherited dispatch name is reachable on any subclass (Aster's absence
+// invariant), dropping primitive-definition 11 → 9. E3b.2 seals the remaining
+// concrete transports + AxonaPeer's routed primitive, driving this toward 0.
+summary['primitive-definition'] === 9 ? pass('primitive definitions = 9 (E3a WS transport + E3b.1 base Transport contract sealed)') : fail(`primitive-definition = ${summary['primitive-definition']}, expected 9`);
 summary['parameterized-registrar'] === 1 ? pass('parameterized registrar (onDirectMessage direct_*) = 1') : fail(`parameterized-registrar = ${summary['parameterized-registrar']}, expected 1`);
 
 const args = process.argv.slice(2);

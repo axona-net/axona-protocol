@@ -5,7 +5,7 @@
     "onNotification",
     "onRoutedMessage"
   ],
-  "treeHash": "6aa4934177cec1b88e6e0e4a180a24fd1a2a2ea9",
+  "treeHash": "18d2d47a32cf9890e0bc7a85c9c526e6688c6b4a",
   "filesScanned": 76,
   "summary": {
     "migration-target": 38,
@@ -13,31 +13,13 @@
     "mechanism-shim": 5,
     "canonical-door": 3,
     "parameterized-registrar": 1,
-    "primitive-definition": 11,
+    "primitive-definition": 9,
     "bridge-ws-dispatch": 8,
     "wrapper-passthrough": 2,
     "public-api-out-of-scope": 3
   },
   "b1PubsubFrames": 19,
   "rows": [
-    {
-      "file": "contracts/Transport.js",
-      "line": 189,
-      "callee": "onRequest",
-      "receiver": "def",
-      "wire": "—",
-      "classification": "primitive-definition",
-      "boundary": "—"
-    },
-    {
-      "file": "contracts/Transport.js",
-      "line": 202,
-      "callee": "onNotification",
-      "receiver": "def",
-      "wire": "—",
-      "classification": "primitive-definition",
-      "boundary": "—"
-    },
     {
       "file": "dht/AxonaPeer.js",
       "line": 492,

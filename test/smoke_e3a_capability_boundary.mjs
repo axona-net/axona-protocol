@@ -1,30 +1,23 @@
 // =====================================================================
-// smoke_e3a_capability_boundary.mjs — REF-1.1 E3a: the runtime capability
-// boundary for the first sealed transport (node WebSocketTransport).
+// smoke_e3a_capability_boundary.mjs — REF-1.1 E3: the runtime capability
+// boundary for the sealed node WebSocketTransport.
 //
-// E3a settles decision 1 (the capability-channel shape) in code: a sealed transport's
-// dispatch primitives become closures captured in a module-private WeakMap, keyed by
-// dispatch KIND (request|notification|routed) — NOT by the public method names — and
-// read solely by registerFrame. This test proves the boundary on a REAL constructed
-// transport:
+// E3a introduced the capability channel + reroute and sealed this transport's own
+// methods; E3b.1 sealed the base Transport contract so no inherited stub remains.
+// Together they establish Aster's E3 ABSENCE INVARIANT (ASTER-E3A-SEAL-REVIEW): on a
+// sealed transport, the registering dispatch primitive is unreachable by name via
+// EVERY access path — dotted, computed, prototype walk, Reflect.get — all resolve to
+// undefined. "inert/throwing is not the absence invariant": there is no residual
+// throwing stub; there is nothing.
 //
-//   (A) The REGISTERING PRIMITIVE is unreachable by name. The sealed class defines no
-//       onRequest / onNotification method — no own property on the instance, none on
-//       the WebSocketTransport prototype. onRoutedMessage never existed on a transport
-//       and is undefined by every access path (dotted, computed, Reflect.get) with no
-//       residual on the chain.
-//   (B) Non-vacuous control: registerFrame — the sole reader of the channel — DOES
-//       register a handler, populating the real handler maps. The capability works;
-//       only the public name is gone.
-//   (C) Transitional dual path (E3a): an unsealed receiver is still driven via the
-//       literal named method; removed in E3b once every transport is sealed.
-//   (D) HONEST E3a BOUNDARY: the ONLY name that still resolves for onRequest /
-//       onNotification is the inert base Transport contract stub (the interface
-//       declaration), reached by walking PAST the sealed subclass. It throws "not
-//       implemented" and registers nothing — it is not the primitive. E3b seals the
-//       base contract (Transport.js), at which point these names resolve to undefined
-//       by every path; E3a proves the CAPABILITY is off-door-unreachable and the
-//       residual stub is inert.
+//   (A) All three primitives resolve to undefined by every access path, with no
+//       descriptor anywhere on the prototype chain.
+//   (B) Non-vacuous control: registerFrame — sole reader of the module-private
+//       WeakMap channel (kind-keyed) — DOES register a handler through the channel.
+//   (C) Transitional dual path (E3b removes it): a receiver NOT in the channel is
+//       still driven via the literal named method.
+//   (D) Contract-level seal: the base Transport prototype declares no dispatch
+//       method — the absence is structural at the contract, not per-subclass.
 //
 // Run: node test/smoke_e3a_capability_boundary.mjs
 // =====================================================================
@@ -38,43 +31,35 @@ const check = (label, cond, extra = '') => {
   if (cond) { console.log(`  ✓ ${label}`); passed++; }
   else      { console.log(`  ✗ ${label}${extra ? ' — ' + extra : ''}`); failed++; }
 };
-console.log('\nREF-1.1 E3a — capability boundary (sealed node WebSocketTransport)\n');
+console.log('\nREF-1.1 E3 — capability boundary (sealed node WebSocketTransport)\n');
 
 const mkSealed = () => new WebSocketTransport({ sendToConn: () => true, isConnOpen: () => true });
 const REG = makeTestRegistry([
   { wire: 'probe_req', transportKind: 'request' },
   { wire: 'probe_ntf', transportKind: 'notification' },
 ]);
-
+const PRIMS = ['onRequest', 'onNotification', 'onRoutedMessage'];
 const ownDesc = (obj, key) => Object.getOwnPropertyDescriptor(obj, key);
 
-// ── (A) The registering primitive is unreachable by name ────────────────────
+// ── (A) Absence invariant: undefined by every access path, no residual ──────
 {
   const t = mkSealed();
-  // The sealed class defines no own dispatch method on the instance…
-  check('A1. no own onRequest/onNotification on the sealed instance',
-    !ownDesc(t, 'onRequest') && !ownDesc(t, 'onNotification'));
-  // …nor on the WebSocketTransport prototype (the overrides were removed).
-  check('A2. WebSocketTransport.prototype defines no own onRequest/onNotification',
-    !ownDesc(WebSocketTransport.prototype, 'onRequest') && !ownDesc(WebSocketTransport.prototype, 'onNotification'));
+  let allDotted = true, allComputed = true, allConcat = true, allReflect = true, noResidual = true;
+  for (const p of PRIMS) {
+    if (t[p] !== undefined) allDotted = false;
+    if (t[String(p)] !== undefined) allComputed = false;
+    if (Reflect.get(t, p) !== undefined) allReflect = false;
+    for (let o = t; o; o = Object.getPrototypeOf(o)) if (ownDesc(o, p)) noResidual = false;
+  }
+  if (t['on' + 'Request'] !== undefined) allConcat = false;
+  if (t['onNot' + 'ification'] !== undefined) allConcat = false;
+  if (t['onRouted' + 'Message'] !== undefined) allConcat = false;
 
-  // onRoutedMessage never existed on a transport or on the base contract — undefined
-  // by every access path, with no residual descriptor anywhere on the chain.
-  let routedResidual = false;
-  for (let o = t; o; o = Object.getPrototypeOf(o)) if (ownDesc(o, 'onRoutedMessage')) routedResidual = true;
-  check('A3. onRoutedMessage is undefined by dotted/computed/Reflect access with no residual on the chain',
-    !routedResidual
-    && t.onRoutedMessage === undefined
-    && t['onRoutedMessage'] === undefined
-    && t['onRouted' + 'Message'] === undefined
-    && Reflect.get(t, 'onRoutedMessage') === undefined);
-
-  // The capability channel is NOT keyed by the public method names, so the seal
-  // removes those names from the running program: they survive nowhere the caller
-  // can name to register — not on the instance, not on the subclass prototype.
-  check('A4. neither instance nor subclass prototype exposes a callable request/notification primitive',
-    typeof ownDesc(t, 'onRequest')?.value !== 'function'
-    && typeof ownDesc(WebSocketTransport.prototype, 'onNotification')?.value !== 'function');
+  check('A1. all three primitives are undefined by dotted access', allDotted);
+  check('A2. all three are undefined by computed (bracket) access', allComputed);
+  check('A3. all three are undefined by concatenated computed keys', allConcat);
+  check('A4. all three are undefined by Reflect.get', allReflect);
+  check('A5. no descriptor for any primitive anywhere on the prototype chain (no residual stub)', noResidual);
 }
 
 // ── (B) Not vacuous — registerFrame (sole reader) drives the real primitive ──
@@ -107,24 +92,16 @@ const ownDesc = (obj, key) => Object.getOwnPropertyDescriptor(obj, key);
     unsealed._ntf.get('probe_ntf') === h);
 }
 
-// ── (D) Honest boundary — the residual base contract stub is inert ───────────
+// ── (D) Contract-level seal — the base Transport declares no dispatch method ──
 {
-  const t = mkSealed();
-  // The nearest onRequest reachable up the chain is the BASE Transport contract stub,
-  // reached only by walking PAST the sealed subclass (which defines none). It is the
-  // interface declaration, NOT the primitive: it throws and registers nothing. E3b
-  // seals it, tightening t.onRequest to undefined.
-  let nearest, nearestProto;
-  for (let o = t; o; o = Object.getPrototypeOf(o)) {
-    const d = ownDesc(o, 'onRequest');
-    if (d) { nearest = d; nearestProto = o; break; }
-  }
-  check('D1. the nearest onRequest on the chain is the base Transport.prototype stub (not the subclass)',
-    nearestProto === Transport.prototype && typeof nearest?.value === 'function');
-  let stubThrew = false;
-  try { t.onRequest('x', () => {}); } catch (e) { stubThrew = /not implemented/.test(e.message); }
-  check('D2. calling the reachable name hits the inert stub: throws "not implemented", registers nothing',
-    stubThrew && t._reqHandlers.size === 0);
+  // E3b.1 removed the throwing "not implemented" stubs from the base contract, so
+  // the absence is structural: no subclass inherits a reachable dispatch name.
+  check('D1. base Transport.prototype declares no own onRequest',
+    !ownDesc(Transport.prototype, 'onRequest'));
+  check('D2. base Transport.prototype declares no own onNotification',
+    !ownDesc(Transport.prototype, 'onNotification'));
+  check('D3. a bare Transport instance resolves the dispatch names to undefined',
+    (() => { const b = Object.create(Transport.prototype); return b.onRequest === undefined && b.onNotification === undefined; })());
 }
 
 console.log(`\nResult: ${passed} passed, ${failed} failed\n`);
