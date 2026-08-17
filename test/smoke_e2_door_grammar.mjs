@@ -17,9 +17,11 @@
 //   registerFrame(recv, T.NAME, handler, { registry: <this.X | id.X in the table> })
 // with a DIRECT `registerFrame` callee bound by a plain named import.
 //
-// Plus PARITY: on the real unmigrated src tree the migration-aware discover() with an
-// empty door table yields ZERO doors and the unchanged raw site set — byte-identical
-// to the pre-door scan (the standalone recut lands before B1, so src has no doors).
+// Plus the REAL-TREE checks: with an EMPTY door table the grammar is inert (zero
+// doors, whatever the tree holds); with the DEFAULT table (E2.1 B1 landed) the migrated
+// tree yields EXACTLY B1's 19 door sites, all bound to wireHandlersMethods.
+// _registerHandlers, and the 19 raw on(T.*) sites are gone — the registrations moved
+// raw→door, conserved (raw XOR door).
 //
 // Run: node test/smoke_e2_door_grammar.mjs
 // =====================================================================
@@ -35,9 +37,15 @@ const check = (label, cond, extra = '') => { if (cond) { console.log(`  ✓ ${la
 console.log('\nREF-1.1 E2.1 — canonical registerFrame door grammar (adversarial + parity)\n');
 
 const NAME = 'SUB';                               // T.SUB — a real Boundary-1 wire
-const DOORS = [{ file: 'fx.js', registry: 'this._frameDoor', boundary: 'B1' }];
+// Context is MANDATORY (Vega 0193ec7f): every real door entry names its enclosing
+// <container>.<method>, so the grammar fixtures below live inside that context. `inCtx`
+// wraps a body in the allowlisted receiver method so the canonical door can bind;
+// the negatives then fail purely for their own indirection, not a context mismatch.
+const CTXPATH = 'Mgr._registerHandlers';
+const DOORS = [{ file: 'fx.js', context: CTXPATH, registry: 'this._frameDoor', boundary: 'B1' }];
 const IMP = "import { registerFrame } from '../registry/index.js';\n";
-const run = (body, imp = IMP, doorRegistries = DOORS) => discoverDoors([{ path: 'src/fx.js', code: imp + body }], { doorRegistries });
+const inCtx = (body) => `const Mgr = { _registerHandlers() { ${body} } };`;
+const run = (body, imp = IMP, doorRegistries = DOORS) => discoverDoors([{ path: 'src/fx.js', code: imp + inCtx(body) }], { doorRegistries });
 
 // ── POSITIVE: the canonical door is recognized as exactly one boundary site ──
 {
@@ -75,7 +83,9 @@ const neg = {
   'D12 missing options object':                { body: `registerFrame(this.dht, T.${NAME}, h);` },
 };
 for (const [name, f] of Object.entries(neg)) {
-  const r = discoverDoors([{ path: 'src/fx.js', code: (f.imp || IMP) + f.body }], { doorRegistries: DOORS });
+  // each negative runs INSIDE the allowlisted context, so it fails for its own
+  // indirection (alias/computed/wrapper/registry), never merely a context mismatch.
+  const r = discoverDoors([{ path: 'src/fx.js', code: (f.imp || IMP) + inCtx(f.body) }], { doorRegistries: DOORS });
   check(`${name} → FAILS CLOSED (no door, ≥1 unresolved)`, r.doors.length === 0 && r.unresolved.length >= 1,
     `\n   doors=${JSON.stringify(r.doors)} unresolved=${JSON.stringify(r.unresolved)}`);
 }
@@ -122,19 +132,39 @@ for (const [name, body] of Object.entries(ctxNeg)) {
     `\n   doors=${JSON.stringify(r.doors)} unresolved=${JSON.stringify(r.unresolved)}`);
 }
 
-// ── PARITY on the real unmigrated src tree: migration-aware discover() with the
-// default (empty) door table yields ZERO doors and the unchanged raw site set. ──
+// ── R7: context is MANDATORY — an entry that OMITS context is a REFUSE, not a
+// permissive default (Vega 0193ec7f). A context-less entry can never bind, even for a
+// canonical shape in the right file/registry; this is what closes the last
+// (file, spelled-expr)-alone hole (two classes in one file sharing this._frameDoor). ──
+{
+  const noCtx = [{ file: 'fx.js', registry: 'this._frameDoor', boundary: 'B1' }];
+  const r = discoverDoors([{ path: 'src/fx.js', code: IMP + inCtx(`registerFrame(this.dht, T.${NAME}, h, { registry: this._frameDoor });`) }], { doorRegistries: noCtx });
+  check('R7. a door entry that OMITS context REFUSES even a canonical shape in the right file/registry — context is mandatory (Vega 0193ec7f: an omitted-context entry is a refuse, not a permissive default)',
+    r.doors.length === 0 && r.unresolved.length >= 1, `\n   doors=${JSON.stringify(r.doors)} unresolved=${JSON.stringify(r.unresolved)}`);
+}
+
+// ── REAL TREE: (P1) with an EMPTY door table the grammar is inert — zero doors,
+// whatever the tree holds; (P2) with the DEFAULT (B1) table the migrated tree yields
+// EXACTLY B1's 19 doors, all in wireHandlersMethods._registerHandlers, and the 19 raw
+// on(T.*) sites are gone — the registrations moved raw→door, conserved (raw XOR door). ──
 {
   const SRC = fileURLToPath(new URL('../src/', import.meta.url));
   const listJs = (dir) => { const o = []; for (const n of readdirSync(dir)) { const p = join(dir, n); const s = statSync(p); if (s.isDirectory()) o.push(...listJs(p)); else if (n.endsWith('.js')) o.push(p); } return o; };
   const files = listJs(SRC).map((p) => ({ path: relative(SRC, p), code: readFileSync(p, 'utf8') }));
-  const r = discover(files, { methods: new Set(['onRequest', 'onNotification', 'onRoutedMessage']) });
-  check('P1. PARITY: the unmigrated src tree yields ZERO doors — the door grammar is inert until a boundary migrates',
-    r.doors.length === 0, `\n   doors=${r.doors.length}`);
-  check('P1b. PARITY: the raw site set is intact (≥40) — the door pass never touches sites/mechanisms',
-    r.sites.length >= 40, `\n   sites=${r.sites.length}`);
-  check('P1c. PARITY: no door-grammar false unresolved on the real tree (src imports no door pre-migration)',
-    r.doors.length === 0 && files.every((f) => discoverDoors([f]).unresolved.length === 0));
+  const METH = { methods: new Set(['onRequest', 'onNotification', 'onRoutedMessage']) };
+  const inert = discover(files, { ...METH, doorRegistries: [] });
+  check('P1. INERT: an empty door table yields ZERO doors on the real tree — the grammar contributes nothing until a boundary is listed',
+    inert.doors.length === 0, `\n   doors=${inert.doors.length}`);
+  const migd = discover(files, METH);   // DEFAULT_DOOR_REGISTRIES = B1
+  const b1doors = migd.doors.filter((d) => d.boundary === 'B1');
+  check('P2. MIGRATED: the default (B1) table discovers EXACTLY 19 B1 doors, all bound to wireHandlersMethods._registerHandlers',
+    b1doors.length === 19 && b1doors.every((d) => d.context === 'wireHandlersMethods._registerHandlers'),
+    `\n   b1doors=${b1doors.length} contexts=${[...new Set(migd.doors.map((d) => d.context))].join(',')}`);
+  check('P2b. CONSERVED: no raw on(T.*) site remains on the real tree — the 19 wires moved raw→door (raw XOR door)',
+    migd.sites.filter((s) => s.callee === 'on(T.*)').length === 0,
+    `\n   residual raw on(T.*) = ${migd.sites.filter((s) => s.callee === 'on(T.*)').length}`);
+  check('P2c. no door-grammar false unresolved on the real tree under the default (B1) table',
+    discoverDoors(files).unresolved.length === 0, `\n   unresolved=${JSON.stringify(discoverDoors(files).unresolved)}`);
 }
 
 console.log(`\nResult: ${passed} passed, ${failed} failed\n`);

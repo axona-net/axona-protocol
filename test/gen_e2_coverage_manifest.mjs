@@ -50,14 +50,30 @@ function resolveRowType(boundary, wire, tk) {
   for (const [key, v] of REG[boundary]) if ((v.wire ?? key) === wire && v.transportKind === tk) return v.type;
   return null;
 }
+// A canonical door row (callee 'registerFrame', E2.1+) carries no primitive-derived
+// transportKind — the source site no longer names a sealed primitive; the boundary
+// REGISTRY declares the transport kind. Resolve it from the wiring row the intended
+// boundary owns for this wire, so a migrated site maps to EXACTLY the row its raw
+// predecessor did (B1 doors are all bare-keyed routed → transportKind 'routed').
+function registryTransportKind(boundary, wire) {
+  if (!REG[boundary]) return null;
+  for (const [key, v] of REG[boundary]) if ((v.wire ?? key) === wire) return v.transportKind ?? null;
+  return null;
+}
 
 export function generate() {
   const manifest = JSON.parse(readFileSync(E0, 'utf8'));
   const targets = manifest.rows.filter((r) => r.classification === 'migration-target');
   const sites = targets.map((row) => {
     const wire = row.wire;
-    const transportKind = TK[row.callee] ?? null;
     const boundary = intendedBoundary(row);
+    // A raw site's transportKind comes from the sealed primitive it invoked; a
+    // migrated door site (callee 'registerFrame') has none, so its boundary registry
+    // declares it (E2.1). Either way the (boundary, wire, transportKind) that follows
+    // resolves the owning row identically.
+    const transportKind = row.callee === 'registerFrame'
+      ? registryTransportKind(boundary, wire)
+      : (TK[row.callee] ?? null);
     const receiver = row.receiver ?? '';
     // IMMUTABLE source-site identity = the actual CALL-SITE locator (canonical
     // file:line — the AST location of the registration call) + the source PRIMITIVE

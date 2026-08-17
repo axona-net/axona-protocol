@@ -73,7 +73,9 @@ const METHODS = new Set(['onRoutedMessage', 'onNotification']);
 // Non-literal registration calls that are DOCUMENTED mechanisms/planes, keyed by
 // (file, receiver, method, arg) so a NEW computed registration anywhere else fails.
 const MECHANISM_EXEMPT = [
-  { file: 'pubsub/wireHandlers.js', recv: 'dht',       method: 'onRoutedMessage', arg: 'type',     why: 'B1 routed registration helper; concrete wires from on(T.X)' },
+  // (E2.1: the pubsub/wireHandlers.js on() helper is DELETED — its 19 wires now
+  // register through the canonical door. The exemption is removed; a re-introduced raw
+  // dht.onRoutedMessage(type) in wireHandlers now fails closed under this fence too.)
   { file: 'dht/AxonaPeer.js',       recv: 'peer',      method: 'onRoutedMessage', arg: 'type',     why: 'transport-adapter delegation shim' },
   { file: 'web/composite.js',       recv: 't',         method: 'onNotification',  arg: 'type',     why: 'CompositeTransport fan-out over recorded handlers' },
   { file: 'dht/AxonaPeer.js',       recv: 'transport', method: 'onNotification',  arg: 'wireType', why: 'direct-messaging direct_<type> family, out of scope' },

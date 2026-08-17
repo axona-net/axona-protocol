@@ -16,15 +16,16 @@
 //   mechanism-shim         — a low-level demux/fan-out that is not a frame and has
 //                            no row (CompositeTransport fan-out; the DHT-adapter
 //                            passthrough).
-//   registration-helper    — the B1 on() helper; its concrete wires resolve from
-//                            on(T.X).
 //   parameterized-registrar— onDirectMessage's direct_${type} family (own E1 fence).
+//
+// (E2.1: the B1 on() helper — formerly class `registration-helper` — is DELETED;
+// its 19 wires migrated to the canonical door. Its allowlist row is removed, so a
+// re-introduced raw dht.onRoutedMessage(type) in wireHandlers now fails closed.)
 // =====================================================================
 
 export const SEALED = Object.freeze(new Set(['onRequest', 'onNotification', 'onRoutedMessage']));
 
 export const RAW_DISPATCH_ALLOWLIST = Object.freeze([
-  { file: 'pubsub/wireHandlers.js', recv: 'dht',       method: 'onRoutedMessage', arg: 'type',     class: 'registration-helper',    why: 'B1 on() helper; the concrete pub/sub wires resolve from on(T.X)' },
   { file: 'dht/AxonaPeer.js',       recv: 'peer',      method: 'onRoutedMessage', arg: 'type',     class: 'mechanism-shim',         why: 'default-DHT adapter passthrough (AxonaPeer.js:3089)' },
   { file: 'web/composite.js',       recv: 't',         method: 'onRequest',       arg: 'type',     class: 'mechanism-shim',         why: 'CompositeTransport onRequest fan-out/replay over recorded handlers' },
   { file: 'web/composite.js',       recv: 't',         method: 'onNotification',  arg: 'type',     class: 'mechanism-shim',         why: 'CompositeTransport onNotification fan-out/replay over recorded handlers' },

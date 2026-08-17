@@ -39,12 +39,16 @@ export const DEFAULT_METHODS = new Set(['onRoutedMessage', 'onNotification']);
 // options) is a NONCANONICAL look-alike and fails closed, exactly as an aliased raw
 // primitive does — this is what preserves S5's closed soundness claim.
 //
-// DEFAULT_DOOR_REGISTRIES maps (file, registry-expr) → boundary. It is EMPTY until a
-// boundary migrates: on the unmigrated tree src carries zero registerFrame calls
-// (E1 landed the door; E2 migrates the sites), so discovery is byte-identical to the
-// pre-E2 raw scan (parity). B1 adds { 'pubsub/wireHandlers.js', 'this._frameDoor',
-// 'B1' } when it lands.
-export const DEFAULT_DOOR_REGISTRIES = [];
+// DEFAULT_DOOR_REGISTRIES maps (file, context, registry-expr) → boundary. Each entry
+// names the exact enclosing lexical context (<container>.<method>) the door lives in;
+// context is MANDATORY (doorOf refuses a context-less entry). A boundary adds its row
+// when it migrates; before E2.1 this was empty (zero doors → the raw scan verbatim).
+// E2.1 B1 (2026-08-17): the 19 routed pub/sub handlers register through registerFrame
+// with { registry: this._frameDoor } inside wireHandlersMethods._registerHandlers, so
+// B1's row lands here and those 19 sites are discovered as doors, not raw on(T.*).
+export const DEFAULT_DOOR_REGISTRIES = [
+  { file: 'pubsub/wireHandlers.js', context: 'wireHandlersMethods._registerHandlers', registry: 'this._frameDoor', boundary: 'B1' },
+];
 
 // Render a registry-argument expression to its explicit canonical source string, or
 // null if it is not one of the two allowed explicit forms (this.<name> | <id>.<name>).
@@ -62,7 +66,10 @@ export function canonicalRegistryExpr(node) {
 // (file, receiver, method, arg) so a NEW computed registration anywhere else fails.
 // `class`/`why` are metadata the E0 manifest reads; S5's default list omits them.
 export const DEFAULT_MECHANISM_EXEMPT = [
-  { file: 'pubsub/wireHandlers.js', recv: 'dht',       method: 'onRoutedMessage', arg: 'type',     why: 'B1 routed registration helper; concrete wires from on(T.X)' },
+  // (E2.1: the pubsub/wireHandlers.js on() helper — a `dht.onRoutedMessage(type, h)`
+  // shim — is DELETED; its 19 wires now register through the canonical door. The
+  // exemption that documented it is removed, so a future raw dht.onRoutedMessage(type)
+  // in wireHandlers fails closed.)
   { file: 'dht/AxonaPeer.js',       recv: 'peer',      method: 'onRoutedMessage', arg: 'type',     why: 'transport-adapter delegation shim' },
   { file: 'web/composite.js',       recv: 't',         method: 'onNotification',  arg: 'type',     why: 'CompositeTransport fan-out over recorded handlers' },
   { file: 'dht/AxonaPeer.js',       recv: 'transport', method: 'onNotification',  arg: 'wireType', why: 'direct-messaging direct_<type> family, out of scope' },
@@ -214,13 +221,16 @@ export function discover(fileList, { methods = DEFAULT_METHODS, mechanismExempt 
 // discovery is byte-identical to the raw scan (parity).
 export function discoverDoors(fileList, { doorRegistries = DEFAULT_DOOR_REGISTRIES } = {}) {
   // A door binds only to an entry with the matching FILE, canonical registry
-  // EXPRESSION, and — when the entry names one — the exact enclosing lexical CONTEXT
-  // (<container>.<method>). The context field is what makes `this._frameDoor` bind to
-  // B1's actual receiver and refuse a same-spelled field in another class/method or
-  // file (Aster 067e1bde / Vega da6cbdb4 / Orion fee0355a): (file, spelled-expr)
-  // alone cannot tell two classes in one file apart.
+  // EXPRESSION, and the exact enclosing lexical CONTEXT (<container>.<method>).
+  // Context is MANDATORY: an entry that OMITS it never binds — a refuse, not a
+  // permissive default (Vega 0193ec7f, 2026-08-17). Requiring context closes the last
+  // hole the (file, spelled-expr) pair left open: two classes in one file sharing
+  // this._frameDoor would both match a context-less entry. With context required, the
+  // door pins to B1's actual receiver method and refuses a same-spelled field in
+  // another class/method/file, peer._frameDoor, an alias, or the nullable canary
+  // this._frameRegistry (Aster 067e1bde / Vega da6cbdb4 / Orion fee0355a).
   const doorOf = (fp, registry, ctx) => doorRegistries.find((d) =>
-    fp.endsWith(d.file) && d.registry === registry && (d.context == null || d.context === ctx)) || null;
+    fp.endsWith(d.file) && d.registry === registry && d.context != null && d.context === ctx) || null;
   const doors = [], unresolved = [], parseErrors = [];
   for (const { path: fp, code } of fileList) {
     let ast;
