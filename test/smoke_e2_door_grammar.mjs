@@ -269,11 +269,14 @@ for (const [name, body] of Object.entries(ctxNeg)) {
   const b2Raw = migd.sites.filter(isB2Raw);
   check("P3b. ZERO-RESIDUAL RAW (B2-scoped): none of the 3 migrated B2 (recv,wire) pairs — (bridge,hello),(bridge,hello-ack),(webrtc,cap-attest) — remains a raw site (raw XOR door, scoped by RECEIVER so the B3 webrtc 'hello' is not miscounted)",
     b2Raw.length === 0, `\n   b2Raw=${JSON.stringify(b2Raw.map((s) => s.site))}`);
-  // NON-OVER-CLAIM: B2 migrated only the bridge hello/hello-ack + webrtc cap-attest; the
-  // B3 webrtc hello + hello-sig raw sites (deferred to E2.3) MUST still be present raw.
-  const b3Raw = migd.sites.filter((s) => s.recv === 'webrtc' && (s.wire === 'hello' || s.wire === 'hello-sig'));
-  check("P3c. B2 did NOT swallow B3: the webrtc hello + hello-sig raw sites (B3, deferred to E2.3) are STILL present as raw — the shared 'hello' wire is scoped correctly, not swept",
-    b3Raw.length === 2, `\n   b3Raw=${JSON.stringify(b3Raw.map((s) => s.site))}`);
+  // CROSS-BOUNDARY (E2.3): the shared 'hello' wire is now TWO doors — bridge hello → B2
+  // (registry composite._b2door) and webrtc hello → B3 (registry composite._b3door). The
+  // boundary is split by the DOOR REGISTRY, not the wire; B2 did not absorb B3's hello.
+  const b2hello = migd.doors.find((d) => d.wire === 'hello' && d.boundary === 'B2');
+  const b3hello = migd.doors.find((d) => d.wire === 'hello' && d.boundary === 'B3');
+  check("P3c. the shared 'hello' wire is TWO distinct doors: bridge hello → B2 (composite._b2door) AND webrtc hello → B3 (composite._b3door) — split by the door registry, B2 did not swallow B3",
+    !!b2hello && !!b3hello && b2hello.registry === 'composite._b2door' && b3hello.registry === 'composite._b3door',
+    `\n   b2hello=${JSON.stringify(b2hello)} b3hello=${JSON.stringify(b3hello)}`);
   // P3b-neg: TEETH — inject a residual raw bridge.onNotification('hello', …) beside the
   // B2 door; discover() surfaces it as recv='bridge' wire='hello' → b2Raw non-zero →
   // P3b would FAIL. (Also self-checks the recv='bridge' label the scope relies on.)
@@ -281,6 +284,40 @@ for (const [name, body] of Object.entries(ctxNeg)) {
     const resid = discover([{ path: 'transport/web/index.js', code: IMP + `export function webTransport(){ registerFrame(bridge, 'hello', h, { registry: composite._b2door }); bridge.onNotification('hello', h2); }` }], METH);
     const injected = resid.sites.filter((s) => s.recv === 'bridge' && s.wire === 'hello');
     check("P3b-neg. the B2 zero-residual guard has TEETH: a residual raw bridge.onNotification('hello', …) beside the door IS discovered (recv=bridge, wire=hello) → P3b would FAIL (not vacuous)",
+      injected.length >= 1, `\n   sites=${JSON.stringify(resid.sites.map((s) => s.site))}`);
+  }
+}
+
+// ── REAL TREE — B3 (E2.3, Vega-pattern B3-scoped zero-residual). The 3 WebRTC-signalling
+// doors exist (webrtc hello + hello-sig in webTransport; mesh:signal in AxonaPeer), and
+// NONE of the 3 migrated B3 (recv,wire) pairs remains a raw site. 'hello' is scoped by
+// receiver (it is ALSO a B2 bridge door); hello-sig and mesh:signal are B3-unique wires. ──
+{
+  const SRC = fileURLToPath(new URL('../src/', import.meta.url));
+  const listJs = (dir) => { const o = []; for (const n of readdirSync(dir)) { const p = join(dir, n); const s = statSync(p); if (s.isDirectory()) o.push(...listJs(p)); else if (n.endsWith('.js')) o.push(p); } return o; };
+  const files = listJs(SRC).map((p) => ({ path: relative(SRC, p), code: readFileSync(p, 'utf8') }));
+  const METH = { methods: new Set(['onRequest', 'onNotification', 'onRoutedMessage']) };
+  const migd = discover(files, METH);
+  const b3doors = migd.doors.filter((d) => d.boundary === 'B3');
+  const b3Wires = ['hello', 'hello-sig', 'mesh:signal'];
+  check('P4. MIGRATED B3: the default table discovers EXACTLY 3 B3 doors (hello, hello-sig, mesh:signal) — hello + hello-sig in context webTransport, mesh:signal in AxonaPeer._installRoutingHandlers',
+    b3doors.length === 3 && b3Wires.every((w) => b3doors.some((d) => d.wire === w))
+    && b3doors.filter((d) => d.context === 'webTransport').length === 2
+    && b3doors.some((d) => d.wire === 'mesh:signal' && d.context === 'AxonaPeer._installRoutingHandlers'),
+    `\n   b3doors=${JSON.stringify(b3doors.map((d) => ({ wire: d.wire, ctx: d.context })))}`);
+  // B3-scoped zero-residual. 'hello' scoped by receiver (shared with the B2 bridge hello);
+  // hello-sig + mesh:signal are B3-unique wires, so wire-scoping is exact for them.
+  const isB3Raw = (s) => (s.recv === 'webrtc' && (s.wire === 'hello' || s.wire === 'hello-sig')) || s.wire === 'mesh:signal';
+  const b3Raw = migd.sites.filter(isB3Raw);
+  check("P4b. ZERO-RESIDUAL RAW (B3-scoped): none of the 3 migrated B3 (recv,wire) pairs — (webrtc,hello),(webrtc,hello-sig),(this,mesh:signal) — remains a raw site (raw XOR door); 'hello' scoped by receiver so the B2 bridge 'hello' door is not miscounted",
+    b3Raw.length === 0, `\n   b3Raw=${JSON.stringify(b3Raw.map((s) => s.site))}`);
+  // P4b-neg: TEETH — inject a residual raw webrtc.onNotification('hello', …) beside the B3
+  // door; discover() surfaces it as recv='webrtc' wire='hello' → b3Raw non-zero → P4b would
+  // FAIL. (Also self-checks the recv='webrtc' label the scope relies on.)
+  {
+    const resid = discover([{ path: 'transport/web/index.js', code: IMP + `export function webTransport(){ registerFrame(webrtc, 'hello', h, { registry: composite._b3door }); webrtc.onNotification('hello', h2); }` }], METH);
+    const injected = resid.sites.filter((s) => s.recv === 'webrtc' && s.wire === 'hello');
+    check("P4b-neg. the B3 zero-residual guard has TEETH: a residual raw webrtc.onNotification('hello', …) beside the door IS discovered (recv=webrtc, wire=hello) → P4b would FAIL (not vacuous)",
       injected.length >= 1, `\n   sites=${JSON.stringify(resid.sites.map((s) => s.site))}`);
   }
 }

@@ -53,6 +53,15 @@ export const DEFAULT_DOOR_REGISTRIES = [
   // function body. (The webrtc hello/hello-sig sites in the same file are B3 and stay
   // raw until E2.3, so they do NOT match this boundary:'B2' entry.)
   { file: 'transport/web/index.js', context: 'webTransport', registry: 'composite._b2door', boundary: 'B2' },
+  // E2.3 B3 (2026-08-17): the WebRTC mesh-base-auth notifications hello / hello-sig
+  // register through registerFrame with { registry: composite._b3door } inside webTransport()
+  // — the SAME file+context as B2, disambiguated by the registry expression (composite._b3door
+  // vs composite._b2door). So bridge hello binds B2 and webrtc hello binds B3, one wire 'hello'
+  // across two boundaries, split by the door registry.
+  { file: 'transport/web/index.js', context: 'webTransport', registry: 'composite._b3door', boundary: 'B3' },
+  // The routed B3 site mesh:signal lives in AxonaPeer._installRoutingHandlers with its own
+  // door holder this._b3door (transportKind 'routed' resolved from the B3 row).
+  { file: 'dht/AxonaPeer.js', context: 'AxonaPeer._installRoutingHandlers', registry: 'this._b3door', boundary: 'B3' },
 ];
 
 // Render a registry-argument expression to its explicit canonical source string, or

@@ -57,6 +57,12 @@ import { AxonaManager, MAX_PUBLISH_BYTES, MAX_RELIABLE_PUBLISH_BYTES, isRegionLo
 import { metricTopic, isMetricTopicName, dataTopicIdOf } from '../pubsub/metrics.js';
 import { authorClassTopic, buildAuthorClass, verifyAuthorClass } from '../pubsub/authorClass.js';
 import { AxonaError, PublishError, SubscribeError, KillError, TouchError, PullError, MetricsError, ErrorCodes } from '../errors.js';
+// REF-1.1 E2.3: the canonical registration DOOR + runtime shadow flag, and the
+// Boundary-3 registry. The routed mesh:signal handler registers through registerFrame
+// (transportKind 'routed' resolved from the B3 row) instead of the raw onRoutedMessage
+// primitive; observation is default-off, so flag-off dispatch is byte-identical.
+import { registerFrame, shadowEnabled } from '../registry/index.js';
+import { buildBoundary3Registry } from '../transport/boundary3Registry.js';
 
 // ── B-3 (eclipse prevention) tunables ───────────────────────────────
 // Max concurrent verification probes triggered by gossip introductions —
@@ -120,6 +126,11 @@ export class AxonaPeer extends DHT {
     // then gates whether the wrap observes or runs the handler verbatim). The M1
     // telemetry-only canary sets this so a relay peer can report the shadow invariant.
     this._armFrameRegistry = frameRegistry === true;
+    // REF-1.1 E2.3: the Boundary-3 door for the routed mesh:signal handler (built
+    // unconditionally, same discipline as the transport's _b2door/_b3door). The B3
+    // row keys mesh:signal on transportKind 'routed', so registerFrame binds it to
+    // this.onRoutedMessage; flag-off the wrap runs the handler verbatim (byte-identical).
+    this._b3door = buildBoundary3Registry({ enabled: shadowEnabled });
     // REF-1.1 E1 direct_* admissible-type fence (council-cleared design; David:
     // registration-time allowlist; Vega ffdba957 hardening). The construction-time
     // admissible set for direct-message `type`s. OMITTED (undefined/null) = dormant
@@ -726,7 +737,7 @@ export class AxonaPeer extends DHT {
     // channel is still authenticated end-to-end (axona/4 + DTLS-fingerprint
     // binding), so a relay can drop/observe but never MITM.  Design:
     // axona-docs/implementation/Peer-Relayed-Signaling-v0.1.md §3.1.
-    this.onRoutedMessage('mesh:signal', async (payload, meta) => {
+    registerFrame(this, 'mesh:signal', async (payload, meta) => {
       if (meta.targetId !== node.id) return null;       // not us — forward
       const t = node.transport;
       if (t && typeof t.deliverMeshSignal === 'function'
@@ -737,7 +748,7 @@ export class AxonaPeer extends DHT {
         }
       }
       return 'consumed';
-    });
+    }, { registry: this._b3door });
 
     this._routingHandlersInstalled = true;
   }

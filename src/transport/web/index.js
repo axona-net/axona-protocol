@@ -49,7 +49,7 @@ import { makeBoundary2Observers, buildBoundary2Registry } from '../boundary2Regi
 import { registerFrame, shadowEnabled } from '../../registry/index.js';
 // REF-1.1 S4b: Boundary-3 (WebRTC signalling + mesh-auth) frame-contract registry,
 // SHADOW MODE, DEFAULT-OFF — same flag and no-op-when-off discipline as Boundary-2.
-import { makeBoundary3Observers } from '../boundary3Registry.js';
+import { makeBoundary3Observers, buildBoundary3Registry } from '../boundary3Registry.js';
 import { makeBoundary4Observers } from '../boundary4Registry.js';
 import {
   buildAuthHello, verifyAuthHello, cbvFromNonces, AUTH_PROTO,
@@ -599,6 +599,11 @@ export function webTransport({
   // observeShape for exactly that reason), and the registry carries no mintLive, so the
   // wrap is an unbranded no-op flag-on and byte-identical dispatch flag-off.
   composite._b2door = buildBoundary2Registry({ enabled: shadowEnabled });
+  // REF-1.1 E2.3: the Boundary-3 door for the two webrtc mesh-base-auth notifications
+  // (hello, hello-sig). Built unconditionally, same discipline as _b2door — the b3observe
+  // side-channel keeps the (wire, fromConnId) scoping the wrap can't see; flag-off the
+  // wrap is byte-identical. (mesh:signal, the routed B3 site, holds its own door on AxonaPeer.)
+  composite._b3door = buildBoundary3Registry({ enabled: shadowEnabled });
 
   // ── Bridge handshake state (auto-handshake path) ─────────────────
   //
@@ -993,8 +998,8 @@ export function webTransport({
     if (typeof mesh.onPeerLost === 'function') {
       mesh.onPeerLost((meshId) => meshAuth.onChannelLost(meshId));
     }
-    webrtc.onNotification('hello',     (fromConnId, body) => { b3observe('hello',     fromConnId, body); return meshAuth.onHello(fromConnId, body); });
-    webrtc.onNotification('hello-sig', (fromConnId, body) => { b3observe('hello-sig', fromConnId, body); return meshAuth.onHelloSig(fromConnId, body); });
+    registerFrame(webrtc, 'hello',     (fromConnId, body) => { b3observe('hello',     fromConnId, body); return meshAuth.onHello(fromConnId, body); },    { registry: composite._b3door });
+    registerFrame(webrtc, 'hello-sig', (fromConnId, body) => { b3observe('hello-sig', fromConnId, body); return meshAuth.onHelloSig(fromConnId, body); }, { registry: composite._b3door });
     // CAP_ATTEST arrives POST-bind, so webrtc dispatches the sender's
     // BigInt nodeId here — not the pre-bind meshId string the hello
     // handlers get.  Translate back to the meshId MeshAuth keys on.

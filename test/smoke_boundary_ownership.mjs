@@ -294,12 +294,12 @@ const TABLE_ONLY = new Set(['B4:client-hello', 'B4:ping', 'B4:turn-refresh', 'B4
   for (const [b, wires] of Object.entries(REG)) for (const w of wires) if (!liveByB[b]?.has(w) && !TABLE_ONLY.has(`${b}:${w}`)) miss.push(`${b}:${w}`);
   check('INV2. backward: every registry wire is a live in-scope endpoint OR a documented TABLE_ONLY frame', miss.length === 0, `\n   miss: ${miss.join(', ')}`);
 }
-check('INV3. B3 signalling endpoints now map to DISTINCT wires (E2.0, Aster ASTER-E2-KEY-SCOPE: do not reuse signal): bridge-ws|signal → B3 wire `signal`; routed-dht|mesh:signal → B3 wire `mesh:signal`',
+check('INV3. B3 signalling endpoints map to DISTINCT wires (E2.0 Aster ASTER-E2-KEY-SCOPE, do not reuse signal): bridge-ws|signal → B3 raw wire `signal` (a dispatch case, not migrated); mesh:signal → B3 DOOR wire `mesh:signal` (E2.3: migrated raw routed→door)',
   A('bridge-ws', 'signal') && L.find((x) => x.surface === 'bridge-ws' && x.wire === 'signal')?.regWire === 'signal'
-  && A('routed-dht', 'mesh:signal') && L.find((x) => x.surface === 'routed-dht' && x.wire === 'mesh:signal')?.regWire === 'mesh:signal'
+  && L.some((x) => x.surface === 'door' && x.wire === 'mesh:signal' && x.boundary === 'B3')
   && REG.B3.has('signal') && REG.B3.has('mesh:signal'));
-check('INV4. hello is TWO endpoints pinned by surface: the bridge hello (E2.2: now a B2 DOOR) AND webrtc-notif|hello→B3 (still raw, migrates in E2.3)',
-  L.some((x) => x.surface === 'door' && x.wire === 'hello' && x.boundary === 'B2') && L.find((x) => x.key === 'webrtc-notif|hello')?.boundary === 'B3' && REG.B2.has('hello') && REG.B3.has('hello'));
+check('INV4. hello is TWO endpoints pinned by surface, BOTH now DOORs (E2.2 + E2.3): the bridge hello → B2 DOOR AND the webrtc hello → B3 DOOR — one wire `hello`, two boundaries, split by the door registry (composite._b2door vs composite._b3door)',
+  L.some((x) => x.surface === 'door' && x.wire === 'hello' && x.boundary === 'B2') && L.some((x) => x.surface === 'door' && x.wire === 'hello' && x.boundary === 'B3') && REG.B2.has('hello') && REG.B3.has('hello'));
 {
   const bad = []; for (const b of Object.keys(REG)) for (const [wire, info] of WIRING[b]) if (!String(info.type).startsWith(REG_PREFIX[b])) bad.push(`${b}:${wire}`);
   check('O1. every registered row type is namespaced to its boundary', bad.length === 0, `\n   ${bad.join(', ')}`);
