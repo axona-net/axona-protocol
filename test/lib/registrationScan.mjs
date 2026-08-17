@@ -48,6 +48,11 @@ export const DEFAULT_METHODS = new Set(['onRoutedMessage', 'onNotification']);
 // B1's row lands here and those 19 sites are discovered as doors, not raw on(T.*).
 export const DEFAULT_DOOR_REGISTRIES = [
   { file: 'pubsub/wireHandlers.js', context: 'wireHandlersMethods._registerHandlers', registry: 'this._frameDoor', boundary: 'B1' },
+  // E2.2 B2 (2026-08-17): transport hello / hello-ack / cap-attest register through
+  // registerFrame with { registry: composite._b2door } inside the webTransport()
+  // function body. (The webrtc hello/hello-sig sites in the same file are B3 and stay
+  // raw until E2.3, so they do NOT match this boundary:'B2' entry.)
+  { file: 'transport/web/index.js', context: 'webTransport', registry: 'composite._b2door', boundary: 'B2' },
 ];
 
 // Render a registry-argument expression to its explicit canonical source string, or
@@ -267,6 +272,10 @@ export function discoverDoors(fileList, { doorRegistries = DEFAULT_DOOR_REGISTRI
     const containerName = (nd) =>
       ((nd.type === 'ClassDeclaration' || nd.type === 'ClassExpression') && nd.id?.name) ? nd.id.name
       : (nd.type === 'VariableDeclarator' && nd.id?.type === 'Identifier' && (nd.init?.type === 'ObjectExpression' || nd.init?.type === 'ClassExpression')) ? nd.id.name
+      // A named FunctionDeclaration is a lexical container too — a door registered
+      // directly in a `function foo(){…}` body binds to context `foo` (E2.2: the B2
+      // sites live in `export function webTransport(){…}`, not a class/object method).
+      : (nd.type === 'FunctionDeclaration' && nd.id?.name) ? nd.id.name
       : null;
     const enclosingMethod = (nd) => (nd.type === 'MethodDefinition' || (nd.type === 'Property' && nd.method))
       ? (nd.key?.type === 'Identifier' ? nd.key.name : (nd.key?.type === 'Literal' && typeof nd.key.value === 'string' ? nd.key.value : null))

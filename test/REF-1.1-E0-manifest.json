@@ -5,7 +5,7 @@
     "onNotification",
     "onRoutedMessage"
   ],
-  "treeHash": "c0d63035938f7bb568db71e7c56b3fe0c54e8c32",
+  "treeHash": "7c440afc24f1aae02e72bab1b37d5a23ce92af76",
   "filesScanned": 76,
   "summary": {
     "migration-target": 38,
@@ -535,7 +535,7 @@
     },
     {
       "file": "transport/web/index.js",
-      "line": 467,
+      "line": 471,
       "callee": "dispatch",
       "receiver": "signaling",
       "wire": "welcome",
@@ -544,7 +544,7 @@
     },
     {
       "file": "transport/web/index.js",
-      "line": 507,
+      "line": 511,
       "callee": "dispatch",
       "receiver": "signaling",
       "wire": "turn",
@@ -553,7 +553,7 @@
     },
     {
       "file": "transport/web/index.js",
-      "line": 515,
+      "line": 519,
       "callee": "dispatch",
       "receiver": "signaling",
       "wire": "peer-list",
@@ -562,7 +562,7 @@
     },
     {
       "file": "transport/web/index.js",
-      "line": 521,
+      "line": 525,
       "callee": "dispatch",
       "receiver": "signaling",
       "wire": "peer-joined",
@@ -571,7 +571,7 @@
     },
     {
       "file": "transport/web/index.js",
-      "line": 527,
+      "line": 531,
       "callee": "dispatch",
       "receiver": "signaling",
       "wire": "peer-left",
@@ -580,7 +580,7 @@
     },
     {
       "file": "transport/web/index.js",
-      "line": 545,
+      "line": 549,
       "callee": "dispatch",
       "receiver": "signaling",
       "wire": "signal",
@@ -589,7 +589,7 @@
     },
     {
       "file": "transport/web/index.js",
-      "line": 551,
+      "line": 555,
       "callee": "dispatch",
       "receiver": "signaling",
       "wire": "pong",
@@ -598,7 +598,7 @@
     },
     {
       "file": "transport/web/index.js",
-      "line": 557,
+      "line": 561,
       "callee": "dispatch",
       "receiver": "signaling",
       "wire": "version-gate",
@@ -607,25 +607,25 @@
     },
     {
       "file": "transport/web/index.js",
-      "line": 939,
-      "callee": "onNotification",
-      "receiver": "bridge",
+      "line": 953,
+      "callee": "registerFrame",
+      "receiver": "composite._b2door",
       "wire": "hello",
       "classification": "migration-target",
-      "boundary": "B2/B3"
+      "boundary": "B2"
     },
     {
       "file": "transport/web/index.js",
-      "line": 940,
-      "callee": "onNotification",
-      "receiver": "bridge",
+      "line": 954,
+      "callee": "registerFrame",
+      "receiver": "composite._b2door",
       "wire": "hello-ack",
       "classification": "migration-target",
       "boundary": "B2"
     },
     {
       "file": "transport/web/index.js",
-      "line": 982,
+      "line": 996,
       "callee": "onNotification",
       "receiver": "webrtc",
       "wire": "hello",
@@ -634,7 +634,7 @@
     },
     {
       "file": "transport/web/index.js",
-      "line": 983,
+      "line": 997,
       "callee": "onNotification",
       "receiver": "webrtc",
       "wire": "hello-sig",
@@ -643,9 +643,9 @@
     },
     {
       "file": "transport/web/index.js",
-      "line": 987,
-      "callee": "onNotification",
-      "receiver": "webrtc",
+      "line": 1001,
+      "callee": "registerFrame",
+      "receiver": "composite._b2door",
       "wire": "cap-attest",
       "classification": "migration-target",
       "boundary": "B2"

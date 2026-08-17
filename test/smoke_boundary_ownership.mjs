@@ -298,15 +298,15 @@ check('INV3. B3 signalling endpoints now map to DISTINCT wires (E2.0, Aster ASTE
   A('bridge-ws', 'signal') && L.find((x) => x.surface === 'bridge-ws' && x.wire === 'signal')?.regWire === 'signal'
   && A('routed-dht', 'mesh:signal') && L.find((x) => x.surface === 'routed-dht' && x.wire === 'mesh:signal')?.regWire === 'mesh:signal'
   && REG.B3.has('signal') && REG.B3.has('mesh:signal'));
-check('INV4. hello is TWO endpoints pinned by surface: bridge-notif|hello→B2 AND webrtc-notif|hello→B3',
-  L.find((x) => x.key === 'bridge-notif|hello')?.boundary === 'B2' && L.find((x) => x.key === 'webrtc-notif|hello')?.boundary === 'B3' && REG.B2.has('hello') && REG.B3.has('hello'));
+check('INV4. hello is TWO endpoints pinned by surface: the bridge hello (E2.2: now a B2 DOOR) AND webrtc-notif|hello→B3 (still raw, migrates in E2.3)',
+  L.some((x) => x.surface === 'door' && x.wire === 'hello' && x.boundary === 'B2') && L.find((x) => x.key === 'webrtc-notif|hello')?.boundary === 'B3' && REG.B2.has('hello') && REG.B3.has('hello'));
 {
   const bad = []; for (const b of Object.keys(REG)) for (const [wire, info] of WIRING[b]) if (!String(info.type).startsWith(REG_PREFIX[b])) bad.push(`${b}:${wire}`);
   check('O1. every registered row type is namespaced to its boundary', bad.length === 0, `\n   ${bad.join(', ')}`);
 }
 check('E1. welcome → B2 only, never B3', L.find((x) => x.key === 'bridge-ws|welcome')?.boundary === 'B2' && !REG.B3.has('welcome'));
-check('E2. cap-attest is the WIRE (carries write-flight-ack-v1 capability codec) → B2; no separate `write-flight-ack` wire',
-  L.find((x) => x.key === 'webrtc-notif|cap-attest')?.boundary === 'B2' && REG.B2.has('cap-attest') && !REG.B2.has('write-flight-ack'));
+check('E2. cap-attest is the WIRE (carries write-flight-ack-v1 capability codec) → B2 (E2.2: now a DOOR); no separate `write-flight-ack` wire',
+  L.some((x) => x.surface === 'door' && x.wire === 'cap-attest' && x.boundary === 'B2') && REG.B2.has('cap-attest') && !REG.B2.has('write-flight-ack'));
 check('E3. peer-list → B3 only, never B4', L.find((x) => x.key === 'bridge-ws|peer-list')?.boundary === 'B3' && !REG.B4.has('peer-list'));
 check('E4. peer-list-request → B4 only + TABLE_ONLY', REG.B4.has('peer-list-request') && !REG.B3.has('peer-list-request') && TABLE_ONLY.has('B4:peer-list-request'));
 check('E5. turn → B4; no `turn` wire in B2', L.find((x) => x.key === 'bridge-ws|turn')?.boundary === 'B4' && !REG.B2.has('turn'));

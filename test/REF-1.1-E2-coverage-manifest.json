@@ -334,28 +334,38 @@
       "rowType": "pubsub:metricson"
     },
     {
-      "identity": "transport/web/index.js:939|hello|notification|bridge",
-      "callSite": "transport/web/index.js:939",
-      "primitive": "onNotification",
-      "receiver": "bridge",
+      "identity": "transport/web/index.js:1001|cap-attest|notification|composite._b2door",
+      "callSite": "transport/web/index.js:1001",
+      "primitive": "registerFrame",
+      "receiver": "composite._b2door",
+      "wire": "cap-attest",
+      "transportKind": "notification",
+      "boundary": "B2",
+      "rowType": "transport:cap-attest"
+    },
+    {
+      "identity": "transport/web/index.js:953|hello|notification|composite._b2door",
+      "callSite": "transport/web/index.js:953",
+      "primitive": "registerFrame",
+      "receiver": "composite._b2door",
       "wire": "hello",
       "transportKind": "notification",
       "boundary": "B2",
       "rowType": "transport:hello"
     },
     {
-      "identity": "transport/web/index.js:940|hello-ack|notification|bridge",
-      "callSite": "transport/web/index.js:940",
-      "primitive": "onNotification",
-      "receiver": "bridge",
+      "identity": "transport/web/index.js:954|hello-ack|notification|composite._b2door",
+      "callSite": "transport/web/index.js:954",
+      "primitive": "registerFrame",
+      "receiver": "composite._b2door",
       "wire": "hello-ack",
       "transportKind": "notification",
       "boundary": "B2",
       "rowType": "transport:hello-ack"
     },
     {
-      "identity": "transport/web/index.js:982|hello|notification|webrtc",
-      "callSite": "transport/web/index.js:982",
+      "identity": "transport/web/index.js:996|hello|notification|webrtc",
+      "callSite": "transport/web/index.js:996",
       "primitive": "onNotification",
       "receiver": "webrtc",
       "wire": "hello",
@@ -364,24 +374,14 @@
       "rowType": "mesh:hello"
     },
     {
-      "identity": "transport/web/index.js:983|hello-sig|notification|webrtc",
-      "callSite": "transport/web/index.js:983",
+      "identity": "transport/web/index.js:997|hello-sig|notification|webrtc",
+      "callSite": "transport/web/index.js:997",
       "primitive": "onNotification",
       "receiver": "webrtc",
       "wire": "hello-sig",
       "transportKind": "notification",
       "boundary": "B3",
       "rowType": "mesh:hello-sig"
-    },
-    {
-      "identity": "transport/web/index.js:987|cap-attest|notification|webrtc",
-      "callSite": "transport/web/index.js:987",
-      "primitive": "onNotification",
-      "receiver": "webrtc",
-      "wire": "cap-attest",
-      "transportKind": "notification",
-      "boundary": "B2",
-      "rowType": "transport:cap-attest"
     }
   ]
 }
