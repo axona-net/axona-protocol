@@ -66,6 +66,11 @@ const migration = sites.filter((s) => s.callee !== 'dispatch').map((s) => ({
 const doorRows = doors.map((d) => ({
   file: d.file, line: d.line, callee: 'registerFrame', receiver: d.registry, wire: d.wire,
   classification: 'migration-target', boundary: d.boundary,
+  // B6 is the sole COMPOSITE boundary: two axona:direct legs share one wire, so the
+  // door's SUPPLIED transportKind is the only way the coverage manifest can tell them
+  // apart. Thread it through when the door names one; B1–B3 doors omit it (d.transportKind
+  // is null) → spread {} → key absent → those committed rows stay byte-identical.
+  ...(d.transportKind ? { transportKind: d.transportKind } : {}),
 }));
 const dispatch = sites.filter((s) => s.callee === 'dispatch').map((s) => ({
   file: s.file, line: s.line, callee: 'dispatch', receiver: s.recv, wire: s.wire,

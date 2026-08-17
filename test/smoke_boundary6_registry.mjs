@@ -60,5 +60,35 @@ check('R8. __tunneled_direct__ on the WRONG kind (request/notification) is REFUS
 check('R9. a MALFORMED transportKind (not routed|notification|request) is rejected by registerFrame',
   threw(() => registerFrame(recv, 'axona:direct', () => {}, { registry: reg, transportKind: 'garbage' })));
 
+// ── D. FLAG-OFF IDENTITY (the migration's byte-identical property) ──────────
+// R1–R9 prove registerFrame ROUTES each leg to the right primitive. This block
+// proves the leg it wires runs the ORIGINAL handler VERBATIM with ZERO traces
+// when the shadow flag is off — the one property the E2.4 migration must not
+// break. A capturing recv hands back the wrapped handler so it can be invoked;
+// with enabled:false the wrap is inert (byte-identical), same as B3 section D.
+{
+  const tr = [];
+  const reg6 = buildBoundary6Registry({ enabled: false, sink: (t) => tr.push(t) });
+  const capture = { onRequest: (w, h) => h, onNotification: (w, h) => h, onRoutedMessage: (w, h) => h };
+  const legs = [
+    ['request', 'axona:direct'],
+    ['notification', 'axona:direct'],
+    ['routed', '__tunneled_direct__'],
+  ];
+  let allVerbatim = true, allInert = tr.length === 0, allRethrow = true;
+  for (const [tk, wire] of legs) {
+    const wrapped = registerFrame(capture, wire, (a, b) => `ran:${wire}:${a}`, { registry: reg6, transportKind: tk });
+    if (wrapped('X', 'Y') !== `ran:${wire}:X`) allVerbatim = false;
+    let rethrew = false;
+    const boom = registerFrame(capture, wire, () => { throw new Error(`boom:${wire}`); }, { registry: reg6, transportKind: tk });
+    try { boom('Z'); } catch (e) { rethrew = e.message === `boom:${wire}`; }
+    if (!rethrew) allRethrow = false;
+  }
+  allInert = tr.length === 0;
+  check('D1. flag-off: EVERY composite leg (request/notify/routed) runs its handler VERBATIM (return identical)', allVerbatim);
+  check('D2. flag-off: a throwing handler on every leg rethrows VERBATIM', allRethrow);
+  check('D3. flag-off: ZERO traces emitted across all legs and invocations (inert wrap, byte-identical)', allInert, `traces=${tr.length}`);
+}
+
 console.log(`\nResult: ${passed} passed, ${failed} failed\n`);
 process.exit(failed === 0 ? 0 : 1);

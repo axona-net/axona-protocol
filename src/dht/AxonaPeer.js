@@ -63,6 +63,7 @@ import { AxonaError, PublishError, SubscribeError, KillError, TouchError, PullEr
 // primitive; observation is default-off, so flag-off dispatch is byte-identical.
 import { registerFrame, shadowEnabled } from '../registry/index.js';
 import { buildBoundary3Registry } from '../transport/boundary3Registry.js';
+import { buildBoundary6Registry } from './boundary6Registry.js';
 
 // ── B-3 (eclipse prevention) tunables ───────────────────────────────
 // Max concurrent verification probes triggered by gossip introductions —
@@ -131,6 +132,13 @@ export class AxonaPeer extends DHT {
     // row keys mesh:signal on transportKind 'routed', so registerFrame binds it to
     // this.onRoutedMessage; flag-off the wrap runs the handler verbatim (byte-identical).
     this._b3door = buildBoundary3Registry({ enabled: shadowEnabled });
+    // REF-1.1 E2.4: the Boundary-6 door for the direct-messaging frames. B6 is the SOLE
+    // composite registry — axona:direct binds TWO primitives (onRequest + onNotification)
+    // on one wire, plus the routed __tunneled_direct__ leg — so its migration sites NAME
+    // the primitive via transportKind (bare lookup would refuse). Flag-off the wrap runs
+    // each handler verbatim (byte-identical). Reachable at both direct-handler sites
+    // (this._b6door) and the tunneled site in _buildDefaultAxonaManager (peer === this).
+    this._b6door = buildBoundary6Registry({ enabled: shadowEnabled });
     // REF-1.1 E1 direct_* admissible-type fence (council-cleared design; David:
     // registration-time allowlist; Vega ffdba957 hardening). The construction-time
     // admissible set for direct-message `type`s. OMITTED (undefined/null) = dormant
@@ -2607,7 +2615,7 @@ export class AxonaPeer extends DHT {
     const t = this._transport;
     if (!t || typeof t.onRequest !== 'function') return;
 
-    t.onRequest('axona:direct', async (fromId, payload) => {
+    registerFrame(t, 'axona:direct', async (fromId, payload) => {
       const h = this._directMessageHandler;
       if (!h) return undefined;
       // The wire fromId is the transport's notion:
@@ -2622,8 +2630,8 @@ export class AxonaPeer extends DHT {
         (typeof fromId === 'string' && isHexId(fromId)) ? fromId :
         (payload?.from ?? null);
       return await h(senderId, payload?.message);
-    });
-    t.onNotification('axona:direct', (fromId, payload) => {
+    }, { registry: this._b6door, transportKind: 'request' });
+    registerFrame(t, 'axona:direct', (fromId, payload) => {
       const h = this._directMessageHandler;
       if (!h) return;
       const senderId =
@@ -2632,7 +2640,7 @@ export class AxonaPeer extends DHT {
         (payload?.from ?? null);
       try { h(senderId, payload?.message); }
       catch { /* notification handler errors swallow */ }
-    });
+    }, { registry: this._b6door, transportKind: 'notification' });
     this._directHandlersInstalled = true;
   }
 
@@ -3139,7 +3147,7 @@ export class AxonaPeer extends DHT {
     // Receiver end of the routed fallback.  Mirrors browser_engine.
     // meta.targetId arrives over the wire as hex; convert to BigInt
     // before comparing to selfId.
-    peer.onRoutedMessage('__tunneled_direct__', async (payload, meta) => {
+    registerFrame(peer, '__tunneled_direct__', async (payload, meta) => {
       const targetBig =
         (typeof meta?.targetId === 'bigint')   ? meta.targetId :
         (typeof meta?.targetId === 'string' && isHexId(meta.targetId))
@@ -3160,7 +3168,7 @@ export class AxonaPeer extends DHT {
         }
       }
       return 'consumed';
-    });
+    }, { registry: peer._b6door, transportKind: 'routed' });
 
     const am = new AxonaManager({
       dht,

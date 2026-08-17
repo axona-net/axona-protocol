@@ -367,5 +367,87 @@ for (const [name, body] of Object.entries(ctxNeg)) {
   }
 }
 
+// ── H-family: the COMPOSITE-KEY door (E2.4 B6, Aster ASTER-E2-SITE-IDENTITY). B6 is the
+// SOLE boundary where ONE wire (axona:direct) binds TWO doors in ONE context, split only by
+// the SUPPLIED transportKind. This family proves the grammar keeps the two legs DISTINCT (no
+// silent collapse onto one) and that the routed tunneled leg binds its own context. The
+// generic context fence (wrong method/class/file/top-level) is the SAME machinery the
+// G-family already proves; H adds only the composite-specific evidence. (Flag-off byte-
+// identical equivalence for all three B6 legs is owned by smoke_boundary6_registry.mjs's
+// D. FLAG-OFF IDENTITY block, 15/15.)
+{
+  const PFILE = 'dht/AxonaPeer.js';
+  const B6PEER = [
+    { file: PFILE, context: 'AxonaPeer._installDirectHandlers', registry: 'this._b6door', boundary: 'B6' },
+    { file: PFILE, context: 'AxonaPeer._buildDefaultAxonaManager', registry: 'peer._b6door', boundary: 'B6' },
+  ];
+  const runP = (src, path = 'src/' + PFILE) => discoverDoors([{ path, code: IMP + src }], { doorRegistries: B6PEER });
+  {
+    // The two axona:direct legs, SAME wire, SAME context, SAME registry — distinguished only
+    // by transportKind. The grammar must yield TWO doors, not one (no collision, no collapse).
+    const r = runP(`class AxonaPeer { _installDirectHandlers(){
+      registerFrame(t, 'axona:direct', h1, { registry: this._b6door, transportKind: 'request' });
+      registerFrame(t, 'axona:direct', h2, { registry: this._b6door, transportKind: 'notification' });
+    } }`);
+    const tks = new Set(r.doors.map((d) => d.transportKind));
+    check("H1. COMPOSITE INTENDED: two axona:direct legs (request + notification) in AxonaPeer._installDirectHandlers on this._b6door → TWO distinct B6 doors, ONE wire, DISTINCT transportKind, zero unresolved (no collapse)",
+      r.doors.length === 2 && r.doors.every((d) => d.wire === 'axona:direct' && d.boundary === 'B6' && d.context === 'AxonaPeer._installDirectHandlers')
+      && tks.size === 2 && tks.has('request') && tks.has('notification') && r.unresolved.length === 0,
+      `\n   doors=${JSON.stringify(r.doors.map((d) => ({ wire: d.wire, tk: d.transportKind })))} unresolved=${JSON.stringify(r.unresolved)}`);
+  }
+  {
+    // The routed tunneled leg binds its OWN context (_buildDefaultAxonaManager) on peer._b6door.
+    const r = runP(`class AxonaPeer { _buildDefaultAxonaManager(){ const peer = this;
+      registerFrame(peer, '__tunneled_direct__', h, { registry: peer._b6door, transportKind: 'routed' });
+    } }`);
+    check("H2. the routed tunneled leg in AxonaPeer._buildDefaultAxonaManager on peer._b6door → ONE B6 routed door, zero unresolved",
+      r.doors.length === 1 && r.doors[0].boundary === 'B6' && r.doors[0].wire === '__tunneled_direct__' && r.doors[0].transportKind === 'routed'
+      && r.doors[0].context === 'AxonaPeer._buildDefaultAxonaManager' && r.unresolved.length === 0,
+      `\n   doors=${JSON.stringify(r.doors)} unresolved=${JSON.stringify(r.unresolved)}`);
+  }
+  {
+    // WRONG CONTEXT: the composite legs in a method the B6 table does not name → refused.
+    const r = runP(`class AxonaPeer { someOtherMethod(){ registerFrame(t, 'axona:direct', h, { registry: this._b6door, transportKind: 'request' }); } }`);
+    check("H3. WRONG METHOD: an axona:direct door in AxonaPeer.someOtherMethod → context mismatch → ZERO doors, refused (shared context fence, B6-scoped)",
+      r.doors.length === 0 && r.unresolved.length === 1, `\n   doors=${JSON.stringify(r.doors)} unresolved=${JSON.stringify(r.unresolved)}`);
+  }
+}
+
+// ── REAL TREE — B6 (E2.4, composite-key zero-residual). The 3 direct-messaging doors exist
+// (two axona:direct legs in AxonaPeer._installDirectHandlers, one __tunneled_direct__ routed
+// leg in AxonaPeer._buildDefaultAxonaManager), keyed by the (wire, transportKind) composite so
+// the two same-wire legs stay DISTINCT, and NONE of the 3 migrated (recv,wire) primitives
+// remains a raw site. axona:direct is the ONLY same-wire-two-primitive case in the 38-site set. ──
+{
+  const SRC = fileURLToPath(new URL('../src/', import.meta.url));
+  const listJs = (dir) => { const o = []; for (const n of readdirSync(dir)) { const p = join(dir, n); const s = statSync(p); if (s.isDirectory()) o.push(...listJs(p)); else if (n.endsWith('.js')) o.push(p); } return o; };
+  const files = listJs(SRC).map((p) => ({ path: relative(SRC, p), code: readFileSync(p, 'utf8') }));
+  const METH = { methods: new Set(['onRequest', 'onNotification', 'onRoutedMessage']) };
+  const migd = discover(files, METH);
+  const b6doors = migd.doors.filter((d) => d.boundary === 'B6');
+  const directLegs = b6doors.filter((d) => d.wire === 'axona:direct');
+  const directTks = new Set(directLegs.map((d) => d.transportKind));
+  check('P5. MIGRATED B6: the default table discovers EXACTLY 3 B6 doors — the two axona:direct legs (request + notification) in AxonaPeer._installDirectHandlers with DISTINCT transportKind (composite key, no collapse), and __tunneled_direct__ routed in AxonaPeer._buildDefaultAxonaManager',
+    b6doors.length === 3
+    && directLegs.length === 2 && directLegs.every((d) => d.context === 'AxonaPeer._installDirectHandlers') && directTks.size === 2 && directTks.has('request') && directTks.has('notification')
+    && b6doors.some((d) => d.wire === '__tunneled_direct__' && d.transportKind === 'routed' && d.context === 'AxonaPeer._buildDefaultAxonaManager'),
+    `\n   b6doors=${JSON.stringify(b6doors.map((d) => ({ wire: d.wire, tk: d.transportKind, ctx: d.context })))}`);
+  // B6 zero-residual. The migrated wires axona:direct and __tunneled_direct__ are B6-unique
+  // (no other boundary owns them), so wire-scoping is exact — no receiver disambiguation needed.
+  const b6Raw = migd.sites.filter((s) => s.wire === 'axona:direct' || s.wire === '__tunneled_direct__');
+  check("P5b. ZERO-RESIDUAL RAW (B6): neither axona:direct (either primitive) nor __tunneled_direct__ remains a raw site — all three legs live at a door (raw XOR door)",
+    b6Raw.length === 0, `\n   b6Raw=${JSON.stringify(b6Raw.map((s) => s.site))}`);
+  // P5b-neg: TEETH — inject a residual raw t.onNotification('axona:direct', …) beside the door;
+  // discover() surfaces it as wire='axona:direct' → b6Raw non-zero → P5b would FAIL (not vacuous).
+  // This is the composite case: the residual is the NOTIFY leg, distinct from the migrated request
+  // leg, so it proves the guard catches a per-PRIMITIVE residual, not merely a per-wire one.
+  {
+    const resid = discover([{ path: 'dht/AxonaPeer.js', code: IMP + `class AxonaPeer { _installDirectHandlers(){ registerFrame(t, 'axona:direct', h, { registry: this._b6door, transportKind: 'request' }); t.onNotification('axona:direct', h2); } }` }], METH);
+    const injected = resid.sites.filter((s) => s.wire === 'axona:direct');
+    check("P5b-neg. the B6 zero-residual guard has TEETH: a residual raw t.onNotification('axona:direct', …) beside the request-leg door IS discovered (wire=axona:direct) → P5b would FAIL (not vacuous)",
+      injected.length >= 1, `\n   sites=${JSON.stringify(resid.sites.map((s) => s.site))}`);
+  }
+}
+
 console.log(`\nResult: ${passed} passed, ${failed} failed\n`);
 process.exit(failed === 0 ? 0 : 1);

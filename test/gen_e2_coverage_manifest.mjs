@@ -35,7 +35,7 @@ const TK = { onRequest: 'request', onNotification: 'notification', onRoutedMessa
 // `hello` sites) split by the manifest receiver tag (bridge → B2, webrtc → B3).
 function intendedBoundary(row) {
   const b = row.boundary;
-  if (b === 'B1' || b === 'B2' || b === 'B3') return b;
+  if (b === 'B1' || b === 'B2' || b === 'B3' || b === 'B6') return b;
   if (b === 'dht:transport') return 'B5';
   if (b === 'direct') return 'B6';
   if (b === 'B2/B3') return row.receiver === 'bridge' ? 'B2' : row.receiver === 'webrtc' ? 'B3' : null;
@@ -71,9 +71,14 @@ export function generate() {
     // migrated door site (callee 'registerFrame') has none, so its boundary registry
     // declares it (E2.1). Either way the (boundary, wire, transportKind) that follows
     // resolves the owning row identically.
-    const transportKind = row.callee === 'registerFrame'
-      ? registryTransportKind(boundary, wire)
-      : (TK[row.callee] ?? null);
+    // E2.4 B6 is the sole COMPOSITE registry: the two axona:direct legs share one wire, so
+    // wire-only registryTransportKind cannot tell them apart (it returns the first row for
+    // both). Prefer the door's SUPPLIED transportKind (threaded from the E0 manifest); B1–B5
+    // door rows omit it → fall back to the wire-only lookup (correct, single-primitive).
+    const transportKind = row.transportKind
+      ?? (row.callee === 'registerFrame'
+        ? registryTransportKind(boundary, wire)
+        : (TK[row.callee] ?? null));
     const receiver = row.receiver ?? '';
     // IMMUTABLE source-site identity = the actual CALL-SITE locator (canonical
     // file:line — the AST location of the registration call) + the source PRIMITIVE

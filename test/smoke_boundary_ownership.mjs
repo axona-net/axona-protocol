@@ -55,6 +55,7 @@ import { buildBoundary1Registry } from '../src/pubsub/boundary1Registry.js';
 import { buildBoundary2Registry } from '../src/transport/boundary2Registry.js';
 import { buildBoundary3Registry } from '../src/transport/boundary3Registry.js';
 import { buildBoundary4Registry } from '../src/transport/boundary4Registry.js';
+import { buildBoundary6Registry } from '../src/dht/boundary6Registry.js';
 import { T } from '../src/pubsub/constants.js';
 import { discoverDoors, DEFAULT_DOOR_REGISTRIES } from './lib/registrationScan.mjs';
 
@@ -64,10 +65,18 @@ const check = (label, cond, extra = '') => { if (cond) { console.log(`  ✓ ${la
 console.log('\nREF-1.1 S5 — cross-boundary ownership fence (AST scan of src/)\n');
 
 const R1 = buildBoundary1Registry().wiring, R2 = buildBoundary2Registry().wiring,
-      R3 = buildBoundary3Registry().wiring, R4 = buildBoundary4Registry().wiring;
-const REG = { B1: new Set(R1.keys()), B2: new Set(R2.keys()), B3: new Set(R3.keys()), B4: new Set(R4.keys()) };
-const WIRING = { B1: R1, B2: R2, B3: R3, B4: R4 };
-const REG_PREFIX = { B1: 'pubsub:', B2: 'transport:', B3: 'mesh:', B4: 'bridge:' };
+      R3 = buildBoundary3Registry().wiring, R4 = buildBoundary4Registry().wiring,
+      R6 = buildBoundary6Registry().wiring;
+// B6 is the sole COMPOSITE-keyed registry (frameWiringKey = `${transportKind} ${wire}`):
+// two axona:direct legs share one wire. REG is the set of bare WIRES a boundary owns, so
+// B6 maps its wiring VALUES to `.wire` (not the composite keys) — the INV0 prefix scan and
+// WIRING both iterate values, so they stay correct on the composite map unchanged.
+const REG = {
+  B1: new Set(R1.keys()), B2: new Set(R2.keys()), B3: new Set(R3.keys()), B4: new Set(R4.keys()),
+  B6: new Set([...R6.values()].map((v) => v.wire)),
+};
+const WIRING = { B1: R1, B2: R2, B3: R3, B4: R4, B6: R6 };
+const REG_PREFIX = { B1: 'pubsub:', B2: 'transport:', B3: 'mesh:', B4: 'bridge:', B6: 'direct:' };
 
 const METHODS = new Set(['onRoutedMessage', 'onNotification']);
 // Non-literal registration calls that are DOCUMENTED mechanisms/planes, keyed by
@@ -226,13 +235,14 @@ const IN_SCOPE = new Map([
   ['routed-dht|mesh:signal', ['B3', 'mesh:signal']],   // E2.0 (Aster ASTER-E2-KEY-SCOPE): distinct routed wire, no longer folded onto `signal`
 ]);
 const OUT_OF_SCOPE = new Map([
-  ['routed-dht|__tunneled_direct__', 'direct-messaging tunnel plane'],
+  // E2.4: axona:direct (both legs) and __tunneled_direct__ are now B6 DOORS, IN scope —
+  // the two prior direct-messaging OUT entries are removed, so any RAW axona:direct /
+  // __tunneled_direct__ site that reappears now fails INV0 closed (must be a door).
   ['transport-notif|reinforce', 'synaptome-learning gossip'],
   ['transport-notif|triadic_introduce', 'synaptome-learning gossip'],
   ['transport-notif|hop_cache', 'routing-hint learning'],
   ['transport-notif|lateral_spread', 'routing-hint learning'],
   ['transport-notif|peer-leaving', 'membership-departure gossip'],
-  ['t-notif|axona:direct', 'direct-messaging plane'],
 ]);
 const classify = (e) => e.surface === 'routed' ? ['B1', e.wire]
   : (IN_SCOPE.get(`${e.surface}|${e.wire}`) || (OUT_OF_SCOPE.has(`${e.surface}|${e.wire}`) ? 'OUT' : null));

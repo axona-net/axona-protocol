@@ -62,6 +62,13 @@ export const DEFAULT_DOOR_REGISTRIES = [
   // The routed B3 site mesh:signal lives in AxonaPeer._installRoutingHandlers with its own
   // door holder this._b3door (transportKind 'routed' resolved from the B3 row).
   { file: 'dht/AxonaPeer.js', context: 'AxonaPeer._installRoutingHandlers', registry: 'this._b3door', boundary: 'B3' },
+  // E2.4 B6 (2026-08-17): direct messaging. axona:direct binds TWO primitives on ONE wire
+  // (onRequest + onNotification) inside _installDirectHandlers on this._b6door; the routed
+  // __tunneled_direct__ leg registers inside _buildDefaultAxonaManager on peer._b6door (peer===this).
+  // B6 is the sole composite registry — the two axona:direct legs share this (file,context,registry)
+  // row and are disambiguated by the SUPPLIED transportKind (captured below), not by this key.
+  { file: 'dht/AxonaPeer.js', context: 'AxonaPeer._installDirectHandlers', registry: 'this._b6door', boundary: 'B6' },
+  { file: 'dht/AxonaPeer.js', context: 'AxonaPeer._buildDefaultAxonaManager', registry: 'peer._b6door', boundary: 'B6' },
 ];
 
 // Render a registry-argument expression to its explicit canonical source string, or
@@ -311,17 +318,21 @@ export function discoverDoors(fileList, { doorRegistries = DEFAULT_DOOR_REGISTRI
       if (wireArg?.type === 'MemberExpression' && !wireArg.computed && wireArg.object?.type === 'Identifier' && wireArg.object.name === 'T' && wireArg.property?.type === 'Identifier') wire = (typeof T[wireArg.property.name] === 'string') ? T[wireArg.property.name] : null;
       else if (wireArg?.type === 'Literal' && typeof wireArg.value === 'string') wire = wireArg.value;
       if (wire == null) { unresolved.push(`${fp} registerFrame(…) — wire arg is not a literal T.<name>/string (noncanonical door)`); return; }
-      let registryProp = null, hasSpread = false;
+      let registryProp = null, hasSpread = false, transportKindProp = null;
       if (optsArg?.type === 'ObjectExpression') for (const p of optsArg.properties) {
         if (p.type === 'SpreadElement') hasSpread = true;
         else if (p.type === 'Property' && !p.computed && ((p.key?.type === 'Identifier' && p.key.name === 'registry') || (p.key?.type === 'Literal' && p.key.value === 'registry'))) registryProp = p;
+        // E2.4 B6: capture a SUPPLIED transportKind (the composite-key case — axona:direct on two
+        // primitives). Additive: B1–B5 doors OMIT it → transportKind stays null, no consumer affected.
+        else if (p.type === 'Property' && !p.computed && ((p.key?.type === 'Identifier' && p.key.name === 'transportKind') || (p.key?.type === 'Literal' && p.key.value === 'transportKind'))) transportKindProp = p;
       }
       if (!optsArg || optsArg.type !== 'ObjectExpression' || hasSpread || !registryProp) { unresolved.push(`${fp} registerFrame('${wire}', …) — options must be an inline { registry: … } object with no spread (noncanonical door)`); return; }
       const registryExpr = canonicalRegistryExpr(registryProp.value);
       if (registryExpr == null) { unresolved.push(`${fp} registerFrame('${wire}', { registry: <non-explicit> }) — registry must be an explicit this.<name>/<id>.<name>, not an alias/computed (noncanonical door)`); return; }
+      const transportKind = (transportKindProp?.value?.type === 'Literal' && typeof transportKindProp.value.value === 'string') ? transportKindProp.value.value : null;
       const entry = doorOf(fp, registryExpr, ctx);
       if (!entry) { unresolved.push(`${fp} registerFrame('${wire}', { registry: ${registryExpr} }) @ ${ctx || '<top>'} — not a canonical (file, context, registry) boundary door (wrong receiver/context, wrong-boundary, or unlisted)`); return; }
-      doors.push({ surface: 'door', wire, site: `${fp} registerFrame('${wire}', { registry: ${registryExpr} })`, file: fp, line: lineOf(n), callee: 'registerFrame', registry: registryExpr, context: ctx, boundary: entry.boundary });
+      doors.push({ surface: 'door', wire, site: `${fp} registerFrame('${wire}', { registry: ${registryExpr} })`, file: fp, line: lineOf(n), callee: 'registerFrame', registry: registryExpr, context: ctx, transportKind, boundary: entry.boundary });
     };
     const walkDoors = (node, ctx) => {
       if (!node || typeof node.type !== 'string') return;
