@@ -161,11 +161,12 @@ summary['migration-target'] === 38 ? pass('migration-target frames = 38') : fail
 // Transport.js contract: its onRequest/onNotification throwing stubs are removed so
 // no inherited dispatch name is reachable on any subclass (Aster's absence
 // invariant), dropping primitive-definition 11 → 9. E3b.2a sealed the sim
-// transport (→7); E3b.2b seals the three web transports (bridge, webrtc,
-// composite) (→1). The ONE remaining primitive definition is
-// AxonaPeer.onRoutedMessage — the routed dispatch primitive E3b.2c seals last,
-// driving this to 0.
-summary['primitive-definition'] === 1 ? pass('primitive definitions = 1 (only AxonaPeer.onRoutedMessage remains — the E3b.2c target)') : fail(`primitive-definition = ${summary['primitive-definition']}, expected 1`);
+// transport (→7); E3b.2b sealed the three web transports (→1); E3b.2c seals
+// AxonaPeer.onRoutedMessage, the LAST primitive (→0). Every dispatch receiver in
+// the program — every transport AND the peer — now reaches its raw primitive only
+// through the capability channel; the onRequest/onNotification/onRoutedMessage
+// names survive nowhere as reachable methods. The E3 absence invariant is complete.
+summary['primitive-definition'] === 0 ? pass('primitive definitions = 0 (every receiver sealed — E3 absence invariant complete)') : fail(`primitive-definition = ${summary['primitive-definition']}, expected 0`);
 summary['parameterized-registrar'] === 1 ? pass('parameterized registrar (onDirectMessage direct_*) = 1') : fail(`parameterized-registrar = ${summary['parameterized-registrar']}, expected 1`);
 
 const args = process.argv.slice(2);

@@ -97,7 +97,9 @@ export const DEFAULT_MECHANISM_EXEMPT = [
   // shim — is DELETED; its 19 wires now register through the canonical door. The
   // exemption that documented it is removed, so a future raw dht.onRoutedMessage(type)
   // in wireHandlers fails closed.)
-  { file: 'dht/AxonaPeer.js',       recv: 'peer',      method: 'onRoutedMessage', arg: 'type',     why: 'transport-adapter delegation shim' },
+  // (E3b.2c: the default-DHT adapter's peer.onRoutedMessage(type) delegation is GONE —
+  // it reaches the sealed peer's routed primitive through readDispatchCapability. The
+  // exemption is removed; a re-introduced raw peer.onRoutedMessage(type) fails closed.)
   { file: 'web/composite.js',       recv: 't',         method: 'onNotification',  arg: 'type',     why: 'CompositeTransport fan-out over recorded handlers' },
   { file: 'registry/registerDirectFrame.js', recv: 'recv', method: 'onNotification', arg: 'wire', why: 'registerDirectFrame direct_<type> family — the ONE named direct registrar (E3 decision 2); transitional named fallback, removed when E3b seals every transport' },
 ];

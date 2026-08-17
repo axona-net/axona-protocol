@@ -61,7 +61,7 @@ import { AxonaError, PublishError, SubscribeError, KillError, TouchError, PullEr
 // Boundary-3 registry. The routed mesh:signal handler registers through registerFrame
 // (transportKind 'routed' resolved from the B3 row) instead of the raw onRoutedMessage
 // primitive; observation is default-off, so flag-off dispatch is byte-identical.
-import { registerFrame, registerDirectFrame, readDispatchCapability, shadowEnabled } from '../registry/index.js';
+import { registerFrame, registerDirectFrame, depositDispatchCapability, readDispatchCapability, shadowEnabled } from '../registry/index.js';
 import { buildBoundary3Registry } from '../transport/boundary3Registry.js';
 import { buildBoundary6Registry } from './boundary6Registry.js';
 import { buildBoundary5Registry } from './boundary5Registry.js';
@@ -266,6 +266,16 @@ export class AxonaPeer extends DHT {
     this._routedHandlers = new Map();
     /** @type {Map<string, Function>} direct-message type → handler */
     this._directHandlers = new Map();
+
+    // REF-1.1 E3b.2c (SEAL): the AxonaPeer IS the routed-dispatch receiver —
+    // registerFrame(this, 'mesh:signal' | '__tunneled_direct__' | the B1 pub/sub
+    // wires) binds through this deposited `routed` closure, keyed by dispatch KIND,
+    // never the public onRoutedMessage name. The peer receives only routed frames,
+    // so it deposits only the routed slot. Body is byte-identical to the former
+    // onRoutedMessage method; registerFrame is the one door.
+    depositDispatchCapability(this, {
+      routed: (type, handler) => { this._routedHandlers.set(type, handler); },
+    });
 
     // ─── Routing-handler install flag (Phase 5e follow-up) ───────
     /** True once start() has called transport.onRequest('lookup_step') etc. */
@@ -3136,7 +3146,11 @@ export class AxonaPeer extends DHT {
         });
         return true;
       },
-      onRoutedMessage: (type, h) => peer.onRoutedMessage(type, h),
+      // REF-1.1 E3b.2c: the peer's onRoutedMessage is sealed — this default-DHT
+      // adapter (one of the three module-identity-frozen mechanism shims) reaches
+      // the routed primitive through the allowlisted capability reader, not a raw
+      // public method. AxonaManager installs its pub/sub routed handlers via this.
+      onRoutedMessage: (type, h) => readDispatchCapability(peer).routed(type, h),
       onDirectMessage: (type, h) => peer.onDirectMessage(type, h),
       // Robust ITERATIVE lookup (α-parallel, escapes the greedy local minima that
       // strand subscribers on a sparse mesh). Every consumer — rootElection's
@@ -4298,13 +4312,12 @@ export class AxonaPeer extends DHT {
     return best;
   }
 
-  /**
-   * Register a routed-message handler for `type`.  Per-peer storage;
-   * engine version still works because engine delegates here.
-   */
-  onRoutedMessage(type, handler) {
-    this._routedHandlers.set(type, handler);
-  }
+  // REF-1.1 E3b.2c (SEAL): onRoutedMessage is no longer a public instance method.
+  // The routed dispatch primitive lives only in the capability channel (deposited
+  // in the constructor); registerFrame reaches it, and the default-DHT adapter's
+  // routed passthrough reads it via readDispatchCapability. This is the LAST
+  // primitive-definition sealed — the E3 absence invariant now holds for every
+  // receiver in the program.
 
   /**
    * Register a direct-message handler for `type`.  Bridges to a

@@ -18,6 +18,12 @@ import { NeuronNode }               from '../src/dht/NeuronNode.js';
 import { SimNetwork, simTransport } from '../src/transport/sim/index.js';
 import { createNodeIdentity }       from '../src/identity/index.js';
 import { fromHex, toHex }           from '../src/utils/hexid.js';
+import { registerFrame }            from '../src/registry/index.js';
+import { makeTestRegistry }         from './lib/testRegistry.mjs';
+
+// REF-1.1 E3b.2c: the AxonaPeer routed primitive is sealed — register the probe
+// routed handler through the canonical door.
+const SELFINT_REG = makeTestRegistry([{ wire: 'selfint_probe', transportKind: 'routed' }]);
 
 let passed = 0, failed = 0;
 const check = (label, ok) => { console.log(`  ${ok ? '✓' : '✗'} ${label}`); ok ? passed++ : failed++; };
@@ -83,7 +89,7 @@ async function testSelfIntegrate() {
 
   // And the joiner is routable: some base peer can route a packet to it.
   let reached = false;
-  joiner.peer.onRoutedMessage('selfint_probe', (_p, meta) => (meta.targetId === joinerBig ? (reached = true, 'consumed') : null));
+  registerFrame(joiner.peer, 'selfint_probe', (_p, meta) => (meta.targetId === joinerBig ? (reached = true, 'consumed') : null), { registry: SELFINT_REG });
   const r = await base[1].peer.routeMessage(joinerBig, 'selfint_probe', {});
   check('a base peer routes a packet to the joiner', !!(r && r.consumed && r.atNode === joinerBig));
 }

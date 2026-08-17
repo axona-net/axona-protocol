@@ -14,6 +14,7 @@
 import { AxonaPeer, AxonaDomain, NeuronNode, AxonaManager, Synapse,
          SimNetwork, simTransport, createNodeIdentity, createAuthorIdentity, clz264 }
   from '../src/index.js';
+import { readDispatchCapability } from '../src/registry/index.js';
 
 let passed = 0, failed = 0;
 const check = (label, ok) => { console.log(`  ${ok ? '✓' : '✗'} ${label}`); ok ? passed++ : failed++; };
@@ -40,7 +41,7 @@ async function makePeer(network) {
       }
       return peer.sendDirect(pid, t, p);
     },
-    onRoutedMessage: (t, h) => peer.onRoutedMessage(t, h),
+    onRoutedMessage: (t, h) => readDispatchCapability(peer).routed(t, h),  // REF-1.1 E3b.2c: peer routed primitive is sealed
     onDirectMessage: (t, h) => peer.onDirectMessage(t, h),
   };
   peer._axonaManager = new AxonaManager({ dht });

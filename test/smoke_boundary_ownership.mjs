@@ -87,7 +87,9 @@ const MECHANISM_EXEMPT = [
   // (E2.1: the pubsub/wireHandlers.js on() helper is DELETED — its 19 wires now
   // register through the canonical door. The exemption is removed; a re-introduced raw
   // dht.onRoutedMessage(type) in wireHandlers now fails closed under this fence too.)
-  { file: 'dht/AxonaPeer.js',       recv: 'peer',      method: 'onRoutedMessage', arg: 'type',     why: 'transport-adapter delegation shim' },
+  // (E3b.2c: the default-DHT adapter's peer.onRoutedMessage(type) delegation is GONE —
+  // it reaches the sealed peer's routed primitive through readDispatchCapability. The
+  // exemption is removed; a re-introduced raw peer.onRoutedMessage(type) fails closed.)
   { file: 'web/composite.js',       recv: 't',         method: 'onNotification',  arg: 'type',     why: 'CompositeTransport fan-out over recorded handlers' },
   { file: 'registry/registerDirectFrame.js', recv: 'recv', method: 'onNotification', arg: 'wire', why: 'registerDirectFrame — the ONE named direct_<type> registrar (E3 decision 2), frozen by module identity; transitional named fallback removed when E3b seals every transport' },
   // REF-1.1 E1: the canonical registerFrame door is the ALLOWLISTED holder of the

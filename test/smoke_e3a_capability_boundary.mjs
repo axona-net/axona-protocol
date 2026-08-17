@@ -23,6 +23,7 @@
 // =====================================================================
 import { WebSocketTransport } from '../src/transport/node/index.js';
 import { Transport }          from '../src/contracts/Transport.js';
+import { AxonaPeer }          from '../src/dht/AxonaPeer.js';
 import { registerFrame }      from '../src/registry/index.js';
 import { makeTestRegistry }   from './lib/testRegistry.mjs';
 
@@ -102,6 +103,25 @@ const ownDesc = (obj, key) => Object.getOwnPropertyDescriptor(obj, key);
     !ownDesc(Transport.prototype, 'onNotification'));
   check('D3. a bare Transport instance resolves the dispatch names to undefined',
     (() => { const b = Object.create(Transport.prototype); return b.onRequest === undefined && b.onNotification === undefined; })());
+}
+
+// ── (E) The AxonaPeer routed primitive is sealed too (E3b.2c) ─────────────────
+{
+  // The peer is the routed-dispatch receiver: registerFrame(peer, 'mesh:signal' | the
+  // B1 pub/sub wires) binds through its deposited `routed` capability. E3b.2c removed
+  // the public onRoutedMessage method, so the name is unreachable on the class — the
+  // absence invariant now holds for the peer exactly as it does for every transport.
+  let noProtoDesc = true;
+  for (let o = AxonaPeer.prototype; o && o !== Object.prototype; o = Object.getPrototypeOf(o)) {
+    if (ownDesc(o, 'onRoutedMessage')) noProtoDesc = false;
+  }
+  check('E1. AxonaPeer.prototype resolves onRoutedMessage to undefined (method removed)',
+    AxonaPeer.prototype.onRoutedMessage === undefined);
+  check('E2. no onRoutedMessage descriptor anywhere on the AxonaPeer prototype chain (no residual)',
+    noProtoDesc);
+  check('E3. the OTHER routed access paths are undefined too (computed, Reflect.get)',
+    AxonaPeer.prototype['onRouted' + 'Message'] === undefined &&
+    Reflect.get(AxonaPeer.prototype, 'onRoutedMessage') === undefined);
 }
 
 console.log(`\nResult: ${passed} passed, ${failed} failed\n`);
