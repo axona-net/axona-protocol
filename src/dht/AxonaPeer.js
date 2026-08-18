@@ -2057,13 +2057,12 @@ export class AxonaPeer extends DHT {
     this._subscriptions.get(topicIdBig).add(sub);
     this._installDeliveryHook(am);
 
-    // Lookup-assisted subscribe (v4.3.1): warm the true-root hint so the SUBSCRIBE
-    // routes straight to the topic's emergent root (and replay lands), instead of
-    // relying solely on the post-strand background heal. Bounded; no-op once warm.
-    if (typeof am.warmRootHint === 'function') {
-      try { await am.warmRootHint(topicIdBig); } catch { /* proceed greedy + heal */ }
-    }
-
+    // v4.64.0: NO lookup-assisted warm on subscribe. The SUBSCRIBE routes greedily
+    // toward the topic id and every hop routes by its own synaptome; a pre-warmed
+    // root hint would only pin a waypoint the neuromorphic layer may have already
+    // restructured around, turning an optimal path into a poor one on resubscribe.
+    // (The PUBLISH path still warms — see peer.pub — because a one-shot PUB has no
+    // renewal to re-route it.)
     am.pubsubSubscribe(topicIdBig, { replayLatest: opts.since === 'latest' });
 
     // Demand-driven metrics: subscribing to a metricTopic(dataId) turns metrics ON

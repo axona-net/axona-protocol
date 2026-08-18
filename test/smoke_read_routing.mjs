@@ -1,14 +1,16 @@
 // smoke_read_routing.mjs — v4.10.1 read/host path routing (cohort-aware).
 //
-// pull and host used a bare greedy via:[] and so stranded on a local minimum,
-// reaching a non-cohort node (pull → false "no message"; host → initial announce
-// lost until the next tick). They now route via the warm lookup-assist hint, exactly
-// like publish/kill — so they reach a node that actually serves the topic's cohort.
+// pull used a bare greedy via:[] and so stranded on a local minimum, reaching a
+// non-cohort node (false "no message"). The WRITE/READ path (pull/kill/publish)
+// routes via the warm lookup-assist hint so it reaches a node that serves the
+// topic's cohort. The SUBSCRIBE path does NOT (v4.64.0): it routes greedy and lets
+// the neuromorphic layer pick each hop, so a stale root hint can't force a
+// resubscribe down a path the mesh has since restructured around.
 //
 //   1. requestPull with a warm root hint routes the PULL to that root (not greedy)
 //   2. requestPull with no hint falls back to greedy toward the topic (cold path OK)
-//   3. pubsubHost routes its announce via _sendSubscribe (a SUB toward the hinted root),
-//      not a bare host-send, and registers the hosted topic
+//   3. pubsubHost routes its announce via _sendSubscribe, which goes GREEDY toward
+//      the topic id even with a hint present, and registers the hosted topic
 import { AxonaManager } from '../src/pubsub/AxonaManager.js';
 import { sealTestDht } from './lib/testCapability.mjs';
 
@@ -54,14 +56,19 @@ const warmHint = (am, topicBig, rootBig) =>
   ok('cold pull falls back to greedy toward the topic', !!pull && pull.target === T1 && (pull.payload.via || []).length === 0);
 }
 
-// ── 3. host routes via _sendSubscribe (lookup-assisted SUB), registers the topic ──
+// ── 3. host routes via _sendSubscribe, which as of v4.64.0 goes GREEDY toward the
+//      bare topic id even with a warm hint present — the neuromorphic layer routes
+//      each hop to the current-best terminal, so the SUB is NOT via-pinned to the
+//      cached root (a stale pin would fight mesh restructuring on resubscribe).
+//      Distinct from PULL above, which still uses the write-path hint.
 {
   const { am, sends } = mk();
-  warmHint(am, T2, ROOT);
+  warmHint(am, T2, ROOT);   // hint present — and deliberately ignored by the SUB
   am.pubsubHost(T2);
   const sub = sends.find(s => s.type === 'pubsub:sub');
   ok('pubsubHost emits a SUB (via _sendSubscribe, not a bare host-send)', !!sub);
-  ok('host SUB is routed to the hinted root', sub?.target === ROOT);
+  ok('host SUB routes greedy — no via pin despite the warm hint (v4.64.0)',
+     sub?.target === T2 && (sub.payload.via || []).length === 0);
   ok('hosted topic is registered', am._hostedTopics.has(T2));
 }
 
