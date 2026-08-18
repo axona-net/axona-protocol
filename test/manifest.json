@@ -48,6 +48,11 @@
       "note": "REF-1.1 E3c SEAL: freezes the readDispatchCapability importer set by MODULE IDENTITY (design decision 3). readDispatchCapability is the ONE allowlisted reader of the sealed dispatch-capability channel, so the seal's security reduces to which modules may import it. Frozen to exactly 5: the definer (registerFrame.js), the barrel (registry/index.js), and 3 mechanism shims (CompositeTransport fan-out, AxonaPeer routed demux+adapter, registerDirectFrame direct_* home). A NEW importer — a back door around the door — fails closed; non-vacuous (every frozen entry must still reference it). 11 checks."
     },
     {
+      "file": "smoke_e4_root_reachability.mjs",
+      "class": "default",
+      "note": "REF-1.1 E4 ARM: the runtime capability boundary [R4] over the QUANTIFIED ROOT SET (not the E3a single sample). Instantiates every sealed receiver — the five transport classes (sim/nodeWS/webrtc/bridge/composite) + AxonaPeer + the base Transport contract + the default-DHT adapter (am.dht) — and, per member, proves the absence invariant (onRequest/onNotification/onRoutedMessage undefined by dotted/computed/concat/Reflect.get, no descriptor on the prototype chain) AND, via the sole reader readDispatchCapability (importable in test/ — the E3c freeze scans src/ only), that the deposited capability is present yet held by NO own property under any string or symbol key (WeakMap-only, non-vacuous). The adapter is treated as the MECHANISM SHIM it is: it retains a delegating onRoutedMessage (AxonaManager readiness guard) that is NOT the raw capability. Also covers factory outputs (sealed-class instances) + module namespace exports. Closes the access partition — named half = the armed empty AST baseline, unnamed half = this boundary — and records S5's deferred sound-no-alias narrowing retired. 39 checks. No wire, no behavior change."
+    },
+    {
       "file": "fence_pull_outcome.mjs",
       "class": "default",
       "note": "Q1 — requestPull must distinguish response/empty-response/timeout/invalid-response instead of collapsing all four to null. Verified RED against the pre-fix tree (empty, timeout and malformed were all null and indistinguishable). Drives the real requestPull + _onPullResp path; nothing stubbed."

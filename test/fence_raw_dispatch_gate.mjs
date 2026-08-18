@@ -9,9 +9,13 @@
 //     is a "raw reference". At E1 the EXISTING references are frozen into a baseline
 //     (REF-1.1-raw-dispatch-baseline.json). From E1 the build FAILS on any NEW raw
 //     reference not in the baseline; a baseline reference may be REMOVED (E2 migrates
-//     it) without failing — the baseline shrinks and reaches empty at E4. It is a
-//     baseline DIFF, not warn-only: a new raw call is stopped while the legacy sites
-//     still legitimately exist. Aliases / re-exports / computed / loose method-name
+//     it) without failing — the baseline shrinks and reaches empty at E4. E4 ARMS
+//     it: E2 migrated all 38 sites, E3 sealed the primitives, and the baseline is
+//     now frozen EMPTY, so any raw dispatch reference at all fails the build (the
+//     armed assertion also fails if a stray --write re-populates the baseline).
+//     It is a baseline DIFF, not warn-only: through E2 a new raw call was stopped
+//     while the legacy sites still legitimately existed; at E4 there are none.
+//     Aliases / re-exports / computed / loose method-name
 //     literals outside the allowlist are fail-closed (unresolved), per the partition:
 //     named access is this gate's case; computed access is the runtime boundary's
 //     (structurally closed at E3). [Q1] the named gate cannot catch a NEW computed
@@ -69,7 +73,7 @@ const args = process.argv.slice(2);
 if (args.includes('--write')) {
   let treeHash = 'UNKNOWN';
   try { treeHash = execSync('git rev-parse HEAD', { cwd: REPO }).toString().trim(); } catch { /* detached / no git */ }
-  writeFileSync(BASELINE, JSON.stringify({ note: 'REF-1.1 E1 frozen raw-dispatch baseline; shrinks as E2 migrates, empty at E4', treeHash, count: current.length, keys: current }, null, 2) + '\n');
+  writeFileSync(BASELINE, JSON.stringify({ note: 'REF-1.1 E4 ARMED — empty baseline. Any raw dispatch reference now fails the build (E2 migrated all 38 sites, E3 sealed the primitives). Was the E1 frozen baseline that shrank through E2.', treeHash, count: current.length, keys: current }, null, 2) + '\n');
   pass(`froze baseline: ${current.length} raw-dispatch references (tree ${treeHash.slice(0, 7)})`);
 } else {
   let base;
@@ -82,6 +86,15 @@ if (args.includes('--write')) {
       ? pass(`baseline-diff: no NEW raw reference (${current.length} present, all in the frozen baseline)`)
       : fail(`baseline-diff: ${added.length} NEW raw reference(s) not in the baseline — a new raw registration landed:\n     ${added.join('\n     ')}`);
     if (removed.length) console.log(`    · ${removed.length} baseline reference(s) migrated away (allowed; refresh the baseline with --write)`);
+    // ── E4 ARMED: the baseline is empty (zero-tolerance) ──────────────────────
+    // E2 migrated all 38 sites; E3 sealed the primitives; E4 freezes the baseline
+    // EMPTY. From here every raw dispatch reference is a NEW reference and fails
+    // the build — the tolerance window that let the legacy sites coexist is shut.
+    // Assert the empty state itself so a stray `--write` that re-populated the
+    // baseline (re-opening the window) is caught as an arm regression, not passed.
+    (base.count === 0 && base.keys.length === 0)
+      ? pass('E4 ARMED: baseline is empty — zero raw-dispatch tolerance; any raw reference fails the build')
+      : fail(`E4 arm regression: baseline is NON-EMPTY (${base.keys.length} entr${base.keys.length === 1 ? 'y' : 'ies'}) — the E2 tolerance window is re-open. E4 requires an empty baseline.`);
   }
 }
 
@@ -238,6 +251,20 @@ const synth = (code) => discover([{ path: 'src/__synth__.js', code }], { methods
   // A loose method-name literal (the re-export / dynamic-handle class) → unresolved.
   const d3 = synth("const m = 'onRoutedMessage'; export { m };");
   d3.unresolved.length >= 1 ? pass('NEG-A3. a loose raw-method-name literal (re-export/handle) FAILS closed (unresolved)') : fail('NEG-A3. loose method-name literal not caught');
+
+  // NEG-A4 — E4 ARMED teeth, tied to the REAL committed baseline: the baseline is
+  // empty, so a discovered raw site's key is absent from it → the armed diff fails
+  // it. Through E2 this site would have been tolerated only if pre-frozen; at E4 no
+  // key is pre-frozen, so every raw reference fails.
+  {
+    let base = { keys: [null] };
+    try { base = JSON.parse(readFileSync(BASELINE, 'utf8')); } catch { /* handled below */ }
+    const site = synth("x.onRoutedMessage('__armed_ghost__', () => {});").sites.find((s) => s.wire === '__armed_ghost__');
+    const key = site && keyOf(site);
+    (base.keys.length === 0 && key && !base.keys.includes(key))
+      ? pass('NEG-A4. E4 armed: a discovered raw site is absent from the empty committed baseline → the armed diff fails it')
+      : fail(`NEG-A4. armed diff would not fail a new raw site against the committed baseline (baseline has ${base.keys.length} entries)`);
+  }
 }
 {
   // wire-literal gate must bite a variable, and must NOT bite a literal or T.<name>.
