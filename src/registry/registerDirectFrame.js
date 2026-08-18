@@ -18,8 +18,8 @@
 // adds the structural guarantee that no computed wire escapes the sealed primitive.
 //
 // It reaches the notification primitive through the allowlisted capability reader
-// (a sealed transport) or, transitionally, by literal name (an unsealed transport);
-// E3b removes the named fallback once every transport is sealed.
+// (readDispatchCapability) ONLY. E3c removed the transitional literal-name fallback:
+// capability presence is mandatory, matching the canonical door.
 // =====================================================================
 import { readDispatchCapability } from './registerFrame.js';
 
@@ -45,20 +45,20 @@ export function registerDirectFrame(recv, type, handler) {
   }
   const wire = `direct_${type}`;
 
-  // Read the sealed receiver's notification closure through the allowlisted reader;
-  // fall back to the literal-named public method for an unsealed transport (removed
-  // when E3b seals every transport).
+  // Read the sealed receiver's notification closure through the allowlisted reader.
+  // E3c (SEAL): capability presence is MANDATORY — no literal-name fallback. A receiver
+  // that has not deposited cannot register a direct frame; it throws. This is the same
+  // mandatory-capability rule the canonical door enforces (E3b.4, Aster option 1
+  // 39012d73), applied to the one parameterized registrar. After E3c no `recv.onX(...)`
+  // named-primitive call survives anywhere in src.
   const cap = readDispatchCapability(recv);
-  if (cap) {
-    if (typeof cap.notification !== 'function') {
-      throw new TypeError(`registerDirectFrame(${type}): sealed recv has no notification dispatch capability`);
-    }
-    return cap.notification(wire, handler);
+  if (!cap) {
+    throw new TypeError(`registerDirectFrame(${type}): receiver has no deposited dispatch capability — every direct-message receiver must deposit through depositDispatchCapability at construction (E3 seal: capability presence is mandatory, no literal-name fallback). Test doubles opt in via test/lib/testCapability.mjs.`);
   }
-  if (typeof recv.onNotification !== 'function') {
-    throw new TypeError(`registerDirectFrame(${type}): recv has no onNotification() primitive`);
+  if (typeof cap.notification !== 'function') {
+    throw new TypeError(`registerDirectFrame(${type}): sealed recv has no notification dispatch capability`);
   }
-  return recv.onNotification(wire, handler);
+  return cap.notification(wire, handler);
 }
 
 export default registerDirectFrame;

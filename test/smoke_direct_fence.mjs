@@ -17,6 +17,7 @@
 // =====================================================================
 import { AxonaPeer } from '../src/dht/AxonaPeer.js';
 import { AxonaDomain } from '../src/dht/AxonaDomain.js';
+import { sealByOwnMethods } from './lib/testCapability.mjs';
 
 let passed = 0, failed = 0;
 const check = (label, ok, extra = '') => { console.log(`  ${ok ? '✓' : '✗'} ${label}${ok ? '' : ' ' + extra}`); ok ? passed++ : failed++; };
@@ -27,11 +28,14 @@ function makeTransport() {
   const installs = [];      // wires passed to onNotification
   const sends = [];         // { peerId, wire } passed to notify
   const cbs = new Map();    // wire -> the installed listener (to prove delivery)
-  return {
+  // E3c (SEAL): registerDirectFrame is capability-mandatory (no literal-name fallback),
+  // so this transport mock deposits a notification capability that delegates to its
+  // onNotification recorder.
+  return sealByOwnMethods({
     installs, sends, cbs,
     onNotification(wire, cb) { installs.push(wire); cbs.set(wire, cb); return { wire, unsub() {} }; },
     async notify(peerId, wire) { sends.push({ peerId, wire }); return true; },
-  };
+  });
 }
 function makePeer(opts = {}) {
   const tx = makeTransport();

@@ -25,20 +25,17 @@
 
 export const SEALED = Object.freeze(new Set(['onRequest', 'onNotification', 'onRoutedMessage']));
 
-export const RAW_DISPATCH_ALLOWLIST = Object.freeze([
-  // (E3b.2c: the default-DHT adapter's peer.onRoutedMessage passthrough is GONE —
-  // it now reaches the sealed peer's routed primitive through readDispatchCapability,
-  // so there is no raw dht/AxonaPeer.js peer.onRoutedMessage reference to allowlist.
-  // A re-introduced raw peer.onRoutedMessage(type) in wireHandlers now fails closed.)
-  { file: 'web/composite.js',       recv: 't',         method: 'onRequest',       arg: 'type',     class: 'mechanism-shim',         why: 'CompositeTransport request fan-out (E3b.2b: cap-first via readDispatchCapability; this literal-method call is the TRANSITIONAL fallback for an unsealed sub, removed when the fallback is dropped)' },
-  { file: 'web/composite.js',       recv: 't',         method: 'onNotification',  arg: 'type',     class: 'mechanism-shim',         why: 'CompositeTransport notification fan-out (E3b.2b: cap-first via readDispatchCapability; this literal-method call is the TRANSITIONAL fallback for an unsealed sub, removed when the fallback is dropped)' },
-  { file: 'registry/registerDirectFrame.js', recv: 'recv', method: 'onNotification', arg: 'wire', class: 'parameterized-registrar', why: 'registerDirectFrame direct_${type} family — the ONE named direct registrar (E3 decision 2); transitional named fallback for an unsealed transport, removed when E3b seals every transport' },
-  // REF-1.1 E1: the canonical registerFrame door — the allowlisted holder of the
-  // raw primitives (exit criterion 2, keyed by module identity). Reaches them by
-  // NAME with the `wire` param; the door itself, not a migration-target.
-  { file: 'registry/registerFrame.js', recv: 'recv', method: 'onRoutedMessage', arg: 'wire', class: 'canonical-door', why: 'registerFrame routed dispatch (named access)' },
-  { file: 'registry/registerFrame.js', recv: 'recv', method: 'onNotification',  arg: 'wire', class: 'canonical-door', why: 'registerFrame notification dispatch (named access)' },
-  { file: 'registry/registerFrame.js', recv: 'recv', method: 'onRequest',       arg: 'wire', class: 'canonical-door', why: 'registerFrame request dispatch (named access)' },
-]);
+// E3c (SEAL — close the E0 instrumentation): the allowlist is now EMPTY. After the
+// E3 seal, NO source file names a raw dispatch primitive: the canonical door
+// (registerFrame) and every mechanism shim (CompositeTransport fan-out, the
+// default-DHT routed passthrough, the registerDirectFrame direct_* registrar) reach
+// the primitive ONLY through the deposited capability closure (readDispatchCapability),
+// never by a literal `recv.onX(...)` call. There is nothing left to allowlist — a
+// re-introduced raw named-primitive call anywhere now matches no entry and fails
+// closed. The surviving shims are instead frozen by MODULE IDENTITY (which modules may
+// import readDispatchCapability) in fence_readcap_importer_freeze.mjs. The prior
+// entries (2 composite fan-out fallbacks, 3 registerFrame door legs, 1 registerDirectFrame
+// fallback) were all removed across E3b.4 + E3c as each transitional fallback was dropped.
+export const RAW_DISPATCH_ALLOWLIST = Object.freeze([]);
 
 export default RAW_DISPATCH_ALLOWLIST;

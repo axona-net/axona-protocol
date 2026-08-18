@@ -83,23 +83,14 @@ const REG_PREFIX = { B1: 'pubsub:', B2: 'transport:', B3: 'mesh:', B4: 'bridge:'
 const METHODS = new Set(['onRoutedMessage', 'onNotification']);
 // Non-literal registration calls that are DOCUMENTED mechanisms/planes, keyed by
 // (file, receiver, method, arg) so a NEW computed registration anywhere else fails.
-const MECHANISM_EXEMPT = [
-  // (E2.1: the pubsub/wireHandlers.js on() helper is DELETED — its 19 wires now
-  // register through the canonical door. The exemption is removed; a re-introduced raw
-  // dht.onRoutedMessage(type) in wireHandlers now fails closed under this fence too.)
-  // (E3b.2c: the default-DHT adapter's peer.onRoutedMessage(type) delegation is GONE —
-  // it reaches the sealed peer's routed primitive through readDispatchCapability. The
-  // exemption is removed; a re-introduced raw peer.onRoutedMessage(type) fails closed.)
-  { file: 'web/composite.js',       recv: 't',         method: 'onNotification',  arg: 'type',     why: 'CompositeTransport fan-out over recorded handlers' },
-  { file: 'registry/registerDirectFrame.js', recv: 'recv', method: 'onNotification', arg: 'wire', why: 'registerDirectFrame — the ONE named direct_<type> registrar (E3 decision 2), frozen by module identity; transitional named fallback removed when E3b seals every transport' },
-  // REF-1.1 E1: the canonical registerFrame door is the ALLOWLISTED holder of the
-  // raw primitives (design exit criterion 2, keyed by module identity). It reaches
-  // them by NAME with the `wire` param as the frame-type arg. This is the
-  // enforcement S5's escape-boundary note deferred to; adding the door is the
-  // sanctioned fifth entry, a reviewed change.
-  { file: 'registry/registerFrame.js', recv: 'recv', method: 'onRoutedMessage', arg: 'wire', why: 'canonical registerFrame door — routed dispatch, named access' },
-  { file: 'registry/registerFrame.js', recv: 'recv', method: 'onNotification',  arg: 'wire', why: 'canonical registerFrame door — notification dispatch, named access' },
-];
+// E3c (SEAL — close the E0 instrumentation): EMPTY. After the E3 seal, no source file
+// names a raw dispatch primitive — the canonical door and every mechanism shim reach
+// the primitive only through the deposited capability closure (readDispatchCapability),
+// never a literal `recv.onX(...)`. So there is no non-literal named-primitive registration
+// left to exempt; any re-introduced one matches nothing and fails closed under this fence.
+// The surviving shims are frozen by MODULE IDENTITY (who imports readDispatchCapability)
+// in fence_readcap_importer_freeze.mjs, not by a per-call exemption here.
+const MECHANISM_EXEMPT = [];
 const isMechanism = (fp, recv, method, arg) => MECHANISM_EXEMPT.some((x) => fp.endsWith(x.file) && recv === x.recv && method === x.method && arg === x.arg);
 
 // ── AST helpers ──

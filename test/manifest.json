@@ -43,6 +43,11 @@
       "note": "REF-1.1 E3b.4 SEAL (Aster boundary ruling 39012d73 / option 1; Vega 94cdf8ec; Orion b86f4c0d): the SOURCE-backed proof that capability presence is mandatory. Asserts (1) registerFrame source carries no recv.onRequest/onNotification/onRoutedMessage literal-name fallback + the mandatory-capability throw is present; (2) the CompositeTransport fan-out is cap-only (no t.onX literal-method fallback); (3) every production dispatch receiver deposits at construction — the five transports, the AxonaPeer, and the default-DHT adapter AxonaManager registers B1 on; (4) paired with E0 primitive-definition=0 from the committed manifest. Complements smoke_e3a_capability_boundary (same seal proven at RUNTIME). 14 checks. No wire, no behavior change."
     },
     {
+      "file": "fence_readcap_importer_freeze.mjs",
+      "class": "default",
+      "note": "REF-1.1 E3c SEAL: freezes the readDispatchCapability importer set by MODULE IDENTITY (design decision 3). readDispatchCapability is the ONE allowlisted reader of the sealed dispatch-capability channel, so the seal's security reduces to which modules may import it. Frozen to exactly 5: the definer (registerFrame.js), the barrel (registry/index.js), and 3 mechanism shims (CompositeTransport fan-out, AxonaPeer routed demux+adapter, registerDirectFrame direct_* home). A NEW importer — a back door around the door — fails closed; non-vacuous (every frozen entry must still reference it). 11 checks."
+    },
+    {
       "file": "fence_pull_outcome.mjs",
       "class": "default",
       "note": "Q1 — requestPull must distinguish response/empty-response/timeout/invalid-response instead of collapsing all four to null. Verified RED against the pre-fix tree (empty, timeout and malformed were all null and indistinguishable). Drives the real requestPull + _onPullResp path; nothing stubbed."

@@ -167,7 +167,7 @@ summary['migration-target'] === 38 ? pass('migration-target frames = 38') : fail
 // through the capability channel; the onRequest/onNotification/onRoutedMessage
 // names survive nowhere as reachable methods. The E3 absence invariant is complete.
 summary['primitive-definition'] === 0 ? pass('primitive definitions = 0 (every receiver sealed — E3 absence invariant complete)') : fail(`primitive-definition = ${summary['primitive-definition']}, expected 0`);
-summary['parameterized-registrar'] === 1 ? pass('parameterized registrar (onDirectMessage direct_*) = 1') : fail(`parameterized-registrar = ${summary['parameterized-registrar']}, expected 1`);
+summary['parameterized-registrar'] === 0 ? pass('parameterized registrar (registerDirectFrame direct_*) = 0 — E3c sealed it: capability-mandatory, no named-primitive call remains') : fail(`parameterized-registrar = ${summary['parameterized-registrar']}, expected 0 (E3c seal removed the registerDirectFrame named fallback)`);
 
 const args = process.argv.slice(2);
 if (args.includes('--write')) {

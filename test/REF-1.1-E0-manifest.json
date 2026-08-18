@@ -5,14 +5,14 @@
     "onNotification",
     "onRoutedMessage"
   ],
-  "treeHash": "fc032c0953bfb93cf971f2d117d4f3e9cc802511",
+  "treeHash": "26039d451a5453ae35e7e45dc2fc692b69419c82",
   "filesScanned": 77,
   "summary": {
     "migration-target": 38,
     "registration-helper": 0,
     "mechanism-shim": 0,
     "canonical-door": 0,
-    "parameterized-registrar": 1,
+    "parameterized-registrar": 0,
     "primitive-definition": 0,
     "bridge-ws-dispatch": 8,
     "wrapper-passthrough": 2,
@@ -346,16 +346,6 @@
       "wire": "pubsub:metricson",
       "classification": "migration-target",
       "boundary": "B1"
-    },
-    {
-      "file": "registry/registerDirectFrame.js",
-      "line": 61,
-      "callee": "onNotification",
-      "receiver": "recv",
-      "wire": "<wire>",
-      "classification": "parameterized-registrar",
-      "boundary": "—",
-      "why": "registerDirectFrame direct_${type} family — the ONE named direct registrar (E3 decision 2); transitional named fallback for an unsealed transport, removed when E3b seals every transport"
     },
     {
       "file": "transport/web/index.js",
