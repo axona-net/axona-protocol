@@ -28,6 +28,7 @@ import { AxonaManager } from '../src/pubsub/AxonaManager.js';
 import { buildEnvelope } from '../src/pubsub/envelope.js';
 import { deriveTopicIdBig } from '../src/pubsub/post.js';
 import { createAuthorIdentity } from '../src/identity/index.js';
+import { sealTestDht } from './lib/testCapability.mjs';
 
 let n = 0, fail = 0;
 const ok = (m, c, extra = '') => {
@@ -68,7 +69,7 @@ async function nonRootHolder(name, { verdict, declares = true, rootVisible = fal
     lookup: async () => ({ path: [idHex(heir)] }),
     isReachableId: () => true,
   };
-  const am = new AxonaManager({ dht, now: () => clock.t, rootReplicas: 2 });
+  const am = new AxonaManager({ dht: sealTestDht(dht), now: () => clock.t, rootReplicas: 2 });
   am.nodeId = selfId; am.setLogSink(() => {});
 
   const role = am._rootClaim.adoptChild(topicId, idHex(principal));   // NON-root relay

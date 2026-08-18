@@ -7,6 +7,7 @@
 //
 // Run: node test/smoke_root_claim.mjs
 import { AxonaManager } from '../src/pubsub/AxonaManager.js';
+import { sealTestDht } from './lib/testCapability.mjs';
 
 let passed = 0, failed = 0;
 const check = (label, cond, extra = '') => {
@@ -26,7 +27,7 @@ function makeManager({ selfBig, neighbors = [], bridge = null } = {}) {
     neighbors: () => neighbors.map(idHex),
     bridgeId: () => bridge,
   };
-  const am = new AxonaManager({ dht, emitLog: (lvl, ev, ctx) => logs.push({ lvl, ev, ctx }) });
+  const am = new AxonaManager({ dht: sealTestDht(dht), emitLog: (lvl, ev, ctx) => logs.push({ lvl, ev, ctx }) });
   return { am, rc: am._rootClaim, routed, logs };
 }
 const transitions = (logs) => logs.filter(l => l.ev === 'pubsub:root-transition');

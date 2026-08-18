@@ -38,6 +38,7 @@ import { deriveTopicIdBig } from '../src/pubsub/post.js';
 import { createNodeIdentity, createAuthorIdentity } from '../src/identity/index.js';
 import { regionCenter } from '../src/utils/region-names.js';
 import { ROOT_REPLICAS } from '../src/pubsub/constants.js';
+import { sealTestDht } from './lib/testCapability.mjs';
 
 const __LOC = regionCenter('useast');
 const idHex = (b) => b.toString(16).padStart(66, '0');
@@ -65,7 +66,7 @@ class Fabric {
         .sort((a, b) => ((a ^ target) < (b ^ target) ? -1 : 1))
         .slice(0, K).map(idHex),
     };
-    const am = new AxonaManager({ dht, now: () => self.clock, renewMs: 60_000, dropMs: 180_000 });
+    const am = new AxonaManager({ dht: sealTestDht(dht), now: () => self.clock, renewMs: 60_000, dropMs: 180_000 });
     const rec = { id: idBig, am, handlers, alive: true };
     this.nodes.set(idBig, rec);
     return rec;

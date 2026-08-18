@@ -24,6 +24,7 @@ import { buildEnvelope }       from '../src/pubsub/envelope.js';
 import { resolveTopic }        from '../src/pubsub/post.js';
 import { buildUnpub, verifyUnpub } from '../src/pubsub/unpub.js';
 import { UnpubError, ErrorCodes }  from '../src/errors.js';
+import { sealTestDht } from './lib/testCapability.mjs';
 
 let passed = 0, failed = 0;
 function check(label, cond) {
@@ -40,7 +41,7 @@ function stubDht() {
     onEvent: () => () => {}, sendDirect: async () => true, verdictsSupported: false, routeMessage: async () => {},
   };
 }
-function mkManager() { return new AxonaManager({ dht: stubDht(), now: () => T }); }
+function mkManager() { return new AxonaManager({ dht: sealTestDht(stubDht()), now: () => T }); }
 
 // Resolve an owner-only topic for `owner` (an author) and `name`. Region is
 // explicit ('useast') — a topic's region is always a real cell, never derived

@@ -71,6 +71,7 @@
 // Run: node test/fence_pub_defers_to_corpse.mjs
 import { AxonaManager } from '../src/pubsub/AxonaManager.js';
 import { BEACON_MS, BEACON_TTL_MS, ROOT_VERIFY_MS, T } from '../src/pubsub/constants.js';
+import { sealTestDht } from './lib/testCapability.mjs';
 
 let n = 0, fail = 0;
 const ok = (m, c, extra = '') => {
@@ -135,7 +136,7 @@ function mk({ neighbors = [NB, ALIVE], deadVia = [DEAD], consumeAt = null,
     findKClosest: async () => [],
     lookup: async () => null,                 // overridden where a section drives _verifyRoots
   };
-  const am = new AxonaManager({ dht, now: () => clock.t, rootReplicas: 2 });
+  const am = new AxonaManager({ dht: sealTestDht(dht), now: () => clock.t, rootReplicas: 2 });
   am.nodeId = SELF;
   am.setLogSink(() => {});
   const release = () => { while (pending.length) pending.shift()(); };

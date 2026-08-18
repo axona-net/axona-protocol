@@ -14,6 +14,7 @@
 //   node test/smoke_keyspace_hosting.mjs
 // =====================================================================
 import { AxonaManager } from '../src/pubsub/AxonaManager.js';
+import { sealTestDht } from './lib/testCapability.mjs';
 
 let passed = 0, failed = 0;
 const check = (label, cond) => { if (cond) { console.log(`  ✓ ${label}`); passed++; } else { console.log(`  ✗ ${label}`); failed++; } };
@@ -28,7 +29,7 @@ function makeMgr(selfId) {
     onRoutedMessage: () => {},
     onDirectMessage: () => {},
   };
-  return new AxonaManager({ dht, now: () => 1_700_000_000_000 });
+  return new AxonaManager({ dht: sealTestDht(dht), now: () => 1_700_000_000_000 });
 }
 
 async function main() {

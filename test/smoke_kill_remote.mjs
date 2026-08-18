@@ -23,6 +23,7 @@ import { createAuthorIdentity } from '../src/identity/index.js';
 import { buildEnvelope }  from '../src/pubsub/envelope.js';
 import { buildKill }      from '../src/pubsub/kill.js';
 import { toHex }          from '../src/utils/hexid.js';
+import { sealTestDht } from './lib/testCapability.mjs';
 
 let passed = 0, failed = 0;
 const check = (label, cond) => { if (cond) { console.log(`  ✓ ${label}`); passed++; } else { console.log(`  ✗ ${label}`); failed++; } };
@@ -53,7 +54,7 @@ class MockNet {
   }
   spawn(selfId) {
     const dht = this.makeDht(selfId);
-    const mgr = new AxonaManager({ dht, now: () => T });
+    const mgr = new AxonaManager({ dht: sealTestDht(dht), now: () => T });
     mgr._dht = dht; mgr.nodeId = selfId; this.mgrs.set(selfId, mgr);
     return mgr;
   }

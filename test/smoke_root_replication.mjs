@@ -5,6 +5,7 @@
 //   3. receiving a REPLICATE makes a node a passive BACKUP (backupOf set, not root)
 //   4. a backup whose root stopped replicating (stale) promotes to root iff closest
 import { AxonaManager } from '../src/pubsub/AxonaManager.js';
+import { sealTestDht } from './lib/testCapability.mjs';
 
 // Q2/C4 TIMING NOTE. The replica ledger is now written when the TRANSPORT answers
 // (routeMessage resolves), not synchronously inside the push loop — that is the
@@ -26,7 +27,7 @@ function mk({neighbors=[],bridge=null,replicas=2}={}){
     getSelfId:()=>SELF, onRoutedMessage:()=>{},
     routeMessage:(target,type,payload)=>(sends.push({target,type,payload}), { consumed: true }),
     neighbors:()=>neighbors, bridgeId:()=>bridge };
-  const am=new AxonaManager({dht, now:()=>clock.t, rootReplicas:replicas}); am.nodeId=SELF;
+  const am=new AxonaManager({dht: sealTestDht(dht), now:()=>clock.t, rootReplicas:replicas}); am.nodeId=SELF;
   return {am,sends,clock};
 }
 const repl=(sends)=>sends.filter(s=>s.type==='pubsub:replicate');

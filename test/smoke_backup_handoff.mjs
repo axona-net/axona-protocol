@@ -33,6 +33,7 @@ import { buildEnvelope } from '../src/pubsub/envelope.js';
 import { deriveTopicIdBig } from '../src/pubsub/post.js';
 import { createAuthorIdentity } from '../src/identity/index.js';
 import { T } from '../src/pubsub/constants.js';
+import { sealTestDht } from './lib/testCapability.mjs';
 
 let passed = 0, failed = 0;
 const check = (label, cond, extra = '') => {
@@ -61,7 +62,7 @@ class Fabric {
         [...self.nodes.entries()].filter(([, n]) => n.alive).map(([id]) => id)
           .sort((a, b) => { const da = a ^ target, db = b ^ target; return da < db ? -1 : da > db ? 1 : 0; }).slice(0, _k),
     };
-    const am = new AxonaManager({ dht, now: () => self.clock, renewMs: 60_000, renewFastMs: 5_000, dropMs: 180_000 });
+    const am = new AxonaManager({ dht: sealTestDht(dht), now: () => self.clock, renewMs: 60_000, renewFastMs: 5_000, dropMs: 180_000 });
     const rec = { id: idBig, am, handlers, alive: true, got: [] };
     am.onPubsubDelivery((_t, _j, msgId) => rec.got.push(msgId));
     this.nodes.set(idBig, rec);
@@ -125,7 +126,7 @@ async function main() {
       findKClosest: async () => [outHeir, heir],   // out-of-region candidate listed CLOSER
       neighbors: () => [idHex(rootAlive), idHex(heir)],   // rootAlive IS a live neighbour; rootDead is NOT
     };
-    const am = new AxonaManager({ dht, now: () => clock, renewMs: 60_000, renewFastMs: 5_000, dropMs: 180_000 });
+    const am = new AxonaManager({ dht: sealTestDht(dht), now: () => clock, renewMs: 60_000, renewFastMs: 5_000, dropMs: 180_000 });
     const seed = (tBig, isRoot, backupOfBig) => {
       const role = makeRole(tBig, isRoot);
       if (backupOfBig) role.backupOf = idHex(backupOfBig).toLowerCase();

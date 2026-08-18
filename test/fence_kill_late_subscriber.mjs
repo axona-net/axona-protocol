@@ -36,6 +36,7 @@ import { buildEnvelope } from '../src/pubsub/envelope.js';
 import { buildKill } from '../src/pubsub/kill.js';
 import { deriveTopicIdBig } from '../src/pubsub/post.js';
 import { createAuthorIdentity } from '../src/identity/index.js';
+import { sealTestDht } from './lib/testCapability.mjs';
 
 let n = 0, fail = 0;
 const ok = (m, c, extra = '') => {
@@ -80,7 +81,7 @@ class Net {
       lookup: async () => { const o = other(); return { path: o === null ? [] : [idHex(o)] }; },
       isReachableId: () => true,
     };
-    const am = new AxonaManager({ dht, now: () => self.clock.t, rootReplicas });
+    const am = new AxonaManager({ dht: sealTestDht(dht), now: () => self.clock.t, rootReplicas });
     am.nodeId = idBig; am.setLogSink(() => {});
     this.nodes.set(idBig, { am, handlers, id: idBig });
     return am;

@@ -20,6 +20,7 @@ import { buildEnvelope } from '../src/pubsub/envelope.js';
 import { deriveTopicIdBig } from '../src/pubsub/post.js';
 import { createAuthorIdentity } from '../src/identity/index.js';
 import { T } from '../src/pubsub/constants.js';
+import { sealTestDht } from './lib/testCapability.mjs';
 
 let n = 0, fail = 0;
 const ok = (m, c, extra = '') => { if (c) { console.log(`  ok ${++n} - ${m}`); } else { console.log(`  ✗  ${m} ${extra}`); fail++; } };
@@ -35,7 +36,7 @@ function mk({ selfBig, neighbors = [], kClosest = null, replicas = 2 } = {}) {
     bridgeId: () => null,
   };
   if (kClosest) dht.findKClosest = async () => kClosest;
-  const am = new AxonaManager({ dht, now: () => Date.now(), rootReplicas: replicas });
+  const am = new AxonaManager({ dht: sealTestDht(dht), now: () => Date.now(), rootReplicas: replicas });
   return { am, sends };
 }
 

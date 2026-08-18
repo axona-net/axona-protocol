@@ -43,6 +43,7 @@ import { deriveTopicIdBig } from '../src/pubsub/post.js';
 import { createAuthorIdentity } from '../src/identity/index.js';
 import { DurabilityLedger } from '../src/pubsub/durability.js';
 import { REPLICATE_FULL_BUDGET, ROOT_REPLICATE_FULL_MS } from '../src/pubsub/constants.js';
+import { sealTestDht } from './lib/testCapability.mjs';
 
 let n = 0, fail = 0;
 const ok = (m, c, extra = '') => {
@@ -81,7 +82,7 @@ async function rootNode(name, verdict) {
     neighbors: () => [peer],
     bridgeId: () => null,
   };
-  const am = new AxonaManager({ dht, now: () => clock.t, rootReplicas: 1 });
+  const am = new AxonaManager({ dht: sealTestDht(dht), now: () => clock.t, rootReplicas: 1 });
   am.nodeId = selfId; am.setLogSink(() => {});
   am.pubsubSubscribe(topicId);
   const role = am._becomeRoot(topicId);
@@ -264,7 +265,7 @@ console.log('durability evidence — a deferral is not a failure, a keepalive is
     neighbors: () => [],
     bridgeId: () => null,
   };
-  const am = new AxonaManager({ dht, now: () => clock.t, rootReplicas: 1 });
+  const am = new AxonaManager({ dht: sealTestDht(dht), now: () => clock.t, rootReplicas: 1 });
   am.nodeId = selfId; am.setLogSink(() => {});
   am.pubsubSubscribe(topicId);
   const role = am._becomeRoot(topicId);
@@ -365,7 +366,7 @@ console.log('durability evidence — a deferral is not a failure, a keepalive is
       bridgeId: () => null,
       ...dhtOverrides,
     };
-    const am = new AxonaManager({ dht, now: () => clock.t, rootReplicas: 1 });
+    const am = new AxonaManager({ dht: sealTestDht(dht), now: () => clock.t, rootReplicas: 1 });
     am.nodeId = selfId; am.setLogSink(() => {});
     am.pubsubSubscribe(topicId);
     const role = am._becomeRoot(topicId);
@@ -391,7 +392,7 @@ console.log('durability evidence — a deferral is not a failure, a keepalive is
       neighbors: () => { if (armed.on) throw new Error('table unavailable'); return []; },
       bridgeId: () => null,
     };                                            // no findKClosest → neighbours fallback
-    const am = new AxonaManager({ dht, now: () => clock.t, rootReplicas: 1 });
+    const am = new AxonaManager({ dht: sealTestDht(dht), now: () => clock.t, rootReplicas: 1 });
     am.nodeId = selfId; am.setLogSink(() => {});
     am.pubsubSubscribe(topicId);
     const role = am._becomeRoot(topicId);

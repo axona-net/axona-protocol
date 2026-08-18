@@ -23,6 +23,7 @@
 // =====================================================================
 import { buildBoundary1Registry } from '../src/pubsub/boundary1Registry.js';
 import { registerFrame, setShadowEnabled } from '../src/registry/index.js';
+import { sealByOwnMethods } from './lib/testCapability.mjs';
 import { T } from '../src/pubsub/constants.js';
 
 let passed = 0, failed = 0;
@@ -39,10 +40,12 @@ console.log('\nREF-1.1 E1 — registerFrame canonical door (proven on Boundary-1
 // onRoutedMessage only.
 function makeRecv() {
   const installed = new Map();
-  return {
+  // E3b.4 (SEAL): opt this bare capturing receiver into the mandatory capability
+  // through the explicit test-only helper — registerFrame has no literal-name fallback.
+  return sealByOwnMethods({
     installed,
     onRoutedMessage(wire, handler) { installed.set(wire, handler); return { wire, unsub: () => installed.delete(wire) }; },
-  };
+  });
 }
 
 // A schema-satisfying representative SUB frame + meta, so the flag-on path can mint

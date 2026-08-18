@@ -14,6 +14,7 @@
 //
 // Run: node test/smoke_cold_burst.mjs
 import { AxonaManager } from '../src/pubsub/AxonaManager.js';
+import { sealTestDht } from './lib/testCapability.mjs';
 
 let n = 0, fail = 0;
 const ok = (m, c, extra = '') => { console.log(`  ${c ? '✓' : '✗'} ${m} ${extra}`); c ? n++ : fail++; };
@@ -36,7 +37,7 @@ function mk({ neighbours }) {
     bridgeId: () => null,
     findKClosest: async () => [],
   };
-  const am = new AxonaManager({ dht, now: () => Date.now() });
+  const am = new AxonaManager({ dht: sealTestDht(dht), now: () => Date.now() });
   am.nodeId = SELF;
   return { am, pubs };
 }

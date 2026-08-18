@@ -14,6 +14,7 @@
 //   node test/smoke_adaptive_renewal.mjs
 // =====================================================================
 import { AxonaManager } from '../src/pubsub/AxonaManager.js';
+import { sealTestDht } from './lib/testCapability.mjs';
 
 let passed = 0, failed = 0;
 const check = (label, cond) => { if (cond) { console.log(`  ✓ ${label}`); passed++; } else { console.log(`  ✗ ${label}`); failed++; } };
@@ -39,7 +40,7 @@ const dht = {
   onRoutedMessage: () => {},
   neighbors: () => [CLOSER],
 };
-const mgr = new AxonaManager({ dht, now: () => clock, renewMs: RENEW_CEIL, renewFastMs: RENEW_FAST });
+const mgr = new AxonaManager({ dht: sealTestDht(dht), now: () => clock, renewMs: RENEW_CEIL, renewFastMs: RENEW_FAST });
 const ivOf = () => mgr.mySubscriptions.get(TOPIC)?.interval;
 const tick = async () => { await mgr.refreshTick(); };
 

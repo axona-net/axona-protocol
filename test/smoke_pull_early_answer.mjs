@@ -10,6 +10,7 @@
 //
 // Run: node test/smoke_pull_early_answer.mjs
 import { AxonaManager } from '../src/pubsub/AxonaManager.js';
+import { sealTestDht } from './lib/testCapability.mjs';
 
 let n = 0, fail = 0;
 const ok = (m, c, extra = '') => { console.log(`  ${c ? '✓' : '✗'} ${m} ${extra}`); c ? n++ : fail++; };
@@ -29,7 +30,7 @@ function mk({ seedCache = true } = {}) {
     routeMessage: (target, type, payload) => { sent.push({ target, type, payload }); },
     neighbors: () => [], bridgeId: () => null, findKClosest: async () => [],
   };
-  const am = new AxonaManager({ dht, now: () => Date.now() });
+  const am = new AxonaManager({ dht: sealTestDht(dht), now: () => Date.now() });
   am.nodeId = SELF;
   // Seed a role holding two cached messages (NOT marked root — an en-route replica).
   const role = am._becomeRoot(TOPIC);

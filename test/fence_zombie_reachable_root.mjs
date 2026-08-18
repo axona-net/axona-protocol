@@ -30,6 +30,7 @@
 // Run: node test/fence_zombie_reachable_root.mjs
 import { AxonaManager } from '../src/pubsub/AxonaManager.js';
 import { BEACON_MS, T } from '../src/pubsub/constants.js';
+import { sealTestDht } from './lib/testCapability.mjs';
 
 let n = 0, fail = 0;
 const ok = (m, c, extra = '') => {
@@ -64,7 +65,7 @@ function mk({ neighbors }) {
     findKClosest: async () => [],
     lookup: async () => null,
   };
-  const am = new AxonaManager({ dht, now: () => clock.t, rootReplicas: 2 });
+  const am = new AxonaManager({ dht: sealTestDht(dht), now: () => clock.t, rootReplicas: 2 });
   am.nodeId = SELF;
   am.setLogSink(() => {});
   return { am, clock, sends };

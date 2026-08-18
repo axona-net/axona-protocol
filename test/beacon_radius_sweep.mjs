@@ -21,6 +21,7 @@ import { AxonaManager } from '../src/pubsub/AxonaManager.js';
 import { buildEnvelope } from '../src/pubsub/envelope.js';
 import { deriveTopicIdBig } from '../src/pubsub/post.js';
 import { createNodeIdentity, createAuthorIdentity } from '../src/identity/index.js';
+import { sealTestDht } from './lib/testCapability.mjs';
 
 const idHex = (b) => b.toString(16).padStart(66, '0');
 function lcg(s){ s>>>=0; return () => { s = (s*1664525 + 1013904223)>>>0; return s/4294967296; }; }
@@ -61,7 +62,7 @@ class Sweep {
         self.queue.push({ dest, type, payload, meta: { targetId: target, isTerminal: true, hopCount: 1, fromId: meta.fromId ?? idHex(me) } });
       },
     };
-    const am = new AxonaManager({ dht, now: () => self.clock, renewMs: 60_000, renewFastMs: 5_000, dropMs: 180_000,
+    const am = new AxonaManager({ dht: sealTestDht(dht), now: () => self.clock, renewMs: 60_000, renewFastMs: 5_000, dropMs: 180_000,
                                   beaconFanout: self.fanout, beaconLayers: self.layers });
     const rec = { id: me, am, handlers, alive: true, got: new Set() };
     am.onPubsubDelivery((_t, _j, msgId) => rec.got.add(msgId));

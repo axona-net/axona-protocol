@@ -16,6 +16,7 @@ import { deriveTopicId }  from '../src/pubsub/post.js';
 import { createNodeIdentity, createAuthorIdentity } from '../src/identity/index.js';
 import { buildEnvelope }  from '../src/pubsub/envelope.js';
 import { fromHex }        from '../src/utils/hexid.js';
+import { sealTestDht } from './lib/testCapability.mjs';
 
 let passed = 0, failed = 0;
 function check(label, cond) {
@@ -29,7 +30,7 @@ function stubDht() {
     onEvent: () => () => {}, sendDirect: async () => true, verdictsSupported: false, routeMessage: async () => {},
   };
 }
-const am = new AxonaManager({ dht: stubDht(), now: () => 1_700_000_000_000 });
+const am = new AxonaManager({ dht: sealTestDht(stubDht()), now: () => 1_700_000_000_000 });
 
 function entry(seq, signer, ts = 0) {
   return { json: '{}', publishId: `p${seq}-${signer}`, postHash: `${signer}:${seq}`, seq, ts, signerPubkey: signer };
@@ -120,7 +121,7 @@ async function testMetricsResponseShape() {
     sendDirect: async (_to, _type, payload) => { sent = payload; return true; },
   };
   const now = 1_700_000_000_000;
-  const am2 = new AxonaManager({ dht, now: () => now });
+  const am2 = new AxonaManager({ dht: sealTestDht(dht), now: () => now });
   const topicId = 42n;
   // metrics() is owner-only (v3.5.0): the cached posts must be anchored at the
   // requester for the gate to pass, so this verifies the OWNER's response shape.
@@ -152,7 +153,7 @@ async function testMetricsOwnership() {
   function respond(anchorBig, requesterId) {
     let sent = null;
     const dht = { ...stubDht(), sendDirect: async (_t, _y, p) => { sent = p; return true; } };
-    const am2 = new AxonaManager({ dht, now: () => now });
+    const am2 = new AxonaManager({ dht: sealTestDht(dht), now: () => now });
     const role = {
       replayCache: [{ ...entry(1, 'A'), publisher: anchorBig }],
       children: new Map([[1n, {}]]),

@@ -18,6 +18,7 @@ import { deriveIdentity } from '../src/identity/index.js';
 import { buildEnvelope }  from '../src/pubsub/envelope.js';
 import { deriveTopicId }  from '../src/pubsub/post.js';
 import { toHex, fromHex } from '../src/utils/hexid.js';
+import { sealTestDht } from './lib/testCapability.mjs';
 
 const tick  = () => new Promise((r) => setTimeout(r, 0));
 const flush = async () => { for (let i = 0; i < 12; i++) await tick(); };
@@ -56,7 +57,7 @@ class MockNet {
   spawn(selfId, label) {
     const dht = this.makeDht(selfId);
     const net = this;
-    const mgr = new AxonaManager({ dht, now: () => net.now() });
+    const mgr = new AxonaManager({ dht: sealTestDht(dht), now: () => net.now() });
     mgr._dht = dht; mgr._label = label;
     this.mgrs.set(selfId, mgr);
     return mgr;

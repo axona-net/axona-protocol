@@ -43,6 +43,7 @@
 import { AxonaManager } from '../src/pubsub/AxonaManager.js';
 import { createNodeIdentity } from '../src/identity/index.js';
 import { regionCenter } from '../src/utils/region-names.js';
+import { sealTestDht } from './lib/testCapability.mjs';
 import { MAX_ROLES, ROLE_GRACE_MS, ROLE_ADMIT_PER_TICK,
          HELLO_DEADLINE_MS, SATURATION_PRESSURE, DROP_MS, ROOT_REPLICATE_FULL_MS } from '../src/pubsub/constants.js';
 
@@ -91,7 +92,7 @@ function makeManager(selfBig, { neverRoot = false, meshed = true, ...opts } = {}
     routeMessage: () => {},
   };
   const am = new AxonaManager({
-    dht, now: () => t, neverRoot, renewMs: 60_000, renewFastMs: 5_000, dropMs: 180_000, ...opts,
+    dht: sealTestDht(dht), now: () => t, neverRoot, renewMs: 60_000, renewFastMs: 5_000, dropMs: 180_000, ...opts,
   });
   const origLog = am._log;
   am._log = function (lvl, tag, data) { logs.push({ lvl, tag, data }); return origLog?.call(this, lvl, tag, data); };

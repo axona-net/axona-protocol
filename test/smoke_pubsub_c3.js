@@ -18,6 +18,7 @@ import { AxonaManager } from '../src/pubsub/AxonaManager.js';
 import { createAuthorIdentity } from '../src/identity/index.js';
 import { buildEnvelope } from '../src/pubsub/envelope.js';
 import { setPowDifficulty, resetPowDifficulty } from '../src/pow/pow.js';
+import { sealTestDht } from './lib/testCapability.mjs';
 
 let passed = 0, failed = 0;
 function check(label, cond) {
@@ -39,7 +40,7 @@ function makeManager() {
     onRoutedMessage: () => {}, onDirectMessage: () => {}, verdictsSupported: false, routeMessage: () => {},
     sendDirect:      async (to, type, body) => { sent.push({ to, type, body }); return true; },
   };
-  return { am: new AxonaManager({ dht }), sent };
+  return { am: new AxonaManager({ dht: sealTestDht(dht) }), sent };
 }
 
 function setRole(am, { publisher = null, children = [SUB], cacheLen = 1 } = {}) {

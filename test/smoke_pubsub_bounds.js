@@ -19,6 +19,7 @@
 // =====================================================================
 
 import { AxonaManager } from '../src/pubsub/AxonaManager.js';
+import { sealTestDht } from './lib/testCapability.mjs';
 
 let passed = 0, failed = 0;
 function check(label, cond) {
@@ -35,7 +36,7 @@ function makeManager() {
     verdictsSupported: false,   // audited: returns a push-count / undefined, never a verdict
     routeMessage: () => {}, sendDirect: async () => true, findKClosest: undefined,
   };
-  return new AxonaManager({ dht });
+  return new AxonaManager({ dht: sealTestDht(dht) });
 }
 
 function main() {

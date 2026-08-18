@@ -25,6 +25,7 @@ import { createNodeIdentity } from '../src/identity/index.js';
 import { buildAuthHello, cbvFromNonces } from '../src/transport/handshake-auth.js';
 import { registerFrame } from '../src/registry/index.js';
 import { makeTestRegistry } from './lib/testRegistry.mjs';
+import { sealByOwnMethods } from './lib/testCapability.mjs';
 
 // REF-1.1 E3b.2b: CompositeTransport is sealed — register through the canonical
 // door. (The FakeSubTransport doubles below keep public methods on purpose, so
@@ -176,6 +177,9 @@ class FakeSubTransport {
     this.sendCalls = [];
     this.notifyCalls = [];
     this.started = false;
+    // E3b.4 (SEAL): a sub-transport deposits its dispatch capability at construction —
+    // the CompositeTransport fan-out is now cap-only (no literal-method fallback).
+    sealByOwnMethods(this);
   }
   async start() { this.started = true; }
   async stop()  { this.started = false; }

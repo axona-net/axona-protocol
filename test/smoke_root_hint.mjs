@@ -17,6 +17,7 @@
 // Run: node test/smoke_root_hint.mjs
 // =====================================================================
 import { AxonaManager } from '../src/pubsub/AxonaManager.js';
+import { sealTestDht } from './lib/testCapability.mjs';
 
 let n = 0, fail = 0;
 const ok = (m, c) => { if (c) { console.log(`  ok ${++n} - ${m}`); } else { console.log(`  ✗  ${m}`); fail++; } };
@@ -34,7 +35,7 @@ function mkManager({ closest, findKClosestCalls, lookupCalls }) {
     async findKClosest(target, K) { findKClosestCalls.push({ target, K }); return closest != null ? [closest] : []; },
     async lookup(target) { lookupCalls.push(target); return { path: [selfId, 0xdeadn], hops: 1, found: false }; },
   };
-  const am = new AxonaManager({ dht, now: () => Date.now(), renewMs: 60_000, dropMs: 180_000 });
+  const am = new AxonaManager({ dht: sealTestDht(dht), now: () => Date.now(), renewMs: 60_000, dropMs: 180_000 });
   am.nodeId = selfId;
   return am;
 }

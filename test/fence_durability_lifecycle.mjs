@@ -26,6 +26,7 @@ import { buildEnvelope } from '../src/pubsub/envelope.js';
 import { deriveTopicIdBig } from '../src/pubsub/post.js';
 import { createAuthorIdentity } from '../src/identity/index.js';
 import { DURABILITY_ATTEMPTS } from '../src/pubsub/durability.js';
+import { sealTestDht } from './lib/testCapability.mjs';
 
 let n = 0, fail = 0;
 const ok = (m, c, extra = '') => {
@@ -54,7 +55,7 @@ async function root(name, verdict, { rootReplicas = 2 } = {}) {
     neighbors: () => [idHex(selfId ^ 0x11n), idHex(selfId ^ 0x22n)],
     bridgeId: () => null,
   };
-  const am = new AxonaManager({ dht, now: () => clock.t, rootReplicas });
+  const am = new AxonaManager({ dht: sealTestDht(dht), now: () => clock.t, rootReplicas });
   am.nodeId = selfId; am.setLogSink(() => {});
   am.pubsubSubscribe(topicId);
   const role = am._becomeRoot(topicId);

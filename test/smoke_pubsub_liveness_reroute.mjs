@@ -20,6 +20,7 @@ import { buildEnvelope } from '../src/pubsub/envelope.js';
 import { deriveTopicIdBig } from '../src/pubsub/post.js';
 import { createNodeIdentity, createAuthorIdentity } from '../src/identity/index.js';
 import { regionCenter } from '../src/utils/region-names.js';
+import { sealTestDht } from './lib/testCapability.mjs';
 const __LOC = regionCenter('useast');  // region-lock: co-region test nodes with the 'useast' topics
 
 let passed = 0, failed = 0;
@@ -45,7 +46,7 @@ class Fabric {
       },
       findKClosest: async (target, _k = 1) => { const c = self._closestAlive(target); return c === null ? [] : [c]; },
     };
-    const am = new AxonaManager({ dht, now: () => self.clock, renewMs: 60_000, renewFastMs: 5_000, dropMs: 180_000 });
+    const am = new AxonaManager({ dht: sealTestDht(dht), now: () => self.clock, renewMs: 60_000, renewFastMs: 5_000, dropMs: 180_000 });
     const rec = { id: idBig, am, handlers, alive: true, got: [] };
     am.onPubsubDelivery((_t, _j, msgId) => rec.got.push(msgId));
     this.nodes.set(idBig, rec);

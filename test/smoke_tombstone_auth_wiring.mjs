@@ -23,6 +23,7 @@
 // Run: node test/smoke_tombstone_auth_wiring.mjs
 // =====================================================================
 import { AxonaManager } from '../src/pubsub/AxonaManager.js';
+import { sealTestDht } from './lib/testCapability.mjs';
 import { buildEnvelope } from '../src/pubsub/envelope.js';
 import { buildKill } from '../src/pubsub/kill.js';
 import { deriveTopicIdBig } from '../src/pubsub/post.js';
@@ -51,7 +52,7 @@ class Fabric {
       findKClosest: async (target, k = 3) => [...self.nodes.entries()].filter(([, n]) => n.alive)
         .map(([id]) => id).sort((a, b) => { const da = a ^ target, db = b ^ target; return da < db ? -1 : da > db ? 1 : 0; }).slice(0, k),
     };
-    const opts = { dht, now: () => self.clock, renewMs: 60_000, renewFastMs: 5_000, dropMs: 180_000, tombstoneAuth: self._ta };
+    const opts = { dht: sealTestDht(dht), now: () => self.clock, renewMs: 60_000, renewFastMs: 5_000, dropMs: 180_000, tombstoneAuth: self._ta };
     if (Number.isFinite(self._rcb)) opts.replayCacheBytes = self._rcb;
     const am = new AxonaManager(opts);
     const rec = { id: idBig, am, handlers, alive: true, got: [], dels: [] };

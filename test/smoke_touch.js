@@ -19,6 +19,7 @@ import { buildEnvelope }  from '../src/pubsub/envelope.js';
 import { buildTouch, verifyTouch } from '../src/pubsub/touch.js';
 import { fromHex }        from '../src/utils/hexid.js';
 import { TouchError, ErrorCodes } from '../src/errors.js';
+import { sealTestDht } from './lib/testCapability.mjs';
 
 let passed = 0, failed = 0;
 function check(label, cond) {
@@ -41,7 +42,7 @@ function stubDht() {
     onEvent: () => () => {}, sendDirect: async () => true, verdictsSupported: false, routeMessage: async () => {},
   };
 }
-function mkManager() { return new AxonaManager({ dht: stubDht(), now: () => T }); }
+function mkManager() { return new AxonaManager({ dht: sealTestDht(stubDht()), now: () => T }); }
 
 async function aliceMsg(identity) {
   const env  = await buildEnvelope({ topic: TOPIC_DESC, message: 'hi', identity, ts: T, seq: T });

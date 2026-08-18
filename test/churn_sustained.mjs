@@ -21,6 +21,7 @@ import { AxonaManager } from '../src/pubsub/AxonaManager.js';
 import { buildEnvelope } from '../src/pubsub/envelope.js';
 import { deriveTopicIdBig } from '../src/pubsub/post.js';
 import { createNodeIdentity, createAuthorIdentity } from '../src/identity/index.js';
+import { sealTestDht } from './lib/testCapability.mjs';
 
 const idHex = (b) => b.toString(16).padStart(66, '0');
 function lcg(s){ s>>>=0; return () => { s = (s*1664525 + 1013904223)>>>0; return s/4294967296; }; }
@@ -98,7 +99,7 @@ class Fab {
       verdictsSupported: false,   // audited: returns a push-count / undefined, never a verdict
       routeMessage:(tg,t,p,m={})=>{ if(self.sent++>3_000_000) return; const d=self._term(me,tg); if(d===null)return;
         self.queue.push({dest:d,type:t,payload:p,meta:{targetId:tg,isTerminal:true,hopCount:1,fromId:m.fromId??idHex(me)}}); } };
-    const am=new AxonaManager({dht,now:()=>self.clock,renewMs:60000,renewFastMs:5000,dropMs:180000,beaconFanout:0,beaconLayers:1});
+    const am=new AxonaManager({dht: sealTestDht(dht),now:()=>self.clock,renewMs:60000,renewFastMs:5000,dropMs:180000,beaconFanout:0,beaconLayers:1});
     const rec={id:me,am,h,got:new Set()}; am.onPubsubDelivery((_t,_j,mid)=>rec.got.add(mid)); this.nodes.set(me,rec); return rec; }
   link(a,b){ (this.adj.get(a)??this.adj.set(a,new Set()).get(a)).add(b); (this.adj.get(b)??this.adj.set(b,new Set()).get(b)).add(a); }
   _term(s,t){ let c=s,g=0; while(g++<128){ let n=c,bd=c^t; for(const nb of(this.adj.get(c)||[])){ if(!this.nodes.has(nb))continue; const d=nb^t; if(d<bd){bd=d;n=nb;} } if(n===c)return c; c=n; } return c; }

@@ -1,3 +1,4 @@
+import { sealTestDht } from './lib/testCapability.mjs';
 // =====================================================================
 // smoke_sim_keyspace.mjs — the SHRUNK simulator keyspace profile.
 //
@@ -57,7 +58,7 @@ class Fabric {
         self.queue.push({ dest, type, payload, meta: { targetId: target, isTerminal: true, hopCount: 1, fromId: idHex(idBig) } });
       },
     };
-    const am = new AxonaManager({ dht, now: () => self.clock, renewMs: 60_000, dropMs: 180_000 });
+    const am = new AxonaManager({ dht: sealTestDht(dht), now: () => self.clock, renewMs: 60_000, dropMs: 180_000 });
     const rec = { id: idBig, am, handlers, alive: true, received: [] };
     am.onPubsubDelivery((topicId, json, msgId, ts) => rec.received.push({ topicId, json, msgId, ts }));
     this.nodes.set(idBig, rec);

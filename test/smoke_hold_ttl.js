@@ -11,6 +11,7 @@
 // =====================================================================
 
 import { AxonaManager } from '../src/pubsub/AxonaManager.js';
+import { sealTestDht } from './lib/testCapability.mjs';
 
 let passed = 0, failed = 0;
 function check(label, cond) {
@@ -32,7 +33,7 @@ function entry(seq, ts) {
 
 function testDefaultHold() {
   console.log('\n── default 24h hold; ceiling at 48h ──');
-  const am = new AxonaManager({ dht: stubDht(), now: () => T });
+  const am = new AxonaManager({ dht: sealTestDht(stubDht()), now: () => T });
   const role = { replayCache: [] };
   am._addToReplayCache(role, entry(1, T));
   const e = role.replayCache[0];
@@ -43,7 +44,7 @@ function testDefaultHold() {
 
 function testOwnerHoldCappedAt48h() {
   console.log('\n── owner hold is capped at the 48h ceiling ──');
-  const am = new AxonaManager({ dht: stubDht(), now: () => T });
+  const am = new AxonaManager({ dht: sealTestDht(stubDht()), now: () => T });
   const role = { replayCache: [], maxHoldMs: 100 * H };   // owner asks 100h
   am._addToReplayCache(role, entry(1, T));
   check('expiry capped at ts + 48h', role.replayCache[0].expiresAt === T + 48 * H);
@@ -52,7 +53,7 @@ function testOwnerHoldCappedAt48h() {
 function testSweep() {
   console.log('\n── expired messages are swept ──');
   let clock = T;
-  const am = new AxonaManager({ dht: stubDht(), now: () => clock });
+  const am = new AxonaManager({ dht: sealTestDht(stubDht()), now: () => clock });
   const role = { replayCache: [] };
   am._addToReplayCache(role, entry(1, T));            // expires T+24h
   am._addToReplayCache(role, entry(2, T + 30 * H));   // expires T+54h
@@ -73,7 +74,7 @@ function testSweep() {
 function testFindReportsExpiredMiss() {
   console.log('\n── _findInReplayCache misses (and drops) an expired message ──');
   let clock = T;
-  const am = new AxonaManager({ dht: stubDht(), now: () => clock });
+  const am = new AxonaManager({ dht: sealTestDht(stubDht()), now: () => clock });
   const role = { replayCache: [] };
   am._addToReplayCache(role, entry(7, T));
   check('found while live', am._findInReplayCache(role, 'h7') !== null);

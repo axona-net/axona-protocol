@@ -28,6 +28,7 @@
 //
 // Run: node test/fence_capability_declaration.mjs
 import { AxonaManager } from '../src/pubsub/AxonaManager.js';
+import { sealTestDht } from './lib/testCapability.mjs';
 
 let n = 0, fail = 0;
 const ok = (m, c, extra = '') => {
@@ -41,7 +42,10 @@ const base = () => ({
   onRoutedMessage: () => {},
   routeMessage: async () => ({ consumed: true }),
 });
-const build = (extra) => new AxonaManager({ dht: { ...base(), ...extra } });
+// E3b.4 (SEAL): the dht double opts into the mandatory capability through the
+// explicit test-only helper, so the ONLY variable this fence exercises is
+// verdictsSupported — not the (separate) capability-presence contract.
+const build = (extra) => new AxonaManager({ dht: sealTestDht({ ...base(), ...extra }) });
 const throws = (fn) => { try { fn(); return null; } catch (e) { return e; } };
 
 console.log('capability declaration — declared at construction, once, or not at all\n');

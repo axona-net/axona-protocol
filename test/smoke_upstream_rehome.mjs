@@ -11,6 +11,7 @@
 //
 // Run: node test/smoke_upstream_rehome.mjs
 import { AxonaManager } from '../src/pubsub/AxonaManager.js';
+import { sealTestDht } from './lib/testCapability.mjs';
 
 let passed = 0, failed = 0;
 const check = (label, cond, extra = '') => {
@@ -29,7 +30,7 @@ function makeManager({ selfBig }) {
     neighbors: () => [],
     bridgeId: () => null,
   };
-  const am = new AxonaManager({ dht });
+  const am = new AxonaManager({ dht: sealTestDht(dht) });
   return { am, routed };
 }
 

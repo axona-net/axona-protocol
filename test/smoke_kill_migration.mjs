@@ -10,6 +10,7 @@
 //   3. pubsubLeaveHandoff includes tombstones in the HANDOFF push
 //   4. _onHandoff applies a migrated tombstone → heir does NOT resurrect the killed body
 import { AxonaManager } from '../src/pubsub/AxonaManager.js';
+import { sealTestDht } from './lib/testCapability.mjs';
 let n=0,fail=0; const ok=(m,c)=>{ if(c){console.log(`  ok ${++n} - ${m}`)}else{console.log(`  ✗  ${m}`);fail++} };
 const REG=0x87n<<248n, idHex=(b)=>b.toString(16).padStart(66,'0');
 const SELF=REG|0x011n, TOPIC=REG|0xabcn, HEIR=REG|0xab0n, PARENT=REG|0xab1n;
@@ -18,7 +19,7 @@ function mk({neighbors=[]}={}){
   const sends=[]; const clock={t:1_000_000};
   const dht={ getSelfId:()=>SELF, onRoutedMessage:()=>{}, verdictsSupported: false, routeMessage:(target,type,payload)=>sends.push({target,type,payload}),
     neighbors:()=>neighbors, bridgeId:()=>null, async findKClosest(){ return [idHex(HEIR)]; } };
-  const am=new AxonaManager({dht, now:()=>clock.t}); am.nodeId=SELF;
+  const am=new AxonaManager({dht: sealTestDht(dht), now:()=>clock.t}); am.nodeId=SELF;
   return {am,sends,clock};
 }
 // seed a root that holds m1 and has KILLED it (tombstone present, m1 spliced from cache)

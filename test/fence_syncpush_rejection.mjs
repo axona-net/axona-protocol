@@ -23,6 +23,7 @@
 //
 // Run: node test/fence_syncpush_rejection.mjs
 import { AxonaManager } from '../src/pubsub/AxonaManager.js';
+import { sealTestDht } from './lib/testCapability.mjs';
 
 let n = 0, fail = 0;
 const ok = (m, c, extra = '') => {
@@ -68,7 +69,7 @@ function mk({ reject = true } = {}) {
     bridgeId: () => null,
     isReachableId: () => true,
   };
-  const am = new AxonaManager({ dht, now: () => Date.now(), rootReplicas: 2 });
+  const am = new AxonaManager({ dht: sealTestDht(dht), now: () => Date.now(), rootReplicas: 2 });
   am.nodeId = SELF;
   am.setLogSink(() => {});
   return { am, routed };

@@ -16,6 +16,7 @@
 
 import { AxonaPeer } from '../src/dht/AxonaPeer.js';
 import { Synapse }   from '../src/dht/Synapse.js';
+import { sealByOwnMethods } from './lib/testCapability.mjs';
 
 let passed = 0, failed = 0;
 function check(label, cond) {
@@ -42,7 +43,8 @@ function bindingTransport() {
   const calls = { open: [] };
   let bound = [];
   const ntf = {}, req = {};
-  return {
+  // E3b.4 (SEAL): the transport mock deposits its dispatch capability (no fallback).
+  return sealByOwnMethods({
     _calls: calls, _setBound: (a) => { bound = a; }, _ntf: ntf, _req: req,
     boundPeers:      () => bound,
     onPeerBound:     () => () => {},
@@ -52,17 +54,17 @@ function bindingTransport() {
     notify:          async () => {},
     onNotification:  (t, h) => { ntf[t] = h; },
     onRequest:       (t, h) => { req[t] = h; },
-  };
+  });
 }
 
 function simTransport() {
-  return {
+  return sealByOwnMethods({
     openConnection: async () => true,
     getLatency: () => 50,
     closeConnection: async () => {},
     notify: async () => {},
     onNotification: () => {}, onRequest: () => {},
-  };
+  });
 }
 
 function makePeer(transport) {

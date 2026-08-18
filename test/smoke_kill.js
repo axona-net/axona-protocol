@@ -16,6 +16,7 @@ import { createNodeIdentity, createAuthorIdentity } from '../src/identity/index.
 import { buildEnvelope }  from '../src/pubsub/envelope.js';
 import { buildKill, verifyKill } from '../src/pubsub/kill.js';
 import { KillError, ErrorCodes } from '../src/errors.js';
+import { sealTestDht } from './lib/testCapability.mjs';
 
 let passed = 0, failed = 0;
 function check(label, cond) {
@@ -41,7 +42,7 @@ function stubDht() {
 }
 
 function mkManager() {
-  const am = new AxonaManager({ dht: stubDht(), now: () => T });
+  const am = new AxonaManager({ dht: sealTestDht(stubDht()), now: () => T });
   const deliveries = [];
   am.onPubsubDelivery((topicId, json) => { try { deliveries.push(JSON.parse(json)); } catch {} });
   return { am, deliveries };
@@ -183,7 +184,7 @@ async function testPeerValidation() {
   console.log('\n── peer.kill input validation ──');
   const node   = await createNodeIdentity({ lat: 51.5074, lng: -0.1278 });
   const author = await createAuthorIdentity();
-  const am = new AxonaManager({ dht: stubDht(), now: () => T });
+  const am = new AxonaManager({ dht: sealTestDht(stubDht()), now: () => T });
   const peer = new AxonaPeer({ engine: { onEvent: () => () => {} }, node: { id: BigInt('0x' + node.id), alive: true }, axonaManager: am, nodeIdentity: node });
 
   // Bad msgId is rejected before any signer check (msgId validated first).

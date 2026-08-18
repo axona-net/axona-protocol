@@ -7,6 +7,7 @@
 //
 // Run: node test/smoke_epoch_adoption.mjs
 import { AxonaManager } from '../src/pubsub/AxonaManager.js';
+import { sealTestDht } from './lib/testCapability.mjs';
 
 let n = 0, fail = 0;
 const ok = (m, c, extra = '') => {
@@ -37,7 +38,7 @@ function mk(selfId = SELF) {
     findKClosest: async () => [],
     lookup: async () => null,
   };
-  const am = new AxonaManager({ dht, now: () => clock.t, rootReplicas: 0 });
+  const am = new AxonaManager({ dht: sealTestDht(dht), now: () => clock.t, rootReplicas: 0 });
   am.nodeId = selfId;
   const logs = [];
   am.setLogSink((lvl, evt, data) => logs.push({ lvl, evt, data }));

@@ -3177,6 +3177,19 @@ export class AxonaPeer extends DHT {
       },
     };
 
+    // REF-1.1 E3b.4 (SEAL — Aster boundary ruling 39012d73 / option 1): the
+    // default-DHT adapter is the receiver AxonaManager registers its 19 B1 pub/sub
+    // frames on. registerFrame now MANDATES a deposited capability — no literal-name
+    // fallback — so this adapter DEPOSITS its routed capability at construction, here,
+    // as a named registrar (one of the module-identity-frozen mechanism shims). The
+    // deposited closure delegates to the sealed peer's routed primitive through the
+    // allowlisted reader, exactly as the public onRoutedMessage above does; the public
+    // method is retained only for AxonaManager's readiness guard (AxonaManager.js:116).
+    // B1 binding stays on the adapter — it is NOT moved to the peer (option 1, not 2).
+    depositDispatchCapability(dht, {
+      routed: (type, h) => readDispatchCapability(peer).routed(type, h),
+    });
+
     // Receiver end of the routed fallback.  Mirrors browser_engine.
     // meta.targetId arrives over the wire as hex; convert to BigInt
     // before comparing to selfId.

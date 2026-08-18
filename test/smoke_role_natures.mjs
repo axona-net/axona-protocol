@@ -17,6 +17,7 @@
 import { AxonaManager } from '../src/pubsub/AxonaManager.js';
 import { roleNature } from '../src/pubsub/rootClaim.js';
 import { BACKUP_EVICT_MS } from '../src/pubsub/constants.js';
+import { sealTestDht } from './lib/testCapability.mjs';
 
 let n = 0, fail = 0;
 const ok = (m, c, extra = '') => { if (c) { console.log(`  ok ${++n} - ${m}`); } else { console.log(`  ✗  ${m} ${extra}`); fail++; } };
@@ -33,7 +34,7 @@ function mk({ neighbors = [], bridge = null, replicas = 2 } = {}) {
     routeMessage: (target, type, payload) => sends.push({ target, type, payload }),
     neighbors: () => neighbors, bridgeId: () => bridge,
   };
-  const am = new AxonaManager({ dht, now: () => clock.t, rootReplicas: replicas });
+  const am = new AxonaManager({ dht: sealTestDht(dht), now: () => clock.t, rootReplicas: replicas });
   am.nodeId = SELF;
   am.setLogSink((level, type, data) => logs.push({ level, type, data }));
   return { am, sends, logs, clock };

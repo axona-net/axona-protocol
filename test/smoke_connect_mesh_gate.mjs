@@ -41,6 +41,7 @@
 
 import { connect }               from '../src/connect.js';
 import { MeshUnreachableError }  from '../src/errors.js';
+import { sealByOwnMethods }      from './lib/testCapability.mjs';
 
 let passed = 0, failed = 0;
 const check = (label, cond) => {
@@ -91,7 +92,8 @@ function stubTransport({ meshBound = 0, seedPeerAfterMs = null, bindAfterMs = nu
   };
   if (seedPeerAfterMs != null) setTimeout(() => t.fireBound(), seedPeerAfterMs);
   if (bindAfterMs != null) setTimeout(() => { t.meshBound = 1; t.fireBound(0x8888n); }, bindAfterMs);
-  return t;
+  // E3b.4 (SEAL): the transport mock deposits its dispatch capability (no fallback).
+  return sealByOwnMethods(t);
 }
 
 const LOC = { lat: 40.71, lng: -74.0 };

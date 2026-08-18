@@ -17,6 +17,7 @@ import { AxonaManager } from '../src/pubsub/AxonaManager.js';
 import { buildEnvelope } from '../src/pubsub/envelope.js';
 import { resolveTopic } from '../src/pubsub/post.js';
 import { createAuthorIdentity } from '../src/identity/index.js';
+import { sealTestDht } from './lib/testCapability.mjs';
 
 let passed = 0, failed = 0;
 function check(label, cond) {
@@ -44,7 +45,7 @@ function makeManager() {
     sendDirect:       async (to, type, body) => { sent.push({ to, type, body }); return true; },
     findKClosest:     undefined,
   };
-  const am = new AxonaManager({ dht });
+  const am = new AxonaManager({ dht: sealTestDht(dht) });
   return { am, sent };
 }
 
@@ -182,7 +183,7 @@ function makeManagerK(kClosestFor) {
     sendDirect:      async (to, type, body) => { sent.push({ to, type, body }); return true; },
     findKClosest:    async (topicId, K) => kClosestFor(topicId).slice(0, K),
   };
-  return { am: new AxonaManager({ dht, rootSetSize: 5 }), sent };
+  return { am: new AxonaManager({ dht: sealTestDht(dht), rootSetSize: 5 }), sent };
 }
 
 async function testLazyAxonProximityGate() {
@@ -263,7 +264,7 @@ async function testAdoptRespectsMaxDirectSubs() {
     routeMessage: async () => {}, sendDirect: async (to, t, b) => { sent.push({ to }); return true; },
     findKClosest: undefined,
   };
-  const am = new AxonaManager({ dht, maxDirectSubs: 4 });
+  const am = new AxonaManager({ dht: sealTestDht(dht), maxDirectSubs: 4 });
   // An adopt message naming 50 distinct subscribers must not overfill us.
   const many = Array.from({ length: 50 }, (_, i) => hex(0x40 + i));
   await am._onAdoptSubscribers({ topicId: TOPIC, subscriberIds: many }, { fromId: ATTACKER });

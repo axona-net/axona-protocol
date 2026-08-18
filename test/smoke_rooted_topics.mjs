@@ -17,6 +17,7 @@
 //   node test/smoke_rooted_topics.mjs
 // =====================================================================
 import { AxonaManager } from '../src/pubsub/AxonaManager.js';
+import { sealTestDht } from './lib/testCapability.mjs';
 
 let n = 0, fail = 0;
 const ok = (m, c) => { if (c) { console.log(`  ok ${++n} - ${m}`); } else { console.log(`  ✗  ${m}`); fail++; } };
@@ -25,7 +26,7 @@ const SELF = REG | 0x11n, OPEN = REG | 0xa1n, OWNED = REG | 0xb2n, EMPTY = REG |
 
 function mk() {
   const dht = { getSelfId: () => SELF, onRoutedMessage: () => {}, verdictsSupported: false, routeMessage: () => {}, neighbors: () => [], bridgeId: () => null };
-  const am = new AxonaManager({ dht, now: () => 1_700_000_000_000 }); am.nodeId = SELF;
+  const am = new AxonaManager({ dht: sealTestDht(dht), now: () => 1_700_000_000_000 }); am.nodeId = SELF;
   return am;
 }
 // push a cache entry whose json carries a topic descriptor (rootedTopics JSON.parses .topic)

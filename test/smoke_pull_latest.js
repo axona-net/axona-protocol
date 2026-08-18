@@ -11,6 +11,7 @@
 // =====================================================================
 
 import { AxonaManager } from '../src/pubsub/AxonaManager.js';
+import { sealTestDht } from './lib/testCapability.mjs';
 
 let passed = 0, failed = 0;
 function check(label, cond) {
@@ -31,7 +32,7 @@ function setup(clockRef) {
     onEvent: () => () => {}, verdictsSupported: false, routeMessage: async () => {},
     sendDirect: async (to, type, payload) => { sent.push({ to, type, payload }); return true; },
   };
-  const am = new AxonaManager({ dht, now: () => clockRef.t });
+  const am = new AxonaManager({ dht: sealTestDht(dht), now: () => clockRef.t });
   const role = { isRoot: true, children: new Map(), replayCache: [] };
   am.axonRoles.set(TOPIC_BIG, role);
   return { am, role, sent };

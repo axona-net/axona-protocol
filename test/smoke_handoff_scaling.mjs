@@ -22,6 +22,7 @@ import { AxonaManager } from '../src/pubsub/AxonaManager.js';
 import { createNodeIdentity } from '../src/identity/index.js';
 import { regionCenter } from '../src/utils/region-names.js';
 import { HANDOFF_ACK_MS, HANDOFF_ACK_PER_TOPIC_MS, HANDOFF_ACK_MAX_MS } from '../src/pubsub/constants.js';
+import { sealTestDht } from './lib/testCapability.mjs';
 
 let passed = 0, failed = 0;
 const check = (label, cond, extra = '') => {
@@ -57,7 +58,7 @@ function makeManager({ selfBig, ackDelayFor }) {
       }, d);
     },
   };
-  const am = new AxonaManager({ dht, renewMs: 60_000, renewFastMs: 5_000, dropMs: 180_000 });
+  const am = new AxonaManager({ dht: sealTestDht(dht), renewMs: 60_000, renewFastMs: 5_000, dropMs: 180_000 });
   amRef = am;
   const origLog = am._log;
   am._log = function (lvl, tag, data) {

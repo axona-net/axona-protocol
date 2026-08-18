@@ -38,6 +38,7 @@
 //
 // Run: node test/fence_dispatch_contract.mjs
 import { AxonaManager } from '../src/pubsub/AxonaManager.js';
+import { sealTestDht } from './lib/testCapability.mjs';
 
 let n = 0, fail = 0;
 const ok = (m, c, extra = '') => {
@@ -64,7 +65,7 @@ function mk(report, { verdictsSupported = true } = {}) {
     neighbors: () => [NB1, NB2],
     bridgeId: () => null,
   };
-  const am = new AxonaManager({ dht, now: () => clock.t, rootReplicas: 2 });
+  const am = new AxonaManager({ dht: sealTestDht(dht), now: () => clock.t, rootReplicas: 2 });
   am.nodeId = SELF;
   am.setLogSink(() => {});
   return { am, clock, routed };
@@ -208,7 +209,7 @@ console.log('dispatch contract — a root records the evidence it has, not the h
     neighbors: () => [NB1, NB2],
     bridgeId: () => null,
   };
-  const am = new AxonaManager({ dht, now: () => clock.t, rootReplicas: 2 });
+  const am = new AxonaManager({ dht: sealTestDht(dht), now: () => clock.t, rootReplicas: 2 });
   am.nodeId = SELF; am.setLogSink(() => {});
   const T = REG | 0x9001n;
   am.pubsubSubscribe(T); am._becomeRoot(T);
@@ -239,7 +240,7 @@ console.log('dispatch contract — a root records the evidence it has, not the h
     neighbors: () => [],
     bridgeId: () => null,
   };
-  const am = new AxonaManager({ dht, now: () => clock.t, rootReplicas: 2 });
+  const am = new AxonaManager({ dht: sealTestDht(dht), now: () => clock.t, rootReplicas: 2 });
   am.nodeId = SELF; am.setLogSink(() => {});
   const T = REG | 0x9101n;
   am.pubsubSubscribe(T); am._becomeRoot(T);

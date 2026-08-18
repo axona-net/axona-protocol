@@ -13,6 +13,7 @@
 // Injected clock so the ~20s cadence + 70s lease are exercised in milliseconds.
 // Run: node test/smoke_metrics_demand.mjs
 import { AxonaManager } from '../src/pubsub/AxonaManager.js';
+import { sealTestDht } from './lib/testCapability.mjs';
 
 let n = 0, fail = 0;
 const ok = (m, c, extra = '') => { console.log(`  ${c ? '✓' : '✗'} ${m} ${extra}`); c ? n++ : fail++; };
@@ -32,7 +33,7 @@ function mk() {
     routeMessage: (_t, type, payload) => sent.push({ type, payload }),
     neighbors: () => [], bridgeId: () => null, findKClosest: async () => [],
   };
-  const am = new AxonaManager({ dht, now });
+  const am = new AxonaManager({ dht: sealTestDht(dht), now });
   am.nodeId = SELF;
   am.setMetricsPublisher((dataIdHex, snap) => { pubs.push({ dataIdHex, snap }); });
   return { am, sent, pubs };

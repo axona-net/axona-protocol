@@ -23,6 +23,7 @@ import { AxonaPeer }                 from '../src/dht/AxonaPeer.js';
 import { SimNetwork, simTransport }  from '../src/transport/sim/index.js';
 import { createNodeIdentity }        from '../src/identity/index.js';
 import { toHex, fromHex }            from '../src/utils/hexid.js';
+import { sealTestDht } from './lib/testCapability.mjs';
 
 let passed = 0, failed = 0;
 function check(label, cond) {
@@ -52,7 +53,7 @@ function mockMgr() {
     routeMessage: async () => {},
     sendDirect: async (t, type, p) => { sent.push({ t, type, p }); return true; },
   };
-  const mgr = new AxonaManager({ dht, now: () => T });
+  const mgr = new AxonaManager({ dht: sealTestDht(dht), now: () => T });
   return { mgr, sent, handlers };
 }
 const rootRole = () => ({ isRoot: true, isInRootSet: true, children: new Map(), replayCache: [], peerRoots: new Set(), roleCreatedAt: T, emptiedAt: 0 });

@@ -22,6 +22,7 @@ import { AxonaManager } from '../src/pubsub/AxonaManager.js';
 import { buildEnvelope, computeMsgId } from '../src/pubsub/envelope.js';
 import { deriveTopicId } from '../src/pubsub/post.js';
 import { createAuthorIdentity } from '../src/identity/index.js';
+import { sealTestDht } from './lib/testCapability.mjs';
 
 // v0.3: an envelope's topic is the structured DESCRIPTOR object, not a string.
 const TOPIC_DESC = (name) => ({ region: 0x89, owner: null, name, write: 'open' });
@@ -42,7 +43,7 @@ function makeManager() {
     verdictsSupported: false,   // audited: returns a push-count / undefined, never a verdict
     routeMessage: () => {}, sendDirect: async () => true, findKClosest: undefined,
   };
-  return new AxonaManager({ dht });
+  return new AxonaManager({ dht: sealTestDht(dht) });
 }
 
 async function main() {

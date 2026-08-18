@@ -21,6 +21,7 @@ import { AxonaManager } from '../src/pubsub/AxonaManager.js';
 import { buildEnvelope } from '../src/pubsub/envelope.js';
 import { deriveTopicIdBig } from '../src/pubsub/post.js';
 import { createAuthorIdentity } from '../src/identity/index.js';
+import { sealTestDht } from './lib/testCapability.mjs';
 
 const TRIALS = Number(process.env.TRIALS || 40);
 const SUBS = 12, PRE = 8, DROP = 4, FRESH = 4;
@@ -45,7 +46,7 @@ class Fabric {
         [...self.nodes.entries()].filter(([, n]) => n.alive).map(([id]) => id)
           .sort((a, b) => { const da = a ^ target, db = b ^ target; return da < db ? -1 : da > db ? 1 : 0; }).slice(0, _k),
     };
-    const am = new AxonaManager({ dht, now: () => self.clock, renewMs: 60_000, renewFastMs: 5_000, dropMs: 180_000 });
+    const am = new AxonaManager({ dht: sealTestDht(dht), now: () => self.clock, renewMs: 60_000, renewFastMs: 5_000, dropMs: 180_000 });
     const rec = { id: idBig, am, handlers, alive: true, got: [] };
     am.onPubsubDelivery((_t, _j, msgId) => rec.got.push(msgId));
     this.nodes.set(idBig, rec);

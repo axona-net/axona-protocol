@@ -15,6 +15,7 @@ import { buildEnvelope } from '../src/pubsub/envelope.js';
 import { buildKill } from '../src/pubsub/kill.js';
 import { deriveTopicIdBig } from '../src/pubsub/post.js';
 import { createAuthorIdentity } from '../src/identity/index.js';
+import { sealTestDht } from './lib/testCapability.mjs';
 
 let n = 0, fail = 0;
 const ok = (m, c, extra = '') => {
@@ -40,7 +41,7 @@ function mk(selfId) {
     bridgeId: () => null,
     lookup: async () => ({ path: [idHex(selfId ^ 0x11n)] }),
   };
-  const am = new AxonaManager({ dht, now: () => clock.t, rootReplicas: 2 });
+  const am = new AxonaManager({ dht: sealTestDht(dht), now: () => clock.t, rootReplicas: 2 });
   am.nodeId = selfId;
   am.setLogSink(() => {});
   return { am, clock, sends };

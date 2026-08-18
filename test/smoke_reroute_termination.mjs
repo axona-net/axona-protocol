@@ -34,6 +34,7 @@
 import { AxonaManager } from '../src/pubsub/AxonaManager.js';
 import { T } from '../src/pubsub/constants.js';
 import { idHex } from '../src/pubsub/ids.js';
+import { sealTestDht } from './lib/testCapability.mjs';
 
 let pass = 0, fail = 0;
 const ok = (cond, name) => { if (cond) { pass++; console.log(`  ✓ ${name}`); } else { fail++; console.log(`  ✗ ${name}`); } };
@@ -53,7 +54,7 @@ function mkManager({ neverRoot = true } = {}) {
     peers: () => [],
     onRoutedMessage: () => {},        // required by the AxonaManager contract
   };
-  const m = new AxonaManager({ dht, neverRoot, now: () => 0 });
+  const m = new AxonaManager({ dht: sealTestDht(dht), neverRoot, now: () => 0 });
   const logs = [];
   m._log = (level, event, ctx) => logs.push({ level, event, ctx });
   return { m, sent, logs };

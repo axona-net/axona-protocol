@@ -56,6 +56,7 @@ import { AxonaManager } from '../src/pubsub/AxonaManager.js';
 import { buildEnvelope } from '../src/pubsub/envelope.js';
 import { deriveTopicIdBig } from '../src/pubsub/post.js';
 import { createAuthorIdentity } from '../src/identity/index.js';
+import { sealTestDht } from './lib/testCapability.mjs';
 
 const idHexF = (b) => b.toString(16).padStart(66, '0');
 const fabId = (tag) => BigInt('0x89' + createHash('sha256').update(String(tag)).digest('hex'));
@@ -79,7 +80,7 @@ class Fabric {
           .sort((a, b) => { const da = a ^ target, db = b ^ target; return da < db ? -1 : da > db ? 1 : 0; }).slice(0, k),
       neighbors: () => [...self.nodes.entries()].filter(([, n]) => n.alive).map(([id]) => idHexF(id)),
     };
-    const am = new AxonaManager({ dht, now: () => self.clock, renewMs: 60_000, renewFastMs: 5_000, dropMs: 600_000 });
+    const am = new AxonaManager({ dht: sealTestDht(dht), now: () => self.clock, renewMs: 60_000, renewFastMs: 5_000, dropMs: 600_000 });
     // Arm switch: disable ONLY read-repair to simulate 4.35 (keep empty-root
     // probe + publish/kill retries + leave-handoff — everything else 4.36).
     if (!self.repairOn) am._readRepair = async () => {};

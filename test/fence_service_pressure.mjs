@@ -35,6 +35,7 @@ import {
   OBLIGATIONS, DROP_MS, SATURATION_PRESSURE, HELLO_DEADLINE_MS,
   ROOT_REPLICATE_FULL_MS,
 } from '../src/pubsub/constants.js';
+import { sealTestDht } from './lib/testCapability.mjs';
 
 let n = 0, fail = 0;
 const ok = (m, c, extra = '') => {
@@ -58,7 +59,7 @@ function mk() {
     neighbors: () => [idHex(REG | 0xaa0n), idHex(REG | 0xaafn)],
     bridgeId: () => null,
   };
-  const am = new AxonaManager({ dht, now: () => clock.t, rootReplicas: 2 });
+  const am = new AxonaManager({ dht: sealTestDht(dht), now: () => clock.t, rootReplicas: 2 });
   am.nodeId = SELF;
   am.setLogSink(() => {});
   return { am, clock, sends };
@@ -233,7 +234,7 @@ console.log('service pressure — the capacity metric can report its own failure
     routeMessage: () => {},
     neighbors: () => [], bridgeId: () => null,
   };
-  const am = new AxonaManager({ dht, now: () => clock.t, rootReplicas: 2 });
+  const am = new AxonaManager({ dht: sealTestDht(dht), now: () => clock.t, rootReplicas: 2 });
   am.nodeId = SELF; am.setLogSink(() => {});
   am.pubsubSubscribe(REG | 0x9001n);            // createdAt === 0, a REAL instant
   clock.t = DROP_MS + 5_000;

@@ -26,6 +26,7 @@ import {
   T, DROP_MS, SATURATION_PRESSURE, HELLO_DEADLINE_MS,
   ROOT_REPLICATE_FULL_MS, REPLICATE_FULL_BUDGET,
 } from '../src/pubsub/constants.js';
+import { sealTestDht } from './lib/testCapability.mjs';
 
 const REG = 0x87n << 248n;
 const idHex = (b) => b.toString(16).padStart(66, '0');
@@ -44,7 +45,7 @@ function mk() {
     neighbors: () => [idHex(REG | 0xaa0n), idHex(REG | 0xaafn)],
     bridgeId: () => null,
   };
-  const am = new AxonaManager({ dht, now: () => clock.t, rootReplicas: 2 });
+  const am = new AxonaManager({ dht: sealTestDht(dht), now: () => clock.t, rootReplicas: 2 });
   am.nodeId = SELF;
   am.setLogSink(() => {});
   return { am, sends, clock };

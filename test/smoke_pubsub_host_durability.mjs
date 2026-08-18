@@ -24,6 +24,7 @@ import { AxonaManager } from '../src/pubsub/AxonaManager.js';
 import { buildEnvelope } from '../src/pubsub/envelope.js';
 import { deriveTopicIdBig } from '../src/pubsub/post.js';
 import { createNodeIdentity, createAuthorIdentity } from '../src/identity/index.js';
+import { sealTestDht } from './lib/testCapability.mjs';
 
 let passed = 0, failed = 0;
 const check = (label, cond, extra = '') => {
@@ -46,7 +47,7 @@ class Fabric {
         self.queue.push({ dest, type, payload, meta: { targetId: target, isTerminal: true, hopCount: 1, fromId: idHex(idBig) } });
       },
     };
-    const am = new AxonaManager({ dht, now: () => self.clock, renewMs: 60_000, dropMs: 180_000 });
+    const am = new AxonaManager({ dht: sealTestDht(dht), now: () => self.clock, renewMs: 60_000, dropMs: 180_000 });
     const rec = { id: idBig, am, handlers, alive: true, got: [] };
     am.onPubsubDelivery((_t, _j, msgId, ts) => rec.got.push({ msgId, ts }));
     this.nodes.set(idBig, rec);

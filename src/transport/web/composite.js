@@ -76,20 +76,22 @@ export class CompositeTransport extends Transport {
     });
   }
 
-  // REF-1.1 E3b.2b: fan one handler onto a single sub-transport through its
-  // capability channel. The literal-method fallback is TRANSITIONAL — it only
-  // fires for a sub that is not yet sealed, and is removed in E3b.2c once every
-  // transport is sealed. (Named — never computed — so the E0 fence stays green.)
+  // REF-1.1 E3b.4 (SEAL): fan one handler onto a single sub-transport through its
+  // capability channel ONLY. Every sub-transport is a sealed transport that deposits
+  // at construction, so the literal-method fallback (t.onRequest / t.onNotification)
+  // is GONE — an undeposited sub cannot receive a fan-out, it throws. This keeps the
+  // composite fan-out on the same mandatory-capability path as registerFrame (Aster
+  // boundary ruling 39012d73 / option 1): no receiver reaches a raw primitive by name.
   _fanOutRequest(t, type, handler) {
     const cap = readDispatchCapability(t);
-    if (cap?.request) { cap.request(type, handler); return; }
-    t.onRequest(type, handler);
+    if (typeof cap?.request !== 'function') throw new TypeError('CompositeTransport._fanOutRequest: sub-transport has no deposited request dispatch capability (E3 seal: every sub-transport must deposit at construction)');
+    cap.request(type, handler);
   }
 
   _fanOutNotification(t, type, handler) {
     const cap = readDispatchCapability(t);
-    if (cap?.notification) { cap.notification(type, handler); return; }
-    t.onNotification(type, handler);
+    if (typeof cap?.notification !== 'function') throw new TypeError('CompositeTransport._fanOutNotification: sub-transport has no deposited notification dispatch capability (E3 seal: every sub-transport must deposit at construction)');
+    cap.notification(type, handler);
   }
 
   /**

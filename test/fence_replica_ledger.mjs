@@ -34,6 +34,7 @@
 //
 // Run: node test/fence_replica_ledger.mjs
 import { AxonaManager } from '../src/pubsub/AxonaManager.js';
+import { sealTestDht } from './lib/testCapability.mjs';
 
 let n = 0, fail = 0;
 const ok = (m, c, extra = '') => {
@@ -61,7 +62,7 @@ function mk({ pushThrows }) {
     neighbors: () => [NB1, NB2],
     bridgeId: () => null,
   };
-  const am = new AxonaManager({ dht, now: () => clock.t, rootReplicas: 2 });
+  const am = new AxonaManager({ dht: sealTestDht(dht), now: () => clock.t, rootReplicas: 2 });
   am.nodeId = SELF;
   am.setLogSink(() => {});
   // The transport is the thing that fails. A synchronous throw out of _syncPush

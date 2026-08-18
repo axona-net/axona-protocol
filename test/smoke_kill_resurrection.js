@@ -26,6 +26,7 @@ import { createAuthorIdentity } from '../src/identity/index.js';
 import { buildEnvelope }  from '../src/pubsub/envelope.js';
 import { buildKill }      from '../src/pubsub/kill.js';
 import { toHex }          from '../src/utils/hexid.js';
+import { sealTestDht } from './lib/testCapability.mjs';
 
 let passed = 0, failed = 0;
 function check(label, cond) {
@@ -83,7 +84,7 @@ class MockNet {
     const dht = this.makeDht(selfId);
     const net = this;
     const mgr = new AxonaManager({
-      dht, now: () => T,
+      dht: sealTestDht(dht), now: () => T,
       emitLog: (level, code, data) => net.logs.push({ node: tag, code, ...data }),
     });
     mgr._dht = dht;

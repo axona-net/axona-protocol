@@ -16,6 +16,7 @@
 // Run: node test/smoke_strict_door_boundaries.mjs
 // =====================================================================
 import { registerFrame } from '../src/registry/index.js';
+import { sealByOwnMethods } from './lib/testCapability.mjs';
 import { buildBoundary1Registry } from '../src/pubsub/boundary1Registry.js';
 import { buildBoundary2Registry } from '../src/transport/boundary2Registry.js';
 import { buildBoundary3Registry } from '../src/transport/boundary3Registry.js';
@@ -28,7 +29,7 @@ const check = (l, ok, x = '') => { console.log(`  ${ok ? '✓' : '✗'} ${l}${ok
 const threw = (fn) => { try { fn(); return false; } catch { return true; } };
 // A receiver carrying all three primitives, each returning a tag so a bound
 // registration is observable.
-const recv = () => ({ onRequest: (w) => `req:${w}`, onNotification: (w) => `notif:${w}`, onRoutedMessage: (w) => `routed:${w}` });
+const recv = () => sealByOwnMethods({ onRequest: (w) => `req:${w}`, onNotification: (w) => `notif:${w}`, onRoutedMessage: (w) => `routed:${w}` });
 const KINDS = ['request', 'notification', 'routed'];
 
 console.log('\nREF-1.1 E2.0 — strict composite/bare door, proven in EACH B1–B5 registry + B6\n');

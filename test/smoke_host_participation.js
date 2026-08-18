@@ -26,6 +26,7 @@ import { AxonaManager }   from '../src/pubsub/AxonaManager.js';
 import { createAuthorIdentity } from '../src/identity/index.js';
 import { buildEnvelope }  from '../src/pubsub/envelope.js';
 import { toHex }          from '../src/utils/hexid.js';
+import { sealTestDht } from './lib/testCapability.mjs';
 
 let passed = 0, failed = 0;
 function check(label, cond) {
@@ -71,7 +72,7 @@ class MockNet {
   }
   spawn(selfId) {
     const dht = this.makeDht(selfId);
-    const mgr = new AxonaManager({ dht, now: () => T });
+    const mgr = new AxonaManager({ dht: sealTestDht(dht), now: () => T });
     mgr._dht = dht; this.mgrs.set(selfId, mgr); return mgr;
   }
   sendsOf(type, from) { return this.sends.filter(s => s.type === type && (!from || s.from === from)); }

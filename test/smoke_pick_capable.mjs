@@ -7,6 +7,7 @@
 // Run: node test/smoke_pick_capable.mjs
 import { AxonaManager } from '../src/pubsub/AxonaManager.js';
 import { idHex, idBig } from '../src/pubsub/ids.js';
+import { sealTestDht } from './lib/testCapability.mjs';
 
 let n = 0, fail = 0;
 const ok = (m, c, extra = '') => {
@@ -24,7 +25,7 @@ function mk(selfId, { neighbors = [], capable = new Set(), withIsCapable = true 
     bridgeId: () => null,
   };
   if (withIsCapable) dht.isCapable = (hex) => capable.has(String(hex).toLowerCase());
-  const am = new AxonaManager({ dht, now: () => 1 });
+  const am = new AxonaManager({ dht: sealTestDht(dht), now: () => 1 });
   am.nodeId = selfId;
   am.setLogSink(() => {});
   return am;

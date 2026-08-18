@@ -29,6 +29,7 @@ import { createNodeIdentity } from '../src/identity/index.js';
 import { regionCenter } from '../src/utils/region-names.js';
 import { buildEnvelope } from '../src/pubsub/envelope.js';
 import { deriveTopicIdBig } from '../src/pubsub/post.js';
+import { sealTestDht } from './lib/testCapability.mjs';
 
 let passed = 0, failed = 0;
 const check = (label, cond, extra = '') => {
@@ -49,7 +50,7 @@ function makeManager(selfBig) {
     verdictsSupported: false,   // audited: returns a push-count / undefined, never a verdict
     routeMessage: (target, type, payload) => sent.push({ type, payload }),
   };
-  const am = new AxonaManager({ dht, renewMs: 60_000, renewFastMs: 5_000, dropMs: 180_000 });
+  const am = new AxonaManager({ dht: sealTestDht(dht), renewMs: 60_000, renewFastMs: 5_000, dropMs: 180_000 });
   const origLog = am._log;
   am._log = function (lvl, tag, data) {
     if (lvl === 'warn') warnings.push({ tag, data });

@@ -30,6 +30,7 @@ import { SimNetwork, simTransport } from '../src/transport/sim/index.js';
 import { createNodeIdentity }       from '../src/identity/index.js';
 import { fromHex }                  from '../src/utils/hexid.js';
 import { frameRegistryCanaryVerdict, shadowEnabled, setShadowEnabled } from '../src/registry/index.js';
+import { sealTestDht } from './lib/testCapability.mjs';
 
 let passed = 0, failed = 0;
 const check = (label, cond, extra = '') => { if (cond) { console.log(`  ✓ ${label}`); passed++; } else { console.log(`  ✗ ${label} ${extra}`); failed++; } };
@@ -40,7 +41,7 @@ console.log('\nREF-1.1 M1 — frame-registry canary surface (shadow)\n');
 
 // ── A. Manager fold, DEFAULT-OFF: inert, no armed registry ──
 {
-  const am = new AxonaManager({ dht: fakeDht() });
+  const am = new AxonaManager({ dht: sealTestDht(fakeDht()) });
   const sh = am.frameRegistryShadow();
   const su = am.frameRegistrySummary();
   check('A. default-off: frameRegistryShadow().built === false, rows 0, no traces',
@@ -52,7 +53,7 @@ console.log('\nREF-1.1 M1 — frame-registry canary surface (shadow)\n');
 
 // ── B. Manager fold, ARMED but no traffic: built, empty distribution ──
 {
-  const am = new AxonaManager({ dht: fakeDht(), frameRegistry: true });
+  const am = new AxonaManager({ dht: sealTestDht(fakeDht()), frameRegistry: true });
   const sh = am.frameRegistryShadow();
   const su = am.frameRegistrySummary();
   check('B. armed: frameRegistryShadow().built === true, rows > 0 (the Boundary-1 table)',
@@ -65,7 +66,7 @@ console.log('\nREF-1.1 M1 — frame-registry canary surface (shadow)\n');
 //    exact invariant counters. Drive via _ingestFrameTrace (the registry sink's
 //    single path), NOT a raw ring push, so lifetime counters are exercised. ──
 {
-  const am = new AxonaManager({ dht: fakeDht(), frameRegistry: true });
+  const am = new AxonaManager({ dht: sealTestDht(fakeDht()), frameRegistry: true });
   // Mix clean + fault + a verdict that BREAKS the invariant (an observer that
   // threw), so we prove the fold surfaces a violation rather than hiding it.
   for (const r of [
@@ -97,7 +98,7 @@ console.log('\nREF-1.1 M1 — frame-registry canary surface (shadow)\n');
 //    counters MUST still report it — otherwise the canary false-passes a dirty
 //    window. Proves faults/verdicts survive rollover and dropped/ringSize track. ──
 {
-  const am = new AxonaManager({ dht: fakeDht(), frameRegistry: true });
+  const am = new AxonaManager({ dht: sealTestDht(fakeDht()), frameRegistry: true });
   am._ingestFrameTrace({ type: 'pubsub:KILL', verdict: 'threw', faults: ['schema:type-mismatch'] });
   for (let i = 0; i < 1030; i++) am._ingestFrameTrace({ type: 'pubsub:PUB', verdict: 'passed', faults: [] });
   const ring = am.frameRegistryShadow();
@@ -240,7 +241,7 @@ console.log('\nREF-1.1 M1 — frame-registry canary surface (shadow)\n');
 // ── G2. observing reflects the LIVE runtime shadow gate on a real manager ──
 {
   const prior = shadowEnabled();
-  const am = new AxonaManager({ dht: fakeDht(), frameRegistry: true });
+  const am = new AxonaManager({ dht: sealTestDht(fakeDht()), frameRegistry: true });
   setShadowEnabled(true);
   check('G2. armed manager + shadow ON → summary.observing===true, verdict ready',
     am.frameRegistrySummary().observing === true && frameRegistryCanaryVerdict(am.frameRegistrySummary()).ready === true);

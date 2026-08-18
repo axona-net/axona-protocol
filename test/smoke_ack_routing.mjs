@@ -12,6 +12,7 @@ import { T } from '../src/pubsub/constants.js';
 import { signAckProof, PURPOSE, OP } from '../src/pubsub/ackProof.js';
 import { createNodeIdentity } from '../src/identity/index.js';
 import { idHex, idBig } from '../src/pubsub/ids.js';
+import { sealTestDht } from './lib/testCapability.mjs';
 
 let n = 0, fail = 0;
 const ok = (m, c, extra = '') => {
@@ -29,7 +30,7 @@ function mkOwner(selfId) {
     neighbors: () => [],
     bridgeId: () => null,
   };
-  const am = new AxonaManager({ dht, now: () => clock.t });
+  const am = new AxonaManager({ dht: sealTestDht(dht), now: () => clock.t });
   am.nodeId = selfId;
   am.setLogSink(() => {});
   am._rootBeacons = new Map();       // unversioned flights (epoch 0)

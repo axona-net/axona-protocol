@@ -6,6 +6,7 @@
 // Run: node test/smoke_boundary5_registry.mjs
 import { buildBoundary5Registry, boundary5Rows, rowDefs, frameWiring } from '../src/dht/boundary5Registry.js';
 import { registerFrame } from '../src/registry/index.js';
+import { sealByOwnMethods } from './lib/testCapability.mjs';
 
 let passed = 0, failed = 0;
 const check = (l, ok, x = '') => { console.log(`  ${ok ? '✓' : '✗'} ${l}${ok ? '' : ' ' + x}`); ok ? passed++ : failed++; };
@@ -39,7 +40,7 @@ check('W1. wiring: 10 bare-wire keys; each value carries { wire, transportKind }
 // is single-primitive and bare-keyed, so under the STRICT composite/bare partition
 // (Aster E2.0 re-review 2795636a cond.2, correction a767b880) a SUPPLIED
 // transportKind is composite-only and ALWAYS refuses here — bind only by omitting.
-const recv = { onRequest: (wire) => `req:${wire}`, onNotification: (wire) => `notif:${wire}` };
+const recv = sealByOwnMethods({ onRequest: (wire) => `req:${wire}`, onNotification: (wire) => `notif:${wire}` });
 const reg = buildBoundary5Registry();
 const threw = (fn) => { try { fn(); return false; } catch { return true; } };
 let boundOk = 0, suppliedRefused = 0;
@@ -71,7 +72,7 @@ check('R5. a malformed transportKind is rejected', threw(() => registerFrame(rec
 {
   const tr = [];
   const reg5 = buildBoundary5Registry({ enabled: false, sink: (t) => tr.push(t) });
-  const capture = { onRequest: (wire, h) => h, onNotification: (wire, h) => h };
+  const capture = sealByOwnMethods({ onRequest: (wire, h) => h, onNotification: (wire, h) => h });
   let allVerbatim = true, allRethrow = true;
   for (const d of defs) {
     const wrapped = registerFrame(capture, d.wire, (a, b) => `ran:${d.wire}:${a}`, { registry: reg5 });   // bare — transportKind OMITTED

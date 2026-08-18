@@ -14,6 +14,7 @@
 // Run: node test/smoke_pubsub_kill_heal.mjs
 // =====================================================================
 import { AxonaManager } from '../src/pubsub/AxonaManager.js';
+import { sealTestDht } from './lib/testCapability.mjs';
 
 let n = 0, fail = 0;
 const ok = (m, c) => { if (c) { console.log(`  ok ${++n} - ${m}`); } else { console.log(`  ✗  ${m}`); fail++; } };
@@ -30,7 +31,7 @@ function mkManager({ closest }) {
     neighbors: () => [],
     async findKClosest() { return closest != null ? [closest] : []; },
   };
-  const am = new AxonaManager({ dht, now: () => Date.now(), renewMs: 60_000, renewFastMs: 5_000, dropMs: 180_000 });
+  const am = new AxonaManager({ dht: sealTestDht(dht), now: () => Date.now(), renewMs: 60_000, renewFastMs: 5_000, dropMs: 180_000 });
   am.nodeId = selfId;
   return { am, sends, selfId };
 }

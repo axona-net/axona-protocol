@@ -10,6 +10,7 @@
 //   3. pubsubHost routes its announce via _sendSubscribe (a SUB toward the hinted root),
 //      not a bare host-send, and registers the hosted topic
 import { AxonaManager } from '../src/pubsub/AxonaManager.js';
+import { sealTestDht } from './lib/testCapability.mjs';
 
 let n = 0, fail = 0;
 const ok = (m, c) => { if (c) { console.log(`  ok ${++n} - ${m}`); } else { console.log(`  ✗  ${m}`); fail++; } };
@@ -28,7 +29,7 @@ function mk() {
     bridgeId: () => null,
     async findKClosest() { return []; },
   };
-  const am = new AxonaManager({ dht, now: () => clock.t }); am.nodeId = SELF;
+  const am = new AxonaManager({ dht: sealTestDht(dht), now: () => clock.t }); am.nodeId = SELF;
   return { am, sends, clock };
 }
 // pre-warm the root hint the cheap, deterministic way: a live root beacon.

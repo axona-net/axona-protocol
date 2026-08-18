@@ -32,6 +32,7 @@
 
 import { AxonaManager } from '../src/pubsub/AxonaManager.js';
 import { TICK_LAG_WINDOW, HELLO_DEADLINE_MS, SATURATION_PRESSURE } from '../src/pubsub/constants.js';
+import { sealTestDht } from './lib/testCapability.mjs';
 
 let n = 0, fail = 0;
 const ok = (m, c, extra = '') => {
@@ -48,7 +49,7 @@ function mk() {
     getSelfId: () => SELF, onRoutedMessage: () => {}, verdictsSupported: false, routeMessage: () => {},
     neighbors: () => [PEER], bridgeId: () => null, findKClosest: async () => [PEER],
   };
-  const am = new AxonaManager({ dht, now: () => clock.t, refreshIntervalMs: TICK });
+  const am = new AxonaManager({ dht: sealTestDht(dht), now: () => clock.t, refreshIntervalMs: TICK });
   am.nodeId = SELF;
   am._joinedAt = clock.t - 200_000;          // past grace, so `seated` is not the variable
   return { am, clock };

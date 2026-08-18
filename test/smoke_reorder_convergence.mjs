@@ -36,6 +36,7 @@ import { buildEnvelope } from '../src/pubsub/envelope.js';
 import { buildKill } from '../src/pubsub/kill.js';
 import { deriveTopicIdBig } from '../src/pubsub/post.js';
 import { createAuthorIdentity } from '../src/identity/index.js';
+import { sealTestDht } from './lib/testCapability.mjs';
 
 let passed = 0, failed = 0;
 const check = (label, cond, extra = '') => {
@@ -56,7 +57,7 @@ function mkHolder(topicBig, nowRef) {
     neighbors: () => [],
     bridgeId: () => null,
   };
-  const am = new AxonaManager({ dht, now: () => nowRef.t });
+  const am = new AxonaManager({ dht: sealTestDht(dht), now: () => nowRef.t });
   am.nodeId = dht.getSelfId();
   am.setLogSink(() => {});
   const role = makeRole(topicBig, true, nowRef.t);

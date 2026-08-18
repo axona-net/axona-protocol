@@ -16,6 +16,7 @@
 import { AxonaManager } from '../src/pubsub/AxonaManager.js';
 import { createNodeIdentity } from '../src/identity/index.js';
 import { regionCenter } from '../src/utils/region-names.js';
+import { sealTestDht } from './lib/testCapability.mjs';
 
 let passed = 0, failed = 0;
 const check = (label, cond, extra = '') => {
@@ -38,7 +39,7 @@ function makeManager({ selfBig, findKClosest, lookup, onRoute }) {
     ...(findKClosest ? { findKClosest } : {}),
     ...(lookup ? { lookup } : {}),
   };
-  const am = new AxonaManager({ dht, renewMs: 60_000, renewFastMs: 5_000, dropMs: 180_000 });
+  const am = new AxonaManager({ dht: sealTestDht(dht), renewMs: 60_000, renewFastMs: 5_000, dropMs: 180_000 });
   return { am, handlers, dht };
 }
 

@@ -16,6 +16,7 @@
 // =====================================================================
 
 import { AxonaManager } from '../src/pubsub/AxonaManager.js';
+import { sealTestDht } from './lib/testCapability.mjs';
 
 let passed = 0, failed = 0;
 function check(label, cond) {
@@ -39,7 +40,7 @@ function makeManager() {
     sendDirect:      async () => true,
     findKClosest:    undefined,
   };
-  const am = new AxonaManager({ dht });
+  const am = new AxonaManager({ dht: sealTestDht(dht) });
   const delivered = [];
   am._deliveryCallback = (_t, _j, publishId) => delivered.push(publishId);
   return { am, delivered };

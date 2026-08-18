@@ -26,6 +26,7 @@ import { buildEnvelope } from '../src/pubsub/envelope.js';
 import { deriveTopicIdBig } from '../src/pubsub/post.js';
 import { createNodeIdentity, createAuthorIdentity } from '../src/identity/index.js';
 import { regionCenter } from '../src/utils/region-names.js';
+import { sealTestDht } from './lib/testCapability.mjs';
 const __LOC = regionCenter('useast');
 
 let passed = 0, failed = 0;
@@ -65,7 +66,7 @@ class DivergentFabric {
         return best === null ? { path: [] } : { path: [idHex(best)] };
       },
     };
-    rec.am = new AxonaManager({ dht, now: () => self.clock, renewMs: 60_000, renewFastMs: 5_000, dropMs: 180_000 });
+    rec.am = new AxonaManager({ dht: sealTestDht(dht), now: () => self.clock, renewMs: 60_000, renewFastMs: 5_000, dropMs: 180_000 });
     rec.am.onPubsubDelivery((_t, _j, msgId) => rec.got.push(msgId));
     this.nodes.set(idBig, rec);
     return rec;

@@ -19,6 +19,7 @@
 // Run: node test/smoke_pull_requester_gate.mjs
 
 import { AxonaManager } from '../src/pubsub/AxonaManager.js';
+import { sealTestDht } from './lib/testCapability.mjs';
 
 let n = 0, fail = 0;
 const ok = (m, c, extra = '') => {
@@ -42,7 +43,7 @@ function mk() {
     neighbors: () => [idHex(REG | 0xaa0n)],
     bridgeId: () => null,
   };
-  const am = new AxonaManager({ dht, now: () => Date.now(), rootReplicas: 2 });
+  const am = new AxonaManager({ dht: sealTestDht(dht), now: () => Date.now(), rootReplicas: 2 });
   am.nodeId = SELF;
   am.setLogSink(() => {});
   return { am, sends };

@@ -18,6 +18,7 @@
 
 import { AxonaManager } from '../src/pubsub/AxonaManager.js';
 import { toHex }        from '../src/utils/hexid.js';
+import { sealTestDht } from './lib/testCapability.mjs';
 
 let passed = 0, failed = 0;
 function check(label, cond) {
@@ -39,7 +40,7 @@ function mk() {
     routeMessage: async () => {},
     findKClosest: undefined,
   };
-  const am = new AxonaManager({ dht, now: () => T });
+  const am = new AxonaManager({ dht: sealTestDht(dht), now: () => T });
   return { am, sent };
 }
 

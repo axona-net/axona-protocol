@@ -21,6 +21,7 @@
 // Run: node test/smoke_reachable_root.mjs
 // =====================================================================
 import { AxonaManager } from '../src/pubsub/AxonaManager.js';
+import { sealTestDht } from './lib/testCapability.mjs';
 
 let n = 0, fail = 0;
 const ok = (m, c) => { if (c) { console.log(`  ok ${++n} - ${m}`); } else { console.log(`  ✗  ${m}`); fail++; } };
@@ -46,7 +47,7 @@ function mkManager({ neighbors = [], bridge = null, closest = GHOST } = {}) {
     async findKClosest() { return closest != null ? [closest] : []; },
     async lookup() { return { path: [SELF], hops: 0, found: false }; },
   };
-  const am = new AxonaManager({ dht, now: () => clock.t });
+  const am = new AxonaManager({ dht: sealTestDht(dht), now: () => clock.t });
   am.nodeId = SELF;
   return { am, clock };
 }

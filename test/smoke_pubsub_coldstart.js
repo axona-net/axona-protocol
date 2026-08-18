@@ -21,6 +21,7 @@ import { createAuthorIdentity } from '../src/identity/index.js';
 import { buildEnvelope }  from '../src/pubsub/envelope.js';
 import { deriveTopicId }  from '../src/pubsub/post.js';
 import { toHex }          from '../src/utils/hexid.js';
+import { sealTestDht } from './lib/testCapability.mjs';
 
 // v0.3: an envelope's topic is the structured DESCRIPTOR object. The root binds
 // the SIGNED descriptor to the routed topic id during anti-entropy, so each
@@ -67,7 +68,7 @@ class MockNet {
   }
   spawn(selfId) {
     const dht = this.makeDht(selfId);
-    const mgr = new AxonaManager({ dht, now: () => T });
+    const mgr = new AxonaManager({ dht: sealTestDht(dht), now: () => T });
     mgr._dht = dht; this.mgrs.set(selfId, mgr); return mgr;
   }
 }

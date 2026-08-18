@@ -8,6 +8,7 @@
 // Run: node test/smoke_root_incarnation.mjs
 import { AxonaManager } from '../src/pubsub/AxonaManager.js';
 import { T } from '../src/pubsub/constants.js';
+import { sealTestDht } from './lib/testCapability.mjs';
 
 let n = 0, fail = 0;
 const ok = (m, c, extra = '') => {
@@ -40,7 +41,7 @@ function mk() {
     findKClosest: async () => [],
     lookup: async () => null,
   };
-  const am = new AxonaManager({ dht, now: () => clock.t, rootReplicas: 2 });
+  const am = new AxonaManager({ dht: sealTestDht(dht), now: () => clock.t, rootReplicas: 2 });
   am.nodeId = SELF;
   am.setLogSink(() => {});
   return { am, clock, sends };

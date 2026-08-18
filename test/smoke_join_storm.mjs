@@ -23,6 +23,7 @@ import {
   REPLICATE_FULL_BUDGET, INGEST_QUEUE_MAX,
   MESH_REWARM_MIN, MESH_REWARM_TICKS, MESH_REWARM_COOLDOWN_MS,
 } from '../src/pubsub/constants.js';
+import { sealTestDht } from './lib/testCapability.mjs';
 
 let n = 0, fail = 0;
 const ok = (m, c, extra = '') => { if (c) { console.log(`  ok ${++n} - ${m}`); } else { console.log(`  ✗  ${m} ${extra}`); fail++; } };
@@ -41,7 +42,7 @@ function mk({ neighbors = [NEWCOMER], kClosest = [SELF, NEWCOMER], replicas = 1,
     findKClosest: async () => kClosest,
     ...(reintegrate ? { reintegrate } : {}),
   };
-  const am = new AxonaManager({ dht, now: () => clock.t, rootReplicas: replicas });
+  const am = new AxonaManager({ dht: sealTestDht(dht), now: () => clock.t, rootReplicas: replicas });
   am.nodeId = SELF;
   am.setLogSink((level, type, data) => logs.push({ level, type, data }));
   return { am, sends, logs, clock };

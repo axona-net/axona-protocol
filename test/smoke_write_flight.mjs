@@ -10,6 +10,7 @@
 import { AxonaManager } from '../src/pubsub/AxonaManager.js';
 import { T } from '../src/pubsub/constants.js';
 import { INGEST_ACK_MS, FLIGHT_PROBE_MS } from '../src/pubsub/writeFlight.js';
+import { sealTestDht } from './lib/testCapability.mjs';
 
 let n = 0, fail = 0;
 const ok = (m, c, extra = '') => {
@@ -50,7 +51,7 @@ function mk({ neighbors = () => [NB, HEIR] } = {}) {
     findKClosest: async () => [],
     lookup: async () => null,
   };
-  const am = new AxonaManager({ dht, now: () => clock.t, rootReplicas: 0 });
+  const am = new AxonaManager({ dht: sealTestDht(dht), now: () => clock.t, rootReplicas: 0 });
   am.nodeId = SELF;
   const logs = [];
   am.setLogSink((lvl, evt, data) => logs.push({ lvl, evt, data }));

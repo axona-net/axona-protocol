@@ -78,7 +78,12 @@ const ownDesc = (obj, key) => Object.getOwnPropertyDescriptor(obj, key);
     t._reqHandlers.size === 1 && t._ntfHandlers.size === 1);
 }
 
-// ── (C) Transitional dual path — an UNSEALED receiver uses the named method ───
+// ── (C) NO FALLBACK — an UNSEALED receiver is REFUSED (E3b.4 SEAL) ────────────
+// The transitional named fallback is gone: capability presence is MANDATORY (Aster
+// boundary ruling 39012d73 / option 1). A receiver that still carries the public
+// primitive but never deposited cannot register a frame — registerFrame throws, and
+// no handler is installed. This is the door-level proof that no `recv.onX(...)`
+// literal-name path survives for a future/unsealed receiver to reach.
 {
   const unsealed = {
     _req: new Map(), _ntf: new Map(),
@@ -86,11 +91,12 @@ const ownDesc = (obj, key) => Object.getOwnPropertyDescriptor(obj, key);
     onNotification(type, h) { this._ntf.set(type, h); },
   };
   const h = () => {};
-  registerFrame(unsealed, 'probe_ntf', h, { registry: REG });
+  let threw = false;
+  try { registerFrame(unsealed, 'probe_ntf', h, { registry: REG }); } catch { threw = true; }
   check('C1. an unsealed receiver still exposes the public primitive (typeof function)',
     typeof unsealed.onNotification === 'function');
-  check('C2. registerFrame drove the unsealed receiver via the named fallback (this preserved)',
-    unsealed._ntf.get('probe_ntf') === h);
+  check('C2. registerFrame REFUSES the unsealed receiver — no named fallback survives, no handler installed',
+    threw && unsealed._ntf.get('probe_ntf') === undefined);
 }
 
 // ── (D) Contract-level seal — the base Transport declares no dispatch method ──

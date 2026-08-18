@@ -24,6 +24,7 @@ import { buildKill } from '../src/pubsub/kill.js';
 import { deriveTopicIdBig } from '../src/pubsub/post.js';
 import { createNodeIdentity, createAuthorIdentity } from '../src/identity/index.js';
 import { regionCenter } from '../src/utils/region-names.js';
+import { sealTestDht } from './lib/testCapability.mjs';
 const __LOC = regionCenter('useast');  // region-lock: co-region test nodes with the 'useast' topics
 
 let passed = 0, failed = 0;
@@ -47,7 +48,7 @@ class Fabric {
       findKClosest: async (target, k = 3) => [...self.nodes.entries()].filter(([, n]) => n.alive)
         .map(([id]) => id).sort((a, b) => { const da = a ^ target, db = b ^ target; return da < db ? -1 : da > db ? 1 : 0; }).slice(0, k),
     };
-    const am = new AxonaManager({ dht, now: () => self.clock, renewMs: 60_000, renewFastMs: 5_000, dropMs: 180_000 });
+    const am = new AxonaManager({ dht: sealTestDht(dht), now: () => self.clock, renewMs: 60_000, renewFastMs: 5_000, dropMs: 180_000 });
     const rec = { id: idBig, am, handlers, alive: true, got: [], dels: [] };
     am.onPubsubDelivery((_t, json, msgId) => { let o = null; try { o = JSON.parse(json); } catch {} if (o && o.deleted) rec.dels.push(o.msgId); else rec.got.push(msgId); });
     this.nodes.set(idBig, rec); return rec;

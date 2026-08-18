@@ -35,6 +35,7 @@
 
 import { AxonaManager } from '../src/pubsub/AxonaManager.js';
 import { T, ROOT_CLAIM_MS, ROLE_GRACE_MS, BEACON_MS } from '../src/pubsub/constants.js';
+import { sealTestDht } from './lib/testCapability.mjs';
 
 let n = 0, fail = 0;
 const ok = (m, c, extra = '') => {
@@ -62,7 +63,7 @@ function mk({ neverRoot = true } = {}) {
     findKClosest: async () => [SELF],
     reintegrate: () => {},                        // present so the tick's LAST stage runs
   };
-  const am = new AxonaManager({ dht, now: () => clock.t, neverRoot });
+  const am = new AxonaManager({ dht: sealTestDht(dht), now: () => clock.t, neverRoot });
   am.nodeId = SELF;
   am.setLogSink((level, type, data) => logs.push({ level, type, data }));
   return { am, sends, logs, clock };

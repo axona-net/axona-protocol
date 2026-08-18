@@ -17,6 +17,7 @@
 // turns it ON to exercise enforcement, then flips it OFF to prove the permissive
 // fallback (out-of-region rooting allowed).
 import { AxonaManager, configureRegionLock } from '../src/pubsub/AxonaManager.js';
+import { sealTestDht } from './lib/testCapability.mjs';
 
 configureRegionLock({ enforce: true });   // enforcement path for the assertions below
 
@@ -38,7 +39,7 @@ function newAM() {
     routeMessage: (_t, type, payload) => sent.push({ type, payload }),
     neighbors: () => [], bridgeId: () => null, findKClosest: async () => [],
   };
-  const am = new AxonaManager({ dht, now: () => Date.now() });
+  const am = new AxonaManager({ dht: sealTestDht(dht), now: () => Date.now() });
   am.nodeId = SELF;
   return { am, sent };
 }

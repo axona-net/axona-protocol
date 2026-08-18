@@ -14,6 +14,7 @@
 // =====================================================================
 import { AxonaManager } from '../src/pubsub/AxonaManager.js';
 import { toHex } from '../src/utils/hexid.js';
+import { sealTestDht } from './lib/testCapability.mjs';
 
 let passed = 0, failed = 0;
 const check = (l, c) => { if (c) { console.log(`  ✓ ${l}`); passed++; } else { console.log(`  ✗ ${l}`); failed++; } };
@@ -42,7 +43,7 @@ class MockNet {
       _direct: direct,
     };
   }
-  spawn(id) { const dht = this.makeDht(id); const m = new AxonaManager({ dht, now: () => T }); m._dht = dht; this.mgrs.set(id, m); return m; }
+  spawn(id) { const dht = this.makeDht(id); const m = new AxonaManager({ dht: sealTestDht(dht), now: () => T }); m._dht = dht; this.mgrs.set(id, m); return m; }
 }
 const role = (over = {}) => ({ isRoot: true, isInRootSet: true, children: new Map(), replayCache: [], peerRoots: new Set(), emptiedAt: 0, ...over });
 

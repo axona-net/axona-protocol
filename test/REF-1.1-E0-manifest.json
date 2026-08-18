@@ -5,13 +5,13 @@
     "onNotification",
     "onRoutedMessage"
   ],
-  "treeHash": "2094e7e8b22eecd3eb7e125ad67542592c49f87e",
+  "treeHash": "fc032c0953bfb93cf971f2d117d4f3e9cc802511",
   "filesScanned": 77,
   "summary": {
     "migration-target": 38,
     "registration-helper": 0,
-    "mechanism-shim": 2,
-    "canonical-door": 3,
+    "mechanism-shim": 0,
+    "canonical-door": 0,
     "parameterized-registrar": 1,
     "primitive-definition": 0,
     "bridge-ws-dispatch": 8,
@@ -159,7 +159,7 @@
     },
     {
       "file": "dht/AxonaPeer.js",
-      "line": 3183,
+      "line": 3196,
       "callee": "registerFrame",
       "receiver": "peer._b6door",
       "wire": "__tunneled_direct__",
@@ -169,7 +169,7 @@
     },
     {
       "file": "dht/AxonaPeer.js",
-      "line": 4326,
+      "line": 4339,
       "callee": "onDirectMessage",
       "receiver": "def",
       "wire": "—",
@@ -356,56 +356,6 @@
       "classification": "parameterized-registrar",
       "boundary": "—",
       "why": "registerDirectFrame direct_${type} family — the ONE named direct registrar (E3 decision 2); transitional named fallback for an unsealed transport, removed when E3b seals every transport"
-    },
-    {
-      "file": "registry/registerFrame.js",
-      "line": 198,
-      "callee": "onRoutedMessage",
-      "receiver": "recv",
-      "wire": "<wire>",
-      "classification": "canonical-door",
-      "boundary": "—",
-      "why": "registerFrame routed dispatch (named access)"
-    },
-    {
-      "file": "registry/registerFrame.js",
-      "line": 205,
-      "callee": "onNotification",
-      "receiver": "recv",
-      "wire": "<wire>",
-      "classification": "canonical-door",
-      "boundary": "—",
-      "why": "registerFrame notification dispatch (named access)"
-    },
-    {
-      "file": "registry/registerFrame.js",
-      "line": 212,
-      "callee": "onRequest",
-      "receiver": "recv",
-      "wire": "<wire>",
-      "classification": "canonical-door",
-      "boundary": "—",
-      "why": "registerFrame request dispatch (named access)"
-    },
-    {
-      "file": "transport/web/composite.js",
-      "line": 86,
-      "callee": "onRequest",
-      "receiver": "t",
-      "wire": "<type>",
-      "classification": "mechanism-shim",
-      "boundary": "—",
-      "why": "CompositeTransport request fan-out (E3b.2b: cap-first via readDispatchCapability; this literal-method call is the TRANSITIONAL fallback for an unsealed sub, removed when the fallback is dropped)"
-    },
-    {
-      "file": "transport/web/composite.js",
-      "line": 92,
-      "callee": "onNotification",
-      "receiver": "t",
-      "wire": "<type>",
-      "classification": "mechanism-shim",
-      "boundary": "—",
-      "why": "CompositeTransport notification fan-out (E3b.2b: cap-first via readDispatchCapability; this literal-method call is the TRANSITIONAL fallback for an unsealed sub, removed when the fallback is dropped)"
     },
     {
       "file": "transport/web/index.js",
