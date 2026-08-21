@@ -762,6 +762,10 @@
       "class": "default"
     },
     {
+      "file": "smoke_synaptome_storm_feedback.mjs",
+      "class": "default"
+    },
+    {
       "file": "smoke_sync_engine.mjs",
       "class": "default"
     },
