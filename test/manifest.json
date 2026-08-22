@@ -762,6 +762,10 @@
       "class": "default"
     },
     {
+      "file": "smoke_synaptome_delay_failure_matrix.mjs",
+      "class": "default"
+    },
+    {
       "file": "smoke_synaptome_storm_feedback.mjs",
       "class": "default"
     },
