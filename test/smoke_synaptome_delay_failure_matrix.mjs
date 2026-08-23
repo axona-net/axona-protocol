@@ -54,9 +54,17 @@ const now   = () => Date.now();
 // In-flight dedup + bounded retry with exponential backoff + expiry on bind
 // or exhaustion (Aster a1afc0a6 / Orion df536c99 item 2).
 class AttemptGuard {
-  constructor({ maxAttempts = 4, baseMs = 60, factor = 2 } = {}) {
-    this.maxAttempts = maxAttempts; this.baseMs = baseMs; this.factor = factor;
+  // refillWindowMs (v0.4, Aster d8f26a6e / Vega c8e386c4): receiver-side,
+  // per-origin pacing that covers DIRECT receipt — at most one budget refill
+  // per origin per window. The watermark still advances on every valid gen
+  // (freshness is never lost); only the refill is coalesced. 0 = no pacing
+  // (the v0.3 behaviour the flood arm's control exhibits).
+  constructor({ maxAttempts = 4, baseMs = 60, factor = 2, refillWindowMs = 0 } = {}) {
+    this.maxAttempts = maxAttempts; this.baseMs = baseMs; this.factor = factor; this.refillWindowMs = refillWindowMs;
     this.state = new Map();   // key -> {attempts, inflight, nextAt, expired, times[]}
+    this.gens = new Map();    // key -> highest gen seen (monotonic watermark; survives resets)
+    this.lastRefillAt = new Map();
+    this.refills = 0; this.coalesced = 0;
   }
   _s(key) { let s = this.state.get(key); if (!s) { s = { attempts: 0, inflight: false, nextAt: 0, expired: false, times: [] }; this.state.set(key, s); } return s; }
   allow(key, t = now()) {
@@ -79,11 +87,15 @@ class AttemptGuard {
   // higher generation than any seen for that candidate. A stale or duplicate
   // record resets nothing and refills no attempt budget. `gens` survives state
   // resets on purpose — the monotonic watermark is what defeats replay.
-  onFreshRecord(key, generation) {
-    if (!this.gens) this.gens = new Map();
+  onFreshRecord(key, generation, t = now()) {
     const seen = this.gens.get(key) ?? -Infinity;
-    if (!(generation > seen)) return false;                 // stale/duplicate: no refill
-    this.gens.set(key, generation);
+    if (!(generation > seen)) return false;                 // stale/duplicate: no refill, watermark untouched
+    this.gens.set(key, generation);                         // freshness always recorded
+    // Receiver-side per-origin pacing (direct receipt included): coalesce
+    // refills inside the window. The origin cannot buy budget by minting gens.
+    const last = this.lastRefillAt.get(key) ?? -Infinity;
+    if (t - last < this.refillWindowMs) { this.coalesced++; return 'coalesced'; }
+    this.lastRefillAt.set(key, t); this.refills++;
     this.state.delete(key);                                 // one fresh budget, re-eligible
     return true;
   }
@@ -286,6 +298,47 @@ async function main() {
     const stillExpired = g.expiredOf('u');                  // capture BEFORE r3 resets state
     const r3 = g.onFreshRecord('u', 6);                     // fresh again
     check('2b BOUND: generation watermark is monotonic across resets', r1 === true && r2 === false && stillExpired && r3 === true, `(r1=${r1} r2=${r2} expired=${stillExpired} r3=${r3})`);
+  }
+
+  // ── 2c. presence flood from a flapping origin (v0.4; Aster d8f26a6e) ──
+  // The relay limiter never sees DIRECT receipt: an origin that restarts in a
+  // loop mints a valid higher gen each time and sends straight to its
+  // neighbours, and each accepted gen would clear a fresh attempt budget. The
+  // receiver-side per-origin pacing bound is the fix. Both halves asserted:
+  // refills bounded by the window (and dials toward the origin with them), AND
+  // freshness never lost — the watermark still reaches the latest gen.
+  // The guard model takes (nodeId, gen) only; signature/binding checks are the
+  // handshake's and are covered by the transport auth smokes, not here.
+  {
+    // CONTROL — no pacing: every valid gen refills (the hole, pinned).
+    const g0 = new AttemptGuard({ maxAttempts: 2, baseMs: 1, refillWindowMs: 0 });
+    const burn = (g, k) => { for (let i = 0; i < 2; i++) { g.begin(k, now()); g.end(k, false, now()); } };
+    burn(g0, 'o');
+    let refills0 = 0;
+    for (let gen = 1; gen <= 30; gen++) { if (g0.onFreshRecord('o', gen) === true) refills0++; burn(g0, 'o'); }
+    check('2c CONTROL: without receiver-side pacing, every valid gen refills the budget (the hole)', refills0 === 30, `(refills=${refills0}/30)`);
+    // PACED — on the real kernel node: the flapping origin never binds, so every
+    // refilled budget is spent on wasted dials; pacing must bound them.
+    const { t, nearest, recOf } = await scenario(true);
+    const cand = recOf(nearest[0]); const key = cand.hex;
+    let dialsToOrigin = 0;
+    cand.transport._acceptConnection = () => { dialsToOrigin++; return false; };
+    const WINDOW = 100;
+    const guard = new AttemptGuard({ maxAttempts: 3, baseMs: 20, refillWindowMs: WINDOW });
+    guardDials(t, guard);
+    const t0 = now();
+    while (!guard.expiredOf(key) && now() - t0 < 1500) { await t.peer._maintainSynaptome(); await wait(20); }
+    const dialsAtExhaustion = dialsToOrigin;
+    const tStart = now();
+    for (let gen = 1; gen <= 30; gen++) {                   // 30 valid, strictly increasing gens, fast
+      guard.onFreshRecord(key, gen);
+      await t.peer._maintainSynaptome(); await wait(10);    // neighbours spend whatever budget they were given
+    }
+    const elapsed = now() - tStart;
+    const maxRefills = Math.ceil(elapsed / WINDOW) + 1;
+    check('2c BOUND: refills paced — at most ceil(elapsed/window)+1 across 30 valid gens', guard.refills <= maxRefills && guard.refills + guard.coalesced === 30, `(refills=${guard.refills}, coalesced=${guard.coalesced}, elapsed=${elapsed}ms, window=${WINDOW})`);
+    check('2c BOUND: dials toward the flapping origin bounded by refills × maxAttempts', dialsToOrigin - dialsAtExhaustion <= guard.refills * 3, `(flood dials=${dialsToOrigin - dialsAtExhaustion}, budget=${guard.refills * 3})`);
+    check('2c RECOVERY: freshness never lost — watermark advanced to the latest gen', guard.gens.get(key) === 30 && guard.onFreshRecord(key, 30) === false, `(watermark=${guard.gens.get(key)})`);
   }
 
   // ── 3. permanent-fail ──────────────────────────────────────────────
