@@ -66,28 +66,37 @@ class AttemptGuard {
     this.lastRefillAt = new Map();
     this.refills = 0; this.coalesced = 0;
   }
-  _s(key) { let s = this.state.get(key); if (!s) { s = { attempts: 0, inflight: false, nextAt: 0, expired: false, times: [] }; this.state.set(key, s); } return s; }
+  // Identity-suffix keying (v0.5): nodeId = 8-bit geo prefix ‖ SHA-256(pubkey).
+  // The prefix is the ONLY part an origin can vary while keeping its key, so
+  // watermark / pacing / guard key on the 256-bit suffix (the identity), not the
+  // 264-bit string. Short test keys ('u', 'o') pass through unchanged.
+  _k(key) { return (typeof key === 'string' && key.length === 66) ? key.slice(2) : key; }
+  _s(key) { key = this._k(key); let s = this.state.get(key); if (!s) { s = { attempts: 0, inflight: false, nextAt: 0, expired: false, times: [] }; this.state.set(key, s); } return s; }
   allow(key, t = now()) {
     const s = this._s(key);
     return !s.expired && !s.inflight && t >= s.nextAt;
   }
   begin(key, t = now()) { const s = this._s(key); s.inflight = true; s.times.push(t); }
   end(key, bound, t = now()) {
+    key = this._k(key);
     const s = this._s(key); s.inflight = false;
     if (bound) { this.state.delete(key); return; }          // expiry on bind
     s.attempts++;
     if (s.attempts >= this.maxAttempts) { s.expired = true; return; }  // expiry on exhaustion
     s.nextAt = t + this.baseMs * Math.pow(this.factor, s.attempts - 1);
   }
-  attemptsOf(key) { return this.state.get(key)?.times.length ?? 0; }
-  timesOf(key)    { return this.state.get(key)?.times ?? []; }
-  expiredOf(key)  { return this.state.get(key)?.expired ?? false; }
+  attemptsOf(key) { return this.state.get(this._k(key))?.times.length ?? 0; }
+  timesOf(key)    { return this.state.get(this._k(key))?.times ?? []; }
+  expiredOf(key)  { return this.state.get(this._k(key))?.expired ?? false; }
+  hasEntry(key)   { return this.state.has(this._k(key)); }
+  watermarkOf(key){ return this.gens.get(this._k(key)); }
   // Candidate-level reset (closure condition (a)): an exhausted candidate
   // becomes eligible again ONLY on a fresh routing record with a monotonically
   // higher generation than any seen for that candidate. A stale or duplicate
   // record resets nothing and refills no attempt budget. `gens` survives state
   // resets on purpose — the monotonic watermark is what defeats replay.
   onFreshRecord(key, generation, t = now()) {
+    key = this._k(key);
     const seen = this.gens.get(key) ?? -Infinity;
     if (!(generation > seen)) return false;                 // stale/duplicate: no refill, watermark untouched
     this.gens.set(key, generation);                         // freshness always recorded
@@ -338,7 +347,53 @@ async function main() {
     const maxRefills = Math.ceil(elapsed / WINDOW) + 1;
     check('2c BOUND: refills paced — at most ceil(elapsed/window)+1 across 30 valid gens', guard.refills <= maxRefills && guard.refills + guard.coalesced === 30, `(refills=${guard.refills}, coalesced=${guard.coalesced}, elapsed=${elapsed}ms, window=${WINDOW})`);
     check('2c BOUND: dials toward the flapping origin bounded by refills × maxAttempts', dialsToOrigin - dialsAtExhaustion <= guard.refills * 3, `(flood dials=${dialsToOrigin - dialsAtExhaustion}, budget=${guard.refills * 3})`);
-    check('2c RECOVERY: freshness never lost — watermark advanced to the latest gen', guard.gens.get(key) === 30 && guard.onFreshRecord(key, 30) === false, `(watermark=${guard.gens.get(key)})`);
+    check('2c RECOVERY: freshness never lost — watermark advanced to the latest gen', guard.watermarkOf(key) === 30 && guard.onFreshRecord(key, 30) === false, `(watermark=${guard.watermarkOf(key)})`);
+  }
+
+  // ── 2d. fresh identities and the scope split (v0.5; Aster 7e3836a9, Vega 333688fe) ──
+  // Two different mechanisms, two different bounds, and the spec must say so:
+  //   SAME-nodeId presence reset — 2b/2c above: one budget per window per identity.
+  //   FRESH-identity join — a restart with a NEW key is a NEW identity = a newcomer.
+  //     It holds no old guard entry, so its presence clears nothing; its probe
+  //     budget is one fresh per-candidate budget through the real nomination
+  //     path (_considerCandidate), and its admission is the lane's problem.
+  // Plus the keying refinement: nodeId = geo-prefix ‖ SHA-256(pubkey), so the
+  // prefix is the only churnable part under one key — guard/watermark/pacing
+  // key on the 256-bit identity suffix and a prefix variant coalesces.
+  {
+    const { net, domain, t, nearest, recOf } = await scenario(true);
+    const cand = recOf(nearest[0]);
+    cand.transport._acceptConnection = () => false;          // the old, exhausted candidate
+    const guard = new AttemptGuard({ maxAttempts: 3, baseMs: 20, refillWindowMs: 100 });
+    guardDials(t, guard);
+    const t0 = now();
+    while (!guard.expiredOf(cand.hex) && now() - t0 < 1500) { await t.peer._maintainSynaptome(); await wait(20); }
+    check('2d SETUP: old candidate exhausted', guard.expiredOf(cand.hex));
+    // (a) Successive FRESH identities (new key each): presence from each clears
+    //     nothing for the old candidate; each gets exactly one newcomer budget
+    //     through the real nomination path; the old exclusion never reopens.
+    let totalNewDials = 0; const FRESH = 4;
+    for (let i = 0; i < FRESH; i++) {
+      const fresh = await makePeer(net, domain, 30 + i, 30 + i, null);   // new key → new nodeId
+      let dials = 0; fresh.transport._acceptConnection = () => { dials++; return false; };   // never binds either
+      const r = guard.onFreshRecord(fresh.hex, 1);                 // its presence: new watermark, nothing to clear
+      const oldStillExpired = guard.expiredOf(cand.hex);
+      for (let k = 0; k < 8; k++) { await t.peer._considerCandidate(fresh.big, 'triadic'); await wait(15); }   // nominated repeatedly
+      totalNewDials += dials;
+      if (i === 0) check('2d BOUND: a fresh identity\'s presence reopens nothing — old candidate stays expired', r !== false && oldStillExpired && guard.expiredOf(cand.hex) && guard.attemptsOf(cand.hex) === 3);
+      check(`2d BOUND: fresh identity #${i + 1} gets exactly one newcomer budget via the real nomination path`, dials === 3 && guard.expiredOf(fresh.hex), `(dials=${dials}, maxAttempts=3)`);
+    }
+    check('2d BOUND: N fresh identities cost N × maxAttempts, old exclusion untouched', totalNewDials === FRESH * 3 && guard.expiredOf(cand.hex), `(total=${totalNewDials}, N=${FRESH})`);
+    // (b) Same key, different geo prefix: the only churn possible without a new
+    //     key. The prefix variant keys to the SAME identity — watermark and
+    //     pacing are shared, so a replay under the variant is still a replay.
+    guard.onFreshRecord(cand.hex, 5);                            // fresh record for the old candidate, gen 5 (refills: window passed)
+    const variant = (cand.hex.slice(0, 2) === 'ab' ? 'cd' : 'ab') + cand.hex.slice(2);   // same 256-bit suffix, other prefix byte
+    const replayUnderVariant = guard.onFreshRecord(variant, 5);  // same gen via the prefix variant → stale
+    const higherUnderVariant = guard.onFreshRecord(variant, 6);  // higher gen, inside the window → coalesced (watermark moves)
+    check('2d BOUND: prefix variant keys to the same identity — replay stale, in-window higher gen coalesced, watermark shared',
+      replayUnderVariant === false && higherUnderVariant === 'coalesced' && guard.watermarkOf(cand.hex) === 6 && guard.watermarkOf(variant) === 6,
+      `(replay=${replayUnderVariant}, higher=${higherUnderVariant}, wm=${guard.watermarkOf(cand.hex)})`);
   }
 
   // ── 3. permanent-fail ──────────────────────────────────────────────
