@@ -154,6 +154,51 @@ function realDrop(t, victimHex) {
   t.transport._fireDied(nh);
 }
 
+// Reserve-from-cap join lane (spec v0.2, finding 4). The acceptor's cap is the
+// budget it holds; the K_JOIN lane slots live INSIDE that cap, so installing
+// the lane SHEDS K_JOIN ordinary edges (the reserve costs operational slots —
+// that is the point). Gate: below the operational cap, hold-all admits; at it,
+// the improve-gate is shut and only the lane admits; the lane never takes the
+// table over cap. Qualification: sponsor-attested OR first-seen, one lane
+// admission per id per window, cooldown between lane admissions. The per-
+// acceptor slot bound + cooldown is what turns "N attackers × slots" into
+// "at most K_JOIN per acceptor, ever".
+// Two phases, batch: shed on EVERY acceptor first (sheds notify the far end,
+// so one peer's shed lowers another's size), settle, THEN arm each gate against
+// its settled size. Arming one-at-a-time would snapshot an operational cap that
+// a later peer's shed immediately undercuts — reopening "ordinary" room.
+async function installReservedLanes(peers, { K_JOIN = 2, COOLDOWN_MS = 100, enabled = true, attested = new Set() } = {}) {
+  const budgets = new Map(peers.map(b => [b.hex, b.node.synaptome.size]));   // what each holds = its budget
+  for (const b of peers) {
+    // Shed a RANDOM pair, not a fixed position: the last-added key on every peer
+    // is the same (last-built) node, so slice(-K) would empty that one peer.
+    const keys = [...b.node.synaptome.keys()];
+    const shed = [];
+    while (shed.length < K_JOIN && keys.length) shed.push(keys.splice(Math.floor(Math.random() * keys.length), 1)[0]);
+    for (const id of shed) { b.node.synaptome.delete(id); try { await b.node.transport.closeConnection(toHex(id)); } catch { /* */ } }
+  }
+  await wait(25);                                           // let notified far ends settle
+  return peers.map(b => armLane(b, { budget: budgets.get(b.hex), K_JOIN, COOLDOWN_MS, enabled, attested }));
+}
+async function installReservedLane(b, opts) { return (await installReservedLanes([b], opts))[0]; }
+function armLane(b, { budget, K_JOIN, COOLDOWN_MS, enabled, attested }) {
+  const st = { budget, cap: 0, operational: 0, K_JOIN, laneUsed: 0, lastLaneAt: 0, seen: new Set(), attested, enabled,
+               admits: { ordinary: 0, lane: 0 }, refusals: 0 };
+  st.operational = b.node.synaptome.size; st.cap = Math.min(budget, st.operational + K_JOIN);   // cap ≤ budget, lane inside it
+  b.transport._acceptConnection = (openerHex) => {
+    const size = b.node.synaptome.size;
+    if (size < st.operational) { st.admits.ordinary++; return true; }     // hold-all below operational cap
+    if (!st.enabled)          { st.refusals++; return false; }             // improve-gate shut, no lane
+    if (size >= st.cap)       { st.refusals++; return false; }             // reserve exhausted — never over cap
+    const qualified = st.attested.has(openerHex) || !st.seen.has(openerHex);
+    if (!qualified)           { st.refusals++; return false; }             // one admission per id per window
+    if (st.laneUsed >= st.K_JOIN || now() - st.lastLaneAt < COOLDOWN_MS) { st.refusals++; return false; }
+    st.laneUsed++; st.lastLaneAt = now(); st.seen.add(openerHex); st.admits.lane++;
+    return true;
+  };
+  return st;
+}
+
 async function main() {
   console.log('Axona delay/failure matrix — hold-or-improve + attempt guard (real kernel, guard as reference model)\n');
 
@@ -260,49 +305,56 @@ async function main() {
     check('3 CONTRAST: guarded total is far under the unguarded storm rate', attempts <= 3, `(3 vs ~60 unguarded over 20 ticks)`);
   }
 
-  // ════ Scenario 4: newcomer joins a saturated mesh ════
+  // ════ Scenario 4: newcomer joins a saturated mesh (reserve-from-cap lane) ════
   // Hold-or-improve acceptance modeled on every base peer via the bilateral-
-  // admission hook: at cap, refuse (improve-gates shut — the stranding
-  // precondition of finding 2). The join lane admits a bounded, rate-limited
-  // number of probationers outside the cap.
+  // admission hook. v0.2 finding 4: the lane's K_JOIN slots are RESERVED FROM
+  // the cap (operational table = cap − K_JOIN), never added on top — so each
+  // acceptor first SHEDS K_JOIN ordinary edges to make the reserve real. Lane
+  // qualification: first-seen (or sponsor-attested) + cooldown + one admission
+  // per id per window. A Sybil burst of N fresh ids therefore wins at most
+  // K_JOIN slots per acceptor, not N × slots — the hole Vega ff709b85 named.
   {
     const { net, domain, base } = await scenario(false);
-    // Per-peer cap snapshot: every peer is saturated at ITS OWN built size
-    // (base[0] carries one extra edge — the test sponsor — so a single global
-    // cap would leave the other eleven below threshold and admitting freely).
-    const capOf = new Map(base.map(b => [b.hex, b.node.synaptome.size]));
-    const lane = new Map();                                 // hex -> {slots, lastAt}
-    const LANE_SLOTS = 2, LANE_RATE_MS = 120;
-    let laneAdmits = 0, refusals = 0;
-    for (const b of base) {
-      lane.set(b.hex, { used: 0, lastAt: 0 });
-      b.transport._acceptConnection = () => {
-        if (b.node.synaptome.size < capOf.get(b.hex)) return true;  // below cap: hold-all admits
-        const L = lane.get(b.hex);
-        if (!L.enabled) { refusals++; return false; }       // improve-gate shut, no lane
-        const tnow = now();
-        if (L.used >= LANE_SLOTS || tnow - L.lastAt < LANE_RATE_MS) { refusals++; return false; }
-        L.used++; L.lastAt = tnow; laneAdmits++;
-        return true;                                        // probation admit, outside cap
-      };
-    }
-    // Control: no lane — the newcomer strands.
+    const budgetOf = new Map(base.map(b => [b.hex, b.node.synaptome.size]));   // original budget
+    const lanes = new Map();
+    (await installReservedLanes(base, { K_JOIN: 2, COOLDOWN_MS: 100, enabled: false })).forEach((st, i) => lanes.set(base[i].hex, st));
+    const K_JOIN = 2;
+    check('4 SETUP: reserve is real — every acceptor shed K_JOIN ordinary edges (operational = cap − K_JOIN)',
+      base.every(b => lanes.get(b.hex).operational === lanes.get(b.hex).cap - K_JOIN && b.node.synaptome.size <= lanes.get(b.hex).operational));
+    // Control: lanes off — the newcomer strands at the operational cap.
     const n1 = await makePeer(net, domain, 6, 6, null);
     for (const b of base) { try { await n1.transport.openConnection(b.hex); } catch { /* */ } }
     await wait(20);
-    check('4 CONTROL: improve-gates shut, no lane → newcomer strands', n1.node.synaptome.size === 0, `(degree=${n1.node.synaptome.size}, refusals=${refusals})`);
-    // Lane on: the newcomer reaches working degree; acceptor growth stays bounded.
-    for (const L of lane.values()) L.enabled = true;
+    check('4 CONTROL: improve-gates shut, no lane → newcomer strands', n1.node.synaptome.size === 0, `(degree=${n1.node.synaptome.size})`);
+    // Lanes on: the newcomer reaches working degree; no acceptor exceeds its cap.
+    for (const st of lanes.values()) st.enabled = true;
     const n2 = await makePeer(net, domain, 7, 7, null);
     for (let round = 0; round < 3; round++) {
       for (const b of base) { try { await n2.transport.openConnection(b.hex); } catch { /* */ } }
-      await wait(140);                                      // respect the lane rate limit
+      await wait(120);
     }
     const deg = n2.node.synaptome.size;
-    const worstOver = Math.max(...base.map(b => b.node.synaptome.size - capOf.get(b.hex)));
+    const overCap    = base.filter(b => b.node.synaptome.size > lanes.get(b.hex).cap).length;
+    const overBudget = base.filter(b => b.node.synaptome.size > budgetOf.get(b.hex)).length;
     check('4 RECOVERY: newcomer reaches working degree through the lane', deg >= 3, `(degree=${deg})`);
-    check('4 BOUND: acceptor tables bounded at cap + lane slots', worstOver <= LANE_SLOTS, `(worst over-cap=${worstOver}, lane=${LANE_SLOTS})`);
-    check('4 BOUND: lane admissions rate-limited, not a bypass', laneAdmits <= base.length * LANE_SLOTS, `(admits=${laneAdmits})`);
+    check('4 BOUND: lane inside the cap — no acceptor exceeds cap or its original budget', overCap === 0 && overBudget === 0, `(overCap=${overCap}, overBudget=${overBudget})`);
+    // SYBIL ARM: 12 fresh ids burst one acceptor. Each is "first-seen" — and
+    // still the acceptor gives up at most K_JOIN lane slots in total.
+    const target = base[3]; const ts = lanes.get(target.hex);
+    const laneBefore = ts.admits.lane;
+    const sybils = [];
+    for (let i = 0; i < 12; i++) sybils.push(await makePeer(net, domain, 20 + i, 20 + i, null));
+    await Promise.all(sybils.map(s => s.transport.openConnection(target.hex).catch(() => false)));
+    await wait(120);
+    await Promise.all(sybils.map(s => s.transport.openConnection(target.hex).catch(() => false)));   // second wave after cooldown
+    const sybilAdmits = ts.admits.lane - laneBefore;
+    check('4 BOUND (Sybil): a 12-id burst wins at most K_JOIN lane slots on the acceptor', ts.laneUsed <= K_JOIN && sybilAdmits <= K_JOIN, `(admits=${sybilAdmits}, laneUsed=${ts.laneUsed}, refused=${ts.refusals})`);
+    check('4 BOUND (Sybil): acceptor still within cap after the burst', target.node.synaptome.size <= ts.cap, `(size=${target.node.synaptome.size}, cap=${ts.cap})`);
+    // ONE ADMISSION PER ID PER WINDOW: a seen id is refused on re-dial even with slots free.
+    const seenId = [...ts.seen][0];
+    const fresh  = await installReservedLane(base[4], { K_JOIN: 2, COOLDOWN_MS: 0, enabled: true });
+    fresh.seen.add(seenId ?? 'x');
+    check('4 BOUND: one lane admission per id per window — seen id refused', seenId !== undefined && base[4].transport._acceptConnection(seenId) === false);
   }
 
   // ════ Scenario 5: correlated inbound eviction ════
@@ -324,17 +376,11 @@ async function main() {
     }
     await wait(20);
     check('5 SETUP: victim bled to zero by remote evictions alone', victim.node.synaptome.size === 0);
-    // Acceptors at cap, improve-gates shut, lane = the emergency door.
-    const CAP = Math.max(...base.slice(0, -1).map(b => b.node.synaptome.size));
-    const LANE_SLOTS = 2; let admits = 0;
-    for (const b of base.slice(0, -1)) {
-      let used = 0;
-      b.transport._acceptConnection = () => {
-        if (b.node.synaptome.size < CAP) return true;
-        if (used >= LANE_SLOTS) return false;
-        used++; admits++; return true;
-      };
-    }
+    // Acceptors at their operational cap, improve-gates shut, reserve-from-cap
+    // lane = the emergency door (same model as scenario 4).
+    const LANE_SLOTS = 2;
+    const lanes5 = await installReservedLanes(base.slice(0, -1), { K_JOIN: LANE_SLOTS, COOLDOWN_MS: 40, enabled: true });
+    const admitsOf = () => lanes5.reduce((s, st) => s + st.admits.lane, 0);
     // Emergency refill: below the floor the victim admits/dials ANYONE it
     // remembers — below-cap behavior, improve-gate not consulted. Guarded.
     const FLOOR = 5;
@@ -350,7 +396,8 @@ async function main() {
       await wait(50);
     }
     check('5 RECOVERY: victim recovers to the degree floor', victim.node.synaptome.size >= FLOOR, `(degree=${victim.node.synaptome.size}, floor=${FLOOR}, rounds=${dialRounds})`);
-    check('5 BOUND: recovery bounded — no storm to get there', dialRounds <= 6 && admits <= (base.length - 1) * LANE_SLOTS, `(rounds=${dialRounds}, admits=${admits})`);
+    const overCap5 = base.slice(0, -1).filter((b, i) => b.node.synaptome.size > lanes5[i].cap).length;
+    check('5 BOUND: recovery bounded — lane-only admits, no acceptor over cap, no storm', dialRounds <= 6 && admitsOf() <= (base.length - 1) * LANE_SLOTS && overCap5 === 0, `(rounds=${dialRounds}, laneAdmits=${admitsOf()}, overCap=${overCap5})`);
   }
 
   // ════ Scenario 6: empty-stratum pressure ════
@@ -440,19 +487,13 @@ async function main() {
   // per-node in-flight cap C_dial bounds concurrency; both recoveries complete.
   {
     const { net, domain, base } = await scenario(false);
-    const capOf = new Map(base.map(b => [b.hex, b.node.synaptome.size]));
-    for (const b of base) {
-      let used = 0;
-      b.transport._acceptConnection = () => {
-        if (b.node.synaptome.size < capOf.get(b.hex)) return true;
-        if (used >= 2) return false;                        // lane: 2 slots
-        used++; return true;
-      };
-    }
-    // Bleed a victim (correlated eviction, as scenario 5).
+    // Snapshot the victim's neighbours BEFORE lanes shed edges; `known` is its
+    // remembered-peers cache and must reflect who it knew, not what survived.
     const victim = base[base.length - 1];
+    const known = [...victim.node.synaptome.keys()].map(big => base.find(b => b.big === big)).filter(Boolean).map(p => p.hex);
+    await installReservedLanes(base, { K_JOIN: 2, COOLDOWN_MS: 40, enabled: true });
+    // Bleed the victim (correlated eviction, as scenario 5) on whatever edges it still holds.
     const peersOf = [...victim.node.synaptome.keys()].map(big => base.find(b => b.big === big)).filter(Boolean);
-    const known = peersOf.map(p => p.hex);
     for (const p of peersOf) {
       realDrop(p, victim.hex); realDrop(victim, p.hex);
       p.node.synaptome.delete(victim.big); victim.node.synaptome.delete(p.big);
@@ -473,14 +514,15 @@ async function main() {
     capDials(joiner); capDials(victim);
     const FLOOR = 5;
     await Promise.all([
-      (async () => { for (const b of base.slice(0, -1)) { try { await joiner.transport.openConnection(b.hex); } catch { /* */ } } })(),
+      (async () => { for (let r = 0; r < 2; r++) { for (const b of base.slice(0, -1)) { if (joiner.node.synaptome.size >= 3) break; try { await joiner.transport.openConnection(b.hex); } catch { /* */ } } await wait(50); } })(),
       (async () => {
         let rounds = 0;
-        while (victim.node.synaptome.size < FLOOR && rounds++ < 6) {
+        while (victim.node.synaptome.size < FLOOR && rounds++ < 8) {
           for (const hex of known) {
             if (victim.node.synaptome.size >= FLOOR) break;
             try { await victim.transport.openConnection(hex); } catch { /* */ }
           }
+          await wait(60);                                   // pace past the acceptors' lane cooldown
         }
       })(),
     ]);
