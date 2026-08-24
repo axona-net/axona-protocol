@@ -93,25 +93,29 @@ async function main() {
     const a = await makePeer(net, domain, 5, 5, { admissionGate: { kNear: 5, sparseFloor: 2 } });
     check('2 gate config armed with defaults overridable', a.peer._gateCfg?.kNear === 5 && a.peer._gateCfg?.sparseFloor === 2);
 
-    // Below cap: hold-all.
-    a.node._maxSynaptome = 12;
+    // Below cap: hold-all — proven with a real peer, which is then REMOVED
+    // so the at-cap table below is 100% crafted. A random real id left in
+    // the table perturbs band counts (in band 1 it un-protects the sparse
+    // pair and shifts the improver's candidate count) and made the refusal/
+    // swap cases nondeterministic — Aster 67820521, one repeat at 21/24.
+    a.node._maxSynaptome = 11;
     const below = await makePeer(net, domain, 6, 6, {});
     await below.transport.openConnection(a.hex); await wait(15);
     check('2 HOLD-ALL: below cap the gate admits any live peer', a.node.synaptome.has(below.big));
+    a.node.synaptome.delete(below.big);
+    await a.transport.closeConnection(below.hex); await wait(10);
 
-    // Craft to exactly cap = 12:
+    // Craft to exactly cap = 11 — crafted ids ONLY, every band pinned by seed:
     //  - 5 kNear successors: xor 1..5 (deepest band; protected by rank)
     //  - 2 sparse band-1 members: clz 4 and 5 (band count 2 <= sparseFloor)
     //  - 4 dense band-0 fillers: clz 0..3 (top-bit region), LOW vitality on one
-    //  + the real `below` peer (random id: overwhelmingly band 0)
     const nearIds   = [1n, 2n, 3n, 4n, 5n].map(x => craft(a, x));
     const sparseIds = [craft(a, 1n << 259n), craft(a, 1n << 258n)];
     const denseIds  = [craft(a, (1n << 263n) + 7n, 0.9), craft(a, (1n << 262n) + 3n, 0.9),
                        craft(a, (1n << 261n) + 9n, 0.05), craft(a, (1n << 260n) + 5n, 0.9)];
     const weakest = denseIds[2];                                 // vitality 0.05 — the intended victim
-    check('3 SETUP: crafted table at cap', a.node.synaptome.size === 12 && (a.node._maxSynaptome ?? 50) === 12,
+    check('3 SETUP: crafted table exactly at cap, no random ids', a.node.synaptome.size === 11 && !a.node.synaptome.has(below.big),
       `(size=${a.node.synaptome.size})`);
-    const belowGroup = groupOf(a, below.big, domain);
 
     // REFUSE: a real candidate in the dense band (band 0). Its band count is
     // the densest, so no post-swap improvement exists -> refuse + channel closed.
@@ -130,7 +134,7 @@ async function main() {
     check('4 SETUP: sparser-band candidate minted', improver !== null);
     await improver.transport.openConnection(a.hex); await wait(20);
     check('4 SWAP: structural improver admitted at cap', a.node.synaptome.has(improver.big));
-    check('4 SWAP: occupancy stays pinned at cap', a.node.synaptome.size === 12, `(size=${a.node.synaptome.size})`);
+    check('4 SWAP: occupancy stays pinned at cap', a.node.synaptome.size === 11, `(size=${a.node.synaptome.size})`);
     check('4 SWAP: victim is the lowest-vitality dense evictable', !a.node.synaptome.has(weakest));
     check('4 SWAP: admitted entry marked gate-swap', a.node.synaptome.get(improver.big)?._addedBy === 'gate-swap');
 
@@ -139,7 +143,7 @@ async function main() {
     const sparseHeld = sparseIds.every(id => a.node.synaptome.has(id));
     check('5 PROTECTION: kNear successors never evicted', nearHeld);
     check('5 PROTECTION: sparse-band (<= sparseFloor) members never evicted', sparseHeld);
-    check('5 PROTECTION: real below-cap admit survived unless it was the dense victim', belowGroup !== 0 ? a.node.synaptome.has(below.big) : true);
+    check('5 PROTECTION: incumbent table stayed crafted-only through both decisions (below removed, dense0 refused)', !a.node.synaptome.has(below.big) && !a.node.synaptome.has(dense0.big));
 
     // EVICTION IS NOT DEATH.
     check('6 EVICTION: victim not dead-marked', !(a.node._deadPeers?.has?.(weakest)));
