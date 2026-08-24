@@ -450,10 +450,10 @@ for (const [name, body] of Object.entries(ctxNeg)) {
 }
 
 // ── REAL TREE — B5 (E2.5, bare-keyed zero-residual). The 10 dht:transport routing doors
-// exist in AxonaPeer._installRoutingHandlers on this._b5door (5 request + 5 notification
+// exist in AxonaPeer._installRoutingHandlers on this._b5door (5 request + 6 notification
 // legs), bare-keyed so each OMITS transportKind (→ null), and NONE of the 10 wires remains
 // a raw site. The B3 mesh:signal door shares this method on this._b3door — the
-// boundary==='B5' scope keeps it out of the B5 count. All 10 B5 wires are B5-unique, so
+// boundary==='B5' scope keeps it out of the B5 count. All 11 B5 wires are B5-unique, so
 // wire-scoping is exact for the zero-residual check. B5 is the TERMINAL slice: after it, all
 // 38 migration-targets are doors and zero raw sites remain. ──
 {
@@ -464,10 +464,10 @@ for (const [name, body] of Object.entries(ctxNeg)) {
   const migd = discover(files, METH);
   const b5doors = migd.doors.filter((d) => d.boundary === 'B5');
   const B5_REQUEST = ['lookup_step', 'lookahead_probe', 'local_probe', 'find_closest_set', 'route_msg'];
-  const B5_NOTIFY  = ['reinforce', 'triadic_introduce', 'hop_cache', 'lateral_spread', 'peer-leaving'];
+  const B5_NOTIFY  = ['reinforce', 'triadic_introduce', 'hop_cache', 'lateral_spread', 'presence', 'peer-leaving'];
   const B5_WIRES = [...B5_REQUEST, ...B5_NOTIFY];
-  check('P6. MIGRATED B5: the default table discovers EXACTLY 10 B5 doors, all in AxonaPeer._installRoutingHandlers on this._b5door, bare-keyed (transportKind OMITTED → null), covering the 5 request + 5 notification wires — the B3 mesh:signal door in the SAME method (this._b3door) is NOT miscounted',
-    b5doors.length === 10
+  check('P6. MIGRATED B5: the default table discovers EXACTLY 11 B5 doors, all in AxonaPeer._installRoutingHandlers on this._b5door, bare-keyed (transportKind OMITTED → null), covering the 5 request + 6 notification wires — the B3 mesh:signal door in the SAME method (this._b3door) is NOT miscounted',
+    b5doors.length === 11
     && b5doors.every((d) => d.context === 'AxonaPeer._installRoutingHandlers' && d.registry === 'this._b5door' && d.transportKind === null)
     && B5_WIRES.every((w) => b5doors.some((d) => d.wire === w))
     && b5doors.every((d) => d.wire !== 'mesh:signal')
@@ -475,7 +475,7 @@ for (const [name, body] of Object.entries(ctxNeg)) {
     `\n   b5doors=${JSON.stringify(b5doors.map((d) => ({ wire: d.wire, tk: d.transportKind, reg: d.registry })))}`);
   const b5Wireset = new Set(B5_WIRES);
   const b5Raw = migd.sites.filter((s) => b5Wireset.has(s.wire));
-  check('P6b. ZERO-RESIDUAL RAW (B5): none of the 10 dht:transport wires remains a raw onRequest/onNotification site — all live at a door (raw XOR door)',
+  check('P6b. ZERO-RESIDUAL RAW (B5): none of the 11 dht:transport wires remains a raw onRequest/onNotification site — all live at a door (raw XOR door)',
     b5Raw.length === 0, `\n   b5Raw=${JSON.stringify(b5Raw.map((s) => s.site))}`);
   // P6b-neg: TEETH — inject a residual raw transport.onNotification('reinforce', …) beside
   // the door; discover() surfaces it as wire='reinforce' → b5Raw non-zero → P6b would FAIL.

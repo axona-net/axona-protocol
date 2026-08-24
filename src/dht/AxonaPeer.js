@@ -41,6 +41,7 @@ import { DHT }            from '../contracts/DHT.js';
 import { Synapse }        from './Synapse.js';
 import { Subscription }   from './Subscription.js';
 import { clz264, toHex, fromHex, isHexId, extractS2Prefix, asId, BAD_ID_CODE } from '../utils/hexid.js';
+import { buildPresenceRecord, verifyPresenceRecord } from './presence.js';
 import { resolveTopic, deriveTopicId, deriveTopicIdBig } from '../pubsub/post.js';
 
 /**
@@ -127,7 +128,7 @@ export class AxonaPeer extends DHT {
    *        signed publishes (the default).  Apps that only call
    *        `peer.pub(topic, message, { sign: false })` can omit it.
    */
-  constructor({ engine = null, domain = null, node, axonaManager = null, nodeIdentity = null, transport = null, persist = null, maxPublishBytes = null, synaptomeMaintain = null, admissionGate = null, rootReplicas = null, frameRegistry = false, directMessageTypes = undefined, enforceDirectMessageTypes = false }) {
+  constructor({ engine = null, domain = null, node, axonaManager = null, nodeIdentity = null, transport = null, persist = null, maxPublishBytes = null, synaptomeMaintain = null, admissionGate = null, presence = null, rootReplicas = null, frameRegistry = false, directMessageTypes = undefined, enforceDirectMessageTypes = false }) {
     super();
     if (!node) throw new Error('AxonaPeer: node is required');
     // Singleton-root replication fan-out (kernel v4.9.2). null → kernel default (2).
@@ -196,6 +197,22 @@ export class AxonaPeer extends DHT {
       : (admissionGate === true)
         ? { kNear: 5, sparseFloor: 2 }
         : null;
+    // dht:presence (Connection-Quality v0.7 "The reset record"; slice 2).
+    // RECEIVER side is always live and inert: verify + per-identity watermark
+    // + hooks for the slice-3 attempt-guard/deficit machinery. It emits
+    // nothing. SENDER + RELAY behavior is OPT-IN (default off): announce on
+    // start and relay received origin-sent records one hop, rate-limited per
+    // origin identity. All presence state keys on the 256-bit identity
+    // suffix, never the full nodeId string. `gen` is never persisted.
+    this._presenceCfg = (presence && typeof presence === 'object')
+      ? { announceOnStart: presence.announceOnStart !== false, relayRateMs: presence.relayRateMs ?? 5000 }
+      : (presence === true)
+        ? { announceOnStart: true, relayRateMs: 5000 }
+        : null;
+    this._presenceGen = 0;
+    this._presenceWatermarks = new Map();   // identity suffix (64-hex) -> highest gen seen
+    this._presenceRelayAt = new Map();      // identity suffix -> last relay ts (armed only)
+    this._presenceHooks = new Set();
     // O-5: a publish must be RECEIVABLE by any peer on any browser across any
     // path → default the per-publish limit to the WebRTC-interop floor (16 KiB),
     // never above the absolute ingress cap. Override only for controlled,
@@ -470,6 +487,13 @@ export class AxonaPeer extends DHT {
 
     this._started = true;
 
+    // Presence announce-on-start (opt-in; v0.7 "gen increments at transport
+    // start"). Fire-and-forget: neighbours bound later hear on the next
+    // announce (recovery, restart).
+    if (this._presenceCfg?.announceOnStart) {
+      this.announcePresence().catch(() => { /* best-effort */ });
+    }
+
     // Synaptome-maintenance tick (opt-in): a deterministic cadence to refill the
     // near-quota, independent of routing traffic (anneal only fires on activity,
     // so an idle node would never refresh). No-op when the flag is off.
@@ -597,6 +621,37 @@ export class AxonaPeer extends DHT {
     };
     registerFrame(transport, 'hop_cache',      hopCacheHandler, { registry: this._b5door });
     registerFrame(transport, 'lateral_spread', hopCacheHandler, { registry: this._b5door });
+
+    // ── presence — self-signed candidate-reset record (v0.7, slice 2) ──
+    // Receiver side always live: verify (binding + signature), enforce the
+    // per-identity monotonic watermark keyed by the 256-bit suffix, fire
+    // hooks (slice-3 guard/deficit machinery consumes them). NOT a
+    // nomination — nothing here touches the synaptome. Relay is armed-only:
+    // at most one hop — only origin-sent records (hop 0) forward, marked
+    // hop 1, rate-limited per origin identity. `hop` is a SIBLING field
+    // outside the signed transcript (the hello's pow-field pattern), so a
+    // relay forwards the signed record unchanged.
+    registerFrame(transport, 'presence', async (_fromId, payload) => {
+      const res = await verifyPresenceRecord(payload);
+      if (!res.ok) return;
+      const key = res.identityHex;
+      const seen = this._presenceWatermarks.get(key) ?? -1;
+      if (!(res.gen > seen)) return;                 // stale or replay: nothing, watermark untouched
+      this._presenceWatermarks.set(key, res.gen);
+      for (const cb of this._presenceHooks) { try { cb(res); } catch { /* hook errors are not ours */ } }
+      if (this._presenceCfg && (payload.hop ?? 0) === 0) {
+        const now = Date.now();
+        const last = this._presenceRelayAt.get(key) ?? -Infinity;
+        if (now - last >= this._presenceCfg.relayRateMs) {
+          this._presenceRelayAt.set(key, now);
+          const fwd = { proto: payload.proto, nodeId: payload.nodeId, pubkey: payload.pubkey,
+                        gen: payload.gen, nonce: payload.nonce, sig: payload.sig, hop: 1 };
+          for (const peerId of this._node?.synaptome?.keys() ?? []) {
+            transport.notify(peerId, 'presence', fwd).catch(() => { /* opportunistic */ });
+          }
+        }
+      }
+    }, { registry: this._b5door });
 
     // ── peer-leaving — graceful-departure fast path ─────────────────
     // A peer (e.g. the bridge on a `systemctl restart`) announces that
@@ -1757,6 +1812,40 @@ export class AxonaPeer extends DHT {
     catch { /* best-effort */ }
     this._seedInsert(sponsor, 'gate-swap');
     return true;
+  }
+
+  /**
+   * Subscribe to VERIFIED presence records ({identityHex, nodeId, gen}).
+   * Fires only on a fresh gen (watermark advanced) — the slice-3 attempt
+   * guard and deficit backoff consume this. Returns an unsubscribe.
+   */
+  onPresence(cb) {
+    if (typeof cb === 'function') this._presenceHooks.add(cb);
+    return () => this._presenceHooks.delete(cb);
+  }
+
+  /**
+   * Announce this node's presence to its current neighbours (armed only —
+   * inert without the `presence` ctor option). Increments the per-identity
+   * generation and sends the self-signed record (hop 0) to every synaptome
+   * peer. Called on start when `announceOnStart`; call again on recovery.
+   * Returns the number of neighbours notified.
+   */
+  async announcePresence() {
+    if (!this._presenceCfg) return 0;
+    const id = this._identity;
+    if (!id || typeof id.sign !== 'function' || typeof id.pubkeyHex !== 'string') return 0;
+    const gen = ++this._presenceGen;
+    let record;
+    try { record = await buildPresenceRecord({ identity: id, gen }); }
+    catch { return 0; }
+    const payload = { ...record, hop: 0 };
+    let sent = 0;
+    for (const peerId of this._node?.synaptome?.keys() ?? []) {
+      sent++;
+      this._node.transport.notify(peerId, 'presence', payload).catch(() => { /* opportunistic */ });
+    }
+    return sent;
   }
 
   // ─── DHT operations ────────────────────────────────────────────────

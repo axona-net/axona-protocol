@@ -65,9 +65,9 @@ check('S7. (c) TransportRpcRef with a NON-EMPTY requires (a payload projection c
 // ── the live B5/B6 request rows actually use it; notify/routed legs do not ──
 const b5 = boundary5Rows(), b6 = boundary6Rows();
 const isRpc = (r) => r.kind === RR && r.correlation?.kind === RPC && r.correlation.requires.length === 0 && r.correlation.transportScope === 'request-return';
-check('S9. all 5 Boundary-5 request legs carry TransportRpcRef; all 5 notification legs are ONE_WAY with no correlation',
+check('S9. all 5 Boundary-5 request legs carry TransportRpcRef; all 6 notification legs are ONE_WAY with no correlation',
   b5.filter((r) => r.kind === RR).length === 5 && b5.filter((r) => r.kind === RR).every(isRpc)
-  && b5.filter((r) => r.kind === 'ONE_WAY').length === 5 && b5.filter((r) => r.kind === 'ONE_WAY').every((r) => r.correlation == null));
+  && b5.filter((r) => r.kind === 'ONE_WAY').length === 6 && b5.filter((r) => r.kind === 'ONE_WAY').every((r) => r.correlation == null));
 check('S10. the one Boundary-6 axona:direct REQUEST leg carries TransportRpcRef; the notify + tunneled legs are ONE_WAY',
   b6.filter((r) => r.kind === RR).length === 1 && b6.filter((r) => r.kind === RR).every(isRpc)
   && b6.filter((r) => r.kind === 'ONE_WAY').length === 2);
