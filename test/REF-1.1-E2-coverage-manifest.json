@@ -4,8 +4,8 @@
   "count": 38,
   "sites": [
     {
-      "identity": "dht/AxonaPeer.js:2760|axona:direct|request|this._b6door",
-      "callSite": "dht/AxonaPeer.js:2760",
+      "identity": "dht/AxonaPeer.js:2785|axona:direct|request|this._b6door",
+      "callSite": "dht/AxonaPeer.js:2785",
       "primitive": "registerFrame",
       "receiver": "this._b6door",
       "wire": "axona:direct",
@@ -14,8 +14,8 @@
       "rowType": "direct:axona-direct-request"
     },
     {
-      "identity": "dht/AxonaPeer.js:2776|axona:direct|notification|this._b6door",
-      "callSite": "dht/AxonaPeer.js:2776",
+      "identity": "dht/AxonaPeer.js:2801|axona:direct|notification|this._b6door",
+      "callSite": "dht/AxonaPeer.js:2801",
       "primitive": "registerFrame",
       "receiver": "this._b6door",
       "wire": "axona:direct",
@@ -24,8 +24,8 @@
       "rowType": "direct:axona-direct-notify"
     },
     {
-      "identity": "dht/AxonaPeer.js:3309|__tunneled_direct__|routed|peer._b6door",
-      "callSite": "dht/AxonaPeer.js:3309",
+      "identity": "dht/AxonaPeer.js:3334|__tunneled_direct__|routed|peer._b6door",
+      "callSite": "dht/AxonaPeer.js:3334",
       "primitive": "registerFrame",
       "receiver": "peer._b6door",
       "wire": "__tunneled_direct__",

@@ -1663,17 +1663,30 @@ export class AxonaPeer extends DHT {
   }
 
   /**
-   * Hold-or-improve admission (Connection-Quality v0.6, axona-docs 0e4d75a).
+   * Hold-or-improve admission (Connection-Quality v0.6, axona-docs 0e4d75a;
+   * margin boundaries per council review b41e2a88 / 70f85cc7 / 3b2cf359).
    * Below cap: hold-all — admit any distinct live peer. At cap: id-derivable
    * compare-and-swap. Bands are anneal groups (stratum >> 2, STRATA_GROUPS);
    * protection is condition-based and RE-VERIFIED HERE, at the decision:
    * the kNear XOR-nearest successors, and every member of a band holding
    * sparseFloor or fewer edges (the r >= 2 sparse-band floor — the canPrune
-   * survival rule, widened per the definition). The victim is the lowest-
-   * vitality evictable edge in the densest band; the candidate is admitted
-   * only if its band stays sparser than the victim's band AFTER the swap
-   * (count >= candidateCount + 2 — the integer margin; plain "strictly
-   * sparser" lets a count-minus-one candidate oscillate with its victim).
+   * survival rule, widened per the definition).
+   *
+   * The victim is the lowest-vitality evictable edge in the densest band, and
+   * the operative bound is the ANTI-OSCILLATION INTEGER MARGIN
+   * (victimCount >= candCount + 2), with these boundary semantics:
+   *   V = C+1  REFUSED  — admitting would let the evicted edge immediately
+   *                       reverse the swap (structural ping-pong);
+   *   V = C+2  ADMITTED — the post-swap bands TIE (both C+1); the evicted
+   *                       edge is NOT re-admissible against the candidate;
+   *   V = C+3  ADMITTED — the candidate's band stays strictly sparser.
+   *
+   * LEGACY KEYS: the seed path accommodates hex-string synaptome keys from
+   * older sessions, so structural math NORMALIZES every key to BigInt for
+   * XOR/grouping while table operations (delete, closeConnection) use the
+   * original map key. A key that is neither BigInt nor valid hex id is
+   * structurally unreadable: it is skipped — never counted, never a victim.
+   *
    * Eviction is not death: the victim leaves the table and its channel
    * closes, but it is NOT dead-marked — it re-admits on a future bind.
    * Returns true when the candidate entered the table.
@@ -1694,41 +1707,53 @@ export class AxonaPeer extends DHT {
     // far bands to one value and would blind the density comparison.
     const groupOf = (peerBig) => Math.min(groups - 1, clz264(selfId ^ peerBig) >>> 2);
 
-    // Band occupancy over the full table.
+    // Normalize keys for structural math; keep the original key for table ops.
+    const entries = [];
+    for (const [key, s] of syn) {
+      let big = null;
+      if (typeof key === 'bigint') big = key;
+      else if (typeof key === 'string' && isHexId(key)) {
+        try { big = fromHex(key); } catch { big = null; }
+      }
+      if (big === null) continue;               // unreadable key: not counted, never a victim
+      entries.push({ key, big, s });
+    }
+
+    // Band occupancy over the (readable) table.
     const counts = new Map();
-    for (const id of syn.keys()) {
-      const g = groupOf(id);
+    for (const e of entries) {
+      const g = groupOf(e.big);
       counts.set(g, (counts.get(g) ?? 0) + 1);
     }
 
     // Condition-based protection, re-verified now (no leases, no grandfathering).
-    const byDist = [...syn.keys()].sort((a, b) => {
-      const da = selfId ^ a, db = selfId ^ b;
+    const byDist = [...entries].sort((a, b) => {
+      const da = selfId ^ a.big, db = selfId ^ b.big;
       return da < db ? -1 : da > db ? 1 : 0;
     });
-    const protectedIds = new Set(byDist.slice(0, cfg.kNear));           // last-hop quota
-    for (const id of syn.keys()) {
-      if ((counts.get(groupOf(id)) ?? 0) <= cfg.sparseFloor) protectedIds.add(id);  // sparse-band floor
+    const protectedKeys = new Set(byDist.slice(0, cfg.kNear).map(e => e.key));   // last-hop quota
+    for (const e of entries) {
+      if ((counts.get(groupOf(e.big)) ?? 0) <= cfg.sparseFloor) protectedKeys.add(e.key);  // sparse-band floor
     }
 
-    // Victim: lowest-vitality evictable edge in the densest band whose count
-    // beats the candidate's band by the integer margin.
+    // Victim: lowest-vitality evictable edge in the densest band that clears
+    // the anti-oscillation margin (see boundary semantics above).
     const candCount = counts.get(groupOf(sponsor)) ?? 0;
-    let victimId = null, victimVit = Infinity, victimCount = -1;
-    for (const [id, s] of syn) {
-      if (protectedIds.has(id)) continue;
-      const c = counts.get(groupOf(id)) ?? 0;
-      if (c < candCount + 2) continue;                                  // no post-swap improvement
-      const v = this._vitality(s);
+    let victimKey = null, victimVit = Infinity, victimCount = -1;
+    for (const e of entries) {
+      if (protectedKeys.has(e.key)) continue;
+      const c = counts.get(groupOf(e.big)) ?? 0;
+      if (c < candCount + 2) continue;                                  // under the margin: refuse this pairing
+      const v = this._vitality(e.s);
       if (c > victimCount || (c === victimCount && v < victimVit)) {
-        victimId = id; victimVit = v; victimCount = c;
+        victimKey = e.key; victimVit = v; victimCount = c;
       }
     }
-    if (victimId === null) return false;                                // refuse: no admissible swap
+    if (victimKey === null) return false;                               // refuse: no admissible swap
 
-    syn.delete(victimId);
-    node.connections?.delete(victimId);
-    try { const p = node.transport?.closeConnection?.(victimId); p?.catch?.(() => { /* best-effort */ }); }
+    syn.delete(victimKey);
+    node.connections?.delete(victimKey);
+    try { const p = node.transport?.closeConnection?.(victimKey); p?.catch?.(() => { /* best-effort */ }); }
     catch { /* best-effort */ }
     this._seedInsert(sponsor, 'gate-swap');
     return true;

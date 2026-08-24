@@ -30,7 +30,7 @@ import { NeuronNode }               from '../src/dht/NeuronNode.js';
 import { Synapse }                  from '../src/dht/Synapse.js';
 import { SimNetwork, simTransport } from '../src/transport/sim/index.js';
 import { createNodeIdentity }       from '../src/identity/index.js';
-import { fromHex, clz264 }          from '../src/utils/hexid.js';
+import { fromHex, toHex, clz264 }   from '../src/utils/hexid.js';
 
 let passed = 0, failed = 0;
 const check = (label, ok, extra = '') => { console.log(`  ${ok ? '✓' : '✗'} ${label}${ok ? '' : ' ' + extra}`); ok ? passed++ : failed++; };
@@ -143,6 +143,67 @@ async function main() {
 
     // EVICTION IS NOT DEATH.
     check('6 EVICTION: victim not dead-marked', !(a.node._deadPeers?.has?.(weakest)));
+  }
+
+  // ── 7. margin boundary trio (council b41e2a88 / 70f85cc7 / 3b2cf359) ──
+  // The operative bound is victimCount >= candCount + 2. Pinned exactly:
+  // V=C+1 refused; V=C+2 admitted with post-swap TIE (and the evicted edge is
+  // not re-admissible against the candidate — no ping-pong); V=C+3 admitted
+  // with the candidate's band staying strictly sparser. Tables are crafted;
+  // the candidate is a synthetic id driven straight through _admitOrImprove.
+  {
+    const mkCase = async (denseCount) => {
+      const net = new SimNetwork(); const domain = new AxonaDomain();
+      const a = await makePeer(net, domain, 5, 5, { admissionGate: { kNear: 5, sparseFloor: 2 } });
+      [1n, 2n, 3n, 4n, 5n].forEach(x => craft(a, x));                       // kNear, protected (group 3)
+      craft(a, 1n << 255n); craft(a, (1n << 255n) + 3n);                    // candidate band (group 2), C = 2
+      const dense = [];
+      for (let m = 0; m < denseCount; m++) dense.push(craft(a, (1n << 263n) + BigInt(m), m === 0 ? 0.05 : 0.9)); // group 0
+      a.node._maxSynaptome = a.node.synaptome.size;                         // exactly at cap
+      const cand = a.big ^ ((1n << 254n) + 7n);                             // group 2 candidate (C=2)
+      return { a, cand, dense };
+    };
+    // V = C+1 (3 vs 2): refused.
+    const c1 = await mkCase(3);
+    check('7 BOUNDARY V=C+1: refused', c1.a.peer._admitOrImprove(c1.cand) === false && !c1.a.node.synaptome.has(c1.cand));
+    // V = C+2 (4 vs 2): admitted; post-swap bands tie; evicted edge cannot reverse.
+    const c2 = await mkCase(4);
+    const ok2 = c2.a.peer._admitOrImprove(c2.cand);
+    const evicted2 = c2.dense.find(id => !c2.a.node.synaptome.has(id));
+    check('7 BOUNDARY V=C+2: admitted, occupancy pinned, weakest dense evicted', ok2 === true && c2.a.node.synaptome.has(c2.cand) && evicted2 === c2.dense[0] && c2.a.node.synaptome.size === c2.a.node._maxSynaptome);
+    check('7 BOUNDARY V=C+2: post-swap tie — evicted edge NOT re-admissible (no ping-pong)', c2.a.peer._admitOrImprove(evicted2) === false);
+    // V = C+3 (5 vs 2): admitted; candidate band stays strictly sparser.
+    const c3 = await mkCase(5);
+    const ok3 = c3.a.peer._admitOrImprove(c3.cand);
+    const g = (big) => Math.min(c3.a.peer._domain.STRATA_GROUPS - 1, clz264(c3.a.big ^ big) >>> 2);
+    const countIn = (grp) => [...c3.a.node.synaptome.keys()].filter(k => g(typeof k === 'bigint' ? k : fromHex(k)) === grp).length;
+    check('7 BOUNDARY V=C+3: admitted, candidate band stays strictly sparser', ok3 === true && countIn(2) < countIn(0), `(g2=${countIn(2)}, g0=${countIn(0)})`);
+  }
+
+  // ── 8. legacy hex-string key regression (council b41e2a88 / 70f85cc7) ──
+  // The seed path accommodates hex-string synaptome keys from older sessions;
+  // an armed at-cap gate must DECIDE over them, not throw on BigInt ^ string.
+  // The hex-keyed entry is fully structural: counted in its band, protectable,
+  // evictable — and when it is the weakest dense edge, it IS the victim,
+  // deleted by its original string key.
+  {
+    const net = new SimNetwork(); const domain = new AxonaDomain();
+    const a = await makePeer(net, domain, 5, 5, { admissionGate: { kNear: 5, sparseFloor: 2 } });
+    [1n, 2n, 3n, 4n, 5n].forEach(x => craft(a, x));                         // kNear (group 3)
+    const denseBigs = [craft(a, (1n << 263n) + 1n, 0.9), craft(a, (1n << 262n) + 1n, 0.9), craft(a, (1n << 261n) + 1n, 0.9)];
+    // one LEGACY entry: same dense band, keyed by hex STRING, weakest vitality
+    const legacyBig = a.big ^ ((1n << 260n) + 9n);
+    const legacyHex = toHex(legacyBig);
+    const ls = new Synapse({ peerId: legacyBig, latencyMs: 50, stratum: clz264(a.big ^ legacyBig) });
+    ls.weight = 0.01; ls.inertia = 0; ls._addedBy = 'legacy';
+    a.node.synaptome.set(legacyHex, ls);                                    // hex-string map key
+    a.node._maxSynaptome = a.node.synaptome.size;                           // at cap (9), dense band count 4
+    const cand = a.big ^ ((1n << 254n) + 11n);                              // group 2, C=0 → margin clears (4 >= 2)
+    let threw = false, admitted = false;
+    try { admitted = a.peer._admitOrImprove(cand); } catch (e) { threw = true; }
+    check('8 LEGACY: armed at-cap decision over a hex-string key does not throw', threw === false);
+    check('8 LEGACY: gate decided — candidate admitted, occupancy pinned', admitted === true && a.node.synaptome.has(cand) && a.node.synaptome.size === a.node._maxSynaptome);
+    check('8 LEGACY: the weakest dense edge was the hex-keyed entry, deleted by its ORIGINAL string key', !a.node.synaptome.has(legacyHex) && denseBigs.every(id => a.node.synaptome.has(id)));
   }
 
   console.log(`\nResult: ${passed} passed, ${failed} failed`);
