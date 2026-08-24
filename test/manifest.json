@@ -762,6 +762,10 @@
       "class": "default"
     },
     {
+      "file": "smoke_seed_admission_gate.mjs",
+      "class": "default"
+    },
+    {
       "file": "smoke_synaptome_delay_failure_matrix.mjs",
       "class": "default"
     },

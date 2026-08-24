@@ -127,7 +127,7 @@ export class AxonaPeer extends DHT {
    *        signed publishes (the default).  Apps that only call
    *        `peer.pub(topic, message, { sign: false })` can omit it.
    */
-  constructor({ engine = null, domain = null, node, axonaManager = null, nodeIdentity = null, transport = null, persist = null, maxPublishBytes = null, synaptomeMaintain = null, rootReplicas = null, frameRegistry = false, directMessageTypes = undefined, enforceDirectMessageTypes = false }) {
+  constructor({ engine = null, domain = null, node, axonaManager = null, nodeIdentity = null, transport = null, persist = null, maxPublishBytes = null, synaptomeMaintain = null, admissionGate = null, rootReplicas = null, frameRegistry = false, directMessageTypes = undefined, enforceDirectMessageTypes = false }) {
     super();
     if (!node) throw new Error('AxonaPeer: node is required');
     // Singleton-root replication fan-out (kernel v4.9.2). null → kernel default (2).
@@ -181,6 +181,21 @@ export class AxonaPeer extends DHT {
         : null;
     this._maintainTimer = null;
     this._maintainInflight = false;
+    // Hold-or-improve admission gate (Connection-Quality definition v0.6,
+    // axona-docs 0e4d75a; council-closed 2026-08-24). Governs the binding-
+    // transport admission path (_seedSynaptomeWithSponsor): below the synaptome
+    // cap every distinct live peer is admitted (hold-all); at the cap a
+    // candidate is admitted only by id-derivable structural improvement, paired
+    // with the eviction of the weakest evictable edge in the densest band, and
+    // a refused candidate's channel is closed (a channel outside the budget
+    // defeats the budget). OPT-IN (default off) — when omitted the peer behaves
+    // exactly as before, including the historical over-cap direct insert.
+    // `{ kNear, sparseFloor }` overrides; constants are matrix parameters.
+    this._gateCfg = (admissionGate && typeof admissionGate === 'object')
+      ? { kNear: admissionGate.kNear ?? 5, sparseFloor: admissionGate.sparseFloor ?? 2 }
+      : (admissionGate === true)
+        ? { kNear: 5, sparseFloor: 2 }
+        : null;
     // O-5: a publish must be RECEIVABLE by any peer on any browser across any
     // path → default the per-publish limit to the WebRTC-interop floor (16 KiB),
     // never above the absolute ingress cap. Override only for controlled,
@@ -1592,6 +1607,23 @@ export class AxonaPeer extends DHT {
     const sponsorHex = toHex(sponsor);
     if (syn.has?.(sponsorHex)) return;
 
+    // Hold-or-improve gate (v0.6, opt-in): when armed, the gate is the sole
+    // decider on this path — engine bookkeeping is the benchmark layer and is
+    // not combined with the gate. Flag-off falls through to the legacy flow
+    // below, byte-identical.
+    if (this._gateCfg) {
+      const admitted = this._admitOrImprove(sponsor);
+      if (!admitted) {
+        // Refused at cap with no admissible swap: close the just-bound
+        // channel. A channel kept outside the budget defeats the budget; the
+        // far end sees the close as a liveness drop and evicts in turn —
+        // edge lifetime is the minimum of the two ends' decisions.
+        try { const p = this._node.transport?.closeConnection?.(sponsor); p?.catch?.(() => { /* best-effort */ }); }
+        catch { /* best-effort */ }
+      }
+      return;
+    }
+
     // Engine-managed path: if the engine exposes addSynapse, use it
     // so its bookkeeping (stratum, decay, anneal pool) stays consistent.
     const engine = this._engine;
@@ -1600,9 +1632,19 @@ export class AxonaPeer extends DHT {
       catch { /* fall through to direct insert */ }
     }
 
-    // Direct insert: real Synapse instance with the BigInt peerId.
-    // Stratum = number of leading zero bits in (self ^ peer), matching
-    // axona-peer/src/axona_node.js's _completeHandshake.
+    this._seedInsert(sponsor, 'bootstrap');
+  }
+
+  /**
+   * Direct insert: real Synapse instance with the BigInt peerId.
+   * Stratum = number of leading zero bits in (self ^ peer), matching
+   * axona-peer/src/axona_node.js's _completeHandshake. Extracted from the
+   * legacy seed body verbatim (v4.65.0) so the gate and the legacy flow
+   * insert identically; `addedBy` is diagnostic metadata only.
+   */
+  _seedInsert(sponsor, addedBy) {
+    const syn = this._node?.synaptome;
+    if (!syn) return;
     const selfId = this._node.id;
     const stratum = (typeof selfId === 'bigint')
       ? this._clz(selfId ^ sponsor)
@@ -1616,8 +1658,80 @@ export class AxonaPeer extends DHT {
     if (inserted) {
       inserted.weight   = 0.5;
       inserted.inertia  = 0;
-      inserted._addedBy = 'bootstrap';
+      inserted._addedBy = addedBy;
     }
+  }
+
+  /**
+   * Hold-or-improve admission (Connection-Quality v0.6, axona-docs 0e4d75a).
+   * Below cap: hold-all — admit any distinct live peer. At cap: id-derivable
+   * compare-and-swap. Bands are anneal groups (stratum >> 2, STRATA_GROUPS);
+   * protection is condition-based and RE-VERIFIED HERE, at the decision:
+   * the kNear XOR-nearest successors, and every member of a band holding
+   * sparseFloor or fewer edges (the r >= 2 sparse-band floor — the canPrune
+   * survival rule, widened per the definition). The victim is the lowest-
+   * vitality evictable edge in the densest band; the candidate is admitted
+   * only if its band stays sparser than the victim's band AFTER the swap
+   * (count >= candidateCount + 2 — the integer margin; plain "strictly
+   * sparser" lets a count-minus-one candidate oscillate with its victim).
+   * Eviction is not death: the victim leaves the table and its channel
+   * closes, but it is NOT dead-marked — it re-admits on a future bind.
+   * Returns true when the candidate entered the table.
+   */
+  _admitOrImprove(sponsor) {
+    const node = this._node;
+    const domain = this._domain;
+    const cfg = this._gateCfg;
+    const syn = node.synaptome;
+    const cap = node._maxSynaptome ?? domain.MAX_SYNAPTOME;
+
+    if (syn.size < cap) { this._seedInsert(sponsor, 'gate-admit'); return true; }
+
+    const selfId = node.id;
+    const groups = domain.STRATA_GROUPS;
+    // Band math uses clz264 DIRECTLY — the definition's per-bit distance —
+    // not the width-adaptive _clz, whose legacy-64-bit path collapses all
+    // far bands to one value and would blind the density comparison.
+    const groupOf = (peerBig) => Math.min(groups - 1, clz264(selfId ^ peerBig) >>> 2);
+
+    // Band occupancy over the full table.
+    const counts = new Map();
+    for (const id of syn.keys()) {
+      const g = groupOf(id);
+      counts.set(g, (counts.get(g) ?? 0) + 1);
+    }
+
+    // Condition-based protection, re-verified now (no leases, no grandfathering).
+    const byDist = [...syn.keys()].sort((a, b) => {
+      const da = selfId ^ a, db = selfId ^ b;
+      return da < db ? -1 : da > db ? 1 : 0;
+    });
+    const protectedIds = new Set(byDist.slice(0, cfg.kNear));           // last-hop quota
+    for (const id of syn.keys()) {
+      if ((counts.get(groupOf(id)) ?? 0) <= cfg.sparseFloor) protectedIds.add(id);  // sparse-band floor
+    }
+
+    // Victim: lowest-vitality evictable edge in the densest band whose count
+    // beats the candidate's band by the integer margin.
+    const candCount = counts.get(groupOf(sponsor)) ?? 0;
+    let victimId = null, victimVit = Infinity, victimCount = -1;
+    for (const [id, s] of syn) {
+      if (protectedIds.has(id)) continue;
+      const c = counts.get(groupOf(id)) ?? 0;
+      if (c < candCount + 2) continue;                                  // no post-swap improvement
+      const v = this._vitality(s);
+      if (c > victimCount || (c === victimCount && v < victimVit)) {
+        victimId = id; victimVit = v; victimCount = c;
+      }
+    }
+    if (victimId === null) return false;                                // refuse: no admissible swap
+
+    syn.delete(victimId);
+    node.connections?.delete(victimId);
+    try { const p = node.transport?.closeConnection?.(victimId); p?.catch?.(() => { /* best-effort */ }); }
+    catch { /* best-effort */ }
+    this._seedInsert(sponsor, 'gate-swap');
+    return true;
   }
 
   // ─── DHT operations ────────────────────────────────────────────────
