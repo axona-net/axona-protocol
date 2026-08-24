@@ -91,7 +91,10 @@ export async function verifyPresenceRecord(record) {
   if (typeof record.pubkey !== 'string' || record.pubkey.length !== 64 || !isHex(record.pubkey))
     return fail('bad_pubkey');
   if (!Number.isSafeInteger(record.gen) || record.gen < 0)  return fail('bad_gen');
-  if (typeof record.nonce !== 'string' || record.nonce.length === 0 || !isHex(record.nonce))
+  // v0.7: nonce is EXACTLY 16 random bytes — 32 hex characters, no more, no
+  // less (Aster ASTER-PRESENCE-20260824-01: any-nonempty-hex was looser than
+  // the definition and admits degenerate one-byte nonces).
+  if (typeof record.nonce !== 'string' || record.nonce.length !== 32 || !isHex(record.nonce))
     return fail('bad_nonce');
   if (typeof record.sig !== 'string' || !record.sig.startsWith('ed25519:'))
     return fail('bad_sig_scheme');

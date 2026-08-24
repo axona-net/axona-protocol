@@ -61,6 +61,15 @@ async function main() {
     check('2 FORGERY: wrong proto refused', proto.ok === false && proto.reason === 'proto_mismatch');
     const shape = await verifyPresenceRecord({ proto: PRESENCE_PROTO, nodeId: 'zz', pubkey: '', gen: -1 });
     check('2 FORGERY: malformed shape refused', shape.ok === false);
+    // Nonce is EXACTLY 16 bytes / 32 hex (v0.7; Aster ASTER-PRESENCE-20260824-01).
+    const n32 = await verifyPresenceRecord(await buildPresenceRecord({ identity: idA, gen: 5 }));
+    const nShort = await verifyPresenceRecord(await buildPresenceRecord({ identity: idA, gen: 6, nonce: 'ab'.repeat(15) }));
+    const nLong  = await verifyPresenceRecord(await buildPresenceRecord({ identity: idA, gen: 7, nonce: 'ab'.repeat(17) }));
+    const nBad   = await verifyPresenceRecord(await buildPresenceRecord({ identity: idA, gen: 8, nonce: 'zz'.repeat(16) }));
+    check('2 NONCE: exactly 32 hex accepted (the default build)', n32.ok === true && (await buildPresenceRecord({ identity: idA, gen: 9 })).nonce.length === 32);
+    check('2 NONCE: 30-hex rejected', nShort.ok === false && nShort.reason === 'bad_nonce');
+    check('2 NONCE: 34-hex rejected', nLong.ok === false && nLong.reason === 'bad_nonce');
+    check('2 NONCE: non-hex rejected', nBad.ok === false && nBad.reason === 'bad_nonce');
   }
 
   // ── 3. registry row ───────────────────────────────────────────────────
