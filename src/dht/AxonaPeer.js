@@ -1811,6 +1811,17 @@ export class AxonaPeer extends DHT {
         const key = identitySuffix(sponsor);
         if (key === null) return false;
         const t = Date.now();
+        // Prune expired entries at the decision point (Aster de1e46a3): an
+        // entry older than the window is useless — qualification only looks
+        // within-window — and without the sweep, qualified identity churn
+        // grows the map for the process lifetime. Post-sweep the map holds
+        // only in-window admissions, bounded by laneWindowMs/laneCooldownMs
+        // (entries are written on ADMISSION only, and admissions are
+        // cooldown-limited). O(live entries) per decision, and decisions are
+        // themselves cooldown-paced.
+        for (const [k, at] of this._laneSeen) {
+          if (t - at >= cfg.laneWindowMs) this._laneSeen.delete(k);
+        }
         const seenAt = this._laneSeen.get(key);
         if (seenAt !== undefined && t - seenAt < cfg.laneWindowMs) return false;  // one per id per window
         if (t - this._laneLastAt < cfg.laneCooldownMs) return false;              // lane rate limit

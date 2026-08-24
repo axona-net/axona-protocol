@@ -170,6 +170,44 @@ async function main() {
     check('6 LANE: at FULL cap the slice-1 gate governs — still never over cap', A.node.synaptome.size <= 8, `(size=${A.node.synaptome.size})`);
   }
 
+  // ── 6b. lane state stays bounded under identity churn (Aster de1e46a3) ──
+  // Qualified identities cycling across successive windows must not grow
+  // _laneSeen without bound: expired entries are pruned at the decision
+  // point, so retained state is bounded by admissions-per-window — and an
+  // id whose window has passed may qualify again (unchanged semantics).
+  {
+    const net = new SimNetwork(); const domain = new AxonaDomain();
+    const A = await makePeer(net, domain, 5, 5, { admissionGate: { kNear: 2, sparseFloor: 2, kJoin: 2, laneCooldownMs: 10, laneWindowMs: 120 } });
+    [1n, 2n].forEach(x => craft(A, x));                                  // kNear
+    craft(A, (1n << 263n) + 1n, 0.9);                                    // filler → size 3
+    A.node._maxSynaptome = 5;                                            // operational 3, lane 2
+    // Cycle 8 identities across 4 windows; each window: admit into a lane
+    // slot, then evict it (drop the entry + close) so the next window's
+    // joiners find a free slot. Direct _admitOrImprove drive, synthetic ids.
+    let admitted = 0; const peak = () => A.peer._laneSeen.size;
+    let maxSeen = 0;
+    for (let w = 0; w < 4; w++) {
+      for (let i = 0; i < 2; i++) {
+        const cand = A.big ^ ((1n << 250n) + BigInt(w * 16 + i + 3));    // fresh synthetic identity each time
+        const ok = A.peer._admitOrImprove(cand);
+        if (ok) { admitted++; A.node.synaptome.delete(cand); }           // vacate the lane slot
+        maxSeen = Math.max(maxSeen, peak());
+        await wait(15);                                                  // past cooldown
+      }
+      await wait(130);                                                   // past the window → entries expire
+    }
+    check('6b BOUND: 8 churned identities across 4 windows — retained lane state stays bounded', admitted >= 6 && maxSeen <= 3, `(admitted=${admitted}, maxLaneSeen=${maxSeen})`);
+    // After a final expired window + one decision, only in-window entries remain.
+    const cand = A.big ^ ((1n << 250n) + 99n);
+    A.peer._admitOrImprove(cand);
+    check('6b BOUND: post-sweep the map holds in-window entries only', A.peer._laneSeen.size <= 1, `(size=${A.peer._laneSeen.size})`);
+    // Re-qualification: an id seen in an EXPIRED window may lane-admit again.
+    A.node.synaptome.delete(cand);
+    await wait(130);
+    const again = A.peer._admitOrImprove(cand);
+    check('6b SEMANTICS: an id from an expired window qualifies again (one-per-WINDOW, unchanged)', again === true);
+  }
+
   console.log(`\nResult: ${passed} passed, ${failed} failed`);
   process.exit(failed === 0 ? 0 : 1);
 }
