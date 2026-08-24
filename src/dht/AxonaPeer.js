@@ -42,6 +42,7 @@ import { Synapse }        from './Synapse.js';
 import { Subscription }   from './Subscription.js';
 import { clz264, toHex, fromHex, isHexId, extractS2Prefix, asId, BAD_ID_CODE } from '../utils/hexid.js';
 import { buildPresenceRecord, verifyPresenceRecord } from './presence.js';
+import { AttemptGuard, DeficitBackoff, identitySuffix } from './attemptGuard.js';
 import { resolveTopic, deriveTopicId, deriveTopicIdBig } from '../pubsub/post.js';
 
 /**
@@ -128,7 +129,7 @@ export class AxonaPeer extends DHT {
    *        signed publishes (the default).  Apps that only call
    *        `peer.pub(topic, message, { sign: false })` can omit it.
    */
-  constructor({ engine = null, domain = null, node, axonaManager = null, nodeIdentity = null, transport = null, persist = null, maxPublishBytes = null, synaptomeMaintain = null, admissionGate = null, presence = null, rootReplicas = null, frameRegistry = false, directMessageTypes = undefined, enforceDirectMessageTypes = false }) {
+  constructor({ engine = null, domain = null, node, axonaManager = null, nodeIdentity = null, transport = null, persist = null, maxPublishBytes = null, synaptomeMaintain = null, admissionGate = null, presence = null, attemptGuard = null, rootReplicas = null, frameRegistry = false, directMessageTypes = undefined, enforceDirectMessageTypes = false }) {
     super();
     if (!node) throw new Error('AxonaPeer: node is required');
     // Singleton-root replication fan-out (kernel v4.9.2). null → kernel default (2).
@@ -193,10 +194,35 @@ export class AxonaPeer extends DHT {
     // exactly as before, including the historical over-cap direct insert.
     // `{ kNear, sparseFloor }` overrides; constants are matrix parameters.
     this._gateCfg = (admissionGate && typeof admissionGate === 'object')
-      ? { kNear: admissionGate.kNear ?? 5, sparseFloor: admissionGate.sparseFloor ?? 2 }
+      ? { kNear: admissionGate.kNear ?? 5, sparseFloor: admissionGate.sparseFloor ?? 2,
+          // Join lane (slice 3; v0.6 finding 2, reserve-from-cap per finding 4):
+          // kJoin > 0 reserves the table's LAST kJoin slots for qualified
+          // newcomers — hold-all stops at cap − kJoin, the lane fills the rest,
+          // nothing ever exceeds cap. kJoin 0 (the default) = slice-1 behavior
+          // exactly. Qualification: first-seen per window + a per-lane cooldown
+          // (the sponsor-attested path is defined in the spec and arrives with
+          // an attestation object; not implemented here).
+          kJoin: admissionGate.kJoin ?? 0,
+          laneCooldownMs: admissionGate.laneCooldownMs ?? 1000,
+          laneWindowMs: admissionGate.laneWindowMs ?? 60000 }
       : (admissionGate === true)
-        ? { kNear: 5, sparseFloor: 2 }
+        ? { kNear: 5, sparseFloor: 2, kJoin: 0, laneCooldownMs: 1000, laneWindowMs: 60000 }
         : null;
+    this._laneSeen = new Map();     // identity suffix -> ts of its one lane admission this window
+    this._laneLastAt = 0;           // last lane admission (cooldown)
+    // Candidate attempt guard + deficit backoff (slice 3; v0.7 "Attempt guard,
+    // candidate reset, deficit backoff"). OPT-IN, default off — when omitted,
+    // candidate probing behaves exactly as before (including the storm the
+    // guard exists to kill; arming is a deployment decision). When armed, the
+    // dht:presence hook (slice 2) is the guard's refill valve, paced to one
+    // refill per identity per window, and any verified record resets the
+    // deficit backoff.
+    this._attemptGuard = attemptGuard
+      ? new AttemptGuard(typeof attemptGuard === 'object' ? attemptGuard : {})
+      : null;
+    this._deficitBackoff = attemptGuard
+      ? new DeficitBackoff(typeof attemptGuard === 'object' ? attemptGuard : {})
+      : null;
     // dht:presence (Connection-Quality v0.7 "The reset record"; slice 2).
     // RECEIVER side is always live and inert: verify + per-identity watermark
     // + hooks for the slice-3 attempt-guard/deficit machinery. It emits
@@ -492,6 +518,17 @@ export class AxonaPeer extends DHT {
     // announce (recovery, restart).
     if (this._presenceCfg?.announceOnStart) {
       this.announcePresence().catch(() => { /* best-effort */ });
+    }
+
+    // Slice 3: wire the presence valve into the guard. The hook fires only
+    // on a FRESH gen (watermark enforced upstream in the handler); the guard
+    // paces refills to one per identity per window, and a verified record is
+    // fresh routing evidence — reset the deficit backoff too.
+    if (this._attemptGuard) {
+      this.onPresence((res) => {
+        this._attemptGuard.onFreshRecord(res.identityHex);
+        this._deficitBackoff?.reset();
+      });
     }
 
     // Synaptome-maintenance tick (opt-in): a deterministic cadence to refill the
@@ -1105,6 +1142,11 @@ export class AxonaPeer extends DHT {
     const node = this._node;
     if (!cfg || this._maintainInflight || !node?.alive) return 0;
     if (typeof node.transport?.openConnection !== 'function') return 0;
+    // Slice 3: deficit backoff (opt-in, rides the attempt guard). A pass that
+    // attempted nothing backs the next search off exponentially — an empty
+    // deficit is usually an unpopulated band, and searching cannot fill it.
+    // Any attempt, or any verified presence record, resets the backoff.
+    if (this._deficitBackoff && !this._deficitBackoff.allow()) return 0;
     this._maintainInflight = true;
     try {
       const self = node.id;
@@ -1129,6 +1171,10 @@ export class AxonaPeer extends DHT {
       }
       if (attempted) {
         this._emitLog?.('info', 'synaptome-refill', { near: cfg.kNear, attempted });
+      }
+      if (this._deficitBackoff) {
+        if (attempted === 0) this._deficitBackoff.onEmpty();
+        else this._deficitBackoff.reset();
       }
       return attempted;
     } finally { this._maintainInflight = false; }
@@ -1753,7 +1799,29 @@ export class AxonaPeer extends DHT {
     const syn = node.synaptome;
     const cap = node._maxSynaptome ?? domain.MAX_SYNAPTOME;
 
-    if (syn.size < cap) { this._seedInsert(sponsor, 'gate-admit'); return true; }
+    if (syn.size < cap) {
+      // Join lane (slice 3): with kJoin > 0 the table's LAST kJoin slots are
+      // reserved for qualified newcomers — the operational table is
+      // cap − kJoin (reserve-from-cap; the lane never takes the table over
+      // cap because it IS part of the cap). Qualification: one lane
+      // admission per identity per window (first-seen), plus a per-lane
+      // cooldown. A refused lane candidate's channel closes at the caller.
+      const kJoin = cfg.kJoin ?? 0;
+      if (kJoin > 0 && syn.size >= cap - kJoin) {
+        const key = identitySuffix(sponsor);
+        if (key === null) return false;
+        const t = Date.now();
+        const seenAt = this._laneSeen.get(key);
+        if (seenAt !== undefined && t - seenAt < cfg.laneWindowMs) return false;  // one per id per window
+        if (t - this._laneLastAt < cfg.laneCooldownMs) return false;              // lane rate limit
+        this._laneSeen.set(key, t);
+        this._laneLastAt = t;
+        this._seedInsert(sponsor, 'gate-lane');
+        return true;
+      }
+      this._seedInsert(sponsor, 'gate-admit');
+      return true;
+    }
 
     const selfId = node.id;
     const groups = domain.STRATA_GROUPS;
@@ -3971,11 +4039,23 @@ export class AxonaPeer extends DHT {
       // Budgeted probe: trigger a connection; the handshake binds identity
       // and onPeerBound admits on success. Never binds ⇒ never admitted.
       if ((this._verifyProbes ?? 0) >= MAX_VERIFY_PROBES) return;
+      // Slice 3: the attempt guard (opt-in). Without it, a never-binding
+      // candidate is re-probed on every nomination forever — the c16d12b
+      // storm. With it: in-flight dedup, bounded retry with backoff, expiry
+      // on exhaustion; the dht:presence record is the release valve.
+      if (this._attemptGuard && !this._attemptGuard.allow(peerId)) return;
       this._verifyProbes = (this._verifyProbes ?? 0) + 1;
+      this._attemptGuard?.begin(peerId);
       let opened = false;
       try { opened = await t.openConnection(peerId); }
       catch { /* unverifiable → not admitted */ }
-      finally { this._verifyProbes = Math.max(0, (this._verifyProbes ?? 1) - 1); }
+      finally {
+        this._verifyProbes = Math.max(0, (this._verifyProbes ?? 1) - 1);
+        // The relay fallback below is fire-and-forget signaling on the SAME
+        // attempt — its eventual bind clears the entry via expiry-on-bind
+        // when the candidate is re-nominated bound.
+        this._attemptGuard?.end(peerId, opened);
+      }
       // AUTONOMOUS BRIDGELESS CONNECT.  openConnection only succeeds for a
       // peer the transport already has a (bridge-assigned) binding for; a peer
       // discovered purely peer-to-peer (triadic_introduce / hop_cache /

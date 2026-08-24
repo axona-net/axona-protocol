@@ -762,6 +762,10 @@
       "class": "default"
     },
     {
+      "file": "smoke_attempt_guard_lane.mjs",
+      "class": "default"
+    },
+    {
       "file": "smoke_dht_presence.mjs",
       "class": "default"
     },
