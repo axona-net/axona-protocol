@@ -1793,15 +1793,26 @@ export class AxonaPeer extends DHT {
         // a physical channel open, so deferral capacity derives from live
         // headroom — kept channels (shared synaptome budget members) plus
         // pending closes plus this one must stay within node.maxConnections.
-        // No headroom: close immediately, exactly 4.67.1. A node without a
-        // finite cap declares no physical bound; graceMaxPending still binds.
-        const cap = this._node?.maxConnections;
-        const headroom = !Number.isFinite(cap)
-          || ((this._node?.synaptome?.size ?? 0)
-              + (this._node?.incomingSynapses?.size ?? 0)
-              + this._gracePending.size + 1 <= cap);
-        if (graceMs > 0 && headroom && typeof setTimeout === 'function') {
-          if (!this._gracePending.has(sponsor)) {
+        // No headroom: close immediately, exactly 4.67.1. A node whose cap
+        // is unset or Infinity DELIBERATELY declares no physical connection
+        // bound and is constrained only by graceMaxPending.
+        // v4.68.2 (Aster review ASTER-20260826-1727-KERNEL4681-08): an
+        // ALREADY-PENDING sponsor holds no incremental capacity — its open
+        // channel is the very one the existing timer guards — so the dedupe
+        // runs BEFORE headroom. A duplicate refusal retains the existing
+        // timer unchanged (no refresh: the window is measured from the FIRST
+        // refusal) and never closes the graced channel on a fictitious +1.
+        const graceOn = graceMs > 0 && typeof setTimeout === 'function';
+        if (graceOn && this._gracePending.has(sponsor)) {
+          // Duplicate refusal for an already-graced sponsor: retain the
+          // timer; zero incremental capacity; nothing to do.
+        } else {
+          const cap = this._node?.maxConnections;
+          const headroom = !Number.isFinite(cap)
+            || ((this._node?.synaptome?.size ?? 0)
+                + (this._node?.incomingSynapses?.size ?? 0)
+                + this._gracePending.size + 1 <= cap);
+          if (graceOn && headroom) {
             while (this._gracePending.size >= (this._gateCfg.graceMaxPending ?? 64)) {
               const [oldSponsor, oldHandle] = this._gracePending.entries().next().value;
               clearTimeout(oldHandle);
@@ -1816,9 +1827,9 @@ export class AxonaPeer extends DHT {
             }, graceMs);
             if (typeof handle?.unref === 'function') handle.unref();
             this._gracePending.set(sponsor, handle);
+          } else {
+            doClose();
           }
-        } else {
-          doClose();
         }
       }
       return;

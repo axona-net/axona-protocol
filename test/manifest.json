@@ -948,7 +948,7 @@
     {
       "file": "smoke_gate_close_grace.mjs",
       "class": "default",
-      "note": "4.68.0 admission-gate close grace (closeGraceMs): graceMs=0 default closes at refusal time (v4.67.1 behavior); graceMs>0 defers the close and skips it at fire time when the peer was admitted meanwhile (rescue); pending closes bounded by graceMaxPending with oldest-first immediate overflow close. Mock transport; no network. v4.68.1 (Aster review 1c11a94e): config normalization (zero/negative/fractional/non-finite fail safe to grace off), physical-cap headroom bound on deferral, stop()/leave() lifecycle teardown, and two-peer real-sim-transport bilateral cases (both-armed rescue, one-armed degradation, simultaneous expiry, idempotent teardown). 35 checks."
+      "note": "4.68.0 admission-gate close grace (closeGraceMs): graceMs=0 default closes at refusal time (v4.67.1 behavior); graceMs>0 defers the close and skips it at fire time when the peer was admitted meanwhile (rescue); pending closes bounded by graceMaxPending with oldest-first immediate overflow close. Mock transport; no network. v4.68.1 (Aster review 1c11a94e): config normalization (zero/negative/fractional/non-finite fail safe to grace off), physical-cap headroom bound on deferral, stop()/leave() lifecycle teardown, and two-peer real-sim-transport bilateral cases (both-armed rescue, one-armed degradation, simultaneous expiry, idempotent teardown). 37 checks incl the v4.68.2 duplicate-pending regression (Aster -08): at exact headroom a repeated refusal for an already-graced sponsor neither closes the channel nor grows the map and retains the original timer; a different sponsor still closes immediately."
     }
   ]
 }

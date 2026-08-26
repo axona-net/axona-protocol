@@ -133,8 +133,17 @@ console.log('gate close-grace smoke\n');
   node.maxConnections = 9;               // kept 8 + pending 0 + 1 = 9 ≤ 9 → defer ok
   await peer._seedSynaptomeWithSponsor(0x89_5000_0001n);
   check('6 within headroom: refusal defers', peer._gracePending.size === 1 && closed.length === 0);
+  // v4.68.2 regression (Aster …-08): at EXACT headroom, a duplicate refusal
+  // for the already-graced sponsor holds zero incremental capacity — it must
+  // neither close the graced channel nor grow the map, and the ORIGINAL
+  // timer is retained (no refresh).
+  const firstHandle = peer._gracePending.get(0x89_5000_0001n);
+  await peer._seedSynaptomeWithSponsor(0x89_5000_0001n);
+  check('6 duplicate refusal at bound: graced channel NOT closed', closed.length === 0);
+  check('6 duplicate refusal: map unchanged, original timer retained',
+    peer._gracePending.size === 1 && peer._gracePending.get(0x89_5000_0001n) === firstHandle);
   await peer._seedSynaptomeWithSponsor(0x89_5000_0002n);   // 8 + 1 + 1 = 10 > 9 → immediate
-  check('6 no headroom: refusal closes immediately', closed.length === 1 && closed[0] === 0x89_5000_0002n);
+  check('6 no headroom: DIFFERENT sponsor closes immediately', closed.length === 1 && closed[0] === 0x89_5000_0002n);
   check('6 pending unchanged past the cap', peer._gracePending.size === 1);
   for (const h of peer._gracePending.values()) clearTimeout(h);
   peer._gracePending.clear();
