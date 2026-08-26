@@ -944,6 +944,11 @@
       "file": "smoke_strict_door_boundaries.mjs",
       "class": "default",
       "note": "REF-1.1 E2.0 strict composite/bare door proven SEPARATELY in each B1–B5 registry + B6 (Aster E2.0 re-review 2795636a cond.2, correction a767b880). transportKind SUPPLIED => composite-key lookup ONLY, a miss REFUSES with no bare-row fallback (not even a matching-kind bare row); OMITTED => bare-wire lookup only. B1–B5 are bare-keyed single-primitive, so a supplied transportKind ALWAYS refuses there (all 3 kinds, on a real declared wire); omitting binds. B6 is the sole composite registry: a named primitive binds via the composite key, an omitted kind refuses, a routed axona:direct refuses. 19 checks."
+    },
+    {
+      "file": "smoke_gate_close_grace.mjs",
+      "class": "default",
+      "note": "4.68.0 admission-gate close grace (closeGraceMs): graceMs=0 default closes at refusal time (v4.67.1 behavior); graceMs>0 defers the close and skips it at fire time when the peer was admitted meanwhile (rescue); pending closes bounded by graceMaxPending with oldest-first immediate overflow close. Mock transport; no network."
     }
   ]
 }

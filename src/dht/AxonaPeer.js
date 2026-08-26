@@ -204,12 +204,31 @@ export class AxonaPeer extends DHT {
           // an attestation object; not implemented here).
           kJoin: admissionGate.kJoin ?? 0,
           laneCooldownMs: admissionGate.laneCooldownMs ?? 1000,
-          laneWindowMs: admissionGate.laneWindowMs ?? 60000 }
+          laneWindowMs: admissionGate.laneWindowMs ?? 60000,
+          // Deferred refusal-close (v4.68.0, opt-in; default 0 = immediate
+          // close, byte-identical to v4.67.1). closeGraceMs > 0 defers the
+          // gate's refusal-time channel close by that window; at fire time
+          // the close is SKIPPED if the peer was admitted meanwhile (the
+          // rescue — bilateral by construction when both ends run the
+          // policy; against an older peer the far end still closes
+          // immediately, degrading safely to current behavior). Grounded in
+          // the four-arm/grace evidence: immediate closes during the
+          // admission window starve later admissible edges (dht-sim
+          // v0.112.2–5, council record). graceMaxPending bounds the
+          // per-peer pending-close state under adversarial churn —
+          // overflow closes OLDEST immediately, so retained state and the
+          // channel budget stay bounded (this bound is the budget
+          // enforcement at the gate; simultaneous-expiry races are safe
+          // because closeConnection is idempotent).
+          closeGraceMs: admissionGate.closeGraceMs ?? 0,
+          graceMaxPending: admissionGate.graceMaxPending ?? 64 }
       : (admissionGate === true)
-        ? { kNear: 5, sparseFloor: 2, kJoin: 0, laneCooldownMs: 1000, laneWindowMs: 60000 }
+        ? { kNear: 5, sparseFloor: 2, kJoin: 0, laneCooldownMs: 1000, laneWindowMs: 60000,
+            closeGraceMs: 0, graceMaxPending: 64 }
         : null;
     this._laneSeen = new Map();     // identity suffix -> ts of its one lane admission this window
     this._laneLastAt = 0;           // last lane admission (cooldown)
+    this._gracePending = new Map(); // sponsor(BigInt) -> timeout handle (deferred refusal-closes; bounded by graceMaxPending)
     // Candidate attempt guard + deficit backoff (slice 3; v0.7 "Attempt guard,
     // candidate reset, deficit backoff"). OPT-IN, default off — when omitted,
     // candidate probing behaves exactly as before (including the storm the
@@ -1719,8 +1738,38 @@ export class AxonaPeer extends DHT {
         // channel. A channel kept outside the budget defeats the budget; the
         // far end sees the close as a liveness drop and evicts in turn —
         // edge lifetime is the minimum of the two ends' decisions.
-        try { const p = this._node.transport?.closeConnection?.(sponsor); p?.catch?.(() => { /* best-effort */ }); }
-        catch { /* best-effort */ }
+        //
+        // v4.68.0: with closeGraceMs > 0 the close is DEFERRED by the grace
+        // window — an immediate close during the admission window destroys a
+        // channel a later admissible edge would ride (the measured
+        // shortstop-starvation mechanism). At fire time the close is skipped
+        // if the peer was admitted meanwhile. Pending state is bounded:
+        // over graceMaxPending, the oldest pending close fires immediately.
+        const graceMs = this._gateCfg.closeGraceMs ?? 0;
+        const doClose = () => {
+          try { const p = this._node.transport?.closeConnection?.(sponsor); p?.catch?.(() => { /* best-effort */ }); }
+          catch { /* best-effort */ }
+        };
+        if (graceMs > 0 && typeof setTimeout === 'function') {
+          if (!this._gracePending.has(sponsor)) {
+            while (this._gracePending.size >= (this._gateCfg.graceMaxPending ?? 64)) {
+              const [oldSponsor, oldHandle] = this._gracePending.entries().next().value;
+              clearTimeout(oldHandle);
+              this._gracePending.delete(oldSponsor);
+              try { const p = this._node.transport?.closeConnection?.(oldSponsor); p?.catch?.(() => { /* */ }); }
+              catch { /* best-effort */ }
+            }
+            const handle = setTimeout(() => {
+              this._gracePending.delete(sponsor);
+              if (this._node?.synaptome?.has?.(sponsor)) return;   // rescued: admitted meanwhile
+              doClose();
+            }, graceMs);
+            if (typeof handle?.unref === 'function') handle.unref();
+            this._gracePending.set(sponsor, handle);
+          }
+        } else {
+          doClose();
+        }
       }
       return;
     }
