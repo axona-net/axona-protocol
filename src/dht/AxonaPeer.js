@@ -215,17 +215,34 @@ export class AxonaPeer extends DHT {
           // the four-arm/grace evidence: immediate closes during the
           // admission window starve later admissible edges (dht-sim
           // v0.112.2–5, council record). graceMaxPending bounds the
-          // per-peer pending-close state under adversarial churn —
-          // overflow closes OLDEST immediately, so retained state and the
-          // channel budget stay bounded (this bound is the budget
-          // enforcement at the gate; simultaneous-expiry races are safe
-          // because closeConnection is idempotent).
+          // per-peer pending-close MAP under adversarial churn — overflow
+          // closes OLDEST immediately. The PHYSICAL channel bound is
+          // separate and enforced at defer time (v4.68.1, Aster review
+          // 1c11a94e finding 1): a deferred close keeps a channel open, so
+          // deferral capacity derives from live headroom against
+          // node.maxConnections — no headroom, no deferral. Simultaneous-
+          // expiry races are safe because closeConnection is idempotent.
           closeGraceMs: admissionGate.closeGraceMs ?? 0,
           graceMaxPending: admissionGate.graceMaxPending ?? 64 }
       : (admissionGate === true)
         ? { kNear: 5, sparseFloor: 2, kJoin: 0, laneCooldownMs: 1000, laneWindowMs: 60000,
             closeGraceMs: 0, graceMaxPending: 64 }
         : null;
+    // v4.68.1 (Aster review 1c11a94e finding 3): normalize grace config
+    // BEFORE use — the dormant path must be correct, not merely unarmed.
+    // closeGraceMs: finite and > 0 or the feature is OFF; fractional floors.
+    // graceMaxPending: positive integer or 0; anything else (negative,
+    // fractional, non-finite, non-numeric) fails safe to 0. Zero deferral
+    // capacity means grace OFF (immediate close, 4.67.1 behavior) — the
+    // overflow loop is never entered with an empty map.
+    if (this._gateCfg) {
+      const g = this._gateCfg;
+      g.closeGraceMs = (Number.isFinite(g.closeGraceMs) && g.closeGraceMs > 0)
+        ? Math.floor(g.closeGraceMs) : 0;
+      g.graceMaxPending = (Number.isInteger(g.graceMaxPending) && g.graceMaxPending > 0)
+        ? g.graceMaxPending : 0;
+      if (g.graceMaxPending === 0) g.closeGraceMs = 0;
+    }
     this._laneSeen = new Map();     // identity suffix -> ts of its one lane admission this window
     this._laneLastAt = 0;           // last lane admission (cooldown)
     this._gracePending = new Map(); // sponsor(BigInt) -> timeout handle (deferred refusal-closes; bounded by graceMaxPending)
@@ -929,8 +946,24 @@ export class AxonaPeer extends DHT {
     return 32 + Math.clz32(lo);
   }
 
+  // v4.68.1 (Aster review 1c11a94e finding 2): grace timers must not survive
+  // peer teardown — a pending callback firing after stop() would call
+  // closeConnection against a stopped transport. One helper, called on both
+  // the abrupt (stop) and graceful (leave) paths: every timer cleared, every
+  // pending channel closed NOW (it was refused; only its reclamation was
+  // deferred), map emptied. Idempotent — the second call sees an empty map.
+  _clearGracePending() {
+    for (const [sponsor, handle] of this._gracePending) {
+      clearTimeout(handle);
+      try { const p = this._node?.transport?.closeConnection?.(sponsor); p?.catch?.(() => { /* best-effort */ }); }
+      catch { /* best-effort */ }
+    }
+    this._gracePending.clear();
+  }
+
   async stop() {
     if (!this._started) return;
+    this._clearGracePending();
     if (this._engineListenerUnsub) {
       this._engineListenerUnsub();
       this._engineListenerUnsub = null;
@@ -1237,6 +1270,12 @@ export class AxonaPeer extends DHT {
     // the process past their own resolution.
     const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     const am = this._axonaManager;
+    // v4.68.1: retire deferred refusal-closes before the drain — the pending
+    // channels were refused admission, so closing them now cannot affect the
+    // drain, and a timer surviving into teardown fires against a dead
+    // transport (Aster review 1c11a94e finding 2). stop() repeats the call
+    // harmlessly on an empty map.
+    this._clearGracePending();
 
     // (1) drain FIRST, while the transport is still fully alive: wait for
     // in-flight publishes/kills to CONFIRM (the pendingPub implicit-ack
@@ -1750,7 +1789,18 @@ export class AxonaPeer extends DHT {
           try { const p = this._node.transport?.closeConnection?.(sponsor); p?.catch?.(() => { /* best-effort */ }); }
           catch { /* best-effort */ }
         };
-        if (graceMs > 0 && typeof setTimeout === 'function') {
+        // v4.68.1 (Aster review 1c11a94e finding 1): a deferred close KEEPS
+        // a physical channel open, so deferral capacity derives from live
+        // headroom — kept channels (shared synaptome budget members) plus
+        // pending closes plus this one must stay within node.maxConnections.
+        // No headroom: close immediately, exactly 4.67.1. A node without a
+        // finite cap declares no physical bound; graceMaxPending still binds.
+        const cap = this._node?.maxConnections;
+        const headroom = !Number.isFinite(cap)
+          || ((this._node?.synaptome?.size ?? 0)
+              + (this._node?.incomingSynapses?.size ?? 0)
+              + this._gracePending.size + 1 <= cap);
+        if (graceMs > 0 && headroom && typeof setTimeout === 'function') {
           if (!this._gracePending.has(sponsor)) {
             while (this._gracePending.size >= (this._gateCfg.graceMaxPending ?? 64)) {
               const [oldSponsor, oldHandle] = this._gracePending.entries().next().value;
