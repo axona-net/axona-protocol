@@ -243,6 +243,11 @@ export class AxonaManager {
     this.renewFastMs = renewFastMs;      // adaptive floor
     this.dropMs    = dropMs;
     this.maxDirect = maxDirect || MAX_DIRECT;
+    // Process-generation nonce (Aster c6202ccb): a per-manager-instance id stamped on
+    // every LAT_TRACE receipt/ledger row so the analyzer can filter to the CURRENT
+    // process generation and not mix collected rows across relay restarts (the
+    // win-164-pids issue). node-only concern (LAT_TRACE relays); guarded for browsers.
+    try { this._procNonce = `${(typeof process !== 'undefined' && process.pid) || 0}-${Date.now()}`; } catch { this._procNonce = String(Date.now()); }
     this.refreshIntervalMs = refreshIntervalMs;
     this._cacheMax   = replayCacheSize || CACHE_MAX;
     this._cacheBytes = replayCacheBytes || CACHE_BYTES;
@@ -1321,7 +1326,7 @@ export class AxonaManager {
   // Same LAT_TRACE gate; byte-identical when off.
   _edgeRecv(msgId, fromHex) {
     if (!this._latTrace || !msgId) return;
-    this._log('info', 'lat-stage', { stage: 'sub:recv', msgId, from: fromHex ?? null, to: idHex(this.nodeId), t: Date.now(), mono: globalThis.performance?.now?.() ?? 0 });
+    this._log('info', 'lat-stage', { stage: 'sub:recv', msgId, from: fromHex ?? null, to: idHex(this.nodeId), proc: this._procNonce, t: Date.now(), mono: globalThis.performance?.now?.() ?? 0 });
   }
 
   // PUBLISH-TIME ROOT IDENTITY (Aster c755397a, David-approved 2026-09-01). Emitted by
@@ -1333,7 +1338,7 @@ export class AxonaManager {
   // distribution of true origin roots per message. Same LAT_TRACE gate.
   _rootOrigin(msgId, epoch) {
     if (!this._latTrace || !msgId) return;
-    this._log('info', 'lat-stage', { stage: 'root:origin', msgId, root: idHex(this.nodeId), epoch: Number.isFinite(epoch) ? epoch : null, t: Date.now(), mono: globalThis.performance?.now?.() ?? 0 });
+    this._log('info', 'lat-stage', { stage: 'root:origin', msgId, root: idHex(this.nodeId), epoch: Number.isFinite(epoch) ? epoch : null, proc: this._procNonce, t: Date.now(), mono: globalThis.performance?.now?.() ?? 0 });
   }
 
   // Publish-time EXPECTATION LEDGER (combined Gate-4 item 3; Aster a87ad414;
@@ -1387,7 +1392,7 @@ export class AxonaManager {
     }
     this._log('info', 'lat-stage', {
       stage: 'fanout-ledger',
-      msgId,                                               // STABLE cross-tree join key (same on every node)
+      msgId, proc: this._procNonce,                                               // STABLE cross-tree join key (same on every node)
       topicId: idHex(role.topicId),
       node: idHex(this.nodeId),                            // FULL hex — the fanning node
       isRoot: role.isRoot ? 1 : 0,
