@@ -135,6 +135,19 @@ export class AxonaPeer extends DHT {
     // Singleton-root replication fan-out (kernel v4.9.2). null → kernel default (2).
     // Set 0 to disable (A/B diagnostics, or deployments that don't want backup roots).
     this._rootReplicas = rootReplicas;
+    // findKClosest hop/density telemetry (diagnostic, David 2026-08-30). No-op
+    // unless ROUTE_TRACE=1. Emits one route-lookup summary per findKClosest:
+    // seed-pool density, closer-in-seed, rounds, probes, fulfilled/rejected
+    // (dead-peer waits), elapsed, terminus — to separate "sparse table → 0ms
+    // self" from "slow convergence → timeout" local minima.
+    this._routeTrace = (typeof process !== 'undefined' && process.env && process.env.ROUTE_TRACE === '1');
+    // findKClosest dead-peer skip (routing fix, David 2026-08-30). ROLLOUT GATE,
+    // default OFF. ON: findKClosest never PROBES a known-dead or unconnected peer
+    // (exactly the guard _greedyNextHopToward already applies), so a round can no
+    // longer stall on a dead peer's transport timeout — the 4-5s lookup that
+    // blocked synchronous terminal verification. Candidates are unaffected; only
+    // the outbound probe set is filtered. Remove the gate once armed + validated.
+    this._findkSkipDead = (typeof process !== 'undefined' && process.env && process.env.FINDK_SKIP_DEAD === '1');
     // REF-1.1 M1: DEFAULT-OFF Boundary-1 frame-contract registry. When true, the
     // default AxonaManager arms the shadow registry over its 19 routed handlers
     // (observe-only; byte-identical flag-off; the runtime AXONA_REGISTRY_SHADOW env
@@ -840,6 +853,17 @@ export class AxonaPeer extends DHT {
       const { type, payload, targetId, hops, originId } = msg;
       const targetBig = asId(targetId);   // wire→internal id gate
 
+      // Paired DELIVER hop telemetry (LAT_TRACE-gated; David-approved 2026-09-01).
+      // rx here = this hop actually received the forwarded DELIVER; pairs with the
+      // sender's tx by hopAttemptId. No wire/behaviour change when the flag is off.
+      const _hopLt = this._axonaManager?._latTrace === true && type === 'pubsub:deliver';
+      let _hopMids = null;
+      if (_hopLt) {
+        const _dm = Array.isArray(payload?.msgs) ? payload.msgs : [];
+        _hopMids = _dm.map((m) => m?.msgId).filter(Boolean).slice(0, 8);
+        this._axonaManager._deliverHopRx(_hopMids, msg.hopAttemptId ?? null, hops, fromId, toHex(node.id));
+      }
+
       // Greedy 1-hop forward — only over synapses we are actually connected
       // to (skip dead/unbound entries, e.g. the bridge after it drops; see
       // _greedyNextHopToward).  Without this a dead synapse that is XOR-near
@@ -895,13 +919,18 @@ export class AxonaPeer extends DHT {
         catch { /* fall through */ }
       }
 
+      let _hopId = null;
+      if (_hopLt) { _hopId = `h${(this._hopSeq = (this._hopSeq | 0) + 1)}@${toHex(node.id).slice(-6)}`; }
       try {
         // Wire payload targetId is hex (v1.5 contract).
         const downstream = await node.transport.send(nextHopId, 'route_msg', {
           type, payload, targetId: toHex(targetBig), hops: hops + 1, originId,
+          ...(_hopLt ? { hopAttemptId: _hopId } : {}),
         });
+        if (_hopLt) this._axonaManager._deliverHopTx(_hopMids, _hopId, hops + 1, toHex(node.id), toHex(nextHopId), 'ok', null);
         return downstream;
-      } catch {
+      } catch (e) {
+        if (_hopLt) this._axonaManager._deliverHopTx(_hopMids, _hopId, hops + 1, toHex(node.id), toHex(nextHopId), 'fail', String(e?.message || e));
         return { consumed: false, atNode: meId, hops, exhausted: true };
       }
     }, { registry: this._b5door });
@@ -2298,6 +2327,8 @@ export class AxonaPeer extends DHT {
         `(WebRTC-interoperable floor). Chunk large payloads with @axona/protocol/std/chunk (publishChunkedBytes).`,
         { context: { topic: desc.name, size: json.length, max: this._maxPublishBytes } });
     }
+
+    if (typeof am._latStage === 'function') am._latStage(envelope.msgId, 'pub:built');
 
     // Lookup-assisted publish (v4.3.1): warm the true-root hint before the first
     // publish so the PUB routes straight to the topic's emergent root instead of
@@ -4447,11 +4478,21 @@ export class AxonaPeer extends DHT {
     for (const syn of src.synaptome.values())         addCandidate(syn.peerId);
     for (const syn of src.incomingSynapses.values())  addCandidate(syn.peerId);
 
+    // ROUTE_TRACE telemetry (no-op off): density of the seed pool + how much of
+    // it is already closer than self (0 → sparse-table local minimum).
+    const _rt = this._routeTrace ? {
+      t0: (globalThis.performance?.now?.() ?? Date.now()),
+      seedPool: distances.size, synCount: src.synaptome?.size ?? 0, inCount: src.incomingSynapses?.size ?? 0,
+      selfDist: src.id ^ targetBig, probes: 0, fulfilled: 0, rejected: 0, roundsRun: 0,
+    } : null;
+    if (_rt) { let c = 0; for (const d of distances.values()) if (d < _rt.selfDist) c++; _rt.closerInSeed = c; }
+
     const visited = new Set();
     let lastPoolSize = 0;
     let stableRounds = 0;
 
     for (let round = 0; round < maxRounds; round++) {
+      if (_rt) _rt.roundsRun = round + 1;
       const sorted = [...distances.entries()]
         .sort((a, b) => a[1] < b[1] ? -1 : 1)
         .map(([peerId]) => peerId);
@@ -4468,8 +4509,20 @@ export class AxonaPeer extends DHT {
       }
       if (toQuery.length === 0) break;
 
-      const probes = toQuery.filter(p => p !== src.id);
-      for (const p of toQuery) visited.add(p);
+      // Never PROBE a known-dead or unconnected peer (the guard greedy already
+      // applies): a dead peer's transport.send only rejects after its timeout,
+      // and Promise.allSettled below waits for the slowest in the batch. Gated;
+      // flag-off is the prior behaviour. Candidates are untouched — only probes.
+      const probes = toQuery.filter(p => {
+        if (p === src.id) return false;
+        if (this._findkSkipDead) {
+          if (src._deadPeers && src._deadPeers.has(p)) return false;
+          const tr = src.transport;
+          if (tr && typeof tr.isConnected === 'function' && !tr.isConnected(p)) return false;
+        }
+        return true;
+      });
+      for (const p of toQuery) visited.add(p);   // mark all considered (incl. skipped) so we don't reselect them
 
       if (probes.length > 0) {
         const settled = await Promise.allSettled(
@@ -4482,6 +4535,7 @@ export class AxonaPeer extends DHT {
           if (r.status !== 'fulfilled' || !Array.isArray(r.value)) continue;
           for (const peerId of r.value) addCandidate(peerId);
         }
+        if (_rt) { _rt.probes += probes.length; for (const r of settled) { if (r.status === 'fulfilled') _rt.fulfilled++; else _rt.rejected++; } }
       }
 
       const grew = distances.size > lastPoolSize;
@@ -4490,10 +4544,21 @@ export class AxonaPeer extends DHT {
       if (topKAllVisited && stableRounds >= 1) break;
     }
 
-    return [...distances.entries()]
+    const _result = [...distances.entries()]
       .sort((a, b) => a[1] < b[1] ? -1 : 1)
       .slice(0, K)
       .map(([peerId]) => peerId);
+    if (_rt) {
+      const term = _result[0] ?? null;
+      this._emitLog('info', 'route-lookup', {
+        target: (typeof targetBig === 'bigint' ? targetBig.toString(16).slice(0, 12) : null),
+        seedPool: _rt.seedPool, synCount: _rt.synCount, inCount: _rt.inCount, closerInSeed: _rt.closerInSeed,
+        rounds: _rt.roundsRun, probes: _rt.probes, fulfilled: _rt.fulfilled, rejected: _rt.rejected,
+        elapsedMs: Math.round((globalThis.performance?.now?.() ?? Date.now()) - _rt.t0),
+        terminus: (term != null ? term.toString(16).slice(0, 12) : null), terminusIsSelf: (term != null && term === src.id),
+      });
+    }
+    return _result;
   }
 
   /**
@@ -4548,15 +4613,27 @@ export class AxonaPeer extends DHT {
       catch { /* fall through; send may still route via the bridge/relay sink */ }
     }
 
+    // Origin hop (0->1) DELIVER telemetry — same LAT_TRACE gate; pairs with the
+    // first forwarder's rx by hopAttemptId. No wire/behaviour change when off.
+    const _hopLt = this._axonaManager?._latTrace === true && type === 'pubsub:deliver';
+    let _hopId = null, _hopMids = null;
+    if (_hopLt) {
+      const _dm = Array.isArray(payload?.msgs) ? payload.msgs : [];
+      _hopMids = _dm.map((m) => m?.msgId).filter(Boolean).slice(0, 8);
+      _hopId = `h${(this._hopSeq = (this._hopSeq | 0) + 1)}@${toHex(originNode.id).slice(-6)}`;
+    }
     try {
       // Wire payload `targetId` is hex (per the v1.5 contract; the
       // receiver handles either form, but hex is the canonical wire
       // shape so this also works over JSON-serialising transports).
       const downstream = await originNode.transport.send(nextHopId, 'route_msg', {
         type, payload, targetId: toHex(targetId), hops: 1, originId,
+        ...(_hopLt ? { hopAttemptId: _hopId } : {}),
       });
+      if (_hopLt) this._axonaManager._deliverHopTx(_hopMids, _hopId, 1, toHex(originNode.id), toHex(nextHopId), 'ok', null);
       return downstream;
-    } catch {
+    } catch (e) {
+      if (_hopLt) this._axonaManager._deliverHopTx(_hopMids, _hopId, 1, toHex(originNode.id), toHex(nextHopId), 'fail', String(e?.message || e));
       return { consumed: false, atNode: originNode.id, hops: 0, exhausted: true };
     }
   }
