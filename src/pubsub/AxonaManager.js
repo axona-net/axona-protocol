@@ -1320,15 +1320,25 @@ export class AxonaManager {
   // branch transmission; the eligible recipient set of a publish is spread across
   // the whole delivery tree. So this stamps at EVERY fanning node (root and each
   // intermediate relay — _fanout is the one choke point they all pass through).
-  // The union of these per-node ledgers reconstructs the tree, and the leaf set
-  // (ids that appear as a `sub` but never as a `node`) is the per-app-subscriber
-  // denominator the app-boundary measure needs.
+  // The union of these per-node ledgers reconstructs the tree, joined ACROSS nodes
+  // by msgId (the stable cross-tree identity — node-local seq is NOT a join key).
+  //
+  // TREE POSITION AND DELIVERY OBLIGATION ARE SEPARATE FACTS (Aster 722f8464). A
+  // node can be BOTH an intermediate forwarder AND a local app subscriber, so graph
+  // leafhood — "a sub that is never a node" — does NOT equal the app-subscriber
+  // denominator; it would silently drop subscribed forwarders. Two explicit fields:
+  // per recipient edge, `child`=1 marks a relay-forwarding edge (0 = a terminal
+  // leaf-subscriber edge); per node, `localDelivery`=1 marks that THIS node's own
+  // app owes delivery. Reconciliation derives expected app recipients as
+  // {child=0 recipient edges} ∪ {localDelivery=1 nodes}, deduped by nodeId — never
+  // from leafhood. `parent` (this node's upstream) + node/seq/epoch separate seat
+  // reattachments for the same topic.
   //
   // WHAT it records: per message x LOCAL subscriber, the lease state the fanning
   // node BELIEVED at send time — full-hex id (joins to deliver:app / sub:recv),
-  // {since,lastRenewed}, lease age, whether it aggregates a sub-tree (child) or is
-  // a leaf, and whether it is the sender we skip. Plus the node's epoch/seq so a
-  // publish is pinned to the topology incarnation that carried it.
+  // {since,lastRenewed}, lease age, whether the recipient is a child-relay edge, and
+  // whether it is the sender we skip. Per node: localDelivery obligation, upstream
+  // parent, and epoch/seq so a publish is pinned to the topology incarnation.
   //
   // WHAT it deliberately does NOT do: pre-filter exclusions. Expired-lease / self /
   // child-relay / sender-dedup are recorded as RAW state (+ dropMs threshold), so
@@ -1354,11 +1364,13 @@ export class AxonaManager {
     }
     this._log('info', 'lat-stage', {
       stage: 'fanout-ledger',
-      msgId,
+      msgId,                                               // STABLE cross-tree join key (same on every node)
       topicId: idHex(role.topicId),
       node: idHex(this.nodeId),                            // FULL hex — the fanning node
       isRoot: role.isRoot ? 1 : 0,
-      epoch: Number.isFinite(role.epoch) ? role.epoch : null,   // topology incarnation for THIS publish
+      localDelivery: this.mySubscriptions?.has(role.topicId) ? 1 : 0,  // THIS node's own app owes delivery — the dual-role field (Aster 722f8464)
+      parent: (this._upstream?.get(role.topicId) || [])[0] || null,    // upstream seat this node renews toward — separates reattachments (null at root)
+      epoch: Number.isFinite(role.epoch) ? role.epoch : null,   // seat generation — meaningful at isRoot:1 (0 on relays)
       seq: Number.isFinite(role.seq) ? role.seq : null,
       dropMs: this.dropMs,                                 // analyzer classifies expiry with the SAME threshold
       n: recips.length,
