@@ -874,6 +874,7 @@ export class AxonaManager {
   }
 
   _becomeRoot(topicBig, why = 'terminal') {
+    this._disc(topicBig, 'became-root', { why });
     return this._rootClaim.become(topicBig, why);
   }
 
@@ -1044,6 +1045,7 @@ export class AxonaManager {
   // the publish on a slow live-mesh lookup.
   pubsubPublish(topicId, json, meta = {}) {
     const hint = this._rootHint_(topicId);
+    this._disc(topicId, 'pub-root', { hint: hint ? String(hint).slice(0, 12) : null });
     // Retain briefly so a publish that stranded on the greedy walk (hint not yet
     // warm) is re-sent toward the true root the moment the background lookup
     // resolves — a one-shot publish never re-routes on its own, so a cold-hint
@@ -1054,6 +1056,7 @@ export class AxonaManager {
     let pmsgId = null; try { pmsgId = JSON.parse(json)?.msgId ?? null; } catch { /* opaque body */ }
     if (pmsgId) this._pendingPub.set(pmsgId, { topicBig: topicId, json, at: this._now(), tries: 0 });
     this._send(T.PUB, { topicId: idHex(topicId), via: hint ? [hint] : [], json });
+    this._latStage(pmsgId, 'pub:send');
     // Early re-sends — ONE plan, ONE pump (v4.25.0, Phase 6): a cold publisher
     // (not yet integrated) front-loads burst waves while its table warms; a WARM
     // first publish to a topic gets one quick re-send so a just-formed tree still
@@ -1268,6 +1271,30 @@ export class AxonaManager {
   _log(level, event, ctx) {
     if (this._logSink) { try { this._logSink(level, 'pubsub:' + event, ctx); } catch { /* sink threw */ } }
   }
+
+  // Per-stage delivery-latency trace (diagnostic, David 2026-08-30). NO-OP unless
+  // LAT_TRACE=1, so the live fleet's behaviour is unchanged. Emits one log per
+  // stage keyed by msgId: t = wall (Date.now, joined across hosts by the harness
+  // offsets), mono = process-local monotonic (exact same-process deltas). The
+  // analyzer reconstructs, per msgId, pub:built → pub:send → root:recv/fanout →
+  // sub:recv → deliver:app → deliver:cb to locate where the 1.7s median lives.
+  _latStage(msgId, stage) {
+    if (!this._latTrace || !msgId) return;
+    this._log('info', 'lat-stage', { msgId, stage, t: Date.now(), mono: globalThis.performance?.now?.() ?? 0 });
+  }
+
+  // Root-registration DISCRIMINATOR (Aster/Vega/Orion, 2026-08-30). Same
+  // LAT_TRACE gate. Captures the SUB-resolved root, PUB-resolved root, self-root
+  // events, and the true root's live fanout membership so the probe can tell
+  // apart the three divergence mechanisms (self-root split / asymmetric greedy
+  // termination / migration without handoff) and prove whether a SUB that
+  // reaches the true root is actually recorded in its fanout.
+  _disc(topicIdBig, event, extra = {}) {
+    if (!this._latTrace) return;
+    let t = null; try { t = topicIdBig?.toString(16)?.slice(0, 12) ?? null; } catch { /* */ }
+    this._log('info', 'disc', { t, ev: event, self: idHex(this.nodeId).slice(0, 12), ...extra });
+  }
+
 }
 
 // ── Phase 2 assembly ────────────────────────────────────────────────────

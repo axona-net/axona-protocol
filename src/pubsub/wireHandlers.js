@@ -416,8 +416,10 @@ export const wireHandlersMethods = {
   async _ingestPublish(role, json) {
     let env;
     try { env = JSON.parse(json); } catch { this._log('warn', 'drop-unparseable'); return { ok: false, reason: 'unparseable' }; }
+    this._latStage(env?.msgId, 'root:recv');
 
     const v = await verifyEnvelope(env);                                 // B-4 sig + msgId
+    this._latStage(env?.msgId, 'root:verified');
     if (!v.ok) { this._log('warn', 'drop-bad-envelope', { reason: v.reason }); return { ok: false, reason: 'bad-envelope' }; }
     const fr = checkFreshness(env, { now: this._now() });                 // C-2 freshness (live ingress)
     if (!fr.ok) { this._log('warn', 'drop-stale', { reason: fr.reason }); return { ok: false, reason: 'stale' }; }
@@ -457,6 +459,8 @@ export const wireHandlersMethods = {
     // below never runs and nothing could ever discharge this entry. Choose the
     // terminal state explicitly rather than leaving it pending forever.
     if (!this._rootReplicas) this._durability.noCohortConfigured(env.msgId);
+    this._latStage(env.msgId, 'root:fanout');
+    if (this._latTrace) this._disc(role.topicId, 'root-members', { msgId: env.msgId, n: role.subscribers.size, members: [...role.subscribers.keys()].map((k) => String(k).slice(0, 12)) });
     this._fanout(role, msg, null);                                       // to subscribers
     // local app (if subscribed)
     //
@@ -829,6 +833,7 @@ export const wireHandlersMethods = {
         if (s) s.interval = this.renewFastMs;
       }
       this._upstream.set(topicBig, [fromHex]);
+      this._disc(topicBig, 'sub-root', { root: fromHex ? String(fromHex).slice(0, 12) : null });
     }
 
     const role = this.axonRoles.get(topicBig);        // set iff I'm a relay → re-fan
@@ -849,6 +854,7 @@ export const wireHandlersMethods = {
         if (Number.isFinite(m.seq) && m.seq > role.seq) role.seq = m.seq;   // keep counter ready if we're promoted to root
         this._fanout(role, m, lc(payload.from));       // exclude the sender (m carries seq)
       }
+      this._latStage(m.msgId, 'sub:recv');
       this._deliverToApp(topicBig, m.json, m.msgId, m.publishTs, m.seq);
     }
     return 'consumed';
