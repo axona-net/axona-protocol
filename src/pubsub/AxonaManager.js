@@ -1313,6 +1313,29 @@ export class AxonaManager {
     this._log('info', 'lat-stage', { stage: 'deliver:hop_rx', hopAttemptId, hopIdx, from: fromHex, to: toHex, msgIds, t: Date.now(), mono: globalThis.performance?.now?.() ?? 0 });
   }
 
+  // EDGE-JOIN RECEIPT (Aster c755397a, David-approved 2026-09-01). The plain sub:recv
+  // proved a node received a message but not WHICH EDGE carried it, so the analyzer
+  // could not separate forwarding loss from tree divergence. This carries the upstream
+  // sender (`from`) and this receiver (`to`), so the ACTUAL delivery graph is
+  // reconstructable and joinable to the fanout-ledger's BELIEVED parent/child edges.
+  // Same LAT_TRACE gate; byte-identical when off.
+  _edgeRecv(msgId, fromHex) {
+    if (!this._latTrace || !msgId) return;
+    this._log('info', 'lat-stage', { stage: 'sub:recv', msgId, from: fromHex ?? null, to: idHex(this.nodeId), t: Date.now(), mono: globalThis.performance?.now?.() ?? 0 });
+  }
+
+  // PUBLISH-TIME ROOT IDENTITY (Aster c755397a, David-approved 2026-09-01). Emitted by
+  // the node that INGESTS a publish as root — an authoritative, non-inferred binding of
+  // "this node rooted THIS publish" (msgId = H(payload incl nonce), so msgId is the
+  // publish-instance key). Two root:origin rows for one msgId = two nodes independently
+  // rooted the same publish = GENUINE root-set divergence (definitionally same nonce),
+  // distinct from a re-fanout relay reading as rootless. Lets the analyzer report the
+  // distribution of true origin roots per message. Same LAT_TRACE gate.
+  _rootOrigin(msgId, epoch) {
+    if (!this._latTrace || !msgId) return;
+    this._log('info', 'lat-stage', { stage: 'root:origin', msgId, root: idHex(this.nodeId), epoch: Number.isFinite(epoch) ? epoch : null, t: Date.now(), mono: globalThis.performance?.now?.() ?? 0 });
+  }
+
   // Publish-time EXPECTATION LEDGER (combined Gate-4 item 3; Aster a87ad414;
   // DRAFT 2026-09-01 for David's review — gated but NOT yet approved for a deploy).
   //
