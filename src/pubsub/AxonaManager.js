@@ -259,6 +259,7 @@ export class AxonaManager {
       this._membershipDigest = (process.env && process.env.MEMBERSHIP_DIGEST) || null;
     } catch { this._runId = null; this._membershipEpoch = null; this._membershipDigest = null; }
     this._ledgerSeq = 0;   // monotonic per-process ledger sequence (feeds the completeness manifest)
+    this._nodeStartEmitted = false;   // node-start census row emitted once (David 2026-09-01)
     this.refreshIntervalMs = refreshIntervalMs;
     this._cacheMax   = replayCacheSize || CACHE_MAX;
     this._cacheBytes = replayCacheBytes || CACHE_BYTES;
@@ -1364,6 +1365,18 @@ export class AxonaManager {
     return { runId: this._runId, epoch: this._membershipEpoch, digest: this._membershipDigest,
              proc: this._procNonce, seq: (this._ledgerSeq = (this._ledgerSeq | 0) + 1) };
   }
+  // NODE-START census row (David 2026-09-01): a node records the ephemeral transport id
+  // it computed at startup, so the harness harvests the closed-fleet census from the
+  // files the nodes themselves generate — no precomputed keyset and no exception to the
+  // never-persist-transport-id invariant (the id is ephemeral and lives only in this
+  // run's diagnostic ledger). Emitted once, before this process's first ledger row.
+  _nodeStartLedger() {
+    if (!this._latTrace || this._nodeStartEmitted) return;
+    this._nodeStartEmitted = true;
+    this._log('info', 'lat-stage', { stage: 'node-start', transportId: idHex(this.nodeId),
+      runId: this._runId, epoch: this._membershipEpoch, digest: this._membershipDigest,
+      proc: this._procNonce, t: Date.now(), mono: globalThis.performance?.now?.() ?? 0 });
+  }
   // Classify a transport.send resolution/rejection into the three send-outcome states
   // (Aster's review): not-attempted (never hit the wire) / attempted-failed (write
   // threw) / accepted (write went out — delivered-reply, no-reply, or downstream
@@ -1379,6 +1392,7 @@ export class AxonaManager {
   }
   _txLedger(rec) {
     if (!this._latTrace || !rec || !rec.msgId) return;
+    this._nodeStartLedger();
     this._log('info', 'lat-stage', { stage: 'tx-ledger', ...this._ledgerFrame(),
       msgId: rec.msgId, publishNonce: rec.publishNonce ?? null, edgeAttemptId: rec.edgeAttemptId ?? null,
       ordinal: rec.ordinal ?? 1, from: rec.from ?? idHex(this.nodeId), to: rec.to ?? null,
@@ -1389,6 +1403,7 @@ export class AxonaManager {
   }
   _rxLedger(rec) {
     if (!this._latTrace || !rec || !rec.msgId) return;
+    this._nodeStartLedger();
     this._log('info', 'lat-stage', { stage: 'rx-ledger', ...this._ledgerFrame(),
       msgId: rec.msgId, publishNonce: rec.publishNonce ?? null, edgeAttemptId: rec.edgeAttemptId ?? null,
       from: rec.from ?? null, to: idHex(this.nodeId), role: rec.role ?? null, topicId: rec.topicId ?? null,
