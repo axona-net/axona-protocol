@@ -100,5 +100,54 @@ function mk() {
   am.stop();
 }
 
+// 5. #47 — a REPLICATED BACKUP that NEVER saw the METRICSON inherits the lease
+//    across a root transition. This is the specimen the path-node seed (§4) misses:
+//    the promoted node received the role via REPLICATE, not on the METRICSON path,
+//    so `_metricsWanted` is empty and the lease must ride the replication payload.
+const PRINCIPAL = REG | 0x77n;
+{
+  const { am, pubs } = mk();
+  am._rootReplicas = 2;                                    // backup duty on
+  const leaseUntil = now() + 70_000;
+  // the live root's REPLICATE arrives carrying its active lease (Edit 1 → Edit 2)
+  await am._syncIngest(
+    { topicId: idHex(TOPIC), from: idHex(PRINCIPAL), msgs: [], dels: [], metricsOn: leaseUntil },
+    { fromId: idHex(PRINCIPAL), isTerminal: false },
+    'REPLICATE',
+  );
+  const role = am.axonRoles.get(TOPIC);
+  ok('backup ingested the REPLICATE (never on the METRICSON path)',
+    !!role && role.isRoot === false && (am._metricsWanted.get(TOPIC) || 0) === 0);
+  ok('backup stashed the inherited lease, but does NOT publish while a backup',
+    role._inheritedMetricsOn === leaseUntil && pubs.length === 0, `(inh=${role?._inheritedMetricsOn}, pubs=${pubs.length})`);
+  // …the root dies and routing promotes this backup
+  am._maybePromoteRoot(role, { via: [] }, { isTerminal: true });
+  ok('promoted backup adopts the replicated lease (no METRICSON needed)',
+    role.isRoot && role.metricsOn === leaseUntil, `(metricsOn=${role.metricsOn})`);
+  clock += 21_000;
+  await am.refreshTick();
+  ok('promoted backup publishes a snapshot — metrics survive the transition (#47)', pubs.length >= 1, `(${pubs.length})`);
+  am.stop();
+}
+
+// 5b. CONTROL — a backup with NO inherited lease (and never on the path) stays
+//     metrics-dark on promotion. Proves the lease is what arms it, not promotion.
+{
+  const { am, pubs } = mk();
+  am._rootReplicas = 2;
+  await am._syncIngest(
+    { topicId: idHex(TOPIC), from: idHex(PRINCIPAL), msgs: [], dels: [] },   // no metricsOn
+    { fromId: idHex(PRINCIPAL), isTerminal: false },
+    'REPLICATE',
+  );
+  const role = am.axonRoles.get(TOPIC);
+  am._maybePromoteRoot(role, { via: [] }, { isTerminal: true });
+  ok('control: no inherited lease → promoted root stays metrics-dark', role.isRoot && !(role.metricsOn > now()), `(metricsOn=${role.metricsOn})`);
+  clock += 21_000;
+  await am.refreshTick();
+  ok('control: and publishes no snapshot', pubs.length === 0, `(${pubs.length})`);
+  am.stop();
+}
+
 console.log(`\n${fail ? '✗' : '✓'} smoke_metrics_demand: ${n} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

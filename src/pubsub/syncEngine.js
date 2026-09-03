@@ -162,6 +162,15 @@ export const syncEngineMethods = {
       }
       if (subs.length) payload.subs = subs;
     }
+    // METRICS-LEASE REPLICATION (#47): on a full push from a live root, carry an
+    // active metricTopic(T) publish lease so a promoted backup keeps emitting
+    // snapshots across the transition instead of going metrics-dark until a METRICSON
+    // renewal re-routes to it — which a lingering dead-root can still swallow (#28).
+    // Absolute expiry; applied only on promotion (rootClaim._set) and only while
+    // still fresh (the apply-site guards on `> now`). A backup publishes nothing.
+    if (full && this._replicateSubs && role.isRoot && role.metricsOn > this._now()) {
+      payload.metricsOn = role.metricsOn;
+    }
     if (policyName === 'HANDOFF') return this._route(targetBig, T.HANDOFF, payload);
     return this._route(targetBig, T.REPLICATE, payload);
   },
@@ -244,6 +253,13 @@ export const syncEngineMethods = {
           inh.set(h, { since: Number.isFinite(e.since) ? e.since : 0, child: !!e.child });
         }
         role._inheritedSubs = inh.size ? inh : null;
+      }
+      // METRICS-LEASE REPLICATION (#47): stash the principal's active lease expiry;
+      // applied on promotion (rootClaim._set), and ignored once it lapses (the
+      // apply-site guards on `> now`). Never acted on while a backup — a backup
+      // publishes nothing. Key present ⟺ full push from a root with a fresh lease.
+      if (this._replicateSubs && Number.isFinite(payload.metricsOn) && payload.metricsOn > this._now()) {
+        role._inheritedMetricsOn = payload.metricsOn;
       }
       return;
     }
