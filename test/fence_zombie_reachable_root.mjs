@@ -21,11 +21,18 @@
 // so the 50-minute prod specimen additionally requires active regeneration —
 // the open question this fence does NOT close.
 //
-// SECTIONS 1–3 PIN THE DEFECT AS IT STANDS (they are GREEN on 4.61.2 and
-// document the mechanism). When Dead-Root Eviction (Dead-Root-Eviction-v0.2,
-// council-ratified) ships, sections 1 and 3 FLIP to the fixed contract — a
-// deliberate flip, not a regression; see the E5 task. Section 2 is the
-// control (clean departure heals) and must be green forever.
+// SECTIONS 1 + 3 pin the GATE'S STANDING, INTENTIONAL contract — no longer a
+// "defect awaiting a flip". Dead-Root Eviction v0.3 (writeFlight.js, shipped
+// 4.63→4.73; GH #28/#51) did NOT tighten this gate: it is ADDITIVE one layer up.
+// The gate stays deliberately optimistic — in the zombie window it names a
+// reachable corpse, routing forwards toward it, and a single _onPub mints no
+// role — and the write-flight layer is what makes that SAFE: a write completes
+// only on an ingest-ack, and no ack within INGEST_ACK_MS drives receipt-probe →
+// evict (epoch-stamped tombstone) → promote the closest live holder. So these
+// sections document the primitive the recovery is BUILT TO TOLERATE; they do not
+// flip. The recovery itself is fenced end-to-end by smoke_write_flight (31/31),
+// smoke_ingest_ack, and smoke_ack_routing. Section 2 is the control (clean
+// departure heals) and must be green forever.
 //
 // Run: node test/fence_zombie_reachable_root.mjs
 import { AxonaManager } from '../src/pubsub/AxonaManager.js';
@@ -94,9 +101,9 @@ function agedCorpseBeacon(am, clock) {
   agedCorpseBeacon(am, clock);
   const strict = am._rootClaim.liveCloserRoot(TOPIC);
   const loose  = am._rootClaim.liveCloserRoot(TOPIC, { requireReachable: false });
-  ok('1a CURRENT DEFECT (flips with eviction fix): in the zombie window the corpse wins the STRICT gate on reachability alone',
+  ok('1a GATE CONTRACT (optimistic by design; write-flight v0.3 recovers — smoke_write_flight): in the zombie window the corpse wins the STRICT gate on reachability alone',
     strict === lc(idHex(DEAD)), `got ${strict}`);
-  ok('1b CURRENT DEFECT (flips with eviction fix): same corpse wins the LOOSE gate',
+  ok('1b GATE CONTRACT (write-flight v0.3 recovers): same corpse wins the LOOSE gate',
     loose === lc(idHex(DEAD)), `got ${loose}`);
 }
 
@@ -121,9 +128,9 @@ function agedCorpseBeacon(am, clock) {
   const payload = { topicId: idHex(TOPIC), json: JSON.stringify({ v: 3 }) };
   const d = am._topicDecision(payload, { fromId: idHex(NB) });
   await am._onPub(payload, { fromId: idHex(NB) });
-  ok('3a CURRENT DEFECT (flips with eviction fix): routing keeps forwarding the PUB toward the corpse',
+  ok('3a GATE CONTRACT (write-flight v0.3 recovers): routing keeps forwarding the PUB toward the corpse',
     d === 'forward', `decision=${d}`);
-  ok('3b CURRENT DEFECT (flips with eviction fix): the closest LIVE node never roots — no role minted, the write is gone',
+  ok('3b GATE CONTRACT: a single _onPub mints no role — recovery is the multi-round write flight, not this receive handler (smoke_write_flight)',
     !am.axonRoles.get(TOPIC));
 }
 
