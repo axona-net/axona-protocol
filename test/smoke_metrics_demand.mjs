@@ -101,48 +101,93 @@ function mk() {
 }
 
 // 5. #47 — a REPLICATED BACKUP that NEVER saw the METRICSON inherits the lease
-//    across a root transition. This is the specimen the path-node seed (§4) misses:
-//    the promoted node received the role via REPLICATE, not on the METRICSON path,
-//    so `_metricsWanted` is empty and the lease must ride the replication payload.
-const PRINCIPAL = REG | 0x77n;
+//    across a root transition, through the REAL _syncPush → _syncIngest wire. The
+//    promoted node got the role via REPLICATE, not on the METRICSON path, so
+//    `_metricsWanted` is empty and the lease must ride the replication payload.
+//    Wire shape follows the council review of 3e8537f (Vega/Aster/Orion): a
+//    remaining-DURATION re-based on the receiver's clock, clamped to the lease max,
+//    cleared when a later push carries none.
+const T_REPLICATE = 'pubsub:replicate';
+const PRINCIPAL = REG | 0x77n, BACKUP = REG | 0x78n;
 {
+  // principal: a live root with an armed metrics lease, pushing a full REPLICATE
+  const { am: amP, sent: sentP } = mk();
+  amP._onMetricsOn({ topicId: idHex(TOPIC), via: [], requesterId: idHex(REQ) }, { isTerminal: true });
+  const roleP = amP.axonRoles.get(TOPIC);
+  await amP._syncPush(BACKUP, TOPIC, roleP, 'REPLICATE', { full: true });
+  const push = sentP.filter(s => s.type === T_REPLICATE).pop();
+  ok('full push carries the lease as a remaining-DURATION, not an absolute expiry',
+    !!push && Number.isFinite(push.payload.metricsRemainingMs) && push.payload.metricsOn === undefined,
+    `(rem=${push?.payload?.metricsRemainingMs}, abs=${push?.payload?.metricsOn})`);
+  ok('remaining is positive and within the lease maximum',
+    push.payload.metricsRemainingMs > 0 && push.payload.metricsRemainingMs <= 70_000, `(${push.payload.metricsRemainingMs})`);
+  amP.stop();
+
+  // backup: a DIFFERENT node, never on the METRICSON path, ingests that wire payload
   const { am, pubs } = mk();
-  am._rootReplicas = 2;                                    // backup duty on
-  const leaseUntil = now() + 70_000;
-  // the live root's REPLICATE arrives carrying its active lease (Edit 1 → Edit 2)
+  am.nodeId = BACKUP; am._rootReplicas = 2;
+  clock += 5_000;                                          // so the re-base is observable
+  const at = now();
   await am._syncIngest(
-    { topicId: idHex(TOPIC), from: idHex(PRINCIPAL), msgs: [], dels: [], metricsOn: leaseUntil },
-    { fromId: idHex(PRINCIPAL), isTerminal: false },
-    'REPLICATE',
+    { topicId: idHex(TOPIC), from: idHex(PRINCIPAL), msgs: [], dels: [], metricsRemainingMs: push.payload.metricsRemainingMs },
+    { fromId: idHex(PRINCIPAL), isTerminal: false }, 'REPLICATE',
   );
   const role = am.axonRoles.get(TOPIC);
   ok('backup ingested the REPLICATE (never on the METRICSON path)',
     !!role && role.isRoot === false && (am._metricsWanted.get(TOPIC) || 0) === 0);
-  ok('backup stashed the inherited lease, but does NOT publish while a backup',
-    role._inheritedMetricsOn === leaseUntil && pubs.length === 0, `(inh=${role?._inheritedMetricsOn}, pubs=${pubs.length})`);
-  // …the root dies and routing promotes this backup
+  ok('backup RE-BASES the lease onto its own clock (receiver_now + remaining), not the sender expiry',
+    role._inheritedMetricsOn === at + push.payload.metricsRemainingMs && pubs.length === 0,
+    `(inh=${role?._inheritedMetricsOn}, want=${at + push.payload.metricsRemainingMs}, pubs=${pubs.length})`);
   am._maybePromoteRoot(role, { via: [] }, { isTerminal: true });
   ok('promoted backup adopts the replicated lease (no METRICSON needed)',
-    role.isRoot && role.metricsOn === leaseUntil, `(metricsOn=${role.metricsOn})`);
+    role.isRoot && role.metricsOn === at + push.payload.metricsRemainingMs, `(metricsOn=${role.metricsOn})`);
   clock += 21_000;
   await am.refreshTick();
   ok('promoted backup publishes a snapshot — metrics survive the transition (#47)', pubs.length >= 1, `(${pubs.length})`);
   am.stop();
 }
 
-// 5b. CONTROL — a backup with NO inherited lease (and never on the path) stays
-//     metrics-dark on promotion. Proves the lease is what arms it, not promotion.
+// 5b. CLEAR-ON-OMIT (Vega/Aster/Orion release condition): a later authoritative full
+//     push whose principal lease has lapsed carries remaining=0 and MUST clear the
+//     stash, so a promoted backup cannot arm from a demand the root already dropped.
+{
+  const { am } = mk();
+  am.nodeId = BACKUP; am._rootReplicas = 2;
+  await am._syncIngest({ topicId: idHex(TOPIC), from: idHex(PRINCIPAL), msgs: [], dels: [], metricsRemainingMs: 60_000 },
+    { fromId: idHex(PRINCIPAL), isTerminal: false }, 'REPLICATE');
+  ok('backup stashed a fresh inherited lease', am.axonRoles.get(TOPIC)._inheritedMetricsOn > now());
+  await am._syncIngest({ topicId: idHex(TOPIC), from: idHex(PRINCIPAL), msgs: [], dels: [], metricsRemainingMs: 0 },
+    { fromId: idHex(PRINCIPAL), isTerminal: false }, 'REPLICATE');
+  const role = am.axonRoles.get(TOPIC);
+  ok('a later push with no fresh lease CLEARS the inherited stash (clear-on-omit)', role._inheritedMetricsOn === 0);
+  am._maybePromoteRoot(role, { via: [] }, { isTerminal: true });
+  ok('promoted-after-clear stays metrics-dark', role.isRoot && !(role.metricsOn > now()), `(metricsOn=${role.metricsOn})`);
+  am.stop();
+}
+
+// 5c. CLAMP (Aster/Orion guard): an over-long remaining can never arm a longer-than-
+//     legal lease — it is clamped to METRICS_LEASE_MS on the receiver's clock.
+{
+  const { am } = mk();
+  am.nodeId = BACKUP; am._rootReplicas = 2;
+  const at = now();
+  await am._syncIngest({ topicId: idHex(TOPIC), from: idHex(PRINCIPAL), msgs: [], dels: [], metricsRemainingMs: 999_000 },
+    { fromId: idHex(PRINCIPAL), isTerminal: false }, 'REPLICATE');
+  ok('an over-long remaining is clamped to the lease maximum', am.axonRoles.get(TOPIC)._inheritedMetricsOn === at + 70_000,
+    `(inh=${am.axonRoles.get(TOPIC)._inheritedMetricsOn}, max=${at + 70_000})`);
+  am.stop();
+}
+
+// 5d. CONTROL — an old-format push with the field ABSENT leaves no stash, so a
+//     promoted backup stays dark. Proves the lease is what arms it, not promotion.
 {
   const { am, pubs } = mk();
-  am._rootReplicas = 2;
-  await am._syncIngest(
-    { topicId: idHex(TOPIC), from: idHex(PRINCIPAL), msgs: [], dels: [] },   // no metricsOn
-    { fromId: idHex(PRINCIPAL), isTerminal: false },
-    'REPLICATE',
-  );
+  am.nodeId = BACKUP; am._rootReplicas = 2;
+  await am._syncIngest({ topicId: idHex(TOPIC), from: idHex(PRINCIPAL), msgs: [], dels: [] },   // no metricsRemainingMs
+    { fromId: idHex(PRINCIPAL), isTerminal: false }, 'REPLICATE');
   const role = am.axonRoles.get(TOPIC);
   am._maybePromoteRoot(role, { via: [] }, { isTerminal: true });
-  ok('control: no inherited lease → promoted root stays metrics-dark', role.isRoot && !(role.metricsOn > now()), `(metricsOn=${role.metricsOn})`);
+  ok('control: field absent → promoted root stays metrics-dark', role.isRoot && !(role.metricsOn > now()), `(metricsOn=${role.metricsOn})`);
   clock += 21_000;
   await am.refreshTick();
   ok('control: and publishes no snapshot', pubs.length === 0, `(${pubs.length})`);
