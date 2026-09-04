@@ -654,7 +654,7 @@
       "class": "default"
     },
     {
-      "file": "smoke_region_lock.mjs",
+      "file": "smoke_region_hint.mjs",
       "class": "default"
     },
     {

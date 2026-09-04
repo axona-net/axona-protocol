@@ -146,18 +146,16 @@ async function main() {
     check('backup with root ALIVE (live neighbour) sends NOTHING', !sentFor(T.HANDOFF, tBackAlive) && !sentFor(T.REPLICATE, tBackAlive));
     check('backup with root DEAD pushes REPLICATE — even with a still-fresh beacon', sentFor(T.REPLICATE, tBackDead));
     check('backup push never mints a root at the receiver (no HANDOFF from a backup)', !sentFor(T.HANDOFF, tBackDead));
-    // Region preference (#362): the PRIMARY heir must be the in-region
-    // candidate even when an out-of-region one is XOR-closer (listed first by
-    // findKClosest) — an out-of-region holder is durable but unfindable by
-    // routed reads. The redundant runner-up push MAY go out-of-region (a
-    // wrong-place second copy beats no second copy).
+    // Heir selection is region-independent (v4.75.0): the CLOSEST reachable
+    // candidate is chosen — findKClosest lists outHeir first, so it wins whatever
+    // its region. Region is a placement hint folded into the id, never a selector.
     const handoffTargets = sent.filter(s => s.type === T.HANDOFF).map(s => s.target);
-    check('confirmed HANDOFF targets the IN-REGION heir (out-of-region closer candidate skipped)',
-      handoffTargets.length > 0 && handoffTargets.every(t => t === heir),
+    check('the PRIMARY HANDOFF targets the CLOSEST heir (region is not a selector; later retries may re-pick a reachable candidate)',
+      handoffTargets.length > 0 && handoffTargets[0] === outHeir,
       `(targets=${handoffTargets.map(t => idHex(t).slice(0, 4))})`);
     const backupPrimary = sent.find(s => s.type === T.REPLICATE);
-    check('backup push PRIMARY target is the in-region heir',
-      backupPrimary != null && backupPrimary.target === heir,
+    check('backup push PRIMARY target is the closest heir',
+      backupPrimary != null && backupPrimary.target === outHeir,
       `(first=${backupPrimary ? idHex(backupPrimary.target).slice(0, 4) : 'none'})`);
   }
 
