@@ -84,13 +84,12 @@ async function main() {
   const c = await makePeer(net);
   await c.peer.pub(TOPIC, 'm-c', { signWith: author });   // forces the lazy manager to exist
   const cam = c.peer._axonaManager;
-  // simulate an unconfirmable in-flight publish (implicit ack never arrives)
-  // v4.58.0: the drain consults DURABILITY, not _pendingPub. _pendingPub is the
-  // DELIVERY leg and clears when this node observes its own message — which
-  // proves the root holds it and nothing more. The behaviour under test (bound
-  // the wait; let progress reset the stall clock) is unchanged; only the signal
-  // the drain reads has moved, so the fixture injects the new one.
-  cam._durability.open('deadbeef', 1n);
+  // simulate an unconfirmable in-flight publish (implicit ack never arrives).
+  // The drain consults DURABILITY, not _pendingPub. Per-Role durability (GH #26):
+  // obligations live ON a Role, so the fixture opens on a dedicated fixture root
+  // rather than a bare msgId.
+  const roleC = cam._becomeRoot((0x89n << 256n) | 0xc1n);
+  cam._durability.open(roleC, 'deadbeef');
   const t1 = Date.now();
   await c.peer.leave({ timeoutMs: 700 });
   const boundedMs = Date.now() - t1;
@@ -105,7 +104,8 @@ async function main() {
   const e = await makePeer(net);
   await e.peer.pub(TOPIC, 'm-e', { signWith: author });
   const eam = e.peer._axonaManager;
-  for (let i = 0; i < 90; i++) eam._durability.open('stuck' + i, 1n);
+  const roleE = eam._becomeRoot((0x89n << 256n) | 0xe1n);
+  for (let i = 0; i < 90; i++) eam._durability.open(roleE, 'stuck' + i);
   const t2 = Date.now();
   await e.peer.leave();                        // DEFAULT timeoutMs 5000
   const stalledMs = Date.now() - t2;
@@ -118,14 +118,15 @@ async function main() {
   const f = await makePeer(net);
   await f.peer.pub(TOPIC, 'm-f', { signWith: author });
   const fam = f.peer._axonaManager;
-  for (let i = 0; i < 40; i++) fam._durability.open('drain' + i, 1n);
+  const roleF = fam._becomeRoot((0x89n << 256n) | 0xf1n);
+  for (let i = 0; i < 40; i++) fam._durability.open(roleF, 'drain' + i);
   // delete one entry every 250ms → steady progress well past STALL_MS (1.5s)
   // progress = a pending obligation reaching a TERMINAL state. 'verified' is the
   // happy one and the only one a cohort verdict can produce.
   const drainTimer = setInterval(() => {
     for (let i = 0; i < 40; i++) {
       if (fam._durability.state('drain' + i) === 'pending') {
-        fam._durability.record('drain' + i, { verified: 1, attempted: 1 });
+        fam._durability.record(roleF, 'drain' + i, { verified: 1, attempted: 1 });
         break;
       }
     }
