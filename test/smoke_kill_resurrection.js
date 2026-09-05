@@ -2,31 +2,38 @@
 // smoke_kill_resurrection.js — regression guard for the user-reported
 // "kill, then reload, and the message comes back" bug, and its fix.
 //
-// Root cause (replica divergence): a topic is replicated across R root
-// axons, but a kill is best-effort-pushed to the K-closest set. If even
-// ONE root misses the kill (a dropped delivery, churn between publish- and
-// kill-time K-closest, or a root that joined the set late) that root keeps
-// the message AND has no tombstone. On a fresh reload the subscriber's
-// in-memory tombstone set is empty, so the stale root's replay resurrects it.
+// Root cause (replica divergence): a topic is replicated across a cohort of
+// root/backup axons, but the tombstone from a kill converges through the
+// anti-entropy plane (cohort REPLICATE → union-ingest). If even ONE holder
+// misses that convergence — a dropped REPLICATE, churn between publish- and
+// kill-time K-closest, or a holder that joined the set late — that holder keeps
+// the message AND has no tombstone. On a fresh reload the subscriber's in-memory
+// tombstone set is empty, so the stale holder's replay-on-subscribe resurrects it.
 //
-// Fix (Phase A #2 kill convergence): after a root applies a creator-authorized
-// kill it RE-GOSSIPS the signed kill to the current K-closest root set on every
-// refreshTick (bounded to KILL_REGOSSIP_MS). A replica that missed the original
-// kill re-runs the full verifier against the message it holds and removes +
-// tombstones it. Plus a send-side tombstone backstop in _maybeSendReplay.
+// Fix (cohort anti-entropy): a holder that applied the kill re-pushes its full
+// state — cache PLUS active tombstones (`dels`) — to the K-closest cohort every
+// refreshTick (and eagerly the instant a kill lands) via _replicateRole. A holder
+// that missed the original kill ingests the tombstone (UNION_AT_ROOT → _applyDels
+// → _applyKill), which removes the body from its cache and tombstones it. The
+// receive-side tombstone gate (_tombstoned, checked in _ingestStamped / _onDeliver)
+// is the standing backstop: a killed body can never re-enter a tombstoned holder's
+// cache, whatever path re-offers it.
 //
-// This test reproduces the divergence, then proves reconciliation heals the
-// stale root and a later reload no longer resurrects the message.
+// This test reproduces the divergence, proves the reloaded subscriber resurrects
+// the message off the stale holder, runs the anti-entropy path, and proves the
+// stale holder is healed and a later reload no longer resurrects the message.
 //
 // Run: node test/smoke_kill_resurrection.js
+//   SKIP_RECONCILE=1 node test/smoke_kill_resurrection.js  → red check: 4 + 5 fail
 // =====================================================================
 
-import { AxonaManager }   from '../src/pubsub/AxonaManager.js';
+import { AxonaManager }        from '../src/pubsub/AxonaManager.js';
 import { createAuthorIdentity } from '../src/identity/index.js';
-import { buildEnvelope }  from '../src/pubsub/envelope.js';
-import { buildKill }      from '../src/pubsub/kill.js';
-import { toHex }          from '../src/utils/hexid.js';
-import { sealTestDht } from './lib/testCapability.mjs';
+import { buildEnvelope }       from '../src/pubsub/envelope.js';
+import { buildKill }           from '../src/pubsub/kill.js';
+import { deriveTopicIdBig }    from '../src/pubsub/post.js';
+import { idHex }               from '../src/pubsub/ids.js';
+import { sealTestDht }         from './lib/testCapability.mjs';
 
 let passed = 0, failed = 0;
 function check(label, cond) {
@@ -34,147 +41,188 @@ function check(label, cond) {
   else      { console.log(`  ✗ ${label}`); failed++; }
 }
 
-const LONDON    = { lat: 51.5074, lng: -0.1278 };
-const TOPIC_HEX = '89' + 'ab'.repeat(32);          // 66-char hex topic id
-const TOPIC_BIG = BigInt('0x' + TOPIC_HEX);
-const T         = 1_700_000_000_000;               // fixed test clock
-const tick      = () => new Promise(r => setTimeout(r, 0));
+const T            = 1_700_000_000_000;               // fixed test clock
+const SKIP_RECONCILE = process.env.SKIP_RECONCILE === '1';
+const DESC         = { region: 'useast', owner: null, name: 'cats', write: 'open' };
+const REPLICATE    = 'pubsub:replicate';              // T.REPLICATE — the anti-entropy carrier we drop
+const DELIVER      = 'pubsub:deliver';
 
-// ── In-memory mesh of real AxonaManager instances, wired by sendDirect /
-//    routeMessage / findKClosest over XOR distance (mirrors smoke_metrics_
-//    kfanout). `dropKillTo`: a root that never receives `pubsub:kill-k`. ──
+// ── In-memory mesh of real AxonaManager instances, wired by routeMessage /
+//    findKClosest over XOR distance (mirrors smoke_pubsub_kill.mjs's Fabric).
+//    Routed frames are queued and drained by settle() so async eager-replicate
+//    and ingest cascades never recurse. `dropReplicateTo`: a holder that never
+//    receives the tombstone-bearing REPLICATE — the modelled missed convergence. ─
 class MockNet {
-  constructor() { this.mgrs = new Map(); this.dropKillTo = null; this.logs = []; }
+  constructor(rootReplicas) {
+    this.mgrs = new Map();               // nodeIdBig -> AxonaManager
+    this.routed = new Map();             // nodeIdBig -> Map(type -> handler)
+    this.queue = [];
+    this.errors = [];
+    this.dropReplicateTo = null;         // nodeIdBig whose REPLICATE deliveries are dropped
+    this.rootReplicas = rootReplicas;
+  }
 
-  kclosest(topicId, K) {
+  kclosest(targetBig, K) {
     return [...this.mgrs.keys()]
-      .sort((a, b) => { const da = a ^ topicId, db = b ^ topicId; return da < db ? -1 : da > db ? 1 : 0; })
+      .sort((a, b) => { const da = a ^ targetBig, db = b ^ targetBig; return da < db ? -1 : da > db ? 1 : 0; })
       .slice(0, K);
   }
 
   makeDht(selfId) {
     const net = this;
-    const routed = new Map(), direct = new Map();
-    const dht = {
+    const routed = new Map();
+    net.routed.set(selfId, routed);
+    return {
       getSelfId:       () => selfId,
       onRoutedMessage: (t, h) => routed.set(t, h),
-      onDirectMessage: (t, h) => direct.set(t, h),
       onEvent:         () => () => {},
-      findKClosest:    async (topicId, K) => net.kclosest(topicId, K),
-      verdictsSupported: false,   // audited: returns a push-count / undefined, never a verdict
-      routeMessage:    async (topicId, type, payload) => {
-        const target = net.kclosest(topicId, 1)[0];
-        const h = net.mgrs.get(target)?._dht._routed.get(type);
-        if (h) await h(payload, { fromId: toHex(selfId) });
+      neighbors:       () => [],
+      verdictsSupported: false,          // audited: returns consumed/undefined, never a routing verdict
+      findKClosest:    async (targetBig, K) => net.kclosest(targetBig, K),
+      // Route toward the node closest to `targetBig`. Every frame we drive here
+      // targets a concrete node id (DELIVER→subscriber, REPLICATE→cohort member),
+      // so the closest node IS that node. Enqueue + report consumed; settle()
+      // delivers. A REPLICATE aimed at the divergent holder is silently dropped.
+      routeMessage:    async (targetBig, type, payload) => {
+        const dest = net.kclosest(targetBig, 1)[0];
+        if (dest == null) return { consumed: false };
+        if (type === REPLICATE && net.dropReplicateTo != null && dest === net.dropReplicateTo) {
+          return { consumed: false };    // missed convergence
+        }
+        if (!net.routed.get(dest)?.has(type)) return { consumed: false };
+        net.queue.push({ dest, type, payload, meta: { targetId: dest, isTerminal: true, hopCount: 1, fromId: idHex(selfId) } });
+        return { consumed: true };
       },
-      sendDirect:      async (target, type, payload) => {
-        if (type === 'pubsub:kill-k' && net.dropKillTo != null && target === net.dropKillTo) return false; // missed delivery
-        const m = net.mgrs.get(target);
-        if (!m) return false;
-        const h = m._dht._direct.get(type);
-        if (h) await h(payload, { fromId: toHex(selfId) });
-        return true;
-      },
-      _routed: routed, _direct: direct,
     };
-    return dht;
   }
 
   spawn(selfId, tag) {
     const dht = this.makeDht(selfId);
-    const net = this;
-    const mgr = new AxonaManager({
-      dht: sealTestDht(dht), now: () => T,
-      emitLog: (level, code, data) => net.logs.push({ node: tag, code, ...data }),
-    });
-    mgr._dht = dht;
+    const mgr = new AxonaManager({ dht: sealTestDht(dht), now: () => T, rootReplicas: this.rootReplicas });
     this.mgrs.set(selfId, mgr);
     return mgr;
   }
-}
 
-const hasMsg = (r) => r.axonRoles.get(TOPIC_BIG).replayCache.length === 1;
-
-async function reloadSubscriberAndCount(net, roots, label) {
-  // A brand-new subscriber with an empty tombstone set re-subscribes to every
-  // root; each replays what it still holds (the reload path).
-  const B = net.spawn(TOPIC_BIG ^ (1n << 201n), label);
-  const got = [];
-  B.onPubsubDelivery((_t, j) => { try { got.push(JSON.parse(j)); } catch {} });
-  for (const r of roots) {
-    await r._maybeSendReplay(TOPIC_BIG, r.axonRoles.get(TOPIC_BIG), B.nodeId, 0);
+  async settle(cap = 500000) {
+    let i = 0;
+    while (this.queue.length) {
+      if (++i > cap) throw new Error('settle cap');
+      const j = this.queue.shift();
+      const h = this.routed.get(j.dest)?.get(j.type);
+      if (h) { try { await h(j.payload, j.meta); } catch (e) { this.errors.push(e); } }
+    }
   }
-  await tick();
-  net.mgrs.delete(B.nodeId);
-  return got;
+
+  // Drain the queue AND every async cascade it spawns (eager replicate, the
+  // time-sliced ingest pump), flushing microtasks between passes.
+  async drain(rounds = 8) {
+    for (let i = 0; i < rounds; i++) {
+      await new Promise(r => setImmediate(r));
+      await this.settle();
+      for (const m of this.mgrs.values()) { try { await m._ingestIdle?.(); } catch { /* */ } }
+    }
+  }
 }
+
+const role     = (r, t) => r.axonRoles.get(t);
+const hasMsg   = (r, t, id) => (role(r, t)?.cache || []).some(c => c.msgId === id);
+const tombed   = (r, t, id) => !!role(r, t)?.tombstones?.has(id);
 
 async function main() {
-  console.log('Axona kill-resurrection regression (replica divergence + convergence fix)');
+  console.log('Axona kill-resurrection regression (replica divergence + anti-entropy convergence)');
 
-  const alice = await createAuthorIdentity();
-  const env   = await buildEnvelope({ topic: { region: 'useast', name: 'cats' }, message: 'hi', identity: alice, ts: T, seq: T });
-  const json  = JSON.stringify(env);
+  const alice     = await createAuthorIdentity();
+  const TOPIC_BIG = await deriveTopicIdBig(DESC);      // the REAL derived topic id (msgId excludes topic)
+  const TOPIC_HEX = idHex(TOPIC_BIG);
+  const env       = await buildEnvelope({ topic: DESC, message: 'hi', identity: alice, ts: T, seq: 1 });
+  const json      = JSON.stringify(env);
 
-  const net     = new MockNet();
-  const rootIds = [1n, 3n, 5n, 9n, 17n].map(x => TOPIC_BIG ^ x);    // close to topic ⇒ the K-closest
+  // Five roots XOR-closest to the topic form the durability cohort; A is far, so
+  // it is never a root — it is only the source of the (authorized) kill.
+  const net     = new MockNet(/* rootReplicas */ 4);   // cohort of the 4 nearest holders
+  const rootIds = [1n, 3n, 5n, 9n, 17n].map(x => TOPIC_BIG ^ x);
   const roots   = rootIds.map((id, i) => net.spawn(id, `root${i}`));
-  const A       = net.spawn(TOPIC_BIG ^ (1n << 200n), 'A');         // killer, far ⇒ never a root
+  net.spawn(TOPIC_BIG ^ (1n << 200n), 'A');            // killer, far ⇒ never a root
 
-  // ── Seed: a fully-replicated publish — every root holds the message. ──
+  // ── Seed a fully-replicated publish: every root holds the message in cache. ──
   for (const r of roots) {
-    r.axonRoles.set(TOPIC_BIG, {
-      isRoot: true, isInRootSet: true, children: new Map(),
-      replayCache: [{ json, publishId: 'p1', publishTs: T, postHash: env.msgId, publisher: null }],
-    });
+    const role = r._becomeRoot(TOPIC_BIG, 'seed');     // real root role (all fields present)
+    role.lastTs = T; role.seq = 1;
+    r._cachePush(role, { msgId: env.msgId, publishTs: T, json, seq: 1 });
   }
-  check('1. all 5 roots initially hold the message', roots.every(hasMsg));
+  check('1. all 5 roots initially hold the message', roots.every(r => hasMsg(r, TOPIC_BIG, env.msgId)));
 
-  // ── Kill from A, but DROP the kill to root index 2 (models a missed delivery). ──
+  // A fresh subscriber reload: a brand-new node with an EMPTY tombstone set that
+  // re-subscribes and is served each root's replay-on-subscribe (_replayTo). It
+  // is a pure app sink (no role → no local suppression), exactly the "empty
+  // in-memory tombstone set" a reload starts from. Returns the delivered bodies.
+  async function reloadServe(servers, label) {
+    const B = net.spawn(TOPIC_BIG ^ (1n << 201n), label);
+    B.mySubscriptions.set(TOPIC_BIG, { since: 0, lastRenewSent: 0, interval: 5000 });
+    const got = [];
+    B.onPubsubDelivery((_t, j) => { try { const o = JSON.parse(j); if (!o?.deleted) got.push(o); } catch { /* */ } });
+    for (const r of servers) r._replayTo(role(r, TOPIC_BIG), idHex(B.nodeId), 0, true, false);
+    await net.drain();
+    net.mgrs.delete(B.nodeId); net.routed.delete(B.nodeId);
+    return got.filter(o => o.msgId === env.msgId);
+  }
+
+  // ── Kill from alice reaches the cohort EXCEPT one holder. We deliver the kill
+  //    to each healthy root (its receive path: _onKill → verify → authorship →
+  //    _applyKill), while dropping the tombstone-bearing REPLICATE to the stale
+  //    root so its eager cohort re-push can't heal it — the modelled divergence. ─
   const STALE = 2;
-  net.dropKillTo = rootIds[STALE];
-  const kill = await buildKill({ topicId: TOPIC_HEX, msgId: env.msgId, ts: T, seq: T, identity: alice });
-  await A._asyncKill(TOPIC_BIG, kill);
-  await tick(); await tick();
+  net.dropReplicateTo = rootIds[STALE];
+  const kill = await buildKill({ topicId: TOPIC_HEX, msgId: env.msgId, ts: T, seq: 1, identity: alice });
+  for (let i = 0; i < roots.length; i++) {
+    if (i === STALE) continue;
+    await roots[i]._onKill({ topicId: TOPIC_HEX, via: [], kill }, { targetId: rootIds[i], isTerminal: true, fromId: idHex(TOPIC_BIG ^ (1n << 200n)) });
+  }
+  await net.drain();
 
   const others    = roots.filter((_, i) => i !== STALE);
   const staleRoot = roots[STALE];
   check('2a. roots that got the kill removed + tombstoned the message',
-    others.every(r => !hasMsg(r) && r._isTombstoned(env.msgId)));
-  check('2b. the dropped root is STALE: still holds it, no tombstone',
-    hasMsg(staleRoot) && staleRoot._isTombstoned(env.msgId) === false);
+    others.every(r => !hasMsg(r, TOPIC_BIG, env.msgId) && tombed(r, TOPIC_BIG, env.msgId)));
+  check('2b. the divergent root is STALE: still holds it, no tombstone',
+    hasMsg(staleRoot, TOPIC_BIG, env.msgId) && tombed(staleRoot, TOPIC_BIG, env.msgId) === false);
 
-  // ── Without reconciliation, a reloaded subscriber resurrects it (the bug). ──
-  net.logs.length = 0;
-  const before = await reloadSubscriberAndCount(net, roots, 'B-before');
-  const serveLog = net.logs.find(l => l.node === 'B-before' && l.code === 'replay-serve' && l.msgId === env.msgId);
+  // ── Without convergence, a reloaded subscriber resurrects the message (the bug). ──
+  const beforeAll     = await reloadServe(roots, 'B-before-all');
+  const beforeHealthy = await reloadServe(others, 'B-before-healthy');
   check('3. divergence is real: a reloaded subscriber resurrects the message',
-    before.filter(d => !d.deleted && d.msgId === env.msgId).length === 1);
-  check('3b. instrumentation names the stale root as the source',
-    !!serveLog && serveLog.from === toHex(rootIds[STALE]));
+    beforeAll.length === 1);
+  check('3b. the STALE root is the source: replaying the killed cohort alone yields nothing',
+    beforeHealthy.length === 0);
 
-  // ── FIX: a root that applied the kill re-gossips it (the refreshTick path). ──
-  net.dropKillTo = null;                                   // the transient drop has cleared
-  await roots[0]._syncKillsForTopic(TOPIC_BIG, roots[0].axonRoles.get(TOPIC_BIG));
-  await tick(); await tick();
-  check('4. reconciliation healed the stale root (message removed + tombstoned)',
-    !hasMsg(staleRoot) && staleRoot._isTombstoned(env.msgId) === true);
+  // ── FIX: a holder that applied the kill re-pushes cache+tombstones to the
+  //    cohort (the anti-entropy plane, _replicateRole). The stale holder ingests
+  //    the tombstone (UNION_AT_ROOT → _applyDels), dropping the body + tombstoning. ─
+  net.dropReplicateTo = null;                          // the transient drop has cleared
+  if (!SKIP_RECONCILE) {
+    for (const r of others) await r._replicateRole(TOPIC_BIG, role(r, TOPIC_BIG), null, T);
+    await net.drain();
+  }
+  check('4. anti-entropy healed the stale root (message removed + tombstoned)',
+    !hasMsg(staleRoot, TOPIC_BIG, env.msgId) && tombed(staleRoot, TOPIC_BIG, env.msgId) === true);
 
   // ── Now a fresh reload sees NO resurrection. ──
-  const after = await reloadSubscriberAndCount(net, roots, 'B-after');
+  const after = await reloadServe(roots, 'B-after');
   check('5. FIX VERIFIED: a reloaded subscriber no longer resurrects the message',
-    after.filter(d => !d.deleted && d.msgId === env.msgId).length === 0);
+    after.length === 0);
 
-  // ── Send-side backstop: even if a tombstoned root kept a stale cache entry,
-  //    it must not replay it (defense in depth). ──
-  const guinea = roots[0];                                 // tombstoned + we re-inject a stale copy
-  guinea.axonRoles.get(TOPIC_BIG).replayCache.push({ json, publishId: 'zz', publishTs: T, postHash: env.msgId, publisher: null });
-  const leak = await reloadSubscriberAndCount(net, [guinea], 'B-backstop');
-  check('6. send-side backstop: a tombstoned root never replays the killed msg',
-    leak.filter(d => !d.deleted && d.msgId === env.msgId).length === 0);
+  // ── Receive-side backstop: a killed body re-offered to a tombstoned holder
+  //    (a stale replica pushing the body back through the verified ingest path)
+  //    is suppressed by the tombstone gate — it never re-enters the cache. This
+  //    is what keeps the heal durable under continued anti-entropy churn. ──
+  const guinea = roots[0];                             // healed: tombstoned, body dropped
+  const tally  = await guinea._ingestStampedBatch(role(guinea, TOPIC_BIG),
+    [{ msgId: env.msgId, publishTs: T, json, seq: 1 }]);
+  check('6. receive-side backstop: a tombstoned holder refuses to re-cache the killed body',
+    tally.held === 1 && !hasMsg(guinea, TOPIC_BIG, env.msgId) && tombed(guinea, TOPIC_BIG, env.msgId));
 
   console.log(`\nResult: ${passed} passed, ${failed} failed`);
   process.exit(failed === 0 ? 0 : 1);
 }
 
-main().catch(err => { console.error('smoke threw:', err); process.exit(2); });
+main().catch(err => { console.error('smoke threw:', err?.stack || err); process.exit(2); });
