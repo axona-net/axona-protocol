@@ -1014,10 +1014,25 @@ export class AxonaManager {
         ? () => this.dht.findKClosest(topicBig, 1)
         : null;
     if (!resolver) return;
+    // ONE BUDGET PER COLD CYCLE + GENERATION TOKEN (council bounds, 4.76.1).
+    // repairPlane re-enters _sendSubscribe every renewFastMs (~5s) while a burst still
+    // has retries left — do NOT stack a second steer on a live cycle; the active
+    // bounded budget continues (map presence == a live cycle). A same-topic RESUBSCRIBE
+    // (after unwatch, which eagerly releases the entry) starts a fresh cycle whose gen
+    // obsoletes any late timer still pending from the prior one.
+    if (!this._coldSteerGen) this._coldSteerGen = new Map();
+    if (this._coldSteerGen.has(topicBig)) return;                       // one budget per cold cycle
+    const gen = (this._coldSteerSeq = (this._coldSteerSeq | 0) + 1);
+    this._coldSteerGen.set(topicBig, gen);
+    const mine = () => this._coldSteerGen.get(topicBig) === gen;        // false once superseded/released
+    const release = () => { if (mine()) this._coldSteerGen.delete(topicBig); };
     const wants = () => this.mySubscriptions.has(topicBig) || this._hostedTopics.has(topicBig) || this._backupTopics.has(topicBig);
-    const reschedule = (n) => { if (n + 1 < SUB_RETRY_TRIES && wants()) { const t = setTimeout(() => attempt(n + 1), SUB_RETRY_MS); if (t && typeof t.unref === 'function') t.unref(); } };
+    const reschedule = (n) => {
+      if (n + 1 < SUB_RETRY_TRIES && wants() && mine()) { const t = setTimeout(() => attempt(n + 1), SUB_RETRY_MS); if (t && typeof t.unref === 'function') t.unref(); }
+      else release();                                                   // budget spent / unsubscribed / superseded → free the cycle
+    };
     const attempt = (n) => {
-      if (!wants()) return;                                    // unsubscribed → stop
+      if (!wants() || !mine()) { release(); return; }          // unsubscribed or superseded → stop + free
       const probe = Promise.resolve().then(resolver).then((r) => {
         if (r && Array.isArray(r.path)) return r.path.length ? r.path[r.path.length - 1] : null;  // lookup: { path }
         if (Array.isArray(r)) return r.length ? r[0] : null;                                       // findKClosest: [ids]
@@ -1027,7 +1042,7 @@ export class AxonaManager {
         probe,
         new Promise((res) => { const t = setTimeout(() => res(null), SUB_LOOKUP_MS); if (t && typeof t.unref === 'function') t.unref(); }),
       ]).then((id) => {
-        if (!wants()) return;
+        if (!wants() || !mine()) { release(); return; }
         let done = false;                                      // DONE = pinned to a node closer-or-equal to the true root (not merely "has a pin" — a pin to a FARTHER decoy is the self-root-split strand we must correct)
         if (id != null) {
           try {
@@ -1044,6 +1059,7 @@ export class AxonaManager {
           } catch { /* */ }
         }
         if (!done) reschedule(n);                              // timeout/miss/steered → try again until correctly seated or budget spent
+        else release();                                        // correctly seated → free the cycle
       }).catch(() => reschedule(n));
     };
     attempt(0);
@@ -1216,6 +1232,7 @@ export class AxonaManager {
 
   pubsubUnsubscribe(topicId) {
     this.mySubscriptions.delete(topicId);
+    this._coldSteerGen?.delete(topicId);   // release any live cold-steer cycle so a resubscribe starts clean
     const via = this._upstream.get(topicId) || [];
     this._send(T.UNSUB, { topicId: idHex(topicId), via, subscriberId: idHex(this.nodeId) });
     this.pubsubResetTopicConsumption(topicId);
@@ -1282,6 +1299,7 @@ export class AxonaManager {
   }
   pubsubUnhost(topicId) {
     this._hostedTopics.delete(topicId);
+    this._coldSteerGen?.delete(topicId);   // release any live cold-steer cycle
     const role = this.axonRoles.get(topicId);
     if (role) { const me = lc(idHex(this.nodeId)); role.subscribers.delete(me); role.children.delete(me); }
   }
@@ -1370,6 +1388,7 @@ export class AxonaManager {
     this._upstream.clear();
     this._rootHint.clear();
     this._pendingPub?.clear();
+    this._coldSteerGen?.clear();
     this._lookupInflight?.clear();
     this._rootBeacons.clear();
     this._beaconSeen.clear();

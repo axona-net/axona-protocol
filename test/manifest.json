@@ -964,6 +964,11 @@
       "file": "fence_cold_subscribe_reach.mjs",
       "class": "default",
       "note": "Cold-subscribe read loss (GH #418/#397): a fresh subscriber's SUB routed greedy (via:[]) toward the bare topic id strands at a local minimum on a sparse synaptome, never reaches the topic-closest root, and replays nothing (measured fresh since:'all' ~25-55% vs established 100%). The v4.64.0 change made _sendSubscribe ignore the root hint on the unpinned path. Fix (AxonaManager._sendSubscribe): unpinned SUB (a) uses the warm _rootHint_ if present (re-applied every renewFastMs renewal = the bounded read-retry) and (b) else does a BOUNDED iterative network lookup (raced against SUB_LOOKUP_MS, greedy fallback) for the cold first attempt. Gappy MockNet of real AxonaManager instances: R=topic-closest true root holds a published message; greedy from fresh S strands at a decoy L; the DHT's lookup/findKClosest resolve R. Asserts (A) root holds the message, (B) WITH the fix the fresh SUB reaches R and the message is replayed to S, (C) RED control with no iterative resolver forces greedy — S strands at L and receives nothing. Verified RED: with _sendSubscribe reverted to greedy, (B) fails. 9 checks."
+    },
+    {
+      "file": "smoke_cold_steer_lifecycle.mjs",
+      "class": "default",
+      "note": "Cold-steer retry lifecycle (GH #418 follow-up, 4.76.1): enforces the two council bounds on 4a275a3. ONE BUDGET PER COLD CYCLE — a repairPlane renewal re-entering _sendSubscribe (~renewFastMs) while a burst still has retries must not stack a second steer (AxonaManager._coldSteerGen presence == a live cycle; a re-entry returns). GENERATION TOKEN — pubsubUnsubscribe/pubsubUnhost/teardown release the cycle so a same-topic resubscribe starts a fresh generation, and a late timer from the prior cycle no-ops (mine() check). White-box asserts: one live cycle after a cold steer; re-entry keeps size 1 + gen unchanged; unsubscribe releases; resubscribe yields a new gen. 4 checks."
     }
   ]
 }
