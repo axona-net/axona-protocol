@@ -959,6 +959,11 @@
       "file": "smoke_gate_close_grace.mjs",
       "class": "default",
       "note": "4.68.0 admission-gate close grace (closeGraceMs): graceMs=0 default closes at refusal time (v4.67.1 behavior); graceMs>0 defers the close and skips it at fire time when the peer was admitted meanwhile (rescue); pending closes bounded by graceMaxPending with oldest-first immediate overflow close. Mock transport; no network. v4.68.1 (Aster review 1c11a94e): config normalization (zero/negative/fractional/non-finite fail safe to grace off), physical-cap headroom bound on deferral, stop()/leave() lifecycle teardown, and two-peer real-sim-transport bilateral cases (both-armed rescue, one-armed degradation, simultaneous expiry, idempotent teardown). 37 checks incl the v4.68.2 duplicate-pending regression (Aster -08): at exact headroom a repeated refusal for an already-graced sponsor neither closes the channel nor grows the map and retains the original timer; a different sponsor still closes immediately."
+    },
+    {
+      "file": "fence_cold_subscribe_reach.mjs",
+      "class": "default",
+      "note": "Cold-subscribe read loss (GH #418/#397): a fresh subscriber's SUB routed greedy (via:[]) toward the bare topic id strands at a local minimum on a sparse synaptome, never reaches the topic-closest root, and replays nothing (measured fresh since:'all' ~25-55% vs established 100%). The v4.64.0 change made _sendSubscribe ignore the root hint on the unpinned path. Fix (AxonaManager._sendSubscribe): unpinned SUB (a) uses the warm _rootHint_ if present (re-applied every renewFastMs renewal = the bounded read-retry) and (b) else does a BOUNDED iterative network lookup (raced against SUB_LOOKUP_MS, greedy fallback) for the cold first attempt. Gappy MockNet of real AxonaManager instances: R=topic-closest true root holds a published message; greedy from fresh S strands at a decoy L; the DHT's lookup/findKClosest resolve R. Asserts (A) root holds the message, (B) WITH the fix the fresh SUB reaches R and the message is replayed to S, (C) RED control with no iterative resolver forces greedy — S strands at L and receives nothing. Verified RED: with _sendSubscribe reverted to greedy, (B) fails. 9 checks."
     }
   ]
 }

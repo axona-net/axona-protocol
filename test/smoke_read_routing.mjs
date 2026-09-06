@@ -56,19 +56,20 @@ const warmHint = (am, topicBig, rootBig) =>
   ok('cold pull falls back to greedy toward the topic', !!pull && pull.target === T1 && (pull.payload.via || []).length === 0);
 }
 
-// ── 3. host routes via _sendSubscribe, which as of v4.64.0 goes GREEDY toward the
-//      bare topic id even with a warm hint present — the neuromorphic layer routes
-//      each hop to the current-best terminal, so the SUB is NOT via-pinned to the
-//      cached root (a stale pin would fight mesh restructuring on resubscribe).
-//      Distinct from PULL above, which still uses the write-path hint.
+// ── 3. host routes via _sendSubscribe. RESTORED (cold-subscribe read-loss fix):
+//      when a warm root hint is present, the SUB is via-pinned to it, so a fresh
+//      subscriber reaches the true root instead of stranding greedy at a local
+//      minimum. v4.64.0 had dropped the hint from the SUB path (bare via:[]) —
+//      the regression behind ~25-40% fresh-subscriber delivery. The no-hint cold
+//      case is covered separately by emit-then-steer (_steerColdSubscribe).
 {
   const { am, sends } = mk();
-  warmHint(am, T2, ROOT);   // hint present — and deliberately ignored by the SUB
+  warmHint(am, T2, ROOT);   // hint present — the SUB must now USE it
   am.pubsubHost(T2);
   const sub = sends.find(s => s.type === 'pubsub:sub');
   ok('pubsubHost emits a SUB (via _sendSubscribe, not a bare host-send)', !!sub);
-  ok('host SUB routes greedy — no via pin despite the warm hint (v4.64.0)',
-     sub?.target === T2 && (sub.payload.via || []).length === 0);
+  ok('host SUB is via-pinned to the warm hint (restored; 4.64.0 dropped it)',
+     sub?.payload?.via?.[0] === lc(idHex(ROOT)));
   ok('hosted topic is registered', am._hostedTopics.has(T2));
 }
 
