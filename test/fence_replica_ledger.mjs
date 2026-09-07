@@ -122,5 +122,24 @@ console.log('replica ledger — a root must not record a backup it never reached
     JSON.stringify([...role.replicas.keys()]));
 }
 
+// ── 4. OBSERVABILITY (4.76.x, GH #45/#432 attribution): a total failure must
+//      name WHO it could not reach and the dispatch verdict, so replicate-all-
+//      failed is attributable (reach vs contract; which cohort members) instead
+//      of just {topic, attempted, failed}. ─────────────────────────────────────
+{
+  const { am, clock } = mk({ pushThrows: true });
+  const T4 = REG | 0x4001n;
+  const role = await rootWithState(am, clock, T4);
+  const rep = await am._replicateRole(T4, role, null, clock.t);
+  ok('4a. every push failed and the count is real', rep.attempted > 0 && rep.verified === 0 && rep.failed === rep.attempted,
+    `attempted=${rep.attempted} verified=${rep.verified} failed=${rep.failed}`);
+  ok('4b. _replicateRole returns a failures list, one entry per failed push',
+    Array.isArray(rep.failures) && rep.failures.length === rep.failed,
+    `failures=${JSON.stringify(rep.failures)}`);
+  ok('4c. each failure names a 12-hex target id + a dispatch verdict (the attribution)',
+    rep.failures.length > 0 && rep.failures.every(f => typeof f.id === 'string' && f.id.length === 12 && ['failed', 'unsupported', 'violation'].includes(f.v)),
+    JSON.stringify(rep.failures));
+}
+
 console.log(`\n${fail ? `✗ ${fail} of ${n} failed` : `✓ all ${n} checks passed`}`);
 process.exit(fail ? 1 : 0);
