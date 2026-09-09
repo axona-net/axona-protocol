@@ -1,10 +1,12 @@
 // =====================================================================
-// fence_lookahead_corrected.mjs — 4.83.0
+// fence_lookahead_corrected.mjs — 4.83.0, extended 4.84.0
 //
-// Three measurements the council falsified (Aster 938e4162, Vega 260f527b,
-// Orion d0c04f27, on council post b4392f8c). Each was reported as a finding and
-// each was wrong in the same way: the counter measured something narrower than
-// the sentence written next to it.
+// FIVE measurements the council falsified, in two rounds. Round one: Aster
+// 938e4162, Vega 260f527b, Orion d0c04f27, on council post b4392f8c. Round two,
+// against the FIX for round one: Aster fc8146ed, ratified Orion 3d723228.
+//
+// Every one failed the same way — the counter measured something other than the
+// sentence written beside it, and the sentence was what got reported.
 //
 // 1. answeredByIncoming was only incremented when the probes returned NOTHING:
 //
@@ -15,8 +17,21 @@
 //    So an incoming link that supplied the WINNING next hop still counted to the
 //    probes. I reported "answeredByIncoming is 0 everywhere — no cheaper path is
 //    being ignored". The zero only ever meant "probes always found something".
-//    Now measured independently: incomingCouldAnswer (an incoming link beats MY
-//    distance at all) and incomingWonFinal (it also beat the probes).
+//    Now measured independently.
+//
+// 4. (4.84.0) The fix for (1) mixed UNITS. incomingCouldAnswer incremented once
+//    per qualifying SYNAPSE while incomingWonFinal counted CALLS, so the first
+//    could exceed `calls` and dividing it by them was dimensionally invalid.
+//    Split by name: incomingCandidateLinks (links, summed over calls),
+//    incomingCouldAnswerCalls and incomingWonFinalCalls (calls), and
+//    incomingCouldAnswerRate = calls/calls.
+//
+// 5. (4.84.0) rateOfAnswerable conditioned TERMINAL replies out of its
+//    denominator. A terminal reply is a live peer answering "I have nothing
+//    closer" — evidence about that target, not a missing measurement — so
+//    removing it inflated the hit rate. Replaced by rateOfReplies, which
+//    excludes only the unreachable. The inflating field is deleted rather than
+//    kept alongside: a more-flattering ratio next to honest ones gets quoted.
 //
 // 2. Rank 0 returned no closer replies on every node, and I read that as
 //    structure. Greedy filters CONNECTED/dead/bridge peers; probeTargets is the
@@ -81,16 +96,39 @@ console.log('— incomingCouldAnswer is independent of what the probes did —')
   const got = await call(self, TARGET);
   const s = stats(self);
   check('1. the incoming link wins the final answer', got === R(0x0010), `got ${got}`);
-  check('2. it is recorded as ABLE to answer, though probes also found one',
-        s.incomingCouldAnswer === 1, `got ${s.incomingCouldAnswer}`);
-  check('3. and as having beaten the probes', s.incomingWonFinal === 1,
-        `got ${s.incomingWonFinal}`);
+  check('2. the CALL is recorded as answerable for free, though probes also found one',
+        s.incomingCouldAnswerCalls === 1, `got ${s.incomingCouldAnswerCalls}`);
+  check('3. and as having beaten the probes', s.incomingWonFinalCalls === 1,
+        `got ${s.incomingWonFinalCalls}`);
   check('4. the call still counts as answeredByProbe — that field is unchanged',
         s.answeredByProbe === 1, `got ${s.answeredByProbe}`);
   check('5. THE OLD READING: answeredByIncoming is 0 here, and that 0 must NOT '
         + 'be read as "incoming could not have answered"',
-        s.answeredByIncoming === 0 && s.incomingCouldAnswer === 1,
-        JSON.stringify({ old: s.answeredByIncoming, corrected: s.incomingCouldAnswer }));
+        s.answeredByIncoming === 0 && s.incomingCouldAnswerCalls === 1,
+        JSON.stringify({ old: s.answeredByIncoming, corrected: s.incomingCouldAnswerCalls }));
+}
+
+// ── 1b. LINKS and CALLS are different units ──────────────────────────
+// Aster fc8146ed: the old counter incremented once per qualifying SYNAPSE, so
+// it could exceed `calls` and could not be divided by them. Three qualifying
+// links in ONE call must read 3 links / 1 call — never 3 calls.
+console.log('\n— a Links count is not a Calls count —');
+{
+  const stub = mkNode(SELF, [R(0x0800)], {
+    reply: () => ({ terminal: true }),
+    incoming: [R(0x0010), R(0x0020), R(0x0030)],   // all three beat myDist
+  });
+  const self = mkSelf(stub);
+  await call(self, TARGET);
+  const s = stats(self);
+  check('5a. three qualifying links counted as three LINKS',
+        s.incomingCandidateLinks === 3, `got ${s.incomingCandidateLinks}`);
+  check('5b. but as ONE call — the unit that is comparable to calls',
+        s.incomingCouldAnswerCalls === 1, `got ${s.incomingCouldAnswerCalls}`);
+  check('5c. the free-answer rate divides calls by calls, so it cannot exceed 1',
+        s.incomingCouldAnswerRate === 1, `got ${s.incomingCouldAnswerRate}`);
+  check('5d. links exceed calls here — the exact shape that made the old name wrong',
+        s.incomingCandidateLinks > s.incomingCouldAnswerCalls, '');
 }
 
 // ── 2. a dead rank is not an unhelpful rank ──────────────────────────
@@ -114,9 +152,18 @@ console.log('\n— rejected / terminal / nonCloser are separated per rank —');
         b['2'].nonCloser === 1 && b['2'].rejected === 0, JSON.stringify(b['2']));
   check('9. all three read rate 0 — which is why the partition was needed',
         b['0'].rate === 0 && b['1'].rate === 0 && b['2'].rate === 0, '');
-  check('10. rateOfAnswerable excludes dead and terminal from the denominator',
-        b['0'].rateOfAnswerable === 0 && b['2'].rateOfAnswerable === 0,
-        JSON.stringify([b['0'].rateOfAnswerable, b['2'].rateOfAnswerable]));
+  // CORRECTED (Aster fc8146ed). The old rateOfAnswerable conditioned terminal
+  // replies OUT of the denominator; a terminal reply is a LIVE peer reporting no
+  // escape, which is evidence about that target, not absence of a measurement.
+  // Excluding it inflated the hit rate. Only the unreachable are excluded now.
+  check('10. rateOfReplies excludes ONLY the unreachable — rank 0 was rejected, '
+        + 'so it has no replies and reads 0',
+        b['0'].rateOfReplies === 0, JSON.stringify(b['0']));
+  check('10a. a TERMINAL reply stays in the denominator — rank 1 replied and had '
+        + 'nothing, which is a real 0 out of 1',
+        b['1'].rateOfReplies === 0 && b['1'].terminal === 1, JSON.stringify(b['1']));
+  check('10b. the inflating field is gone, not merely renamed',
+        b['1'].rateOfAnswerable === undefined, JSON.stringify(Object.keys(b['1'])));
 }
 
 // ── 3. top-K is a per-CALL question ──────────────────────────────────
