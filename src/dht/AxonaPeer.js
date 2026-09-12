@@ -2657,8 +2657,11 @@ export class AxonaPeer extends DHT {
    * @returns {Promise<{ ok: boolean, removed: number }>}
    */
   async unsub(topic, opts = {}) {
-    // Derive the topicId exactly as sub() does so we target the same feed.
-    const desc       = await this._resolveTopicOrThrow(topic, 'unsub');
+    // Derive the topicId exactly as sub() does so we target the same feed:
+    // a descriptor OR the bare 66-hex topic id (the shareable read handle).
+    // GH #64: this went through the descriptor-only resolver, so a reader who
+    // subscribed by the id they were given could never unsubscribe from it.
+    const desc       = await this._resolveReadTopic(topic, 'unsub');
     const topicIdBig = desc.topicIdBig;
 
     const set = this._subscriptions.get(topicIdBig);
