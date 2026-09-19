@@ -953,12 +953,10 @@ export class AxonaPeer extends DHT {
       const connOk = (typeof node.transport?.isConnected === 'function')
         ? node.transport.isConnected.bind(node.transport) : null;
       const deadSet = node._deadPeers;
-      const bridgeId = node.transport?.bridgeNodeIdBig ?? null;
       let nextHopId = null;
       let bestDist  = node.id ^ targetBig;
       for (const syn of node.synaptome.values()) {
         if (deadSet && deadSet.has(syn.peerId)) continue;
-        if (bridgeId !== null && syn.peerId === bridgeId) continue;   // bridge is signaling infra, not a topic root/forwarder
         if (connOk && !connOk(syn.peerId)) continue;
         const d = syn.peerId ^ targetBig;
         if (d < bestDist) { bestDist = d; nextHopId = syn.peerId; }
@@ -3559,7 +3557,7 @@ export class AxonaPeer extends DHT {
       // The bridge node id (signaling infra, never a topic root). Lets AxonaManager
       // exclude it from the reachable-closest test in its root-claim fallback, the
       // same way findKClosest/routeMessage already skip it.
-      bridgeId: () => node.transport?.bridgeNodeIdBig ?? null,
+      bridgeId: () => null,   // EXPERIMENT 2026-09-19 (David): the bridge is an ordinary DHT node
       // Per-channel write-flight-ack capability (4.62.2 R13/R15/R17), read by
       // pickCapableAdjacent for D0 delegation. The web transport sets this from a
       // verified CAP_ATTEST; transports without a mesh (sim/node-WS/bridge) expose
@@ -3591,19 +3589,18 @@ export class AxonaPeer extends DHT {
         // the bridge, the SUB/PUB re-homes toward it, the bridge can't serve as a
         // root → the tree never forms (the same strand the iterative findKClosest
         // [bridgeId skip] and the greedy route hop already guard against).
-        const bridgeId = node.transport?.bridgeNodeIdBig ?? null;
         if (typeof selfId === 'bigint') {
           dist.set(selfId, selfId ^ targetIdBig);
         }
         for (const syn of node.synaptome?.values?.() ?? []) {
           const pid = syn.peerId;
-          if (typeof pid === 'bigint' && !dist.has(pid) && pid !== bridgeId) {
+          if (typeof pid === 'bigint' && !dist.has(pid)) {
             dist.set(pid, pid ^ targetIdBig);
           }
         }
         for (const syn of node.incomingSynapses?.values?.() ?? []) {
           const pid = syn.peerId;
-          if (typeof pid === 'bigint' && !dist.has(pid) && pid !== bridgeId) {
+          if (typeof pid === 'bigint' && !dist.has(pid)) {
             dist.set(pid, pid ^ targetIdBig);
           }
         }
@@ -4038,12 +4035,10 @@ export class AxonaPeer extends DHT {
     const t = this._node.transport;
     const connOk = (typeof t?.isConnected === 'function') ? t.isConnected.bind(t) : null;
     const dead   = this._node._deadPeers;
-    const bridgeId = t?.bridgeNodeIdBig ?? null;   // the bridge is signaling infra, not a routable DHT node / topic root
     let bestPeerId = null;
     let bestDist   = this._node.id ^ target;
     for (const syn of this._node.synaptome.values()) {
       if (dead && dead.has(syn.peerId)) continue;
-      if (bridgeId !== null && syn.peerId === bridgeId) continue;   // never route a topic toward the bridge (it can't serve as root)
       if (connOk && !connOk(syn.peerId)) continue;
       const d = syn.peerId ^ target;
       if (d < bestDist) { bestDist = d; bestPeerId = syn.peerId; }
@@ -4748,11 +4743,9 @@ export class AxonaPeer extends DHT {
     // region topic funnels its subscribe-k to the bridge, which can't serve as a
     // root → the tree never forms (captured: SUB/PUB routed to the bridge id,
     // role=— everywhere, 0 delivery on contended regions).
-    const bridgeId = src.transport?.bridgeNodeIdBig ?? null;
     const distances = new Map();
     const addCandidate = (peerId) => {
       if (typeof peerId !== 'bigint' || distances.has(peerId)) return;
-      if (bridgeId !== null && peerId === bridgeId) return;   // exclude the bridge from root candidacy
       distances.set(peerId, peerId ^ targetBig);
     };
 
