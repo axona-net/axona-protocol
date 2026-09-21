@@ -687,6 +687,10 @@
       "class": "default"
     },
     {
+      "file": "smoke_region_bridge.mjs",
+      "class": "default"
+    },
+    {
       "file": "smoke_replica_fast_promote.mjs",
       "class": "default"
     },

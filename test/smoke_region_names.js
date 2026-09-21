@@ -9,7 +9,7 @@
 
 import {
   REGION_NAMES, regionNames, regionName, regionCode, resolveRegion,
-  regionNameForLatLng, MAJORS, canonicalRegion, CANONICAL_REGIONS, POPULATED_REGIONS,
+  regionNameForLatLng, MAJORS, canonicalRegion, CANONICAL_REGIONS, POPULATED_REGIONS, regionCenter,
 } from '../src/utils/region-names.js';
 import { S2_CELL_COUNT, geoCellId } from '../src/utils/s2.js';
 
@@ -79,6 +79,11 @@ check("resolveRegion('EAGLE') case-insensitive → 0x89", resolveRegion('EAGLE')
 check('resolveRegion("137") === 0x89', resolveRegion('137') === 0x89);
 check('resolveRegion(137) === 0x89', resolveRegion(137) === 0x89);
 check('resolveRegion(192) === null (reserved)', resolveRegion(192) === null);
+check("resolveRegion('bridge') === 0xff (system region, 4.88.0)", resolveRegion('bridge') === 0xff);
+check('resolveRegion(0xff) === 0xff (no fold)', resolveRegion(0xff) === 0xff);
+check("resolveRegion('0xff') === 0xff", resolveRegion('0xff') === 0xff);
+check('resolveRegion(254) === null (reserved, not a system region)', resolveRegion(254) === null);
+check('canonicalRegion(0xff) === 0xff', canonicalRegion(0xff) === 0xff);
 check('resolveRegion("nope") === null', resolveRegion('nope') === null);
 
 console.log('\n── regionNames shim + regionNameForLatLng ──');
@@ -91,7 +96,11 @@ check('regionNameForLatLng(lat,lng) === REGION_NAMES[geoCellId(...)]',
 
 console.log('\n── invalid / reserved ──');
 check('regionName(192) === null', regionName(192) === null);
-check('regionName(255) === null', regionName(255) === null);
+check("regionName(255) === 'bridge' (system region)", regionName(255) === 'bridge');
+check('regionName(254) === null', regionName(254) === null);
+check("regionCenter('bridge') === null (no place on the globe)", regionCenter('bridge') === null);
+check('CANONICAL_REGIONS still 84 (the system region is not a major)', CANONICAL_REGIONS.length === 84);
+check("no coordinate maps to 0xff", (() => { for (const [la, ln] of [[0, 0], [89.9, 0], [-89.9, 179.9], [37, -122], [51.5, -0.1]]) if (geoCellId(la, ln, 8) === 0xff) return false; return true; })());
 check('regionCode("nope") === null', regionCode('nope') === null);
 
 console.log(`\nResult: ${passed} passed, ${failed} failed`);

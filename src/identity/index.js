@@ -27,6 +27,7 @@ import {
   verify,
 }                                       from '../pubsub/ed25519.js';
 import { computeNodeId }                from './nodeid.js';
+import { resolveRegion, regionName }    from '../utils/region-names.js';
 import { AUTHOR_ID_BITS, AUTHOR_HEX_CHARS, getKeyspace } from '../utils/hexid.js';
 import { IdentityError, ErrorCodes }    from '../errors.js';
 import { powMint, powVerify }           from '../pow/pow.js';
@@ -75,11 +76,24 @@ const ALGORITHM = { name: 'Ed25519' };
  *        should pass `false` so XSS can't exfiltrate the signing key (H4).
  * @returns {Promise<Identity>}
  */
-export async function createNodeIdentity({ lat, lng, extractable = true, fast = false }) {
+export async function createNodeIdentity({ lat, lng, extractable = true, fast = false, region } = {}) {
   if (typeof lat !== 'number' || typeof lng !== 'number') {
     throw new IdentityError(ErrorCodes.IDENTITY_INVALID_FORMAT,
       'createNodeIdentity: region must be { lat: number, lng: number }');
   }
+  // Explicit region override (kernel 4.88.0): a region NAME or CODE that sets the id's
+  // top byte instead of the geo derivation. The only way to mint an id in the SYSTEM
+  // region 0xFF 'bridge'; lat/lng remain the node's location for placement of the
+  // directory entry. Unresolvable → refused, never silently geo.
+  let regionCode;
+  if (region !== undefined && region !== null) {
+    regionCode = resolveRegion(region);
+    if (regionCode === null) {
+      throw new IdentityError(ErrorCodes.IDENTITY_INVALID_FORMAT,
+        `createNodeIdentity: region override '${region}' does not resolve to a region code`);
+    }
+  }
+  const regionInfo = regionCode === undefined ? { lat, lng } : { lat, lng, code: regionCode, name: regionName(regionCode) };
 
   // ── Fast (SIM-ONLY) path: skip the Ed25519 keygen ──────────────────────────
   // A node identity is never signature-verified by the protocol (the sim
@@ -98,9 +112,9 @@ export async function createNodeIdentity({ lat, lng, extractable = true, fast = 
     }
     const rand = new Uint8Array(32);
     crypto.getRandomValues(rand);
-    const id = await computeNodeId(rand, lat, lng);   // region byte ‖ truncated SHA-256(rand)
+    const id = await computeNodeId(rand, lat, lng, { regionCode });   // region byte ‖ truncated SHA-256(rand)
     const identity = buildIdentity({
-      id, pubkey: rand, privateKey: null, region: { lat, lng }, createdAt: Date.now(),
+      id, pubkey: rand, privateKey: null, region: regionInfo, createdAt: Date.now(),
     });
     identity.fast = true;   // marker: no real keypair; never persist or sign with this
     return identity;
@@ -116,13 +130,13 @@ export async function createNodeIdentity({ lat, lng, extractable = true, fast = 
   }
 
   const pubkey  = await exportPublicKey(pair.publicKey);
-  const id      = await computeNodeId(pubkey, lat, lng);
+  const id      = await computeNodeId(pubkey, lat, lng, { regionCode });
 
   const identity = buildIdentity({
     id,
     pubkey,
     privateKey: pair.privateKey,
-    region:     { lat, lng },
+    region:     regionInfo,
     createdAt:  Date.now(),
   });
   // Stage 2: mint the transport PoW (inert at difficulty 0 ⇒ ''). Presented in
