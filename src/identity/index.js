@@ -43,7 +43,9 @@ const ALGORITHM = { name: 'Ed25519' };
  * @property {Uint8Array} pubkey      32 raw bytes (Ed25519 public key).
  * @property {string}     pubkeyHex   64-char hex of pubkey (convenience).
  * @property {CryptoKey}  privateKey  Web Crypto signing key.
- * @property {{lat: number, lng: number}} region
+ * @property {{lat: number, lng: number, code?: number, name?: string}} region
+ *           lat/lng always; code/name only when the id was minted with an
+ *           explicit region override (kernel 4.88.0).
  * @property {number}     createdAt   ms since epoch.
  * @property {(message: Uint8Array) => Promise<Uint8Array>} sign
  *           Sign with this identity's private key.
@@ -59,7 +61,9 @@ const ALGORITHM = { name: 'Ed25519' };
  * @property {string} id          66-char hex nodeId.
  * @property {string} pubkey      64-char hex (32 raw bytes).
  * @property {string} privkey     base64 PKCS#8 encoding of the private key.
- * @property {{lat: number, lng: number}} region
+ * @property {{lat: number, lng: number, code?: number, name?: string}} region
+ *           code/name present iff the id was minted with a region override;
+ *           loadIdentity validates them and derives the id from the code.
  * @property {number} createdAt
  */
 
@@ -314,6 +318,26 @@ export async function loadIdentity(envelope) {
     throw new IdentityError(ErrorCodes.IDENTITY_INVALID_FORMAT,
       'loadIdentity: region must be { lat, lng }');
   }
+  // Kernel 4.88.0: an identity minted with an explicit region override
+  // (createNodeIdentity({ region })) persists { code, name } beside lat/lng.
+  // The id was derived from THAT code, so the consistency check below must
+  // derive from it too; a legacy geo-only envelope (no code, no name) keeps
+  // the lat/lng derivation exactly as before. The persisted metadata is
+  // validated, never trusted: the code must be a canonical geo code or a
+  // system region (what createNodeIdentity can mint), and a name, if present,
+  // must be that code's name. A tampered code still fails the id check.
+  let regionCode;
+  if (region.code !== undefined || region.name !== undefined) {
+    if (!Number.isInteger(region.code) || resolveRegion(region.code) !== region.code) {
+      throw new IdentityError(ErrorCodes.IDENTITY_INVALID_FORMAT,
+        `loadIdentity: region.code must be a canonical or system region code, got ${JSON.stringify(region.code)}`);
+    }
+    if (region.name !== undefined && region.name !== regionName(region.code)) {
+      throw new IdentityError(ErrorCodes.IDENTITY_INVALID_FORMAT,
+        `loadIdentity: region.name '${region.name}' is not the name of region code ${region.code}`);
+    }
+    regionCode = region.code;
+  }
 
   const pubkeyBytes = hexToBytes(pubkey);
   let privateKey;
@@ -326,7 +350,7 @@ export async function loadIdentity(envelope) {
   }
 
   // Verify the stored id is internally consistent.
-  const expected = await computeNodeId(pubkeyBytes, region.lat, region.lng);
+  const expected = await computeNodeId(pubkeyBytes, region.lat, region.lng, { regionCode });
   if (expected !== id) {
     throw new IdentityError(ErrorCodes.IDENTITY_INVALID_FORMAT,
       `loadIdentity: stored id ${id} does not match derived id ${expected}`);
@@ -356,7 +380,9 @@ export async function loadIdentity(envelope) {
     id,
     pubkey: pubkeyBytes,
     privateKey,
-    region: { lat: region.lat, lng: region.lng },
+    region: regionCode === undefined
+      ? { lat: region.lat, lng: region.lng }
+      : { lat: region.lat, lng: region.lng, code: regionCode, name: regionName(regionCode) },
     createdAt: typeof createdAt === 'number' ? createdAt : Date.now(),
   });
   // Stage 2: reuse the PERSISTED transport PoW nonce if it still satisfies the
