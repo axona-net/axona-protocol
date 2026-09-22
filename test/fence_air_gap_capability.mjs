@@ -210,20 +210,29 @@ console.log('\n[P7] an introduction-only node: every edge classifies introductio
   check('a regular node on the same transport is unaffected', q.isTransit(R(2)) && q._greedyNextHopToward(R(7)) === R(2));
 }
 
-console.log('\n[P8] the data-channel egress gate sits at the PHYSICAL write (mesh._dcWrite), below the composite');
+console.log('\n[P8] the data-channel egress gate sits at the PHYSICAL write (mesh._dcWrite), below the composite, and sees the local cause');
 {
   const { MeshManager } = await import('../src/transport/web/mesh.js');
   const sent = [];
   const seen = [];
-  const gate = { before: (frame, peerId) => { seen.push({ frame, peerId }); return { allowed: frame.k !== 'req' || frame.type !== 'route_msg', cls: frame.k === 'req' && frame.type === 'route_msg' ? 'genericTransit' : 'other' }; }, after: (cls) => sent.push(`after:${cls}`) };
+  const gate = {
+    before: (frame, peerId, cause) => { seen.push({ frame, peerId, cause }); const bad = frame.k === 'req' && frame.type === 'route_msg'; return { allowed: !bad && cause !== null, cls: bad ? 'genericTransit' : 'other' }; },
+    after: (cls) => sent.push(`after:${cls}`),
+    threw: (cls) => sent.push(`threw:${cls}`),
+  };
   const mesh = new MeshManager({ sendSignal: () => {}, log: () => {}, egressGate: gate });
   mesh._peers.set('m1', { peerId: 'm1', dc: { readyState: 'open', send: (s) => sent.push(s) } });
-  const r1 = mesh.send('m1', { k: 'req', id: 1, type: 'route_msg', body: {} });
-  check('a refused frame returns false and NOTHING reaches dc.send', r1 === false && sent.length === 0 && mesh.egressStats().refused === 1);
-  const r2 = mesh.send('m1', { k: 'ntf', type: 'presence', body: {} });
-  check('an allowed frame is written, then after(cls) runs', r2 === true && sent.length === 2 && sent[0].includes('presence') && sent[1] === 'after:other');
-  check('attempts 2, writes 1, refused 1 at the write site', JSON.stringify(mesh.egressStats()) === JSON.stringify({ attempts: 2, writes: 1, refused: 1 }), JSON.stringify(mesh.egressStats()));
-  check('the gate saw the raw frame and the mesh peer id', seen.length === 2 && seen[0].peerId === 'm1' && seen[0].frame.type === 'route_msg');
+  const r1 = mesh.send('m1', { k: 'req', id: 1, type: 'route_msg', body: {} }, 'kernel-request');
+  check('a refused frame returns false and NOTHING reaches dc.send (invoked stays 0)', r1 === false && sent.length === 0 && mesh.egressStats().refused === 1 && mesh.egressStats().invoked === 0);
+  const r2 = mesh.send('m1', { k: 'ntf', type: 'presence', body: {} }, 'kernel-notify');
+  check('an allowed frame is invoked, returned, then after(cls) runs', r2 === true && sent.length === 2 && sent[0].includes('presence') && sent[1] === 'after:other');
+  check('the gate saw the raw frame, the mesh peer id and the LOCAL cause', seen[1].peerId === 'm1' && seen[1].cause === 'kernel-notify' && seen[0].cause === 'kernel-request');
+  const r3 = mesh.send('m1', { k: 'ntf', type: 'presence', body: {} });
+  check('the same frame with NO cause is refused: provenance comes from the caller, never the type', r3 === false);
+  mesh._peers.set('m2', { peerId: 'm2', dc: { readyState: 'open', send: () => { throw new Error('dc closed'); } } });
+  let threw = false; try { mesh.send('m2', { k: 'ntf', type: 'presence', body: {} }, 'kernel-notify'); } catch { threw = true; }
+  check('a send that throws is counted invoked + threw, not returned; the throw propagates', threw && sent.at(-1) === 'threw:other');
+  check('counters: attempts 4, refused 2, invoked 2, returned 1, threw 1', JSON.stringify(mesh.egressStats()) === JSON.stringify({ attempts: 4, refused: 2, invoked: 2, returned: 1, threw: 1 }), JSON.stringify(mesh.egressStats()));
   const plain = new MeshManager({ sendSignal: () => {}, log: () => {} });
   const psent = [];
   plain._peers.set('m1', { peerId: 'm1', dc: { readyState: 'open', send: (s) => psent.push(s) } });

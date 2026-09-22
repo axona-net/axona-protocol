@@ -141,7 +141,7 @@ export class MeshManager {
     // { allowed, cls }; a refused frame is counted and never written;
     // `after(cls)` runs once dc.send returned. Null ⇒ byte-identical behaviour.
     this._egressGate = (egressGate && typeof egressGate.before === 'function') ? egressGate : null;
-    this._egress = { attempts: 0, writes: 0, refused: 0 };
+    this._egress = { attempts: 0, refused: 0, invoked: 0, returned: 0, threw: 0 };
     /** @type {Map<string, PeerState>} */
     this._peers = new Map();
     /** Absolute negotiation deadline (ms) per peerId, set on the FIRST
@@ -352,12 +352,12 @@ export class MeshManager {
    * WebRTCTransport to write req / res / ntf envelopes onto the wire.
    * The existing ping/pong loop continues independently of this.
    */
-  send(peerId, payload) {
+  send(peerId, payload, cause = null) {
     const state = this._peers.get(peerId);
     if (!state || state.dc?.readyState !== 'open') {
       throw new Error(`mesh.send: peer ${peerId} not open`);
     }
-    return this._dcWrite(state, payload);
+    return this._dcWrite(state, payload, cause);
   }
 
   /**
@@ -365,24 +365,34 @@ export class MeshManager {
    * the keepalive pong — passes the egress gate here, so a gated deployment (a
    * bridge) cannot be bypassed by a lower-level send. Returns false when refused.
    */
-  _dcWrite(state, payload) {
+  _dcWrite(state, payload, cause = null) {
     const gate = this._egressGate;
     let verdict = null;
     if (gate) {
       this._egress.attempts++;
-      verdict = gate.before(payload, state.peerId);
+      // `cause` is TRUSTED LOCAL causal metadata supplied by the caller inside
+      // this process (the transport's own send/notify/reply, or this keepalive);
+      // never read from the frame. The gate decides on it, not on the type.
+      verdict = gate.before(payload, state.peerId, cause);
       if (verdict && verdict.allowed === false) { this._egress.refused++; return false; }
+      this._egress.invoked++;
     }
     // BigInt-aware replacer: the Axona wire protocol carries BigInt
     // node IDs through req/res/ntf bodies; native JSON.stringify
     // throws on BigInts.  Serialise as "<digits>n" suffixed strings;
     // the receiver's dc.onmessage parses with the inverse reviver.
-    state.dc.send(JSON.stringify(payload, bigintReplacer));
-    if (gate) { this._egress.writes++; if (typeof gate.after === 'function') gate.after(verdict?.cls ?? null); }
+    try {
+      state.dc.send(JSON.stringify(payload, bigintReplacer));
+    } catch (err) {
+      if (gate) { this._egress.threw++; if (typeof gate.threw === 'function') gate.threw(verdict?.cls ?? null); }
+      throw err;
+    }
+    if (gate) { this._egress.returned++; if (typeof gate.after === 'function') gate.after(verdict?.cls ?? null); }
     return true;
   }
 
-  /** Data-channel write counters (only advance when an egress gate is installed). */
+  /** Data-channel write counters (only advance when an egress gate is installed):
+   *  attempts (gated), refused, invoked (dc.send called), returned (no sync throw), threw. */
   egressStats() { return { ...this._egress }; }
 
   /**
@@ -902,7 +912,7 @@ export class MeshManager {
         // Echo the timestamp back.
         if (state.dc?.readyState === 'open') {
           try {
-            this._dcWrite(state, { type: 'pong', t: msg.t, peerT: Date.now() });
+            this._dcWrite(state, { type: 'pong', t: msg.t, peerT: Date.now() }, 'keepalive');
           } catch (err) {
             this._log('pong-send-failed', {
               peerId: state.peerId, err: err.message,
@@ -948,7 +958,7 @@ export class MeshManager {
   _pingTick(state) {
     if (state.dc?.readyState !== 'open') return 'skip';
     try {
-      state.dc.send(JSON.stringify({ type: 'ping', t: Date.now() }));
+      this._dcWrite(state, { type: 'ping', t: Date.now() }, 'keepalive');
       state.pings++;
       state.sendFailures = 0;          // a successful send clears the streak
       this._emitPingTraffic(state.peerId, 'sent');

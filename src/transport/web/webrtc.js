@@ -398,7 +398,7 @@ export class WebRTCTransport extends Transport {
       this._pending.set(id, { nodeId, resolve, reject, timer });
 
       try {
-        this._mesh.send(meshId, { k: 'req', id, type, body });
+        this._mesh.send(meshId, { k: 'req', id, type, body }, 'kernel-request');
       } catch (err) {
         clearTimeout(timer);
         this._pending.delete(id);
@@ -424,7 +424,7 @@ export class WebRTCTransport extends Transport {
       return;
     }
     try {
-      this._mesh.send(meshId, { k: 'ntf', type, body });
+      this._mesh.send(meshId, { k: 'ntf', type, body }, 'kernel-notify');
     } catch (err) {
       this._log('notify-send-failed', { nodeId: String(nodeId), type, err: err.message });
     }
@@ -526,7 +526,7 @@ export class WebRTCTransport extends Transport {
 
   _reply(meshId, id, ok, body) {
     try {
-      this._mesh.send(meshId, { k: 'res', id, ok, body });
+      this._mesh.send(meshId, { k: 'res', id, ok, body }, 'kernel-reply');
     } catch (err) {
       this._log('reply-send-failed', { meshId, id, err: err.message });
     }
