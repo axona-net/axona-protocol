@@ -180,6 +180,11 @@ export function webTransport({
   turnRefreshReplyMs          = 20 * 1000,       // per-attempt wait for the bridge's `turn` reply
   turnRefreshMaxTries         = 3,               // in-band attempts before graceful deferral
   turnRefreshSendErrBackoffMs = 5 * 1000,        // re-arm this long after a send error
+  // Bridge-Air-Gap-Plan (v0.8, write point 3): an optional gate at the physical
+  // data-channel write — { before(frame, peerId) → {allowed, cls}, after(cls) }.
+  // A bridge that uplinks installs it so its data-channel writes are classified
+  // and counted where they happen. Null ⇒ unchanged behaviour.
+  egressGate = null,
   // REF-1.1 S4a — Boundary-2 frame-contract registry, SHADOW MODE, DEFAULT-OFF.
   // When true, the transport builds a Boundary-2 registry and OBSERVES a certified
   // snapshot beside the bridge auth (hello/hello-ack), session (welcome), and
@@ -409,6 +414,7 @@ export function webTransport({
   // joiners + NAT/ICE failures). Pure measurement — no behaviour change.
   const signalStats = { meshMsgs: 0, bridgeMsgs: 0, dropMsgs: 0, meshPeers: new Set(), bridgePeers: new Set() };
   const mesh = new MeshManager({
+    egressGate,
     sendSignal: (toPeerId, payload) => {
       if (meshRelay && typeof signalRelay === 'function' && isHexId(toPeerId)) {
         let took = false;

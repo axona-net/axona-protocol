@@ -162,7 +162,11 @@ export class AxonaManager {
     this._roleAdmitPerTick = roleAdmitPerTick;
     this._neverRoot        = !!neverRoot;
     this._introductionOnly = !!introductionOnly;
-    this._rootAllowList    = new Set([...(rootAllowList || [])].map((h) => String(h).toLowerCase()));
+    // A Set is kept BY REFERENCE (live: the bridge adds a directory copy it learns
+    // later, D3); an array is copied. Entries are lower-hex 66-char topic ids.
+    this._rootAllowList    = rootAllowList instanceof Set
+      ? rootAllowList
+      : new Set([...(rootAllowList || [])].map((h) => String(h).toLowerCase()));
     // Node TRANSPORT identity {pubkey, sign} — the root signs D1 INGEST-ACK
     // proofs with it (Write-Flight Ack Routing). Absent on sim/test doubles that
     // never carry one; every signed path degrades to the 4.62.1 unsigned one-hop

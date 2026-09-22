@@ -210,5 +210,25 @@ console.log('\n[P7] an introduction-only node: every edge classifies introductio
   check('a regular node on the same transport is unaffected', q.isTransit(R(2)) && q._greedyNextHopToward(R(7)) === R(2));
 }
 
+console.log('\n[P8] the data-channel egress gate sits at the PHYSICAL write (mesh._dcWrite), below the composite');
+{
+  const { MeshManager } = await import('../src/transport/web/mesh.js');
+  const sent = [];
+  const seen = [];
+  const gate = { before: (frame, peerId) => { seen.push({ frame, peerId }); return { allowed: frame.k !== 'req' || frame.type !== 'route_msg', cls: frame.k === 'req' && frame.type === 'route_msg' ? 'genericTransit' : 'other' }; }, after: (cls) => sent.push(`after:${cls}`) };
+  const mesh = new MeshManager({ sendSignal: () => {}, log: () => {}, egressGate: gate });
+  mesh._peers.set('m1', { peerId: 'm1', dc: { readyState: 'open', send: (s) => sent.push(s) } });
+  const r1 = mesh.send('m1', { k: 'req', id: 1, type: 'route_msg', body: {} });
+  check('a refused frame returns false and NOTHING reaches dc.send', r1 === false && sent.length === 0 && mesh.egressStats().refused === 1);
+  const r2 = mesh.send('m1', { k: 'ntf', type: 'presence', body: {} });
+  check('an allowed frame is written, then after(cls) runs', r2 === true && sent.length === 2 && sent[0].includes('presence') && sent[1] === 'after:other');
+  check('attempts 2, writes 1, refused 1 at the write site', JSON.stringify(mesh.egressStats()) === JSON.stringify({ attempts: 2, writes: 1, refused: 1 }), JSON.stringify(mesh.egressStats()));
+  check('the gate saw the raw frame and the mesh peer id', seen.length === 2 && seen[0].peerId === 'm1' && seen[0].frame.type === 'route_msg');
+  const plain = new MeshManager({ sendSignal: () => {}, log: () => {} });
+  const psent = [];
+  plain._peers.set('m1', { peerId: 'm1', dc: { readyState: 'open', send: (s) => psent.push(s) } });
+  check('without a gate: unchanged behaviour, counters stay 0', plain.send('m1', { k: 'req', id: 1, type: 'route_msg', body: {} }) === true && psent.length === 1 && plain.egressStats().attempts === 0);
+}
+
 console.log(`\nResult: ${passed} passed, ${failed} failed`);
 if (failed) process.exit(1);

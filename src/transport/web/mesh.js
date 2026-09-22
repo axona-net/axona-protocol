@@ -133,9 +133,15 @@ const STUN_SERVERS = [
  */
 
 export class MeshManager {
-  constructor({ sendSignal, log }) {
+  constructor({ sendSignal, log, egressGate = null }) {
     this._sendSignal = sendSignal;
     this._log = log ?? (() => {});
+    // Bridge-Air-Gap-Plan v0.5 §7.2.6 (write point 3, v0.8): an optional gate at
+    // the PHYSICAL data-channel write. `before(frame, peerId)` returns
+    // { allowed, cls }; a refused frame is counted and never written;
+    // `after(cls)` runs once dc.send returned. Null ⇒ byte-identical behaviour.
+    this._egressGate = (egressGate && typeof egressGate.before === 'function') ? egressGate : null;
+    this._egress = { attempts: 0, writes: 0, refused: 0 };
     /** @type {Map<string, PeerState>} */
     this._peers = new Map();
     /** Absolute negotiation deadline (ms) per peerId, set on the FIRST
@@ -351,12 +357,33 @@ export class MeshManager {
     if (!state || state.dc?.readyState !== 'open') {
       throw new Error(`mesh.send: peer ${peerId} not open`);
     }
+    return this._dcWrite(state, payload);
+  }
+
+  /**
+   * The ONE physical data-channel write. Every frame — req/res/ntf envelopes and
+   * the keepalive pong — passes the egress gate here, so a gated deployment (a
+   * bridge) cannot be bypassed by a lower-level send. Returns false when refused.
+   */
+  _dcWrite(state, payload) {
+    const gate = this._egressGate;
+    let verdict = null;
+    if (gate) {
+      this._egress.attempts++;
+      verdict = gate.before(payload, state.peerId);
+      if (verdict && verdict.allowed === false) { this._egress.refused++; return false; }
+    }
     // BigInt-aware replacer: the Axona wire protocol carries BigInt
     // node IDs through req/res/ntf bodies; native JSON.stringify
     // throws on BigInts.  Serialise as "<digits>n" suffixed strings;
     // the receiver's dc.onmessage parses with the inverse reviver.
     state.dc.send(JSON.stringify(payload, bigintReplacer));
+    if (gate) { this._egress.writes++; if (typeof gate.after === 'function') gate.after(verdict?.cls ?? null); }
+    return true;
   }
+
+  /** Data-channel write counters (only advance when an egress gate is installed). */
+  egressStats() { return { ...this._egress }; }
 
   /**
    * v0.4.0 — Whether a data channel to peer is currently open.
@@ -875,9 +902,7 @@ export class MeshManager {
         // Echo the timestamp back.
         if (state.dc?.readyState === 'open') {
           try {
-            state.dc.send(JSON.stringify({
-              type: 'pong', t: msg.t, peerT: Date.now(),
-            }));
+            this._dcWrite(state, { type: 'pong', t: msg.t, peerT: Date.now() });
           } catch (err) {
             this._log('pong-send-failed', {
               peerId: state.peerId, err: err.message,
