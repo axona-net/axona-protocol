@@ -178,6 +178,10 @@ export const ErrorCodes = Object.freeze({
   // Transport
   TRANSPORT_NOT_STARTED:     'TRANSPORT_NOT_STARTED',
   TRANSPORT_PEER_UNREACHABLE:'TRANSPORT_PEER_UNREACHABLE',
+  // Bridge-Air-Gap-Plan v0.3 §7.1.2: the only connection to the peer is not a
+  // 'transport' connection (or its generation changed since the choice), so a
+  // forward or role frame has no route. Never routed around; reported to the caller.
+  NO_TRANSPORT_ROUTE:        'NO_TRANSPORT_ROUTE',
   TRANSPORT_TIMEOUT:         'TRANSPORT_TIMEOUT',
   TRANSPORT_CHANNEL_CLOSED:  'TRANSPORT_CHANNEL_CLOSED',
   TRANSPORT_HELLO_FAILED:    'TRANSPORT_HELLO_FAILED',

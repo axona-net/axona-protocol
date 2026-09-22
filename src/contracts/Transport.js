@@ -67,6 +67,36 @@ export class Transport {
     throw new Error('Transport.stop: not implemented');
   }
 
+  // ─── Connection capability (Bridge-Air-Gap-Plan v0.3 §7.1.1, v0.5 §7.1.2) ───
+  //
+  // Every connection a transport holds is one of three classes. Only a
+  // 'transport' connection may carry a forward or a role frame; an
+  // 'introduction' connection (the bridge socket) may carry only the
+  // introduction operations; 'unknown' may carry nothing but discovery.
+  // The default is 'unknown' so a transport that does not classify fails
+  // CLOSED: nothing is forwarded through a connection nobody vouched for.
+
+  /**
+   * Classify the connection to `peerId`.
+   * @param {bigint} peerId
+   * @returns {'unknown'|'introduction'|'transport'}
+   */
+  capabilityFor(peerId) {
+    return 'unknown';
+  }
+
+  /**
+   * Generation of the current connection to `peerId`: increments on every
+   * bind for that id, 0 when there is no connection. A send that chose a
+   * connection pins its generation and is refused at egress if the
+   * connection was rebound or closed in between (v0.5 §7.1.2).
+   * @param {bigint} peerId
+   * @returns {number}
+   */
+  generationFor(peerId) {
+    return 0;
+  }
+
   /**
    * @returns {bigint} the local node ID this transport was started with
    */

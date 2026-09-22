@@ -200,7 +200,7 @@ export const syncEngineMethods = {
       // cohort spray, and depart — dropping the last copy. We now hold no role
       // and send no ack, so the leaver's unacked path re-homes the topic.
       let role = this.axonRoles.get(topicBig);
-      if (!role && !this.admitPushedRole(topicBig)) return;   // refuse: stay silent, leaver retries
+      if (!role && !this.admitPushedRole(topicBig, 'heir')) return;   // refuse: stay silent, leaver retries
       if (!role) role = this._becomeRoot(topicBig, 'handoff-heir');
       if (!role) return;                 // hard refusal (bridge) — no role, no ack, leaver re-homes
       await this._applyDels(role, topicBig, payload.dels);
@@ -235,6 +235,7 @@ export const syncEngineMethods = {
         return;
       }
       if (!this._rootReplicas) return;                  // backup duty disabled on this node
+      if (!this.axonRoles.get(topicBig) && !this.admitPushedRole(topicBig, 'backup')) return;   // v0.3 §7.1.4: a bridge takes no backup
       let from = null;
       if (payload.from && isHexId(lc(payload.from))) from = lc(payload.from);
       else if (meta?.fromId != null) { try { from = lc(idHex(idBig(meta.fromId))); } catch { /* */ } }

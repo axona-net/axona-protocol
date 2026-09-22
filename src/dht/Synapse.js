@@ -22,6 +22,11 @@ export class Synapse {
     this.inertia   = 0;         // epoch lock: immune to decay while simEpoch < inertia
     this.stratum   = stratum;   // higher = more shared geographic prefix bits
     this.bootstrap = false;     // true for initial routing table synapses (slower decay)
+    this.capability = 'unknown'; // 'unknown' | 'introduction' | 'transport' — a snapshot
+                                // of transport.capabilityFor(peerId) at creation. The
+                                // pickers consult the TRANSPORT (AxonaPeer.isTransit), not
+                                // this field; it is kept for the health dump and tests.
+                                // Bridge-Air-Gap-Plan v0.3 §7.1.1.
     this._addedBy  = null;      // diagnostic: which rule introduced this synapse
                                 // (e.g., 'bootstrap', 'hopCache', 'lateralSpread',
                                 //  'triadic', 'promote', 'anneal', 'evictReplace').

@@ -305,6 +305,7 @@ export const wireHandlersMethods = {
     let best = null, bestD = null;
     for (const c of role.children) {
       if (!role.subscribers.has(c)) { role.children.delete(c); continue; }  // stale
+      if (typeof this.dht.isIntroduction === 'function' && this.dht.isIntroduction(idBig(c))) continue;   // air-gap
       const dd = idBig(c) ^ target;
       if (bestD === null || dd < bestD) { bestD = dd; best = c; }
     }
@@ -322,6 +323,7 @@ export const wireHandlersMethods = {
     const leaves = [];
     for (const s of role.subscribers.keys()) {
       if (role.children.has(s)) continue;
+      if (typeof this.dht.isIntroduction === 'function' && this.dht.isIntroduction(idBig(s))) continue;   // air-gap: a bridge is never a child
       leaves.push(s);
     }
     if (leaves.length < 2) return false;
@@ -347,6 +349,9 @@ export const wireHandlersMethods = {
   _onAdopt(payload, meta) {
     if (meta.targetId !== this.nodeId) return;        // routed to me specifically
     const topicBig = idBig(payload.topicId);
+    // Air-gap (v0.3 §7.1.4): ADOPT seats a CHILD role; it had no admission check
+    // before 4.89.0, so a legacy root could delegate to a bridge unconditionally.
+    if (!this.axonRoles.get(topicBig) && !this.admitPushedRole(topicBig, 'child')) return 'consumed';
     const role = this._rootClaim.adoptChild(topicBig, lc(payload.parent));
     for (const s of (Array.isArray(payload.subs) ? payload.subs : [])) {
       const sh = lc(s.subscriberId);

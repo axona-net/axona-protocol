@@ -178,11 +178,13 @@ export class RootClaim {
   meshBare() {
     const m = this.m;
     if (typeof m.dht.neighbors !== 'function') return false;
-    let bridge = null;
-    try { const b = (typeof m.dht.bridgeId === 'function') ? m.dht.bridgeId() : null; bridge = (b != null) ? idBig(b) : null; } catch { /* */ }
+    const intro = (typeof m.dht.introductionIds === 'function') ? new Set(m.dht.introductionIds().map((x) => idBig(x))) : new Set();
+    try { const b = (typeof m.dht.bridgeId === 'function') ? m.dht.bridgeId() : null; if (b != null) intro.add(idBig(b)); } catch { /* transitional guard only */ }
     for (const n of (m.dht.neighbors() || [])) {
       let nb; try { nb = idBig(n); } catch { continue; }
-      if (bridge === null || nb !== bridge) return false;   // any routable non-bridge neighbour → meshed
+      if (intro.has(nb)) continue;                            // air-gap: an introduction edge is not the mesh
+      if (typeof m.dht.isTransit === 'function' && !m.dht.isTransit(nb)) continue;
+      return false;                                           // any transport neighbour → meshed
     }
     return true;
   }
@@ -200,6 +202,7 @@ export class RootClaim {
       for (const n of (m.dht.neighbors() || [])) {
         let nb; try { nb = idBig(n); } catch { continue; }
         if (nb === m.nodeId || (bridge != null && nb === bridge)) continue;
+        if (typeof m.dht.isTransit === 'function' && !m.dht.isTransit(nb)) continue;   // air-gap
         if ((nb ^ tBig) < bestD) return false;     // a reachable neighbour is closer → route to it
       }
     }

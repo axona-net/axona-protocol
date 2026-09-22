@@ -105,6 +105,13 @@ export class AxonaManager {
     roleGraceMs = ROLE_GRACE_MS,   // refuse role MANAGEMENT this long after join (still transports)
     roleAdmitPerTick = ROLE_ADMIT_PER_TICK,  // paced admission: new roles per refresh tick
     neverRoot = false,             // HARD refusal: a bridge is a bridge (transport + introduction only)
+    // Bridge-Air-Gap-Plan v0.3 §7.1.4 (v0.5): the role × operation matrix for an
+    // introduction-only node (a bridge). When `introductionOnly` is true the node
+    // may self-claim root ONLY for topics in `rootAllowList` (the named directory
+    // topics, hex ids), may serve their subscribers, and takes NO backup, heir or
+    // child duty for any topic. Replaces the all-or-nothing `neverRoot` on bridges.
+    introductionOnly = false,
+    rootAllowList = [],
     identity = null,               // node TRANSPORT identity {pubkey, sign} — signs D1 INGEST-ACK proofs
     tombstoneAuth = false,         // REF-1.1 S2.0c Phase 3: DEFAULT-OFF shadow wiring of the tombstone authorization core (observe-only; no behavior change)
     frameRegistry = false,         // REF-1.1 S2: DEFAULT-OFF Boundary-1 frame-contract registry (shadow-wraps the 19 routed handlers; observe-only; byte-identical flag-off)
@@ -154,6 +161,8 @@ export class AxonaManager {
     this._roleGraceMs      = roleGraceMs;
     this._roleAdmitPerTick = roleAdmitPerTick;
     this._neverRoot        = !!neverRoot;
+    this._introductionOnly = !!introductionOnly;
+    this._rootAllowList    = new Set([...(rootAllowList || [])].map((h) => String(h).toLowerCase()));
     // Node TRANSPORT identity {pubkey, sign} — the root signs D1 INGEST-ACK
     // proofs with it (Write-Flight Ack Routing). Absent on sim/test doubles that
     // never carry one; every signed path degrades to the 4.62.1 unsigned one-hop
@@ -619,13 +628,21 @@ export class AxonaManager {
    *   hard:true  — categorical; the floor must NEVER override it.
    *   hard:false — situational; the floor may override to avoid a partition.
    */
-  canAcceptRole() {
+  // Role × operation matrix (Bridge-Air-Gap-Plan v0.3 §7.1.4). `role` is one of
+  // 'root' | 'backup' | 'heir' | 'child'; `topicBig` is required when the node
+  // is introduction-only. HARD refusals never reach the admission floor.
+  canAcceptRole(topicBig = null, role = 'root') {
     // HARD — a bridge is a bridge: transport and introduction, never a root.
     // Deliberately not soft: the floor would otherwise seat a root on the one
     // node whose failure is least tolerable, precisely under the load where it
     // can least afford it. host() was removed 2026-07-25 for this reason and
     // sub() kept rooting anyway; a soft tier reopens that door on a timer.
     if (this._neverRoot) return { ok: false, why: 'bridge', hard: true };
+    if (this._introductionOnly) {
+      if (role !== 'root') return { ok: false, why: 'role-not-allowed', hard: true };
+      const hex = (topicBig != null) ? idHex(topicBig).toLowerCase() : null;
+      if (hex === null || !this._rootAllowList.has(hex)) return { ok: false, why: 'not-directory', hard: true };
+    }
 
     // SOFT — situational, self-declared, floor-overridable.
     if (!this.seated())   return { ok: false, why: 'not-seated', hard: false };
@@ -658,7 +675,7 @@ export class AxonaManager {
    * @returns {boolean} true ⇒ proceed to _becomeRoot
    */
   admitRole(topicBig, hasAlternative = false) {
-    const v = this.canAcceptRole();
+    const v = this.canAcceptRole(topicBig, 'root');
     if (v.ok) { this._admitTickCount++; return true; }
 
     this._admitRefusals[v.why] = (this._admitRefusals[v.why] || 0) + 1;
@@ -693,11 +710,16 @@ export class AxonaManager {
    * A departing node's history has to land somewhere; "I am new" is not a reason
    * to drop it, "I am full" is.
    */
-  admitPushedRole(topicBig) {
+  admitPushedRole(topicBig, role = 'backup') {
     const topic = idHex(topicBig).slice(0, 12);
     if (this._neverRoot) {
       this._admitRefusals.bridge++;
       this._log('info', 'role-refused', { topic, why: 'bridge', hard: true, pushed: true });
+      return false;
+    }
+    if (this._introductionOnly) {                       // v0.3 §7.1.4: a bridge takes no pushed role, ever
+      this._admitRefusals.bridge++;
+      this._log('info', 'role-refused', { topic, why: 'role-not-allowed', role, hard: true, pushed: true });
       return false;
     }
     if (this.saturated()) {
@@ -716,6 +738,8 @@ export class AxonaManager {
       seated: this.seated(),
       saturated: this.saturated(),
       neverRoot: this._neverRoot,
+      introductionOnly: this._introductionOnly,
+      rootAllowList: this._rootAllowList.size,
       graceRemainingMs: Math.max(0, this._roleGraceMs - (this._now() - this._joinedAt)),
       refusals: { ...this._admitRefusals },
       capacity: this.inspectCapacity(),
@@ -858,6 +882,7 @@ export class AxonaManager {
     for (const n of (this.dht.neighbors() || [])) {
       let nb; try { nb = idBig(n); } catch { continue; }
       if (nb === this.nodeId) continue;
+      if (typeof this.dht.isTransit === 'function' && !this.dht.isTransit(nb)) continue;   // air-gap: a bridge is never a delegate
       const hex = lc(idHex(nb));
       let capable = false;
       try { capable = !!this.dht.isCapable(hex); } catch { capable = false; }

@@ -62,6 +62,7 @@ function mkNode(selfId, peerIds, { reply = null, incoming = [] } = {}) {
       synaptome: new Map(peerIds.map((p, i) => [String(i), { peerId: p }])),
       incomingSynapses: new Map(incoming.map((p, i) => [String(i), { peerId: p }])),
       transport: {
+        capabilityFor: () => 'transport',   // air-gap: this stub is a transport edge
         send: async (peerId, type, payload) => {
           sent.push({ peerId, type, payload });
           const r = typeof reply === 'function' ? reply(peerId) : reply;
@@ -72,7 +73,7 @@ function mkNode(selfId, peerIds, { reply = null, incoming = [] } = {}) {
     },
   };
 }
-const mkSelf = (stub) => ({ _node: stub.node });
+const mkSelf = (stub) => ({ _node: stub.node, capabilityOf: AxonaPeer.prototype.capabilityOf, isTransit: AxonaPeer.prototype.isTransit, isIntroduction: AxonaPeer.prototype.isIntroduction });
 const call = (self, t) => AxonaPeer.prototype._findCloserInTwoHops.call(self, t);
 const stats = (self, o) => AxonaPeer.prototype.lookaheadStats.call(self, o);
 

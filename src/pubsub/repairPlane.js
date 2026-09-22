@@ -684,6 +684,7 @@ export const repairPlaneMethods = {
       for (const id of (Array.isArray(arr) ? arr : [])) {
         let b; try { b = idBig(id); } catch { continue; }
         if (b === this.nodeId || (bridge != null && b === bridge)) continue;   // never self / bridge
+        if (this._isIntroductionId(b)) continue;                                  // air-gap: never a replica
         const hex = lc(idHex(b)); if (seen.has(hex)) continue; seen.add(hex);
         cand.push(hex);
       }
@@ -829,12 +830,21 @@ export const repairPlaneMethods = {
     return out;
   },
 
+  // Air-gap (v0.3 §7.1.3): a role holder is never an introduction-class
+  // connection. Ids we hold no connection to are 'unknown' here and stay
+  // eligible as ROLE HOLDERS (the route to them goes over transport hops);
+  // only a connection classified 'introduction' is excluded.
+  _isIntroductionId(b) {
+    return typeof this.dht.isIntroduction === 'function' && this.dht.isIntroduction(b);
+  },
+
   _nearestReachable(tBig, n, bridge) {
     if (n <= 0 || typeof this.dht.neighbors !== 'function') return [];
     const cand = [];
     for (const nb of (this.dht.neighbors() || [])) {
       let b; try { b = idBig(nb); } catch { continue; }
       if (b === this.nodeId || (bridge != null && b === bridge)) continue;
+      if (this._isIntroductionId(b)) continue;                                  // air-gap
       cand.push(b);
     }
     cand.sort((a, b) => (a ^ tBig) < (b ^ tBig) ? -1 : 1);
@@ -944,6 +954,7 @@ export const repairPlaneMethods = {
     for (const id of (Array.isArray(ids) ? ids : [])) {
       let b; try { b = idBig(id); } catch { continue; }
       if (b === this.nodeId) continue;
+      if (this._isIntroductionId(b)) continue;                                  // air-gap: a bridge is never an heir
       ordered.push(b);
     }
     const heir = ordered.length > 0 ? ordered[0] : null;

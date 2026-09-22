@@ -251,6 +251,8 @@ export class WebRTCTransport extends Transport {
     const isNew = prevMeshId === undefined;
     this._meshIdByNodeId.set(nodeId, meshId);
     this._nodeIdByMeshId.set(meshId, nodeId);
+    if (!this._generationByNodeId) this._generationByNodeId = new Map();
+    this._generationByNodeId.set(nodeId, (this._generationByNodeId.get(nodeId) ?? 0) + 1);   // v0.5 §7.1.2
     this._log('bindPeer', { nodeId: String(nodeId), meshId });
     if (isNew && this._peerBoundHandlers) {
       for (const h of this._peerBoundHandlers) {
@@ -316,6 +318,22 @@ export class WebRTCTransport extends Transport {
   /** True if this transport owns a binding for `nodeId`. */
   ownsPeer(nodeId) {
     return this._meshIdByNodeId.has(nodeId);
+  }
+
+  /**
+   * A mesh peer that completed admission (bindPeer after auth-mesh-complete)
+   * is a TRANSPORT edge (Bridge-Air-Gap-Plan v0.3 §7.1.1). Where the peer was
+   * learned plays no part: a peer introduced by the bridge and admitted here
+   * is 'transport' because this transport admitted it.
+   * @param {bigint} nodeId
+   */
+  capabilityFor(nodeId) {
+    return this._meshIdByNodeId.has(nodeId) ? 'transport' : 'unknown';
+  }
+
+  /** Bind generation per node id: bumps on every new bindPeer (v0.5 §7.1.2). */
+  generationFor(nodeId) {
+    return this._meshIdByNodeId.has(nodeId) ? (this._generationByNodeId?.get(nodeId) ?? 0) : 0;
   }
 
   // ─── Channel pool ────────────────────────────────────────────────────

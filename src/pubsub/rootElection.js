@@ -48,7 +48,9 @@ export const rootElectionMethods = {
     const rooted = [];
     for (const [t, r] of this.axonRoles) if (r.isRoot) rooted.push(t);
     if (!rooted.length) return;
-    const neigh = (this.dht.neighbors() || []).map(idBig).filter(n => n !== this.nodeId);
+    const neigh = (this.dht.neighbors() || []).map(idBig)
+      .filter(n => n !== this.nodeId)
+      .filter(n => (typeof this.dht.isTransit !== 'function') || this.dht.isTransit(n));   // air-gap: never beacon over an introduction edge
     if (!neigh.length) return;
     const basin = neigh.slice().sort((a, b) => this._cmpXor(a, b, this.nodeId)).slice(0, this._beaconFanout);
     const payload = {

@@ -158,6 +158,7 @@ export class BridgeTransport extends Transport {
     }
     const isNew = (this._bridgeNodeId !== nodeId);
     this._bridgeNodeId = nodeId;
+    this._bindGeneration = (this._bindGeneration ?? 0) + 1;   // v0.5 §7.1.2: every bind is a new generation
     if (isNew && this._peerBoundHandlers) {
       for (const h of this._peerBoundHandlers) {
         try { h(nodeId); }
@@ -185,6 +186,21 @@ export class BridgeTransport extends Transport {
   ownsPeer(nodeId) {
     if (this._bridgeNodeId === null) return false;
     return this._bridgeNodeId === nodeId;
+  }
+
+  /**
+   * The bridge socket is an INTRODUCTION edge, never a forwarding or role
+   * edge (Bridge-Air-Gap-Plan v0.3 §7.1.1). Anything this transport does not
+   * own is 'unknown', which fails closed.
+   * @param {bigint} nodeId
+   */
+  capabilityFor(nodeId) {
+    return this.ownsPeer(nodeId) ? 'introduction' : 'unknown';
+  }
+
+  /** Bind generation for the bridge id: bumps on every bindPeer (v0.5 §7.1.2). */
+  generationFor(nodeId) {
+    return this.ownsPeer(nodeId) ? (this._bindGeneration ?? 0) : 0;
   }
 
   /**

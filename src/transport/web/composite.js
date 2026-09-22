@@ -131,13 +131,58 @@ export class CompositeTransport extends Transport {
   // We prefer the explicit method when present (cheaper for the
   // single-peer BridgeTransport) and fall back to isConnected.
 
-  _routeFor(nodeId) {
+  // ── Connection capability and the egress gate (Bridge-Air-Gap-Plan v0.3
+  // §7.1.1–7.1.3, v0.5 §7.1.2). The composite is the ONE place a frame leaves
+  // a node, so the class check lives here and not in each caller.
+  //
+  // Operation classes, by frame type:
+  //   'forward'      route_msg and everything that rides inside it, and the
+  //                  direct-message notifications — may leave only over a
+  //                  'transport' connection;
+  //   'discovery'    lookup/probe requests — may go to any owned connection;
+  //                  a discovery reply names a peer to route TO, it never
+  //                  makes the responder a hop;
+  //   'introduction' the link and synaptome-maintenance frames — any owned
+  //                  connection.
+  static opClassOf(type) {
+    switch (type) {
+      case 'route_msg': case '__tunneled_direct__': case 'axona:direct':
+        return 'forward';
+      case 'lookup_step': case 'find_closest_set': case 'lookahead_probe': case 'local_probe':
+        return 'discovery';
+      default:
+        return (typeof type === 'string' && type.startsWith('direct_')) ? 'forward' : 'introduction';
+    }
+  }
+
+  /** @param {bigint} nodeId @returns {'unknown'|'introduction'|'transport'} */
+  capabilityFor(nodeId) {
+    const t = this._routeFor(nodeId);
+    return (t && typeof t.capabilityFor === 'function') ? t.capabilityFor(nodeId) : 'unknown';
+  }
+
+  /** @param {bigint} nodeId @returns {number} */
+  generationFor(nodeId) {
+    const t = this._routeFor(nodeId);
+    return (t && typeof t.generationFor === 'function') ? t.generationFor(nodeId) : 0;
+  }
+
+  /**
+   * The sub-transport a send to `nodeId` may use for an operation of class
+   * `opClass`. A 'forward' needs a sub that owns the id AND classifies that
+   * connection 'transport'; there is no fall-through from a transport-class
+   * connection to an introduction-class one for the same id, and an unknown
+   * classification is never eligible. Any other class takes the first owner.
+   */
+  _routeFor(nodeId, opClass = 'introduction') {
     for (const t of this._subs) {
-      if (typeof t.ownsPeer === 'function') {
-        if (t.ownsPeer(nodeId)) return t;
-      } else {
-        if (t.isConnected(nodeId)) return t;
+      const owns = (typeof t.ownsPeer === 'function') ? t.ownsPeer(nodeId) : t.isConnected(nodeId);
+      if (!owns) continue;
+      if (opClass === 'forward') {
+        const cap = (typeof t.capabilityFor === 'function') ? t.capabilityFor(nodeId) : 'unknown';
+        if (cap !== 'transport') continue;
       }
+      return t;
     }
     return null;
   }
@@ -233,26 +278,48 @@ export class CompositeTransport extends Transport {
 
   // ── Messaging ───────────────────────────────────────────────────────
 
-  async send(nodeId, type, body) {
-    const t = this._routeFor(nodeId);
+  // `opts.pin` (v0.5 §7.1.2): the generation the caller observed when it chose
+  // this connection. If the connection was rebound or closed since, the send is
+  // refused with NO_TRANSPORT_ROUTE and no other connection to the id is tried.
+  _gate(nodeId, type, opts) {
+    const opClass = opts?.opClass ?? CompositeTransport.opClassOf(type);
+    const owner = this._routeFor(nodeId);            // any owner, any class
+    if (!owner) return { t: null, opClass, why: 'unreachable', code: ErrorCodes.TRANSPORT_PEER_UNREACHABLE };
+    const t = this._routeFor(nodeId, opClass);
     if (!t) {
-      throw new TransportError(ErrorCodes.TRANSPORT_PEER_UNREACHABLE,
-        `CompositeTransport.send: no route to ${String(nodeId)}`,
-        { context: { nodeId: String(nodeId), type } });
+      this._noTransportRoute = (this._noTransportRoute ?? 0) + 1;
+      return { t: null, opClass, why: 'no-' + opClass + '-route', code: ErrorCodes.NO_TRANSPORT_ROUTE };
+    }
+    if (opts?.pin != null && typeof t.generationFor === 'function' && t.generationFor(nodeId) !== opts.pin) {
+      this._noTransportRoute = (this._noTransportRoute ?? 0) + 1;
+      return { t: null, opClass, why: 'stale-generation', code: ErrorCodes.NO_TRANSPORT_ROUTE };
+    }
+    return { t, opClass, why: null, code: null };
+  }
+
+  async send(nodeId, type, body, opts = undefined) {
+    const { t, opClass, why, code } = this._gate(nodeId, type, opts);
+    if (!t) {
+      throw new TransportError(code,
+        `CompositeTransport.send: ${why} to ${String(nodeId)} for '${type}'`,
+        { context: { nodeId: String(nodeId), type, opClass, why } });
     }
     return t.send(nodeId, type, body);
   }
 
-  async notify(nodeId, type, body) {
-    const t = this._routeFor(nodeId);
+  async notify(nodeId, type, body, opts = undefined) {
+    const { t, opClass, why } = this._gate(nodeId, type, opts);
     if (!t) {
       // Fire-and-forget but log: pubsub diagnostics correlate with
       // this when fan-out targets can't be reached.
-      this._log('notify-no-route', { nodeId: String(nodeId), type });
+      this._log('notify-no-route', { nodeId: String(nodeId), type, opClass, why });
       return;
     }
     return t.notify(nodeId, type, body);
   }
+
+  /** Count of sends and notifies refused by the class or generation gate. */
+  noTransportRouteCount() { return this._noTransportRoute ?? 0; }
 
   // REF-1.1 E3b.2b (SEAL): onRequest/onNotification are no longer public
   // instance methods. registerFrame reaches the deposited capability closures

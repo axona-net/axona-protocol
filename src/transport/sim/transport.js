@@ -67,6 +67,10 @@ export class SimTransport extends Transport {
     // it on so the lab exercises the same gate as the live network.
     authenticate       = false,
     onAuthReject       = null,
+    // Bridge-Air-Gap-Plan v0.3 §7.1.1: ids (hex or bigint) whose channel is an
+    // INTRODUCTION edge in this sim (a simulated bridge). Everything else that
+    // opens is a 'transport' edge.
+    introductionIds    = [],
   } = {}) {
     super();
     if (!network) {
@@ -88,6 +92,9 @@ export class SimTransport extends Transport {
 
     /** @type {Set<string>} peers we have an open channel to */
     this._openTo = new Set();
+    /** @type {Map<string, number>} bind generation per peer (v0.5 §7.1.2) */
+    this._generation = new Map();
+    this._introductionIds = new Set([...introductionIds].map((x) => this._normPeerId(x)));
 
     /** @type {Set<(peerBig: bigint) => void>} onPeerBound listeners */
     this._boundListeners = new Set();
@@ -203,6 +210,8 @@ export class SimTransport extends Transport {
     // Both sides record the channel.
     this._openTo.add(peerId);
     target._openTo.add(this._localId);
+    this._generation.set(peerId, (this._generation.get(peerId) ?? 0) + 1);            // v0.5 §7.1.2
+    target._generation.set(this._localId, (target._generation.get(this._localId) ?? 0) + 1);
 
     // RTT seed = 2 × one-way latency (we'll keep this accurate via heartbeats).
     const rtt = this._network._latencyMs(this._localId, peerId) +
@@ -299,6 +308,25 @@ export class SimTransport extends Transport {
 
   isConnected(peerId) {
     return this._openTo.has(this._normPeerId(peerId));
+  }
+
+  /**
+   * Sim channels are mesh channels between full peers: an open channel is a
+   * TRANSPORT edge (Bridge-Air-Gap-Plan v0.3 §7.1.1). A sim that wants an
+   * introduction-class peer (a simulated bridge) sets `introductionIds` on
+   * construction; those ids classify 'introduction' while open.
+   * @param {bigint|string} peerId
+   */
+  capabilityFor(peerId) {
+    const hex = this._normPeerId(peerId);
+    if (!this._openTo.has(hex)) return 'unknown';
+    return this._introductionIds?.has(hex) ? 'introduction' : 'transport';
+  }
+
+  /** Bind generation: bumps each time the channel to `peerId` opens (v0.5 §7.1.2). */
+  generationFor(peerId) {
+    const hex = this._normPeerId(peerId);
+    return this._openTo.has(hex) ? (this._generation?.get(hex) ?? 0) : 0;
   }
 
   async _closeChannel(peerId, notify) {

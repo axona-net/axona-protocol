@@ -74,6 +74,7 @@ function newLookaheadStats() {
   return {
     since: Date.now(),
     calls: 0, bypassedAtDestination: 0, probingCalls: 0,
+    probesSuppressedByCapability: 0, firstHopsRejectedByCapability: 0,   // air-gap (v0.3 §7.1.5)
     probesEmitted: 0, probesFulfilled: 0, probesRejected: 0, probesTerminal: 0,
     probesCloserThanMe: 0,
     answeredByProbe: 0, answeredByIncoming: 0, answeredNull: 0,
@@ -958,6 +959,7 @@ export class AxonaPeer extends DHT {
       for (const syn of node.synaptome.values()) {
         if (deadSet && deadSet.has(syn.peerId)) continue;
         if (connOk && !connOk(syn.peerId)) continue;
+        if (!this.isTransit(syn.peerId)) continue;    // air-gap: only a transport edge is a hop
         const d = syn.peerId ^ targetBig;
         if (d < bestDist) { bestDist = d; nextHopId = syn.peerId; }
       }
@@ -1006,7 +1008,7 @@ export class AxonaPeer extends DHT {
         const downstream = await node.transport.send(nextHopId, 'route_msg', {
           type, payload, targetId: toHex(targetBig), hops: hops + 1, originId,
           ...(_hopLt ? { hopAttemptId: _hopId } : {}),
-        });
+        }, { pin: this._pinFor(nextHopId) });   // v0.5 §7.1.2: refused at egress if rebound
         if (_hopLt) {
           this._axonaManager._deliverHopTx(_hopMids, _hopId, hops + 1, toHex(node.id), toHex(nextHopId), 'ok', null);
           const _oc = this._axonaManager._txOutcome(true, null);
@@ -3557,7 +3559,15 @@ export class AxonaPeer extends DHT {
       // The bridge node id (signaling infra, never a topic root). Lets AxonaManager
       // exclude it from the reachable-closest test in its root-claim fallback, the
       // same way findKClosest/routeMessage already skip it.
-      bridgeId: () => null,   // EXPERIMENT 2026-09-19 (David): the bridge is an ordinary DHT node
+      // Bridge-Air-Gap-Plan v0.3 §7.1.1–7.1.3. The connection class comes from the
+      // transport, never from an id prefix or a region byte. `bridgeId()` is
+      // restored as a TRANSITIONAL guard (the 2026-09-19 experiment made it null):
+      // it returns the first introduction-class id, for the pickers that still
+      // test one id; the closed pickers use isTransit / isIntroduction.
+      isTransit:       (id) => { try { return peer.isTransit(typeof id === 'bigint' ? id : fromHex(String(id))); } catch { return false; } },
+      isIntroduction:  (id) => { try { return peer.isIntroduction(typeof id === 'bigint' ? id : fromHex(String(id))); } catch { return false; } },
+      introductionIds: () => peer.introductionIds(),
+      bridgeId: () => { const ids = peer.introductionIds(); return ids.length ? ids[0] : null; },
       // Per-channel write-flight-ack capability (4.62.2 R13/R15/R17), read by
       // pickCapableAdjacent for D0 delegation. The web transport sets this from a
       // verified CAP_ATTEST; transports without a mesh (sim/node-WS/bridge) expose
@@ -4022,6 +4032,32 @@ export class AxonaPeer extends DHT {
    * `routeMessage` to find a first-hop closer to target than self.
    * Returns peerId or null if no synapse makes XOR progress.
    */
+  // ── Connection capability (Bridge-Air-Gap-Plan v0.3 §7.1.1–7.1.3) ─────────
+  // The transport classifies each connection; the peer only asks. A transport
+  // that cannot classify answers 'unknown', which is never a hop and never a
+  // role holder: the default fails closed.
+  capabilityOf(peerId) {
+    const t = this._node?.transport;
+    if (!t || typeof t.capabilityFor !== 'function') return 'unknown';
+    try { return t.capabilityFor(peerId) ?? 'unknown'; } catch { return 'unknown'; }
+  }
+  isTransit(peerId)      { return this.capabilityOf(peerId) === 'transport'; }
+  isIntroduction(peerId) { return this.capabilityOf(peerId) === 'introduction'; }
+  /** Every introduction-class connection this node holds (the dialled bridge, today). */
+  introductionIds() {
+    const out = [];
+    const t = this._node?.transport;
+    const ids = (t && typeof t.boundPeers === 'function') ? t.boundPeers() : [];
+    for (const id of ids) if (typeof id === 'bigint' && this.isIntroduction(id)) out.push(id);
+    return out;
+  }
+  /** The generation to pin a send with (v0.5 §7.1.2); undefined when the transport does not count. */
+  _pinFor(peerId) {
+    const t = this._node?.transport;
+    if (!t || typeof t.generationFor !== 'function') return undefined;
+    try { return t.generationFor(peerId); } catch { return undefined; }
+  }
+
   _greedyNextHopToward(targetId) {
     if (!this._node?.alive) return null;
     const target = asId(targetId);   // wire→internal id gate
@@ -4040,6 +4076,7 @@ export class AxonaPeer extends DHT {
     for (const syn of this._node.synaptome.values()) {
       if (dead && dead.has(syn.peerId)) continue;
       if (connOk && !connOk(syn.peerId)) continue;
+      if (!this.isTransit(syn.peerId)) continue;      // air-gap: only a transport edge is a hop
       const d = syn.peerId ^ target;
       if (d < bestDist) { bestDist = d; bestPeerId = syn.peerId; }
     }
@@ -4110,7 +4147,12 @@ export class AxonaPeer extends DHT {
     let bestPeerId = null;        // the FIRST-HOP (adjacent) peer to forward to
     let bestDist   = myDist;
 
-    const probeTargets = [...node.synaptome.values()].map(s => s.peerId);
+    // Air-gap (v0.3 §7.1.3): the probe set is TRANSPORT synapses only. An
+    // introduction edge (the bridge) is never probed and can never become the
+    // adjacent first hop, whatever its reply would have named.
+    const allTargets = [...node.synaptome.values()].map(s => s.peerId);
+    const probeTargets = allTargets.filter((p) => this.isTransit(p));
+    LS.probesSuppressedByCapability += allTargets.length - probeTargets.length;
     if (probeTargets.length > 0) {
       LS.probingCalls++;
       LS.probesEmitted += probeTargets.length;
@@ -4190,6 +4232,7 @@ export class AxonaPeer extends DHT {
     //   incomingWonFinalCalls    : CALLS where incoming also beat the probes
     let incomingQualifies = false;
     for (const syn of node.incomingSynapses.values()) {
+      if (!this.isTransit(syn.peerId)) { LS.firstHopsRejectedByCapability++; continue; }   // air-gap
       const d = syn.peerId ^ target;
       if (d < myDist) { LS.incomingCandidateLinks++; incomingQualifies = true; }
       if (d < bestDist) { bestDist = d; bestPeerId = syn.peerId; }
@@ -4244,6 +4287,8 @@ export class AxonaPeer extends DHT {
       calls: s.calls,
       bypassedAtDestination: s.bypassedAtDestination,   // the 4.78.0 fence, counted
       probingCalls: probing,
+      probesSuppressedByCapability: s.probesSuppressedByCapability,   // air-gap
+      firstHopsRejectedByCapability: s.firstHopsRejectedByCapability, // air-gap
       probesEmitted: s.probesEmitted,
       probesPerCall: probing ? +(s.probesEmitted / probing).toFixed(1) : 0,
       probesEmittedPerSec: +(s.probesEmitted / (sinceMs / 1000)).toFixed(1),
@@ -4525,6 +4570,7 @@ export class AxonaPeer extends DHT {
       let minV = Infinity, minVAny = Infinity, victimAny = null;
       for (const s of node.synaptome.values()) {
         if (s.inertia > domain.simEpoch) continue;
+        if (this.isIntroduction(s.peerId)) continue;   // air-gap: the bridge edge is not in the contest
         const v = this._vitality(s);
         if (v < minVAny) { minVAny = v; victimAny = s; }
         if (!s.bootstrap && v < minV) { minV = v; victim = s; }
@@ -4702,6 +4748,7 @@ export class AxonaPeer extends DHT {
       if (r.status !== 'fulfilled' || !Array.isArray(r.value)) continue;
       for (const id of r.value) {
         if (id === node.id) continue;
+        if (this.isIntroduction(id)) continue;   // air-gap: never a replacement candidate
         if (dead.has(id)) continue;
         if (node.synaptome.has(id)) continue;
         const stratum = clz264(node.id ^ id);
@@ -4906,7 +4953,7 @@ export class AxonaPeer extends DHT {
       const downstream = await originNode.transport.send(nextHopId, 'route_msg', {
         type, payload, targetId: toHex(targetId), hops: 1, originId,
         ...(_hopLt ? { hopAttemptId: _hopId } : {}),
-      });
+      }, { pin: this._pinFor(nextHopId) });   // v0.5 §7.1.2: refused at egress if rebound
       if (_hopLt) {
         this._axonaManager._deliverHopTx(_hopMids, _hopId, 1, toHex(originNode.id), toHex(nextHopId), 'ok', null);
         const _oc = this._axonaManager._txOutcome(true, null);   // transition-ledger: sender row per msg
