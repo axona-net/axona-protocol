@@ -186,5 +186,29 @@ console.log('\n[P5] the role matrix: an introduction-only node refuses every pus
   check('a regular node is unaffected: canAcceptRole has no hard refusal for backup', plain.canAcceptRole(other, 'backup').hard !== true);
 }
 
+console.log('\n[P7] an introduction-only node: every edge classifies introduction, no forward on any sub');
+{
+  const hex = (b) => b.toString(16).padStart(66, '0');
+  const bridge = new Stub('bridge', 'introduction', [BRIDGE]);
+  const mesh = new Stub('mesh', 'transport', [R(2)]);      // e.g. a WebRTC edge formed through an uplink
+  const c = new CompositeTransport({ localNodeId: SELF, log: () => {}, introductionOnly: true });
+  c.addSubtransport(bridge); c.addSubtransport(mesh);
+  check('the composite maps a transport-class sub to introduction', c.capabilityFor(R(2)) === 'introduction' && c.capabilityFor(BRIDGE) === 'introduction');
+  let err = null;
+  try { await c.send(R(2), 'route_msg', { targetId: hex(R(7)) }); } catch (e) { err = e; }
+  check('a forward to a transport-class sub is refused NO_TRANSPORT_ROUTE, nothing written', err && err.code === ErrorCodes.NO_TRANSPORT_ROUTE && mesh.sent.length === 0, err && err.code);
+  await c.send(R(2), 'route_msg', { targetId: hex(R(2)) });
+  check('a route_msg ADDRESSED to the socket peer still passes (one-hop rule, §7.2.7)', mesh.sent.length === 1 && mesh.sent[0].type === 'route_msg');
+  err = null; try { await c.notify(R(2), 'direct_pubsub:deliver', {}); } catch (e) { err = e; }
+  check('a direct_* notification is dropped on every edge', !mesh.sent.some((x) => x.type === 'direct_pubsub:deliver'));
+  const plain = composite([mesh]);
+  const p = peerWith(plain, [R(2)]);
+  p._introductionOnly = true;
+  check('peer-level introductionOnly: the transport edge reads introduction, never a hop', !p.isTransit(R(2)) && p.isIntroduction(R(2)) && p._greedyNextHopToward(R(7)) === null);
+  check('…and introductionIds lists it', p.introductionIds().map(String).includes(String(R(2))));
+  const q = peerWith(plain, [R(2)]);
+  check('a regular node on the same transport is unaffected', q.isTransit(R(2)) && q._greedyNextHopToward(R(7)) === R(2));
+}
+
 console.log(`\nResult: ${passed} passed, ${failed} failed`);
 if (failed) process.exit(1);

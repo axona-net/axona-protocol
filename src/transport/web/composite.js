@@ -34,8 +34,12 @@ export class CompositeTransport extends Transport {
    * @param {bigint} opts.localNodeId   264-bit BigInt nodeId
    * @param {(event:string, data?:object) => void} [opts.log]
    */
-  constructor({ localNodeId, log }) {
+  constructor({ localNodeId, log, introductionOnly = false }) {
     super();
+    // Bridge-Air-Gap-Plan v0.3 §7.1: on an introduction-only node every owned
+    // connection classifies 'introduction', so a 'forward' finds no route and is
+    // refused NO_TRANSPORT_ROUTE at this gate, whichever sub owns the peer.
+    this._introductionOnly = !!introductionOnly;
     if (typeof localNodeId !== 'bigint') {
       throw new TypeError(`CompositeTransport: localNodeId must be bigint, got ${typeof localNodeId}`);
     }
@@ -158,7 +162,8 @@ export class CompositeTransport extends Transport {
   /** @param {bigint} nodeId @returns {'unknown'|'introduction'|'transport'} */
   capabilityFor(nodeId) {
     const t = this._routeFor(nodeId);
-    return (t && typeof t.capabilityFor === 'function') ? t.capabilityFor(nodeId) : 'unknown';
+    const c = (t && typeof t.capabilityFor === 'function') ? t.capabilityFor(nodeId) : 'unknown';
+    return (this._introductionOnly && c === 'transport') ? 'introduction' : c;
   }
 
   /** @param {bigint} nodeId @returns {number} */
@@ -179,6 +184,7 @@ export class CompositeTransport extends Transport {
       const owns = (typeof t.ownsPeer === 'function') ? t.ownsPeer(nodeId) : t.isConnected(nodeId);
       if (!owns) continue;
       if (opClass === 'forward') {
+        if (this._introductionOnly) continue;
         const cap = (typeof t.capabilityFor === 'function') ? t.capabilityFor(nodeId) : 'unknown';
         if (cap !== 'transport') continue;
       }

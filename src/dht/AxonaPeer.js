@@ -193,9 +193,15 @@ export class AxonaPeer extends DHT {
    *        signed publishes (the default).  Apps that only call
    *        `peer.pub(topic, message, { sign: false })` can omit it.
    */
-  constructor({ engine = null, domain = null, node, axonaManager = null, nodeIdentity = null, transport = null, persist = null, maxPublishBytes = null, synaptomeMaintain = null, admissionGate = null, presence = null, attemptGuard = null, rootReplicas = null, frameRegistry = false, directMessageTypes = undefined, enforceDirectMessageTypes = false }) {
+  constructor({ engine = null, domain = null, node, axonaManager = null, nodeIdentity = null, transport = null, persist = null, maxPublishBytes = null, synaptomeMaintain = null, admissionGate = null, presence = null, attemptGuard = null, rootReplicas = null, frameRegistry = false, directMessageTypes = undefined, enforceDirectMessageTypes = false, introductionOnly = false }) {
     super();
     if (!node) throw new Error('AxonaPeer: node is required');
+    // Bridge-Air-Gap-Plan v0.3 §7.1: an introduction-only node (a bridge) treats EVERY
+    // connection as an introduction edge, whatever the transport says. A bridge that
+    // uplinks into another bridge forms real WebRTC edges through that uplink; without
+    // this flag those edges classify 'transport' and the bridge would forward its
+    // clients' frames over them — the highway by another door.
+    this._introductionOnly = !!introductionOnly;
     // Singleton-root replication fan-out (kernel v4.9.2). null → kernel default (2).
     // Set 0 to disable (A/B diagnostics, or deployments that don't want backup roots).
     this._rootReplicas = rootReplicas;
@@ -4043,8 +4049,12 @@ export class AxonaPeer extends DHT {
   capabilityOf(peerId) {
     const t = this._node?.transport;
     if (!t || typeof t.capabilityFor !== 'function') return 'unknown';
-    try { return t.capabilityFor(peerId) ?? 'unknown'; } catch { return 'unknown'; }
+    let c;
+    try { c = t.capabilityFor(peerId) ?? 'unknown'; } catch { return 'unknown'; }
+    return (this._introductionOnly && c === 'transport') ? 'introduction' : c;
   }
+  /** True when this node never forwards or holds a pushed role (a bridge). */
+  get introductionOnly() { return this._introductionOnly === true; }
   isTransit(peerId)      { return this.capabilityOf(peerId) === 'transport'; }
   isIntroduction(peerId) { return this.capabilityOf(peerId) === 'introduction'; }
   /** Every introduction-class connection this node holds (the dialled bridge, today). */
