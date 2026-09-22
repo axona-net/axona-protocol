@@ -959,8 +959,11 @@ export class AxonaPeer extends DHT {
       for (const syn of node.synaptome.values()) {
         if (deadSet && deadSet.has(syn.peerId)) continue;
         if (connOk && !connOk(syn.peerId)) continue;
-        if (syn.peerId === targetBig) { nextHopId = targetBig; bestDist = 0n; break; }   // addressee on a direct edge
-        if (!this.isTransit(syn.peerId)) continue;    // air-gap: only a transport edge is a hop
+        // air-gap: only a transport edge is a hop. No addressee exception HERE: this
+        // is a RECEIVED frame, and handing it to an introduction-edge addressee would
+        // be one hop of transit through that edge (client → bridge → client is the
+        // highway). The origin-side rule lives in _greedyNextHopToward.
+        if (!this.isTransit(syn.peerId)) continue;
         const d = syn.peerId ^ targetBig;
         if (d < bestDist) { bestDist = d; nextHopId = syn.peerId; }
       }
