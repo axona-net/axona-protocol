@@ -959,6 +959,7 @@ export class AxonaPeer extends DHT {
       for (const syn of node.synaptome.values()) {
         if (deadSet && deadSet.has(syn.peerId)) continue;
         if (connOk && !connOk(syn.peerId)) continue;
+        if (syn.peerId === targetBig) { nextHopId = targetBig; bestDist = 0n; break; }   // addressee on a direct edge
         if (!this.isTransit(syn.peerId)) continue;    // air-gap: only a transport edge is a hop
         const d = syn.peerId ^ targetBig;
         if (d < bestDist) { bestDist = d; nextHopId = syn.peerId; }
@@ -4076,6 +4077,7 @@ export class AxonaPeer extends DHT {
     for (const syn of this._node.synaptome.values()) {
       if (dead && dead.has(syn.peerId)) continue;
       if (connOk && !connOk(syn.peerId)) continue;
+      if (syn.peerId === target) return target;        // addressee on a direct edge: terminal there, never transit
       if (!this.isTransit(syn.peerId)) continue;      // air-gap: only a transport edge is a hop
       const d = syn.peerId ^ target;
       if (d < bestDist) { bestDist = d; bestPeerId = syn.peerId; }

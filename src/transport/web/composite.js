@@ -281,10 +281,17 @@ export class CompositeTransport extends Transport {
   // `opts.pin` (v0.5 §7.1.2): the generation the caller observed when it chose
   // this connection. If the connection was rebound or closed since, the send is
   // refused with NO_TRANSPORT_ROUTE and no other connection to the id is tried.
-  _gate(nodeId, type, opts) {
-    const opClass = opts?.opClass ?? CompositeTransport.opClassOf(type);
+  _gate(nodeId, type, opts, body) {
+    let opClass = opts?.opClass ?? CompositeTransport.opClassOf(type);
     const owner = this._routeFor(nodeId);            // any owner, any class
     if (!owner) return { t: null, opClass, why: 'unreachable', code: ErrorCodes.TRANSPORT_PEER_UNREACHABLE };
+    // A route_msg ADDRESSED to the peer on this connection is terminal there:
+    // delivering it is not transit, whatever the connection's class (v0.4 §7.2.7
+    // one-hop rule; the bridge dispatches only self-addressed frames). Only
+    // route_msg carries an addressee (hex targetId). direct_* stays forward
+    // class: a role-delivery frame has no business on an introduction edge.
+    if (opClass === 'forward' && type === 'route_msg' &&
+        CompositeTransport._addressee(body) === nodeId) opClass = 'introduction';
     const t = this._routeFor(nodeId, opClass);
     if (!t) {
       this._noTransportRoute = (this._noTransportRoute ?? 0) + 1;
@@ -297,8 +304,14 @@ export class CompositeTransport extends Transport {
     return { t, opClass, why: null, code: null };
   }
 
+  static _addressee(body) {
+    const h = body && typeof body.targetId === 'string' ? body.targetId : null;
+    if (!h || !/^[0-9a-fA-F]+$/.test(h)) return null;
+    try { return BigInt('0x' + h); } catch { return null; }
+  }
+
   async send(nodeId, type, body, opts = undefined) {
-    const { t, opClass, why, code } = this._gate(nodeId, type, opts);
+    const { t, opClass, why, code } = this._gate(nodeId, type, opts, body);
     if (!t) {
       throw new TransportError(code,
         `CompositeTransport.send: ${why} to ${String(nodeId)} for '${type}'`,
@@ -308,7 +321,7 @@ export class CompositeTransport extends Transport {
   }
 
   async notify(nodeId, type, body, opts = undefined) {
-    const { t, opClass, why } = this._gate(nodeId, type, opts);
+    const { t, opClass, why } = this._gate(nodeId, type, opts, body);
     if (!t) {
       // Fire-and-forget but log: pubsub diagnostics correlate with
       // this when fan-out targets can't be reached.
