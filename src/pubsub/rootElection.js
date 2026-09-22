@@ -152,7 +152,8 @@ export const rootElectionMethods = {
     }
     if (payload.layer > 1 && typeof this.dht.neighbors === 'function') {
       let from = null; try { if (meta && meta.fromId != null) from = idBig(meta.fromId); } catch { /* */ }
-      const neigh = (this.dht.neighbors() || []).map(idBig).filter(n => n !== this.nodeId && n !== from);
+      const neigh = (this.dht.neighbors() || []).map(idBig).filter(n => n !== this.nodeId && n !== from)
+        .filter(n => (typeof this.dht.isTransit !== 'function') || this.dht.isTransit(n));   // air-gap: never forward a beacon over an introduction edge
       const fwd = { ...payload, layer: payload.layer - 1 };
       for (const nb of neigh.sort((a, b) => this._cmpXor(a, b, this.nodeId)).slice(0, this._beaconFanout)) {
         this._route(nb, T.ROOTBEACON, fwd);
@@ -184,6 +185,7 @@ export const rootElectionMethods = {
       for (const n of (this.dht.neighbors() || [])) {
         let nb; try { nb = idBig(n); } catch { continue; }
         if (bridge != null && nb === bridge) continue;   // bridge never a root → don't let it gate beacon acceptance
+        if (typeof this.dht.isIntroduction === 'function' && this.dht.isIntroduction(nb)) continue;   // air-gap: every introduction id
         const d = nb ^ tBig; if (d < bestD) { bestD = d; best = nb; }
       }
     }

@@ -8,20 +8,26 @@ WP4 P1 (static audit) greps this table against the tree: every chooser in §A mu
 | Site | Chooses | Filter point |
 |---|---|---|
 | dht/AxonaPeer.js:4025 `_greedyNextHopToward` | next hop by strict XOR progress | skip non-transit synapses |
-| dht/AxonaPeer.js:4066 `_findCloserInTwoHops` | probe set + `bestPeerId` (adjacent first hop) | probe only transit synapses; never assign a non-transit `bestPeerId` |
+| dht/AxonaPeer.js:4066 `_findCloserInTwoHops` | probe set + adjacent first hop | probe only transit synapses; never assign a non-transit first hop |
 | dht/AxonaPeer.js ~932–1010 `route_msg` receive handler | forward hop by greedy scan over `node.synaptome` | skip non-transit |
-| dht/AxonaPeer.js:3639 default-dht `sendDirect` fallback | routes `__tunneled_direct__` | goes through routeMessage → covered by the two above; plus `_routeFor(id,'forward')` |
+| dht/AxonaPeer.js:5053 `sendDirect` | a direct notification (direct_<type>) | (gated at composite: opClassOf direct_* = 'forward') |
 | dht/AxonaPeer.js:4518 `_addByVitality` | synaptome admission/eviction victim | introduction synapses are exempt from eviction contests and never counted toward transport degree |
-| dht/AxonaPeer.js:4647 `_evictAndReplace`, :4682 `_localCandidate` | replacement candidates | candidates must be transport-capable |
+| dht/AxonaPeer.js:4647 `_evictAndReplace` | never replaces an introduction synapse | returns null for an introduction dead synapse |
+| dht/AxonaPeer.js:4682 `_localCandidate` | replacement candidates | never returns an introduction id |
 | pubsub/AxonaManager.js:855 `pickCapableAdjacent` | D0 delegate | skip non-transit |
-| pubsub/rootElection.js:46 `_emitRootBeacons` | beacon basin (`_beaconFanout` nearest neighbours) | skip non-transit |
-| pubsub/repairPlane.js ~680 cohort `want` (findKClosest consumer) | replica targets | exclude non-transit ids and `bridgeId()` list |
+| pubsub/rootElection.js:46 `_emitRootBeacons` | beacon basin (beaconFanout nearest neighbours) | skip non-transit |
+| pubsub/rootElection.js:130 `_onRootBeacon` | layer-forward basin (beaconFanout nearest neighbours) | skip non-transit |
+| pubsub/rootElection.js:170 `_bestKnownClosest` | closest-known node gating beacon acceptance | skip every introduction id |
+| dht/AxonaPeer.js:2270 `_pickRecruitPeer` | a child to recruit for delivery | skip an introduction-class child |
+| pubsub/repairPlane.js:832 `_isIntroductionId` | cohort want (findKClosest consumer, ~680), heirs, nearestReachable share this predicate | exclude every introduction id; unknown ids stay eligible as role holders |
 | pubsub/repairPlane.js:832 `_nearestReachable` | cohort fallback | same |
 | pubsub/repairPlane.js:942 `_pickHeirs` | heir + alt on leave | same |
 | pubsub/rootClaim.js:178 `meshBare` | "is any non-bridge neighbour routable" | uses `bridgeId()` list |
 | pubsub/rootClaim.js:195 `selfClosestReachable` | reachable-closest root test | skip non-transit |
-| pubsub/wireHandlers.js:303 `_pickChild`, :319 `_promoteChild` | delegate subscriber/child | skip subscribers whose synapse is non-transit |
-| transport/web/composite.js:134 `_routeFor` | sub-transport for a send | takes opClass; 'forward'/'role' require 'transport' |
+| pubsub/wireHandlers.js:303 `_pickChild` | delegate to a child | skip an introduction-class child |
+| pubsub/wireHandlers.js:319 `_promoteChild` | promote a subscriber to child | skip an introduction-class subscriber |
+| transport/web/composite.js:134 `_routeFor` | sub-transport for a send | takes opClass; 'forward' requires 'transport'; no fall-through |
+| transport/web/composite.js:134 `_gate` | the egress gate (class + pinned generation) | NO_TRANSPORT_ROUTE on refusal |
 
 ## B. Routed sends (all via `_route` → `dht.routeMessage`; the choosers above apply)
 AxonaManager.js:333 `_send`; :358 `_route`; :1171 SUB; :1223 PUB; :1269 UNSUB; :1293 METRICSON; :1351 KILL; :1354 TOUCH; :1375 PULL.

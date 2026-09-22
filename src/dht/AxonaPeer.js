@@ -4693,6 +4693,9 @@ export class AxonaPeer extends DHT {
   async _evictAndReplace(deadSyn) {
     const node   = this._node;
     const domain = this._domain;
+    // Air-gap (v0.3 §7.1.3): an introduction edge is not replaced from the mesh;
+    // its lifecycle belongs to the bridge transport (reconnect), not to routing.
+    if (this.isIntroduction(deadSyn.peerId)) return null;
 
     node.synaptome.delete(deadSyn.peerId);
     node.connections?.delete(deadSyn.peerId);
@@ -5144,6 +5147,7 @@ export class AxonaPeer extends DHT {
     for (const childId of role.children.keys()) {
       if (childId === selfBig)   continue;
       if (childId === forwarder) continue;
+      if (this.isIntroduction(childId)) continue;   // air-gap: a bridge is never recruited
       const s = synapseWeights.get(childId);
       if (!s) continue;
       const score = s.weight * 1_000_000 - s.latency;
@@ -5156,6 +5160,7 @@ export class AxonaPeer extends DHT {
     for (const childId of role.children.keys()) {
       if (childId === selfBig)   continue;
       if (childId === forwarder) continue;
+      if (this.isIntroduction(childId)) continue;   // air-gap
       const d = childId ^ subscriberId;
       if (bestDist === null || d < bestDist) { bestDist = d; best = childId; }
     }
