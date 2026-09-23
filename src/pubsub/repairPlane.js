@@ -47,6 +47,18 @@ import { dispatchVerdict } from './dispatch.js';
 // name. Its header explains why 'consumed' credits here and 'failed' unpins there.
 
 export const repairPlaneMethods = {
+  /**
+   * How long this role has gone without a message, in ms.
+   * `role.lastTs` is the stamp of the last message it emitted or held and
+   * SURVIVES the cache emptying, so it answers "when was the last message".
+   * A role that never carried one is measured from its admission stamp.
+   * Returns 0 when neither exists, which leaves the role un-reapable by age.
+   */
+  _roleIdleMs(role, now) {
+    const anchor = (role.lastTs || 0) > 0 ? role.lastTs : (role.createdAt || 0);
+    return anchor > 0 ? Math.max(0, now - anchor) : 0;
+  },
+
   async refreshTick() {
     // E3 write flights: deadline sweep rides the kernel's one scheduler — no
     // per-flight timers, nothing to leak on teardown.
@@ -247,7 +259,19 @@ export const repairPlaneMethods = {
       // fleet's default mode). Root-ness is still decided by ROUTING (this only
       // protects roles the node legitimately won as terminus); the set is bounded
       // by the node's keyspace share of topics that actually see traffic.
-      // TODO(Phase 4): age out keyspace-pinned empty roles after a long idle TTL.
+      // The Phase-4 idle TTL is implemented below as `idleReap` (2026-09-23).
+      // IDLE-ROLE REAP (David 2026-09-23): an EMPTY cache whose last message is
+      // older than the idle TTL ends the role, whatever else would hold it —
+      // root or child, with subscribers or without, pinned or not. `role.lastTs`
+      // survives the cache emptying (only _expireCache drops entries), so it IS
+      // "when the last message was"; a role that never carried one falls back to
+      // its admission stamp, and a role with neither is left alone.
+      // Deliberately NOT overridden: mySubscriptions and _hostedTopics — this
+      // node's own explicit intent through peer.sub() / peer.host(). Reaping
+      // those would break a local API contract rather than reclaim junk.
+      const idleReap = this._roleIdleTtlMs > 0 && role.cache.length === 0
+        && !this.mySubscriptions.has(t) && !this._hostedTopics.has(t)
+        && this._roleIdleMs(role, now) > this._roleIdleTtlMs;
       const keyspacePinned = this._hostKeyspace && role.isRoot;
       // A BACKUP holds a deliberate warm copy of another root's history — never tear
       // it down for being subscriber-less, or the durability replica vanishes.
@@ -255,7 +279,15 @@ export const repairPlaneMethods = {
       // even with zero subscribers/cache — the lease self-expires (soft state), and
       // the role then tears down on a later tick like any other.
       const metricsLeased = role.isRoot && role.metricsOn > now;
-      if (role.subscribers.size === 0 && !holdsHistory && !keyspacePinned && !role.backupOf && !this._backupTopics.has(t) && !metricsLeased && !this.mySubscriptions.has(t) && !this._hostedTopics.has(t)) {
+      if (idleReap) {
+        this._rolesReapedIdle = (this._rolesReapedIdle || 0) + 1;
+        this._log?.('info', 'pubsub:role-reaped-idle', {
+          topic: idHex(t).slice(0, 12), isRoot: !!role.isRoot,
+          subscribers: role.subscribers.size, children: role.children.size,
+          idleMs: this._roleIdleMs(role, now), everPublished: (role.lastTs || 0) > 0,
+        });
+      }
+      if (idleReap || (role.subscribers.size === 0 && !holdsHistory && !keyspacePinned && !role.backupOf && !this._backupTopics.has(t) && !metricsLeased && !this.mySubscriptions.has(t) && !this._hostedTopics.has(t))) {
         this.axonRoles.delete(t);
         this._upstream.delete(t);
         if (this._tombAuthority) this._taPurgeTopic(t);   // Phase 3 shadow: node no longer holds this topic's bodies (no-op flag-off)
