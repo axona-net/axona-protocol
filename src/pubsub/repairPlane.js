@@ -202,8 +202,9 @@ export const repairPlaneMethods = {
         p.tries = (p.tries || 0) + 1;
         const tb = p.topicBig;
         const hint = this._rootHint_(tb);
-        if (isKill) this._send(T.KILL, { topicId: idHex(tb), via: hint ? [hint] : [], kill: p.kill });
-        else        this._send(T.PUB,  { topicId: idHex(tb), via: hint ? [hint] : [], json: p.json });
+        // retries of THIS node's own pending publish/kill (_pendingPub), not a received frame
+        if (isKill) this._send(T.KILL, { topicId: idHex(tb), via: hint ? [hint] : [], kill: p.kill }, { own: true });
+        else        this._send(T.PUB,  { topicId: idHex(tb), via: hint ? [hint] : [], json: p.json }, { own: true });
       }
     }
 
@@ -883,7 +884,7 @@ export const repairPlaneMethods = {
         const p = this._pendingPub?.get(msgId);
         if (!p) return;                                 // confirmed or aged out → quench
         const hint = this._rootHint_(topicBig);
-        this._send(T.PUB, { topicId: idHex(topicBig), via: hint ? [hint] : [], json: p.json });
+        this._send(T.PUB, { topicId: idHex(topicBig), via: hint ? [hint] : [], json: p.json }, { own: true });   // own early-resend
         i++; step();
       }, gaps[i]);
       if (typeof h.unref === 'function') h.unref();

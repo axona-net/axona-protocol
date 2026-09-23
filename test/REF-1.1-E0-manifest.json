@@ -5,7 +5,7 @@
     "onNotification",
     "onRoutedMessage"
   ],
-  "treeHash": "b8a67800353cc51b9afcedca31bb6b0f74ef0a3a",
+  "treeHash": "217046421ca04fa2ebc442b65172a30bb463595b",
   "filesScanned": 80,
   "summary": {
     "migration-target": 39,
@@ -178,7 +178,7 @@
     },
     {
       "file": "dht/AxonaPeer.js",
-      "line": 5196,
+      "line": 5210,
       "callee": "onDirectMessage",
       "receiver": "def",
       "wire": "—",

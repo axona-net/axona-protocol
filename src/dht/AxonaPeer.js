@@ -4072,7 +4072,20 @@ export class AxonaPeer extends DHT {
     try { return t.generationFor(peerId); } catch { return undefined; }
   }
 
-  _greedyNextHopToward(targetId) {
+  /**
+   * @param {bigint} targetId
+   * @param {boolean} [ownOrigin]  TRUE only when THIS node originates the frame.
+   *   The addressee exception below (an addressee sitting on a direct edge is
+   *   terminal there, whatever that edge's class) is the ORIGIN rule of
+   *   Bridge-Air-Gap-Plan v0.8 §7.1.2. At an introduction-only node it now
+   *   requires this flag, so a RECEIVED frame restamped with the local id — a
+   *   reroute, a defer-to-root, a forward-to-root — cannot inherit it and reach
+   *   a directly connected client over an introduction edge (Aster 32556d0d).
+   *   A regular node is unaffected: the exception can only ever select an
+   *   introduction edge, and greedy picks a directly connected addressee anyway
+   *   (its XOR distance is zero).
+   */
+  _greedyNextHopToward(targetId, ownOrigin = false) {
     if (!this._node?.alive) return null;
     const target = asId(targetId);   // wire→internal id gate
     // Only forward to a synapse we are ACTUALLY connected to.  A dead synapse
@@ -4090,7 +4103,7 @@ export class AxonaPeer extends DHT {
     for (const syn of this._node.synaptome.values()) {
       if (dead && dead.has(syn.peerId)) continue;
       if (connOk && !connOk(syn.peerId)) continue;
-      if (syn.peerId === target) return target;        // addressee on a direct edge: terminal there, never transit
+      if (syn.peerId === target && (ownOrigin || !this._introductionOnly)) return target;   // ORIGIN rule only (v0.8 §7.1.2)
       if (!this.isTransit(syn.peerId)) continue;      // air-gap: only a transport edge is a hop
       const d = syn.peerId ^ target;
       if (d < bestDist) { bestDist = d; bestPeerId = syn.peerId; }
@@ -4913,7 +4926,8 @@ export class AxonaPeer extends DHT {
     const originNode = this._node;
     const originId   = opts.fromId ?? nodeIdToHex(originNode.id);
 
-    let nextHopId = this._greedyNextHopToward(targetId);
+    const ownOrigin = opts.ownOrigin === true;
+    let nextHopId = this._greedyNextHopToward(targetId, ownOrigin);
     let isTerminal = nextHopId === null;
     if (isTerminal) {
       const closer = await this._findCloserInTwoHops(targetId);
@@ -4971,7 +4985,7 @@ export class AxonaPeer extends DHT {
       const downstream = await originNode.transport.send(nextHopId, 'route_msg', {
         type, payload, targetId: toHex(targetId), hops: 1, originId,
         ...(_hopLt ? { hopAttemptId: _hopId } : {}),
-      }, { pin: this._pinFor(nextHopId) });   // v0.5 §7.1.2: refused at egress if rebound
+      }, { pin: this._pinFor(nextHopId), ownOrigin });   // v0.5 §7.1.2: refused at egress if rebound
       if (_hopLt) {
         this._axonaManager._deliverHopTx(_hopMids, _hopId, 1, toHex(originNode.id), toHex(nextHopId), 'ok', null);
         const _oc = this._axonaManager._txOutcome(true, null);   // transition-ledger: sender row per msg

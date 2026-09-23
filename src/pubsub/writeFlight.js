@@ -220,7 +220,7 @@ export const writeFlightMethods = {
       // Re-stamp the ack routing (D1): the retry must carry the same ackTo +
       // flightNonce + per-entry attemptId so the root's signed proof still binds
       // to THIS open flight.
-      for (const e of f.entries.values()) this._send(e.type, { ...e.payload, via: [f.rootHex], ackTo: f.ackTo, flightNonce: f.flightNonce, attemptId: e.attemptId });
+      for (const e of f.entries.values()) this._send(e.type, { ...e.payload, via: [f.rootHex], ackTo: f.ackTo, flightNonce: f.flightNonce, attemptId: e.attemptId }, { own: true });   // retry of THIS node's own write
       this._log('info', 'receipt-nack-retry', {
         topic: idHex(f.topicBig).slice(0, 12), root: f.rootHex.slice(0, 12),
       });
@@ -289,8 +289,8 @@ export const writeFlightMethods = {
     // rounds cap.
     for (const e of f.entries.values()) {
       const m = this._flightOpen(f.topicBig, bestHex, e.type, e.payload, e.attemptId);
-      if (!m) { this._send(e.type, { ...e.payload, via: [bestHex] }); continue; }  // malformed — forward unstamped, unsigned recovery
-      this._send(e.type, { ...e.payload, via: [bestHex], ackTo: m.ackTo, flightNonce: m.flightNonce, attemptId: m.attemptId });
+      if (!m) { this._send(e.type, { ...e.payload, via: [bestHex] }, { own: true }); continue; }  // malformed — forward unstamped, unsigned recovery
+      this._send(e.type, { ...e.payload, via: [bestHex], ackTo: m.ackTo, flightNonce: m.flightNonce, attemptId: m.attemptId }, { own: true });
     }
     this._log('info', 'write-flight-promoted', {
       topic: idHex(f.topicBig).slice(0, 12), to: bestHex.slice(0, 12),

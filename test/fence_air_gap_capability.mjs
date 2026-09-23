@@ -197,8 +197,11 @@ console.log('\n[P7] an introduction-only node: every edge classifies introductio
   let err = null;
   try { await c.send(R(2), 'route_msg', { targetId: hex(R(7)) }); } catch (e) { err = e; }
   check('a forward to a transport-class sub is refused NO_TRANSPORT_ROUTE, nothing written', err && err.code === ErrorCodes.NO_TRANSPORT_ROUTE && mesh.sent.length === 0, err && err.code);
-  await c.send(R(2), 'route_msg', { targetId: hex(R(2)) });
-  check('a route_msg ADDRESSED to the socket peer still passes (one-hop rule, §7.2.7)', mesh.sent.length === 1 && mesh.sent[0].type === 'route_msg');
+  err = null;
+  try { await c.send(R(2), 'route_msg', { targetId: hex(R(2)) }); } catch (e) { err = e; }
+  check('a route_msg addressed to the socket peer WITHOUT ownOrigin is refused: the exception is not inherited (Aster 32556d0d)', err && err.code === ErrorCodes.NO_TRANSPORT_ROUTE && mesh.sent.length === 0, err && err.code);
+  await c.send(R(2), 'route_msg', { targetId: hex(R(2)) }, { ownOrigin: true });
+  check('…and WITH ownOrigin it passes (the ORIGIN rule, §7.1.2)', mesh.sent.length === 1 && mesh.sent[0].type === 'route_msg');
   err = null; try { await c.notify(R(2), 'direct_pubsub:deliver', {}); } catch (e) { err = e; }
   check('a direct_* notification is dropped on every edge', !mesh.sent.some((x) => x.type === 'direct_pubsub:deliver'));
   const plain = composite([mesh]);
@@ -206,8 +209,10 @@ console.log('\n[P7] an introduction-only node: every edge classifies introductio
   p._introductionOnly = true;
   check('peer-level introductionOnly: the transport edge reads introduction, never a hop', !p.isTransit(R(2)) && p.isIntroduction(R(2)) && p._greedyNextHopToward(R(7)) === null);
   check('…and introductionIds lists it', p.introductionIds().map(String).includes(String(R(2))));
+  check('the ADDRESSEE itself: no ownOrigin → not a hop; ownOrigin → the hop (the origin rule, not an edge property)',
+    p._greedyNextHopToward(R(2), false) === null && p._greedyNextHopToward(R(2), true) === R(2));
   const q = peerWith(plain, [R(2)]);
-  check('a regular node on the same transport is unaffected', q.isTransit(R(2)) && q._greedyNextHopToward(R(7)) === R(2));
+  check('a regular node on the same transport is unaffected either way', q.isTransit(R(2)) && q._greedyNextHopToward(R(7)) === R(2) && q._greedyNextHopToward(R(2), false) === R(2));
 }
 
 console.log('\n[P8] the data-channel egress gate sits at the PHYSICAL write (mesh._dcWrite), below the composite, and sees the local cause');
@@ -237,6 +242,43 @@ console.log('\n[P8] the data-channel egress gate sits at the PHYSICAL write (mes
   const psent = [];
   plain._peers.set('m1', { peerId: 'm1', dc: { readyState: 'open', send: (s) => psent.push(s) } });
   check('without a gate: unchanged behaviour, counters stay 0', plain.send('m1', { k: 'req', id: 1, type: 'route_msg', body: {} }) === true && psent.length === 1 && plain.egressStats().attempts === 0);
+}
+
+console.log('\n[P9] a RECEIVED frame restamped with the local id does not inherit the origin exception (Aster 32556d0d)');
+{
+  const { AxonaManager } = await import('../src/pubsub/AxonaManager.js');
+  const hex = (b) => b.toString(16).padStart(66, '0');
+  const dir = (0x89n << 248n) | 0x0000n;
+  const CLIENT = R(0x0042);                    // a directly connected client: an introduction edge at a bridge
+  const routed = new Map();
+  const calls = [];
+  const dht = {
+    verdictsSupported: true,
+    routeMessage: async (target, type, payload, opts) => { calls.push({ target, type, ownOrigin: opts?.ownOrigin === true, via: payload?.via }); return { consumed: false }; },
+    getSelfId: () => hex(SELF),
+    onRoutedMessage: (type, h) => routed.set(type, h), onDirectMessage() {},
+    neighbors: () => [CLIENT], bridgeId: () => null,
+    isTransit: () => false, isIntroduction: (id) => id === CLIENT, introductionIds: () => [CLIENT],
+  };
+  depositDispatchCapability(dht, { routed: (type, h) => dht.onRoutedMessage(type, h) });
+  const mgr = new AxonaManager({ dht, introductionOnly: true, rootAllowList: [hex(dir)] });
+  mgr._log = () => {};
+  // the node's OWN publish: own origin
+  mgr.pubsubPublish(dir, JSON.stringify({ msgId: 'own1' }));
+  const show = (c) => c && `${String(c.target).slice(0, 8)}/${c.type}/own=${c.ownOrigin}`;
+  check('an own publish routes with ownOrigin true', calls.at(-1)?.ownOrigin === true, show(calls.at(-1)));
+  // a RECEIVED frame re-emitted through each of the three restamp paths
+  calls.length = 0;
+  mgr._reroute('pubsub:sub', { topicId: hex(dir), via: [hex(SELF), hex(CLIENT)], subscriberId: hex(CLIENT) });
+  mgr._deferToRoot(dir, 'pubsub:sub', { topicId: hex(dir), subscriberId: hex(CLIENT) }, hex(CLIENT));
+  mgr._forwardToRoot(dir, 'pubsub:pub', { topicId: hex(dir), json: '{}' }, hex(CLIENT));
+  check('reroute, defer-to-root and forward-to-root all route with ownOrigin FALSE', calls.length === 3 && calls.every((c) => c.ownOrigin === false), calls.map(show).join(' | '));
+  check('…and ALL THREE address the directly connected CLIENT, which is exactly the case the flag governs',
+    calls.filter((c) => c.target === CLIENT).length === 3, calls.map(show).join(' | '));
+  // The flag changes the HOP CHOICE, never whether the frame is emitted: each of
+  // the three still reached routeMessage. At an introduction-only node that call
+  // then finds no hop and terminates locally; the fence above (P7) pins that.
+  check('the frame is still emitted in every case: the flag governs the hop, not the send', calls.length === 3);
 }
 
 console.log(`\nResult: ${passed} passed, ${failed} failed`);

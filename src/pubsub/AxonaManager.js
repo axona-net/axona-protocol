@@ -335,7 +335,17 @@ export class AxonaManager {
   // Route toward via[0] if present, else toward the topic id. The topic id is
   // authoritative; a dead waypoint is popped and routing continues. Never
   // orphaned by a stale via.
-  _send(type, payload) {
+  /**
+   * @param {object} [opts]
+   * @param {boolean} [opts.own]  TRUE only when this node is the ORIGIN of the
+   *   operation (its own pub/sub/unsub/kill/touch/pull and their retries).
+   *   FALSE, the default, for anything carrying or derived from a RECEIVED
+   *   frame — reroute, decline-forward, defer-to-root, forward-to-root.
+   *   Bridge-Air-Gap-Plan v0.9 / v1.0: restamping a received frame with the
+   *   local id must not let it inherit the origin addressee exception
+   *   (Aster 32556d0d). A default of false fails closed.
+   */
+  _send(type, payload, opts = {}) {
     const via = Array.isArray(payload.via) ? payload.via : [];
     const target = via.length ? idBig(via[0]) : idBig(payload.topicId);
     // Delegates to _route rather than calling the transport directly, so it
@@ -343,7 +353,7 @@ export class AxonaManager {
     // separate crash surface: _send had its own copy of the routeMessage call and
     // so was untouched when _route was hardened. Two copies of an emission path
     // means two places to remember, and I had already forgotten one.
-    return this._route(target, type, payload);
+    return this._route(target, type, payload, opts);
   }
   // RETURNS the routeMessage result (Q2/C4), as a promise that NEVER REJECTS.
   //
@@ -364,11 +374,11 @@ export class AxonaManager {
   // containment is here, once: a transport error becomes a FAILURE VERDICT of the
   // same shape routing already uses, which dispatchVerdict() classifies as 'failed'.
   // A caller that ignores the result is safe; a caller that reads it gets the truth.
-  _route(targetBig, type, payload) {
+  _route(targetBig, type, payload, opts = {}) {
     const fail = (e) => ({ consumed: false, error: String((e && e.message) || e), transportError: true });
     try {
       return Promise.resolve(
-        this.dht.routeMessage(targetBig, type, payload, { fromId: idHex(this.nodeId), viaHopBudget: VIA_HOP_BUDGET }),
+        this.dht.routeMessage(targetBig, type, payload, { fromId: idHex(this.nodeId), viaHopBudget: VIA_HOP_BUDGET, ownOrigin: opts.own === true }),
       ).catch(fail).then((r) => this._tallyRoute(targetBig, r));
     } catch (e) {
       return Promise.resolve(this._tallyRoute(targetBig, fail(e)));   // synchronous throw out of routeMessage
@@ -1197,13 +1207,13 @@ export class AxonaManager {
     // The dispatch outcome is RETURNED, not discarded: _sendSubscribe is the only
     // caller that knows whether the via it handed us came from the _upstream pin,
     // so it is the only one that can act on a failure. See _unpinIfWaypointDead.
-    const sent = this._send(T.SUB, {
+    const sent = this._send(T.SUB, {   // own origin: this node's subscription
       topicId: idHex(topicBig), via, subscriberId: idHex(this.nodeId),
       since: this._sinceFor(topicBig),
       hw: role ? this._highWater(role) : 0,   // a cache-bearing relay advertises its history (§6)
       lw: role ? this._lowWater(role) : 0,    // …and its OLDEST stamp, so a root missing the pre-transition half pulls it
       latest,
-    });
+    }, { own: true });
     // D0 / M4 COMPLETION STAMP. The renewal obligation (CHILD / BACKUP / HOLDER /
     // APP_SUB in OBLIGATIONS) is discharged HERE — after the SUB is on the wire,
     // not when the tick decided to try. Placed in _emitSubscribe rather than at
@@ -1249,7 +1259,7 @@ export class AxonaManager {
     // overwrite each other's pending retry — each message is independently retried.
     let pmsgId = null; try { pmsgId = JSON.parse(json)?.msgId ?? null; } catch { /* opaque body */ }
     if (pmsgId) this._pendingPub.set(pmsgId, { topicBig: topicId, json, at: this._now(), tries: 0 });
-    this._send(T.PUB, { topicId: idHex(topicId), via: hint ? [hint] : [], json });
+    this._send(T.PUB, { topicId: idHex(topicId), via: hint ? [hint] : [], json }, { own: true });
     this._latStage(pmsgId, 'pub:send');
     // Early re-sends — ONE plan, ONE pump (v4.25.0, Phase 6): a cold publisher
     // (not yet integrated) front-loads burst waves while its table warms; a WARM
@@ -1295,7 +1305,7 @@ export class AxonaManager {
     this.mySubscriptions.delete(topicId);
     this._coldSteerGen?.delete(topicId);   // release any live cold-steer cycle so a resubscribe starts clean
     const via = this._upstream.get(topicId) || [];
-    this._send(T.UNSUB, { topicId: idHex(topicId), via, subscriberId: idHex(this.nodeId) });
+    this._send(T.UNSUB, { topicId: idHex(topicId), via, subscriberId: idHex(this.nodeId) }, { own: true });
     this.pubsubResetTopicConsumption(topicId);
   }
 
@@ -1319,7 +1329,7 @@ export class AxonaManager {
   // Route a METRICSON toward the data topic's root (lookup-assisted, like SUB).
   _sendMetricsOn(dataTopicBig) {
     const hint = this._rootHint_(dataTopicBig);
-    this._send(T.METRICSON, { topicId: idHex(dataTopicBig), via: hint ? [hint] : [], requesterId: idHex(this.nodeId) });
+    this._send(T.METRICSON, { topicId: idHex(dataTopicBig), via: hint ? [hint] : [], requesterId: idHex(this.nodeId) }, { own: true });
   }
 
   // Publish one metric snapshot for a rooted topic, throttled to METRICS_PUB_MS
@@ -1377,10 +1387,10 @@ export class AxonaManager {
     const hint = this._rootHint_(topicId);
     if (!this._pendingKill) this._pendingKill = new Map();
     if (kill?.msgId) this._pendingKill.set(kill.msgId, { topicBig: topicId, kill, at: this._now(), tries: 0 });
-    this._send(T.KILL, { topicId: idHex(topicId), via: hint ? [hint] : [], kill });
+    this._send(T.KILL, { topicId: idHex(topicId), via: hint ? [hint] : [], kill }, { own: true });
   }
   // pubsubUnpub() — REMOVED v4.3.0 (decision 2026-06-25: keep kill, drop unpub)
-  pubsubTouch(topicId, touch) { const hint = this._rootHint_(topicId); this._send(T.TOUCH, { topicId: idHex(topicId), via: hint ? [hint] : [], touch }); }
+  pubsubTouch(topicId, touch) { const hint = this._rootHint_(topicId); this._send(T.TOUCH, { topicId: idHex(topicId), via: hint ? [hint] : [], touch }, { own: true }); }
 
   requestPull(topicId, postHash = null, { timeoutMs = 1000 } = {}) {
     const corrId = idHex(this.nodeId).slice(0, 8) + ':' + (++this._pullSeq);
@@ -1401,7 +1411,7 @@ export class AxonaManager {
       // requesterId to fold to this so a locally-routed response carrying a
       // FOREIGN requesterId cannot settle our read (Aster, council d17ece0b).
       this._pending.set(corrId, { resolve, timer, requesterId: this.nodeId });
-      this._send(T.PULL, { topicId: idHex(topicId), via: hint ? [hint] : [], corrId, postHash: postHash || null, requesterId: idHex(this.nodeId) });
+      this._send(T.PULL, { topicId: idHex(topicId), via: hint ? [hint] : [], corrId, postHash: postHash || null, requesterId: idHex(this.nodeId) }, { own: true });
     });
   }
   // Enumerate the topics THIS node currently roots, each with a locally-computed

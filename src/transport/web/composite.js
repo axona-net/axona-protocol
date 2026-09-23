@@ -296,7 +296,12 @@ export class CompositeTransport extends Transport {
     // one-hop rule; the bridge dispatches only self-addressed frames). Only
     // route_msg carries an addressee (hex targetId). direct_* stays forward
     // class: a role-delivery frame has no business on an introduction edge.
+    // The ORIGIN rule (v0.8 §7.1.2): only the node that ORIGINATES the frame may
+    // deliver it to an addressee sitting on an introduction edge. `opts.ownOrigin`
+    // is set by AxonaPeer.routeMessage from the manager's own-origin marker; a
+    // received frame restamped locally never carries it (Aster 32556d0d).
     if (opClass === 'forward' && type === 'route_msg' &&
+        (opts?.ownOrigin === true || !this._introductionOnly) &&
         CompositeTransport._addressee(body) === nodeId) opClass = 'introduction';
     const t = this._routeFor(nodeId, opClass);
     if (!t) {
