@@ -735,6 +735,10 @@ export class AxonaPeer extends DHT {
         trace:       payload.trace,
         queried,
         totalTimeMs: payload.totalTimeMs,
+        // Bridge-Air-Gap-Plan v1.1: this walk arrived from a peer. An
+        // introduction-only node answers it from its OWN table and does not
+        // relay it onward — the discovery plane is not a highway either.
+        received:    true,
       });
     }, { registry: this._b5door });
 
@@ -5414,6 +5418,12 @@ export class AxonaPeer extends DHT {
       try { await node.transport.openConnection(nextId); }
       catch { /* fall through — send() will fail and we return false */ }
     }
+
+    // v1.1 (Aster 32556d0d): relaying a RECEIVED walk is the bridge doing a
+    // client's traversal for it, one round trip per hop, over introduction
+    // edges. Same provenance rule as routing: answer locally, never relay.
+    // The node's OWN lookup is unaffected — it enters here with received unset.
+    if (ctx.received && this._introductionOnly) return this._lookupResult(ctx, false);
 
     try {
       const downstream = await node.transport.send(nextId, 'lookup_step', {

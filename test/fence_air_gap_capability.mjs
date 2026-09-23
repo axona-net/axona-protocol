@@ -281,5 +281,37 @@ console.log('\n[P9] a RECEIVED frame restamped with the local id does not inheri
   check('the frame is still emitted in every case: the flag governs the hop, not the send', calls.length === 3);
 }
 
+console.log('\n[P10] the DISCOVERY plane: an introduction-only node answers a received walk, never relays it (v1.1)');
+{
+  const mesh = new Stub('mesh', 'transport', [R(2), R(3)]);
+  const c = composite([mesh]);
+  const near = R(0x0002);                       // closer to TARGET than self, so a relay WOULD be attempted
+  const meshNear = new Stub('mesh', 'transport', [near]);
+  const cNear = composite([meshNear]);
+  const mk = (introOnly) => {
+    const node = { id: SELF, alive: true, transport: cNear, synaptome: new Map(), incomingSynapses: new Map(), _deadPeers: new Set() };
+    node.synaptome.set(String(near), new Synapse({ peerId: near, latencyMs: 1, stratum: 0 }));
+    const self = { _node: node, _domain: { MAX_HOPS: 40, _k: 20 }, _introductionOnly: introOnly, _lookaheadStats: undefined };
+    for (const m of ['capabilityOf', 'isTransit', 'isIntroduction', 'introductionIds', '_pinFor', '_lookupStep', '_lookupResult', '_bestByTwoHopAP', '_evictAndReplace']) self[m] = AxonaPeer.prototype[m];
+    node.bestByAP = (cands) => cands[0];
+    self._recordTransit = () => {};
+    self._tryAnneal = async () => {};
+    self._addByVitality = () => {};
+    self._considerCandidate = () => {};
+    return { self, sub: meshNear };
+  };
+  const ctx = () => ({ sourceId: R(0x9999), targetKey: TARGET, hops: 1, path: [], trace: [], queried: new Set(), totalTimeMs: 0, received: true });
+  const a = mk(true);
+  const ra = await a.self._lookupStep(ctx());
+  check('introduction-only + RECEIVED walk: answered locally, nothing relayed', ra && ra.found === false && !a.sub.sent.some((x) => x.type === 'lookup_step'), JSON.stringify(a.sub.sent.map((x) => x.type)));
+  const b2 = mk(true);
+  const own = ctx(); delete own.received;
+  await b2.self._lookupStep(own);
+  check('introduction-only + its OWN walk: relayed as before (the node still resolves its own placement)', b2.sub.sent.some((x) => x.type === 'lookup_step'), JSON.stringify(b2.sub.sent.map((x) => x.type)));
+  const d = mk(false);
+  await d.self._lookupStep(ctx());
+  check('a regular node relays a received walk exactly as before', d.sub.sent.some((x) => x.type === 'lookup_step'), JSON.stringify(d.sub.sent.map((x) => x.type)));
+}
+
 console.log(`\nResult: ${passed} passed, ${failed} failed`);
 if (failed) process.exit(1);
