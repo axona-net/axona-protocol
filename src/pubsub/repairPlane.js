@@ -279,15 +279,36 @@ export const repairPlaneMethods = {
       // even with zero subscribers/cache — the lease self-expires (soft state), and
       // the role then tears down on a later tick like any other.
       const metricsLeased = role.isRoot && role.metricsOn > now;
-      if (idleReap) {
-        this._rolesReapedIdle = (this._rolesReapedIdle || 0) + 1;
-        this._log?.('info', 'pubsub:role-reaped-idle', {
-          topic: idHex(t).slice(0, 12), isRoot: !!role.isRoot,
+      // IMMEDIATE REAP (David 2026-09-23): a topic with NO subscribers and NO
+      // messages is dead weight NOW, not in 24 h. What it uniquely overrides is
+      // a pushed BACKUP replica (`role.backupOf`), because an empty replica
+      // replicates nothing and the principal re-pushes through REPLICATE the
+      // moment there IS history. On the west production bridge those empty
+      // pushed replicas WERE the accrual: 141 roles over 141 distinct topics
+      // with zero children and zero cached messages, 96 of them not even root.
+      // "No subscribers" means no SEATED subscriber AND no local intent. This
+      // node's own peer.sub() / peer.host() / backup membership / keyspace
+      // hosting never seat it in role.subscribers — a root's own SUB self-loops
+      // without seating — so they count AS subscribers here. Keyspace hosting in
+      // particular EXISTS to retain an empty root as a durable home, which
+      // smoke_keyspace_hosting pins; overriding it was an overreach and the
+      // suite caught it.
+      const deadNow = role.subscribers.size === 0 && role.cache.length === 0
+        && !keyspacePinned && !metricsLeased
+        && !this.mySubscriptions.has(t) && !this._hostedTopics.has(t)
+        && !this._backupTopics.has(t);
+      if (idleReap || deadNow) {
+        const why = deadNow ? 'dead' : 'idle';
+        if (deadNow) this._rolesReapedDead = (this._rolesReapedDead || 0) + 1;
+        else         this._rolesReapedIdle = (this._rolesReapedIdle || 0) + 1;
+        this._log?.('info', 'pubsub:role-reaped', {
+          why, topic: idHex(t).slice(0, 12), isRoot: !!role.isRoot,
+          backup: role.backupOf !== null,
           subscribers: role.subscribers.size, children: role.children.size,
           idleMs: this._roleIdleMs(role, now), everPublished: (role.lastTs || 0) > 0,
         });
       }
-      if (idleReap || (role.subscribers.size === 0 && !holdsHistory && !keyspacePinned && !role.backupOf && !this._backupTopics.has(t) && !metricsLeased && !this.mySubscriptions.has(t) && !this._hostedTopics.has(t))) {
+      if (idleReap || deadNow || (role.subscribers.size === 0 && !holdsHistory && !keyspacePinned && !role.backupOf && !this._backupTopics.has(t) && !metricsLeased && !this.mySubscriptions.has(t) && !this._hostedTopics.has(t))) {
         this.axonRoles.delete(t);
         this._upstream.delete(t);
         if (this._tombAuthority) this._taPurgeTopic(t);   // Phase 3 shadow: node no longer holds this topic's bodies (no-op flag-off)
