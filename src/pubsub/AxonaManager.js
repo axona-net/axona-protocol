@@ -303,6 +303,7 @@ export class AxonaManager {
     // Idle-role reap (David 2026-09-23). 0 disables. See ROLE_IDLE_TTL_MS.
     this._roleIdleTtlMs   = envNum('ROLE_IDLE_TTL_MS', ROLE_IDLE_TTL_MS);
     this._rolesReapedIdle = 0;
+    this._rolesReapedDead = 0;   // subscriber-less AND message-less: reaped on sight
     this._pending         = new Map();  // pull corrId -> { resolve, timer }
     this._pullSeq         = 0;
     this._timer           = null;

@@ -176,8 +176,9 @@ console.log('\n[R7] the reap is emitted as an observable row');
   m._log = (level, event, ctx) => rows.push({ level, event, ctx });
   seed(m, 70n, { isRoot: true, lastTs: T - (DAY + 5_000), subs: 2, children: 1 });
   await m.refreshTick();
-  const row = rows.find((r) => r.event === 'pubsub:role-reaped-idle');
-  check('one pubsub:role-reaped-idle row', !!row, JSON.stringify(rows.map((r) => r.event)));
+  const row = rows.find((r) => r.event === 'pubsub:role-reaped');
+  check('one pubsub:role-reaped row', !!row, JSON.stringify(rows.map((r) => r.event)));
+  check('…tagged why=idle (it had subscribers, so it is not the dead-now case)', row && row.ctx.why === 'idle', row && row.ctx.why);
   check('it carries isRoot, subscribers, children, idleMs and everPublished',
     row && row.ctx.isRoot === true && row.ctx.subscribers === 2 && row.ctx.children === 1
     && row.ctx.idleMs >= DAY && row.ctx.everPublished === true, JSON.stringify(row?.ctx));
