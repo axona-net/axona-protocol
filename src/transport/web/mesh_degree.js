@@ -124,7 +124,24 @@ export function selectMeshRetire(candidates, { now, minUptimeMs }) {
  * @returns {(meshId: string) => boolean}
  */
 export function makeProtectionResolver({ transport, provider }) {
-  return (meshId) => {
+  // ONE OBLIGATION READ PER PASS (4.98.0). The caller passes a monotonic pass
+  // id and the set is rebuilt only when it changes.
+  //
+  // WHY THIS IS NOT AN OPTIMISATION DETAIL. 4.97.0 claimed "read once per
+  // enforcement pass" in this file, in AxonaPeer and in the release note, and
+  // did nothing of the kind: the enforcement loop asks per candidate, so every
+  // resolved channel triggered a full walk of every upstream and every role.
+  // Aster found it by reading the source. The claim was the defect — the cost
+  // followed from it.
+  //
+  // CACHED ON THE PASS ID, NEVER ON A CLOCK. A time-based cache would let a
+  // duty acquired seconds ago go unseen, which is precisely the stale-snapshot
+  // failure this protection exists to prevent. A pass boundary is the only
+  // point where refreshing is both cheap and correct. With no pass id the
+  // resolver does not cache at all, so any other caller keeps 4.97.0 semantics.
+  let cachedPass = null;
+  let cachedSet  = null;
+  return (meshId, passId) => {
     let fn;
     try { fn = provider(); } catch { return true; }
     if (typeof fn !== 'function') return true;
@@ -132,7 +149,12 @@ export function makeProtectionResolver({ transport, provider }) {
     try { nid = transport()?.nodeIdFor?.(meshId); } catch { return true; }
     if (typeof nid !== 'bigint') return true;
     let set;
-    try { set = fn(); } catch { return true; }
+    if (passId != null && passId === cachedPass) {
+      set = cachedSet;
+    } else {
+      try { set = fn(); } catch { return true; }
+      if (passId != null) { cachedPass = passId; cachedSet = (set instanceof Set) ? set : null; }
+    }
     if (!(set instanceof Set)) return true;
     return set.has(nid.toString(16).padStart(66, '0').toLowerCase());
   };
