@@ -344,8 +344,8 @@
       "rowType": "pubsub:metricson"
     },
     {
-      "identity": "transport/web/index.js:1009|hello|notification|composite._b3door",
-      "callSite": "transport/web/index.js:1009",
+      "identity": "transport/web/index.js:1025|hello|notification|composite._b3door",
+      "callSite": "transport/web/index.js:1025",
       "primitive": "registerFrame",
       "receiver": "composite._b3door",
       "wire": "hello",
@@ -354,8 +354,8 @@
       "rowType": "mesh:hello"
     },
     {
-      "identity": "transport/web/index.js:1010|hello-sig|notification|composite._b3door",
-      "callSite": "transport/web/index.js:1010",
+      "identity": "transport/web/index.js:1026|hello-sig|notification|composite._b3door",
+      "callSite": "transport/web/index.js:1026",
       "primitive": "registerFrame",
       "receiver": "composite._b3door",
       "wire": "hello-sig",
@@ -364,8 +364,8 @@
       "rowType": "mesh:hello-sig"
     },
     {
-      "identity": "transport/web/index.js:1014|cap-attest|notification|composite._b2door",
-      "callSite": "transport/web/index.js:1014",
+      "identity": "transport/web/index.js:1030|cap-attest|notification|composite._b2door",
+      "callSite": "transport/web/index.js:1030",
       "primitive": "registerFrame",
       "receiver": "composite._b2door",
       "wire": "cap-attest",
@@ -374,8 +374,8 @@
       "rowType": "transport:cap-attest"
     },
     {
-      "identity": "transport/web/index.js:966|hello|notification|composite._b2door",
-      "callSite": "transport/web/index.js:966",
+      "identity": "transport/web/index.js:982|hello|notification|composite._b2door",
+      "callSite": "transport/web/index.js:982",
       "primitive": "registerFrame",
       "receiver": "composite._b2door",
       "wire": "hello",
@@ -384,8 +384,8 @@
       "rowType": "transport:hello"
     },
     {
-      "identity": "transport/web/index.js:967|hello-ack|notification|composite._b2door",
-      "callSite": "transport/web/index.js:967",
+      "identity": "transport/web/index.js:983|hello-ack|notification|composite._b2door",
+      "callSite": "transport/web/index.js:983",
       "primitive": "registerFrame",
       "receiver": "composite._b2door",
       "wire": "hello-ack",
