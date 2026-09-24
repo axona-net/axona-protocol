@@ -151,5 +151,20 @@ console.log('\n[D7] keyspace hosting is LOCAL INTENT and is not overridden');
   check('a non-root empty role is still reaped — the pin covers roots only', !held(m, 12n));
 }
 
+console.log('\n[D8] the reap is COUNTED WHERE AN OPERATOR CAN SEE IT (inspectAdmission)');
+{
+  // A climbing role count is ambiguous unless you can tell whether the reaper is
+  // firing. The counters existed on the manager and NOTHING surfaced them, so a
+  // bridge holding 84 empty roles read exactly like a bridge whose reaper had
+  // stopped. inspectAdmission is what /healthz and /diag already publish.
+  const m = manager();
+  const before = m.inspectAdmission().reaped;
+  check('inspectAdmission reports a reaped block from the start', before && before.dead === 0 && before.idle === 0, JSON.stringify(before));
+  seed(m, 13n, { isRoot: false, backupOf: hex(SELF) });
+  await m.refreshTick();
+  const after = m.inspectAdmission().reaped;
+  check('a dead reap increments reaped.dead and leaves reaped.idle alone', after.dead === 1 && after.idle === 0, JSON.stringify(after));
+}
+
 console.log(`\nResult: ${passed} passed, ${failed} failed`);
 if (failed) process.exit(1);
