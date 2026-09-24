@@ -14,10 +14,13 @@
 // overrides is a pushed backup replica, because an empty replica replicates
 // nothing and the principal re-pushes the moment there is history.
 //
-// "NO SUBSCRIBERS" INCLUDES THIS NODE. peer.sub(), peer.host(), backup
-// membership and keyspace hosting never seat the node in its own role — a
-// root's own SUB self-loops without seating — so all four are read AS
-// subscribers here. Without that, "no subscribers" would silently reap a topic
+// "NO SUBSCRIBERS" INCLUDES THIS NODE. peer.sub(), peer.host() and keyspace
+// hosting never seat the node in its own role — a root's own SUB self-loops
+// without seating — so those three are read AS subscribers here.
+// `_backupTopics` is NOT one of them: its only writer is becomeBackup on an
+// INBOUND replica, so it is the same inbound state as role.backupOf. Exempting
+// it in 4.91.0 blocked the reap on exactly the roles it was written for — west
+// held 144 roles with zero children and zero cache and logged ZERO reaps. Without that, "no subscribers" would silently reap a topic
 // the node itself asked for. A live metrics lease is left alone too; it is
 // short-lived soft state that expires on its own.
 //
@@ -115,14 +118,14 @@ console.log('\n[D5] "no subscribers" counts THIS NODE\'S OWN intent as a subscri
   const m = manager();
   seed(m, 5n, { isRoot: true }); m.mySubscriptions.set(5n, { since: 0 });
   seed(m, 6n, { isRoot: true }); m._hostedTopics.add(6n);
-  seed(m, 7n, { isRoot: true }); m._backupTopics.add(7n);
+  seed(m, 7n, { isRoot: true }); m._backupTopics.add(7n);   // inbound state, NOT local intent
   seed(m, 8n, { isRoot: true, metricsOn: T + 60_000 });
   await m.refreshTick();
   check('a topic this node SUBSCRIBED to is kept (peer.sub never seats itself)', held(m, 5n));
   check('a topic this node HOSTS is kept (peer.host contract)', held(m, 6n));
-  check('a topic this node holds a backup membership for is kept', held(m, 7n));
+  check('_backupTopics does NOT exempt: its only writer is becomeBackup on an inbound replica, so it is the SAME thing as role.backupOf and must not protect an empty seat', !held(m, 7n));
   check('a live metrics lease is left to expire on its own', held(m, 8n));
-  check('none of the four counted as reaped', (m._rolesReapedDead || 0) === 0, m._rolesReapedDead);
+  check('exactly ONE of the four was reaped — the inbound backup membership', (m._rolesReapedDead || 0) === 1, m._rolesReapedDead);
 }
 
 console.log('\n[D6] the reap is one observable row, tagged why=dead');

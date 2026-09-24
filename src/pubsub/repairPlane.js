@@ -293,10 +293,16 @@ export const repairPlaneMethods = {
       // particular EXISTS to retain an empty root as a durable home, which
       // smoke_keyspace_hosting pins; overriding it was an overreach and the
       // suite caught it.
+      // `_backupTopics` is NOT on this list, and that distinction is the whole
+      // fix. Its ONLY writer is `becomeBackup` (rootClaim.js), reached when this
+      // node RECEIVES a pushed replica — it is inbound state, not local intent,
+      // and it is set in the same breath as `role.backupOf`. Exempting it in
+      // 4.91.0 blocked the reap on precisely the roles it was written for: west
+      // ran 4.91.0 for two minutes and logged ZERO reaps while holding 144 roles
+      // with zero children and zero cache. Measured, not reasoned.
       const deadNow = role.subscribers.size === 0 && role.cache.length === 0
         && !keyspacePinned && !metricsLeased
-        && !this.mySubscriptions.has(t) && !this._hostedTopics.has(t)
-        && !this._backupTopics.has(t);
+        && !this.mySubscriptions.has(t) && !this._hostedTopics.has(t);
       if (idleReap || deadNow) {
         const why = deadNow ? 'dead' : 'idle';
         if (deadNow) this._rolesReapedDead = (this._rolesReapedDead || 0) + 1;
