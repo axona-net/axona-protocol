@@ -94,3 +94,46 @@ export function selectMeshRetire(candidates, { now, minUptimeMs }) {
   }
   return null;
 }
+
+/**
+ * Build the "does this channel carry a duty?" resolver the bounded degree uses.
+ *
+ * EXPORTED, AND THAT IS THE POINT. This logic decides whether a live channel on
+ * a production bridge may be torn down. It lived as a closure inside
+ * webTransport, which meant a fence could only test a COPY of it — and a fence
+ * that certifies its own re-implementation is the exact failure Aster has named
+ * repeatedly: an author's account of a mechanism is not evidence the mechanism
+ * fires. Now there is one implementation and the fence drives it.
+ *
+ * THE CHAIN: meshId --nodeIdFor--> nodeId --obligedPeers--> duty?
+ * The first link is the binding recorded at authentication. 4.95.0 skipped it,
+ * read the bridge's own connection handle as a nodeId, and produced a cap that
+ * could never select a candidate.
+ *
+ * FAIL CLOSED at every step. No provider, a throwing provider, a non-Set
+ * return, or an unresolvable binding all report PROTECTED. "Cannot say" is not
+ * "no duty": keeping a channel costs a slot, dropping a duty costs delivery.
+ *
+ * @param {object} opts
+ * @param {() => ({nodeIdFor?: (meshId: string) => bigint|null}|null)} opts.transport
+ *        Reader for the authenticated binding — a reader, not the object,
+ *        because the transport is constructed after the mesh it serves.
+ * @param {() => (() => Set<string>|null)|null} opts.provider
+ *        Reader for the obligation reader. Two levels for the same reason: the
+ *        kernel installs its half later still.
+ * @returns {(meshId: string) => boolean}
+ */
+export function makeProtectionResolver({ transport, provider }) {
+  return (meshId) => {
+    let fn;
+    try { fn = provider(); } catch { return true; }
+    if (typeof fn !== 'function') return true;
+    let nid;
+    try { nid = transport()?.nodeIdFor?.(meshId); } catch { return true; }
+    if (typeof nid !== 'bigint') return true;
+    let set;
+    try { set = fn(); } catch { return true; }
+    if (!(set instanceof Set)) return true;
+    return set.has(nid.toString(16).padStart(66, '0').toLowerCase());
+  };
+}

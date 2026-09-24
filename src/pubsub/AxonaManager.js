@@ -964,6 +964,52 @@ export class AxonaManager {
     return out;
   }
 
+  /**
+   * The peers this node has a PUB/SUB OBLIGATION to, as lowercase nodeId hex.
+   *
+   * WHY THIS EXISTS (4.97.0). The WebRTC mesh holds CHANNELS and knows nothing
+   * about roles, so when the bounded degree retires a channel it cannot tell a
+   * spare link from the one carrying a topic's root. Both council reviewers
+   * required that gap closed before the cap runs again: Orion asked for
+   * "channels serving as primary topic roots, active upstream subscription
+   * links, and designated standby election peers"; Aster's standing point is
+   * that a protected set nothing populates is not protection. This is the
+   * kernel side of it — the manager is the only thing that knows.
+   *
+   * WHAT COUNTS AS AN OBLIGATION, and why each one:
+   *   · UPSTREAM — the node we are homed under for a topic. Dropping this
+   *     channel orphans our own subscription until the walk re-homes us.
+   *   · PRINCIPAL — the root replicating to a backup we hold (role.backupOf).
+   *     It is the peer that keeps our warm copy warm.
+   *   · REPLICA — a cohort member we credit with holding our root's history
+   *     (role.replicas). Our durability claim names it.
+   *   · SEATED SUBSCRIBER — anyone seated in a role we hold. They receive our
+   *     fan-out; the channel IS the delivery path.
+   *
+   * WHAT IS DELIBERATELY NOT HERE: peers we merely route through. Routing is
+   * re-derivable and the mesh heals it; an obligation is a promise this node
+   * has already made and cannot silently drop.
+   *
+   * Returns a fresh Set each call — the caller reads it once per enforcement
+   * pass, and a stale snapshot is the failure mode to avoid. Cheap: it walks
+   * the roles this node holds, which the repair plane already walks every tick.
+   *
+   * @returns {Set<string>} lowercase nodeId hex
+   */
+  obligedPeers() {
+    const out = new Set();
+    const add = (h) => { if (typeof h === 'string' && h) out.add(h.toLowerCase()); };
+    for (const via of this._upstream.values()) {
+      if (Array.isArray(via)) { for (const h of via) add(h); }
+    }
+    for (const role of this.axonRoles.values()) {
+      add(role.backupOf);
+      if (role.replicas) { for (const h of role.replicas.keys()) add(h); }
+      if (role.subscribers) { for (const h of role.subscribers.keys()) add(h); }
+    }
+    return out;
+  }
+
   inspectHosting() {
     return {
       topics: [...this._hostedTopics].map((t) => idHex(t)),

@@ -31,6 +31,7 @@
 // at the dispatcher boundary inside this factory.
 // =====================================================================
 
+import { makeProtectionResolver } from './mesh_degree.js';
 import { MeshManager }       from './mesh.js';
 import { MeshAuth }          from './mesh-auth.js';
 import { WebRTCTransport }   from './webrtc.js';
@@ -415,6 +416,11 @@ export function webTransport({
   // post-bootstrap edge peer-to-peer, leaving the bridge only genuinely new
   // joiners + NAT/ICE failures). Pure measurement — no behaviour change.
   const signalStats = { meshMsgs: 0, bridgeMsgs: 0, dropMsgs: 0, meshPeers: new Set(), bridgePeers: new Set() };
+  // The obligation reader AxonaPeer installs through setObligedPeers(). Null
+  // until then, and null is "cannot say" — never "no obligations". See the
+  // isProtected resolver below for why that distinction decides a live channel.
+  let obligedPeersFn = null;
+
   // Filled in right after the WebRTCTransport is constructed; the mesh degree
   // resolver closes over it. See the note on `degree` below.
   let webrtcRef = null;
@@ -451,6 +457,31 @@ export function webTransport({
               return (typeof n === 'bigint') ? toHex(n).slice(0, 2).toLowerCase() : null;
             } catch { return null; }
           },
+          // WHICH CHANNELS CARRY A DUTY (4.97.0). Both council reviewers
+          // required this before the cap runs again: a `protected` set that
+          // nothing populates is not protection, and retirement was choosing
+          // blind to topic roots, upstream links and standby election peers.
+          //
+          // The chain is channel → authenticated node → obligation:
+          //   meshId --nodeIdFor--> nodeId --obligedPeers--> duty?
+          // Both halves matter. The first is the binding that 4.95.0 got wrong
+          // by reading the signalling id; the second is the kernel's answer.
+          //
+          // FAIL CLOSED, DELIBERATELY. If the provider is absent, throws, or
+          // returns a non-Set, this reports PROTECTED — "cannot say" is not
+          // "no duty", and the cost of the safe answer is a channel we keep.
+          // The cost of the unsafe one is a dropped obligation on a live
+          // bridge. Same for a peer whose binding is missing: an unresolvable
+          // channel cannot be shown to be spare.
+          //
+          // REBINDING IS HANDLED BY CONSTRUCTION: protection follows the
+          // nodeId, not the channel, so a peer that re-opens under a new
+          // meshId is protected on its next enforcement pass without any
+          // bookkeeping here.
+          isProtected: makeProtectionResolver({
+            transport: () => webrtcRef,
+            provider:  () => obligedPeersFn,
+          }),
           ...meshDegree,
         }
       : null,
@@ -1387,6 +1418,16 @@ export function webTransport({
    * answering that took a source reading rather than a curl. An operator must
    * be able to ask.
    */
+  /**
+   * Install the reader that says which peers this node owes something to
+   * (4.97.0). AxonaPeer calls this at start with a closure over its manager.
+   * Until it does, the degree cap treats EVERY channel as protected, so a
+   * transport whose peer has not started cannot retire anything.
+   */
+  composite.setObligedPeers = (fn) => {
+    obligedPeersFn = (typeof fn === 'function') ? fn : null;
+  };
+
   composite.meshDegreeStats = () => {
     try { return mesh.degreeStats ? mesh.degreeStats() : null; }
     catch { return null; }
