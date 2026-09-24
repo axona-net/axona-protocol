@@ -591,10 +591,14 @@ export class AxonaPeer extends DHT {
     // knows, so hand the transport a reader for it. Installed here because this
     // is where the peer already owns both halves: the transport and the axon.
     //
-    // A READER, NOT A SNAPSHOT. The set is read once per enforcement pass, so a
-    // channel that acquires an obligation between passes is protected on the
-    // next one. Handing over a frozen copy is how this goes stale and starts
-    // retiring live duties.
+    // A READER, NOT A SNAPSHOT — and the reader is called ONCE PER ENFORCEMENT
+    // PASS, which 4.97.0 claimed here and did not do. The enforcement loop asks
+    // per candidate, so every resolved channel used to trigger a full walk of
+    // every upstream and every role; Aster found it by reading the source.
+    // makeProtectionResolver now caches on the pass id the mesh supplies, so
+    // the walk happens once and a duty acquired between passes is still seen on
+    // the next. Handing over a frozen copy instead is how this goes stale and
+    // starts retiring live duties.
     //
     // Inert for every transport that does not take one (sim, node, tests) and
     // for every node that never configures a degree cap, which is all of them

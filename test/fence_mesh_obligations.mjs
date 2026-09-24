@@ -229,5 +229,47 @@ console.log('\n[6] AN OBLIGATION ACQUIRED BETWEEN PASSES IS HONOURED ON THE NEXT
     !retired.some((r) => r.id === next), `retired=${retired.map((r) => r.id).join(',')}`);
 }
 
+console.log('\n[7] THE READER IS CALLED ONCE PER PASS, NOT ONCE PER CANDIDATE');
+{
+  // ASTER'S FINDING (8aa72cab, source read of 4.97.0). _enforceDegree maps
+  // EVERY open candidate through the resolver, the resolver called its provider
+  // each time, and obligedPeers() rebuilds its Set by walking every upstream
+  // and every role. One above-band pass therefore repeated the whole obligation
+  // walk once per resolved channel — and three separate comments claimed the
+  // opposite. The claim was the defect; the cost followed from it.
+  let calls = 0;
+  const provider = () => { calls++; return am.obligedPeers(); };
+  const { mesh, open } = meshWith({ bindings: BIND, provider, cap: 2 });
+  for (const id of BIND.keys()) open(id);
+
+  calls = 0;
+  mesh._lastRetireAt = 0;
+  mesh._enforceDegree();
+  ok('7a. one pass over 6 resolved candidates reads the obligation set ONCE',
+    calls === 1, `provider calls: ${calls}`);
+
+  calls = 0;
+  mesh._lastRetireAt = 0;
+  mesh._enforceDegree();
+  ok('7b. the NEXT pass reads it again — cached on the pass, never on a clock',
+    calls === 1, `provider calls: ${calls}`);
+
+  // And the cache must not outlive its pass: a duty acquired between passes is
+  // seen on the next one. This is the property a time-based cache would lose.
+  const live = manager();
+  let n2 = 0;
+  const p2 = () => { n2++; return live.obligedPeers(); };
+  const m2 = meshWith({ bindings: BIND, provider: p2, cap: 5 });
+  for (const id of BIND.keys()) m2.open(id);
+  m2.mesh._lastRetireAt = 0; m2.mesh._enforceDegree();
+  const firstGone = m2.retired[0]?.id;
+  const survivor = [...m2.mesh._peers.keys()][0];
+  live._upstream.set(TOPIC_A, [hexOf(BIND.get(survivor)).toLowerCase()]);
+  m2.mesh._lastRetireAt = 0; m2.mesh._enforceDegree();
+  ok('7c. a duty acquired after the first pass is honoured on the second',
+    !m2.retired.some((r) => r.id === survivor),
+    `first=${firstGone} survivor=${survivor} retired=${m2.retired.map((r) => r.id).join(',')}`);
+}
+
 console.log(`\nResult: ${n} passed, ${fail} failed`);
 if (fail) process.exit(1);
