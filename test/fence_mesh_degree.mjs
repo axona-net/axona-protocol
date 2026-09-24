@@ -181,5 +181,51 @@ console.log('bounded mesh degree — a bridge is mediocre on BOTH sides\n');
   ok('6e. every candidate protected ⇒ null', selectMeshRetire(allProtected, { now: T, minUptimeMs: 0 }) === null);
 }
 
+// ── 7. THE REGION RESOLVER MUST READ THE AUTHENTICATED nodeId ───────────
+// THE 4.95.0 DEFECT, pinned so it cannot come back. A mesh peerId is the
+// BRIDGE'S CONNECTION HANDLE — server.js mints it as `c${(++connSeq)
+// .toString(36)}`, so peer-list carries `c1`, `c2`, `cz`. 4.95.0 resolved the
+// keyspace region as `isHexId(id) ? id.slice(0,2) : null`, which is null for
+// every one of them. selectMeshRetire filters on a non-null region, so the
+// eligible set was always empty, it always returned null, and NOTHING WAS EVER
+// RETIRED. The west production bridge sat at 40 open channels against a
+// trigger of 18 for as long as the release was live.
+{
+  // The resolver shape webTransport installs: meshId → bound nodeId → top byte.
+  // A real nodeId is 264 bits / 66 hex chars with the region in the TOP byte —
+  // west reads 8065…, east ff32…. Building a 256-bit value and padding to 66
+  // puts two zeros in front and the region in the wrong place; that is a bug in
+  // the test, and it is exactly the kind of off-by-a-byte the resolver must not
+  // have. Construct from the hex spelling so the shape is the production one.
+  const idOf = (regionHex, tail) => BigInt('0x' + regionHex + tail.padStart(64, '0'));
+  const bound = new Map([['c1', idOf('89', '1')], ['c2', idOf('80', '2')]]);
+  const toHex = (b) => b.toString(16).padStart(66, '0');
+  const regionOf = (meshId) => {
+    const nid = bound.get(meshId);
+    return (typeof nid === 'bigint') ? toHex(nid).slice(0, 2).toLowerCase() : null;
+  };
+  ok('7a. a CONNECTION HANDLE resolves to its authenticated region', regionOf('c1') === '89');
+  ok('7b. …and a second, in a different region', regionOf('c2') === '80');
+  ok('7c. an UNAUTHENTICATED peer resolves to null, so it is never retired',
+    regionOf('c99') === null);
+
+  // The 4.95.0 resolver, kept here as the counter-example.
+  const isHexId = (v) => typeof v === 'string' && /^[0-9a-f]{66}$/i.test(v);
+  const broken = (id) => (isHexId(id) ? String(id).slice(0, 2).toLowerCase() : null);
+  ok('7d. the 4.95.0 resolver returns null for a real connId — this is the defect',
+    broken('c1') === null && broken('c17') === null);
+
+  // And end to end: with the broken resolver the selector can never choose.
+  const cands = Array.from({ length: 40 }, (_, i) => ({
+    id: `c${i}`, region: broken(`c${i}`), openedAt: T - 600_000,
+    rttMs: 10, inCooldown: false, isProtected: false,
+  }));
+  ok('7e. 40 open channels and the broken resolver retires NOTHING (west, 2026-09-24)',
+    selectMeshRetire(cands, { now: T, minUptimeMs: 30_000 }) === null);
+  const fixed = cands.map((c, i) => ({ ...c, region: regionOf(i % 2 ? 'c1' : 'c2') }));
+  ok('7f. the same 40 with the authenticated resolver DO retire one',
+    selectMeshRetire(fixed, { now: T, minUptimeMs: 30_000 }) !== null);
+}
+
 console.log(`\nResult: ${n} passed, ${fail} failed`);
 if (fail) process.exit(1);
