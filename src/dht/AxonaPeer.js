@@ -585,6 +585,30 @@ export class AxonaPeer extends DHT {
     // for synaptome convergence via a "ready" gate before calling
     // peer.sub), not a kernel bug to paper over here.
     //
+    // OBLIGATION PROVIDER (4.97.0). The WebRTC mesh's bounded degree retires
+    // channels, and the mesh layer holds channels — it cannot tell the link
+    // carrying a topic's root from a spare. The manager is the only thing that
+    // knows, so hand the transport a reader for it. Installed here because this
+    // is where the peer already owns both halves: the transport and the axon.
+    //
+    // A READER, NOT A SNAPSHOT. The set is read once per enforcement pass, so a
+    // channel that acquires an obligation between passes is protected on the
+    // next one. Handing over a frozen copy is how this goes stale and starts
+    // retiring live duties.
+    //
+    // Inert for every transport that does not take one (sim, node, tests) and
+    // for every node that never configures a degree cap, which is all of them
+    // except a bridge.
+    if (transport && typeof transport.setObligedPeers === 'function') {
+      try {
+        transport.setObligedPeers(() => {
+          try { return this._engine.axonFor(this._node).obligedPeers(); }
+          catch { return null; }   // null = "cannot say", which the caller must
+                                   // NOT read as "no obligations"
+        });
+      } catch { /* a transport that refuses the hook is not a startup failure */ }
+    }
+
     // onPeerBound handler receives BigInt (contract).
     if (transport && typeof transport.onPeerBound === 'function') {
       this._onPeerBoundUnsub = transport.onPeerBound((peerBig) => {
