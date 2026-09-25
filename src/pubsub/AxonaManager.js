@@ -949,8 +949,19 @@ export class AxonaManager {
   // topics, which masked the prod root-split for a full diagnosis cycle.
   // Observability surfaces must fail loudly or exist; these exist again.
   inspectRoles() {
+    const now = this._now();
     const out = [];
     for (const r of this.axonRoles.values()) {
+      // WHEN THIS NODE LAST HEARD FROM THE ROLE'S PRINCIPAL. Only a BACKUP is
+      // ever stamped (rootClaim.js:283, on a replica push from our root), and
+      // an empty REPLICATE counts — it is the keepalive. 0 means NEVER, which
+      // is not the same as "long ago", so the age is null rather than a number
+      // measured from the epoch. repairPlane.js:196 discharges a re-homed,
+      // subscriber-less backup once this age exceeds BACKUP_EVICT_MS; without
+      // it on this surface, "is the principal alive" was unanswerable from
+      // outside the process and every claim about the standby population rested
+      // on inference.
+      const stampedAt   = r.lastReplicaAt || 0;
       out.push({
         topicId: idHex(r.topicId),
         isRoot: !!r.isRoot,
@@ -959,6 +970,8 @@ export class AxonaManager {
         children: [...r.children],
         subscribers: r.subscribers.size,
         replayCacheSize: r.cache.length,
+        lastReplicaAt: stampedAt,                        // epoch ms (_now is Date.now); 0 = never stamped
+        lastReplicaAgeMs: stampedAt ? Math.max(0, now - stampedAt) : null,   // null = never, NOT "infinitely old"
       });
     }
     return out;
