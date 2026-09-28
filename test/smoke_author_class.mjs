@@ -68,8 +68,12 @@ ok('bad operatorProof rejected', !(await verifyAuthorClass({ ...co, operatorProo
 const carol = await createAuthorIdentity({ extractable: true });
 ok('swapped operator rejected', !(await verifyAuthorClass({ ...co, operator: carol.pubkeyHex.toLowerCase() })).ok);
 
-// 9. infra classes: bridge + relay are valid, build/verify round-trip
-for (const cls of ['service', 'bridge', 'relay']) {
+// 9. every non-principal/infra class is valid, build/verify round-trip.
+//    'instrument' joins on David's decision (council seq 449, 481): an automatic
+//    data source, a general publisher kind rather than an axona-track special
+//    case. It reports READINGS rather than making claims, which is what separates
+//    it from 'service' — an app acting on someone's behalf.
+for (const cls of ['service', 'instrument', 'bridge', 'relay']) {
   const a = await buildAuthorClass({ class: cls, label: `${cls} node`, signWith: alice });
   const av = await verifyAuthorClass(a);
   ok(`${cls} class builds + verifies`, av.ok && av.class === cls);
@@ -79,6 +83,45 @@ for (const cls of ['service', 'bridge', 'relay']) {
 let threw2 = false; try { await buildAuthorClass({ class: 'sensor', signWith: alice }); } catch { threw2 = true; }
 ok('unknown class throws at build', threw2);
 ok('unknown class on read → UNSTATED (not-ok)', !(await verifyAuthorClass({ ...att, class: 'sensor' })).ok);
+
+// 11. INSTRUMENT, specifically — the properties a reader depends on.
+//     Aster's seq-458 shape: builder + verifier + expected-author binding +
+//     old-reader UNSTATED behaviour, additive and leaving the existing classes
+//     untouched.
+{
+  const inst = await buildAuthorClass({ class: 'instrument', label: 'axona.track', signWith: alice });
+  const iv   = await verifyAuthorClass(inst);
+  ok('instrument builds and verifies', iv.ok && iv.class === 'instrument');
+  ok('instrument binds to its author', iv.ok && inst.author === alice.pubkeyHex.toLowerCase());
+
+  // Binding: the attestation must be rejected when checked against a DIFFERENT
+  // expected author. A class that authenticated nobody in particular would let
+  // any key wear any other key's declaration.
+  const bound = await verifyAuthorClass(inst, { expectedAuthor: bob.pubkeyHex });
+  ok('instrument rejected under the wrong expectedAuthor', !bound.ok);
+  const bound2 = await verifyAuthorClass(inst, { expectedAuthor: alice.pubkeyHex });
+  ok('instrument accepted under its own expectedAuthor', bound2.ok);
+
+  // Tamper: relabelling a signed attestation to instrument must not verify.
+  // Otherwise the class could be upgraded after signing.
+  ok('agent attestation relabelled to instrument is rejected',
+     !(await verifyAuthorClass({ ...att, class: 'instrument' })).ok);
+
+  // OLD-READER BEHAVIOUR, the reason this is safe to add without a flag day.
+  // A verifier that does not know 'instrument' returns bad_class, and every
+  // caller treats a non-ok verify as UNSTATED — unbadged and shown, never a
+  // wrong default. Simulated with a value no verifier will ever know.
+  const future = await verifyAuthorClass({ ...inst, class: 'tricorder' });
+  ok('a class an old verifier does not know → not ok', !future.ok);
+  ok('…and the reason is bad_class, which callers map to UNSTATED',
+     future.reason === 'bad_class');
+
+  // Additive: the classes that already existed keep working unchanged.
+  for (const cls of ['human', 'agent', 'service', 'bridge', 'relay']) {
+    const a = await buildAuthorClass({ class: cls, signWith: alice });
+    ok(`${cls} still builds + verifies after the addition`, (await verifyAuthorClass(a)).ok);
+  }
+}
 
 console.log(fail ? `\n✗ ${fail}/${n} FAILED` : `\n✓ all ${n} passed`);
 process.exit(fail ? 1 : 0);
