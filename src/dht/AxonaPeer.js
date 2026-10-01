@@ -3222,7 +3222,9 @@ export class AxonaPeer extends DHT {
    *     synaptomeSize:    number,
    *     peers:            string[],
    *     subscriptions:    number,
-   *     axonRoles:        Array<{topic, isRoot, children, cacheSize}>,
+   *     axonRoles:        Array<{topic, isRoot, nature, holder, subscribers,
+   *                              children, cacheSize, lastReplicaAt,
+   *                              lastReplicaAgeMs}>,
    *     wireVersion:      string | null,
    *     started:          boolean,
    *     transport:        { boundCount, meshChannels, meshOpen,
@@ -3283,11 +3285,33 @@ export class AxonaPeer extends DHT {
     if (am && typeof am.inspectRoles === 'function') {
       try {
         for (const r of am.inspectRoles()) {
+          // CARRY THE WHOLE ROW, DO NOT RE-NARROW IT (2026-10-01).
+          //
+          // inspectRoles() already computes nature, holder, subscribers and the
+          // replica stamps, and this loop used to copy four fields and drop the
+          // rest one line later. The cost was not theoretical: a relay's
+          // SIGUSR1 health-dump is the only role-level view that exists on a
+          // relay — relays serve no /diag — so "does this node hold a role with
+          // no subscribers and no messages" was unanswerable anywhere outside a
+          // bridge, on 52 of the fleet's 54 nodes, because of this discard.
+          //
+          // subscribers is the field that question turns on. nature separates a
+          // standby BACKUP (retained deliberately, exempt from the empty/idle
+          // reapers) from a ROOT holding nothing. lastReplicaAgeMs says when
+          // this observer last recorded a replica — activity evidence, and NOT
+          // proof the principal still exists or that the topic is non-empty
+          // (Aster, council 650). Null means never stamped, never "infinitely
+          // old".
           axonRoles.push({
-            topic:      r.topicId,
-            isRoot:     !!r.isRoot,
-            children:   Array.isArray(r.children) ? r.children.length : 0,
-            cacheSize:  r.replayCacheSize ?? r.cacheSize ?? 0,
+            topic:            r.topicId,
+            isRoot:           !!r.isRoot,
+            nature:           r.nature ?? null,
+            holder:           r.holder ?? null,
+            subscribers:      typeof r.subscribers === 'number' ? r.subscribers : null,
+            children:         Array.isArray(r.children) ? r.children.length : 0,
+            cacheSize:        r.replayCacheSize ?? r.cacheSize ?? 0,
+            lastReplicaAt:    r.lastReplicaAt ?? null,
+            lastReplicaAgeMs: r.lastReplicaAgeMs ?? null,
           });
         }
       } catch { /* best-effort */ }
