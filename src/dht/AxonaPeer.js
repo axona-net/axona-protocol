@@ -3225,6 +3225,7 @@ export class AxonaPeer extends DHT {
    *     axonRoles:        Array<{topic, isRoot, nature, holder, subscribers,
    *                              children, cacheSize, lastReplicaAt,
    *                              lastReplicaAgeMs}>,
+   *     axonRolesComplete: boolean,   // false = inspection failed/unavailable
    *     wireVersion:      string | null,
    *     started:          boolean,
    *     transport:        { boundCount, meshChannels, meshOpen,
@@ -3281,7 +3282,16 @@ export class AxonaPeer extends DHT {
             ?? (this._engine?.axonaManagerFor?.(this._node))
             ?? this._engine?._axonaManagers?.get?.(this._node.id)
             ?? null;
+    // AN EMPTY INVENTORY AND A FAILED ONE MUST NOT LOOK ALIKE (Aster, 655).
+    //
+    // This used to swallow an inspection failure into an empty array, so
+    // "this node holds no roles" and "I could not read this node's roles"
+    // produced byte-identical output. A census that unions axonRoles across
+    // the fleet would silently count a throwing node as a clean zero — the
+    // false-empty this project keeps paying for, one layer up from the false
+    // zero. axonRolesComplete says which one you are looking at.
     const axonRoles = [];
+    let axonRolesComplete = false;
     if (am && typeof am.inspectRoles === 'function') {
       try {
         for (const r of am.inspectRoles()) {
@@ -3314,7 +3324,8 @@ export class AxonaPeer extends DHT {
             lastReplicaAgeMs: r.lastReplicaAgeMs ?? null,
           });
         }
-      } catch { /* best-effort */ }
+        axonRolesComplete = true;
+      } catch { /* best-effort; axonRolesComplete stays false */ }
     }
     let hosting = null;
     if (am && typeof am.inspectHosting === 'function') {
@@ -3378,6 +3389,7 @@ export class AxonaPeer extends DHT {
       peers:         this.peers(),
       subscriptions: this._subscriptions.size,
       axonRoles,
+      axonRolesComplete,   // false = could not read them, NOT "there are none"
       hosting,
       admission,
       wireVersion:   this._transport?.wireVersion ?? null,
