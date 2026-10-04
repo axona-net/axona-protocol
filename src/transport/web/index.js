@@ -164,6 +164,21 @@ export function webTransport({
   // re-dials the bridge if its bound-peer count later falls below this floor.
   graduationMeshFloor = 3,
   graduationRecheckMs = 5000,
+  // MESH-COLLAPSE RE-DIAL (4.103.0). The floor alone cannot tell "thin by
+  // design" from "lost most of its mesh": on 2026-10-04 at 04:33Z a network
+  // event killed every srflx channel on two relay hosts at once, the relays
+  // were left at 3–10 bound peers (all ≥ the floor of 3), and none re-dialled
+  // for the next hour — no channel opened or closed on either host. So a
+  // graduated node ALSO re-dials when its bound count falls to
+  // `graduationCollapseRatio` of its peak since graduation, provided that peak
+  // was at least `graduationCollapseMinPeak`. The re-dial is delayed by a
+  // random 0–`graduationCollapseJitterMs`, because a network event hits every
+  // relay at once and they must not stampede the bridge together. Ratio 0
+  // disables. A raised FLOOR would not do: the bridge graduates at the floor,
+  // so a higher floor bounces every freshly graduated relay straight back.
+  graduationCollapseRatio   = 0.5,
+  graduationCollapseMinPeak = 6,
+  graduationCollapseJitterMs = 20000,
   // BOUNDED MESH DEGREE (4.95.0). Null/absent ⇒ the mesh keeps a channel to
   // every peer it hears about, which is what every browser and relay wants and
   // what this transport has always done. A BRIDGE passes { maxPeers: N } to be
@@ -344,6 +359,7 @@ export function webTransport({
         graduated = true;
         setBridgeState('graduated', (ev && ev.reason) || 'meshed — released by bridge');
         log('bridge-graduated', { meshPeers: meshBoundCount() });
+        graduatedPeak = meshBoundCount();
         armGraduationWatch();
       } else if (!stopped && reconnect && autoHandshake) {
         setBridgeState('disconnected');
@@ -741,6 +757,8 @@ export function webTransport({
   let stopped          = false;  // composite.stop() sets this — suppresses reconnect
   let graduated        = false;  // released by the bridge while meshed — no reconnect
   let graduationTimer  = null;   // watchdog: re-dial if the mesh thins post-graduation
+  let graduatedPeak    = 0;      // highest bound-peer count since the last graduation
+  let collapseTimer    = null;   // jittered re-dial pending after a mesh collapse
   let turnRefreshTimer = null;   // fires before the TURN credential's TTL lapses
   let turnRefreshReplyTimer = null;  // awaits the bridge's in-band `turn` reply
   const stateHandlers   = new Set();
@@ -815,17 +833,37 @@ export function webTransport({
     if (graduationTimer != null) return;
     graduationTimer = setInterval(() => {
       if (stopped) { stopGraduationWatch(); return; }
-      if (meshBoundCount() < graduationMeshFloor) {
+      const n = meshBoundCount();
+      if (n > graduatedPeak) graduatedPeak = n;
+      if (n < graduationMeshFloor) {
         stopGraduationWatch();
         graduated = false;
-        log('bridge-graduation-redial', { meshPeers: meshBoundCount(), floor: graduationMeshFloor });
+        log('bridge-graduation-redial', { meshPeers: n, floor: graduationMeshFloor, peak: graduatedPeak, why: 'below-floor' });
         if (reconnect && autoHandshake) { setBridgeState('connecting'); openSocket(); }
+        return;
+      }
+      const collapsed = graduationCollapseRatio > 0 &&
+        graduatedPeak >= graduationCollapseMinPeak &&
+        n <= Math.floor(graduatedPeak * graduationCollapseRatio);
+      if (collapsed) {
+        stopGraduationWatch();
+        const delay = Math.floor(Math.random() * Math.max(0, graduationCollapseJitterMs));
+        log('bridge-graduation-collapse', { meshPeers: n, peak: graduatedPeak, ratio: graduationCollapseRatio, redialInMs: delay });
+        collapseTimer = setTimeout(() => {
+          collapseTimer = null;
+          if (stopped || !graduated) return;     // stopped, or already reconnected another way
+          graduated = false;
+          log('bridge-graduation-redial', { meshPeers: meshBoundCount(), floor: graduationMeshFloor, peak: graduatedPeak, why: 'collapse' });
+          if (reconnect && autoHandshake) { setBridgeState('connecting'); openSocket(); }
+        }, delay);
+        if (typeof collapseTimer?.unref === 'function') collapseTimer.unref();
       }
     }, graduationRecheckMs);
     if (typeof graduationTimer?.unref === 'function') graduationTimer.unref();
   }
   function stopGraduationWatch() {
     if (graduationTimer != null) { clearInterval(graduationTimer); graduationTimer = null; }
+    if (collapseTimer != null) { clearTimeout(collapseTimer); collapseTimer = null; }
   }
 
   // ── TURN credential refresh ─────────────────────────────────────────

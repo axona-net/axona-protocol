@@ -263,6 +263,65 @@ async function main() {
   check('4200 (not meshed) → not stuck graduated', t5.bridgeState !== 'graduated');
   await t5.stop();
 
+  // ── 4.103.0 mesh-collapse re-dial ─────────────────────────────────
+  // 2026-10-04 04:33Z: a network event killed every srflx channel on two relay
+  // hosts; the relays sat at 3–10 bound peers, all at or above the floor of 3,
+  // and none re-dialled for an hour. A graduated node now also re-dials when
+  // its bound count falls to half its peak since graduation (peak ≥ 6).
+  const gradRig = async (opts, atGrad) => {
+    liveSockets = [];
+    const t = webTransport({
+      bridgeUrl: 'wss://test.example', identity: alice, WebSocketImpl: FakeWS,
+      handshakeTimeoutMs: 2000, reconnectInitialMs: 30, reconnectMaxMs: 30,
+      graduationMeshFloor: 3, graduationRecheckMs: 40, graduationCollapseJitterMs: 0,
+      ...opts,
+    });
+    const sp = t.start(); await sleep(5);
+    const g = t.socket; feedWelcome(g); await feedBridgeHello(g); await sp;
+    const peers = (k) => Array.from({ length: k }, (_, i) => BigInt(i + 1));
+    t.webrtc.boundPeers = () => peers(atGrad);
+    const n0 = liveSockets.length;
+    g.close(4200, 'graduated');
+    return { t, n0, set: (k) => { t.webrtc.boundPeers = () => peers(k); } };
+  };
+
+  // Peak grows after graduation (6 → 10); 6 is above half of 10 → hold; 5 → re-dial.
+  { const { t, n0, set } = await gradRig({}, 6);
+    check('collapse: graduated at 6', t.bridgeState === 'graduated');
+    set(10); await sleep(100);
+    set(6);  await sleep(130);
+    check('collapse: 6 of peak 10 (above half) → NO re-dial', liveSockets.length === n0 && t.bridgeState === 'graduated');
+    set(5);  await sleep(130);
+    check('collapse: 5 of peak 10 (half) → re-dials, above the floor of 3', liveSockets.length >= n0 + 1);
+    await t.stop(); }
+
+  // Peak below graduationCollapseMinPeak → only the floor applies. (At ratio 0.5
+  // and floor 3 a peak under 6 cannot reach half without crossing the floor, so
+  // the guard binds only at a higher ratio: 0.8 here, where 4 of 5 would fire.)
+  { const { t, n0, set } = await gradRig({ graduationCollapseRatio: 0.8 }, 5);
+    set(4); await sleep(130);
+    check('collapse: peak 5 < minPeak 6, ratio 0.8, drop to 4 → NO re-dial', liveSockets.length === n0 && t.bridgeState === 'graduated');
+    await t.stop(); }
+
+  // Ratio 0 disables the collapse rule.
+  { const { t, n0, set } = await gradRig({ graduationCollapseRatio: 0 }, 10);
+    set(3); await sleep(130);
+    check('collapse: ratio 0, 10 → 3 → NO re-dial', liveSockets.length === n0 && t.bridgeState === 'graduated');
+    await t.stop(); }
+
+  // The re-dial waits out the jitter, and stop() inside the jitter cancels it.
+  { const { t, n0, set } = await gradRig({ graduationCollapseJitterMs: 1 }, 10);
+    set(4); await sleep(130);
+    check('collapse: jitter 1 ms still re-dials', liveSockets.length >= n0 + 1);
+    await t.stop(); }
+  { const origRandom = Math.random; Math.random = () => 0.999;
+    const { t, n0, set } = await gradRig({ graduationCollapseJitterMs: 400 }, 10);
+    set(4); await sleep(130);
+    check('collapse: inside the jitter window → not yet re-dialled', liveSockets.length === n0);
+    await t.stop(); await sleep(400);
+    check('collapse: stop() inside the jitter → no re-dial ever', liveSockets.length === n0);
+    Math.random = origRandom; }
+
   console.log(`\nResult: ${passed} passed, ${failed} failed`);
   process.exit(failed === 0 ? 0 : 1);
 }
