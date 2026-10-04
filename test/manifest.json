@@ -446,6 +446,10 @@
       "class": "default"
     },
     {
+      "file": "smoke_root_stepdown_hold.mjs",
+      "class": "default"
+    },
+    {
       "file": "smoke_mesh_incarnation.js",
       "class": "default"
     },

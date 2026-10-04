@@ -183,6 +183,15 @@ export const wireHandlersMethods = {
     if (!this.axonRoles.has(topicBig)) {
       const closer = this._liveCloserRoot(topicBig);
       if (closer) { this._deferToRoot(topicBig, T.SUB, payload, closer); return 'consumed'; }
+      // Step-down hold (4.102.0): this node yielded the topic to a named root
+      // and may not re-root it yet. Send the SUB pinned to that root; if it is
+      // unreachable the subscriber's renewal retries, and the hold expires.
+      if (this._rootClaim.holdFor(topicBig)) {
+        const to = this._rootClaim.holdTarget(topicBig);
+        if (to) this._send(T.SUB, { ...payload, via: [to] });
+        else this._undeliverable(T.SUB, topicBig, 'step-down-hold');
+        return 'consumed';
+      }
       // Alone-in-the-dark guard (v4.19.2). A freshly-joined node subscribes
       // before its mesh has formed: with zero non-bridge neighbours its SUB
       // never leaves the node, terminates at self, and (no beacons heard yet)
@@ -380,6 +389,14 @@ export const wireHandlersMethods = {
       // and a failed forward invalidates the pointer instead of our state.
       if (closer) { this._forwardToRoot(topicBig, T.PUB, payload, closer); return 'consumed'; }
     }
+    // Step-down hold (4.102.0): no role here and a held root named → forward
+    // to it (write flight + ack routing), never re-root by publish.
+    if (!this.axonRoles.has(topicBig) && this._rootClaim.holdFor(topicBig)) {
+      const to = this._rootClaim.holdTarget(topicBig);
+      if (to) this._forwardToRoot(topicBig, T.PUB, payload, to);
+      else this._undeliverable(T.PUB, topicBig, 'step-down-hold');
+      return 'consumed';
+    }
     let role = this.axonRoles.get(topicBig) || this._becomeRoot(topicBig, 'pub-terminal');
     // Admission refused (bridge fence): a declined PUB must be FORWARDED, never
     // swallowed. Dropping it here is silent message loss.
@@ -394,7 +411,20 @@ export const wireHandlersMethods = {
     // Only the root (the topic terminus) stamps. A non-root relay can only reach
     // here for a via-routed publish (a security waypoint) — pop the via and
     // continue toward the topic id. Bare-topic publishes always promote above.
-    if (!role.isRoot) { this._reroute(T.PUB, payload); return 'consumed'; }
+    if (!role.isRoot) {
+      // A BARE-topic publish that ends here with the root held elsewhere must go
+      // to the held root explicitly. _reroute sends it toward the topic id, and
+      // this node IS the terminus, so it would come straight back: the
+      // synchronous loop _rerouteDeclined documents (4.102.0).
+      const bare = !(Array.isArray(payload.via) && payload.via.length);
+      if (bare && this._rootClaim.holdFor(topicBig)) {
+        const to = this._rootClaim.holdTarget(topicBig);
+        if (to) this._forwardToRoot(topicBig, T.PUB, payload, to);
+        else this._undeliverable(T.PUB, topicBig, 'step-down-hold');
+        return 'consumed';
+      }
+      this._reroute(T.PUB, payload); return 'consumed';
+    }
 
     const ingest = await this._ingestPublish(role, payload.json);
     if (ingest?.ok) this._sendIngestAck(meta?.fromId, role, ingest.msgId, 'pub', payload);
@@ -1056,6 +1086,12 @@ export const wireHandlersMethods = {
       // the app believes it already sent.
       if (closer) { this._forwardToRoot(topicBig, T.KILL, payload, closer); return 'consumed'; }
     }
+    if (!this.axonRoles.has(topicBig) && this._rootClaim.holdFor(topicBig)) {   // step-down hold (4.102.0)
+      const to = this._rootClaim.holdTarget(topicBig);
+      if (to) this._forwardToRoot(topicBig, T.KILL, payload, to);
+      else this._undeliverable(T.KILL, topicBig, 'step-down-hold');
+      return 'consumed';
+    }
     const role = this.axonRoles.get(topicBig) || this._becomeRoot(topicBig, 'kill-terminal');
     if (!role) {
       // A tombstone is the one thing we least want to lose, but forwarding it
@@ -1225,6 +1261,7 @@ export const wireHandlersMethods = {
         const closer = this._liveCloserRoot(topicBig);
         if (closer) { this._deferToRoot(topicBig, T.METRICSON, payload, closer); return 'consumed'; }
       }
+      if (!this.axonRoles.has(topicBig) && this._rootClaim.holdFor(topicBig)) return 'consumed';   // step-down hold (4.102.0): metrics are cosmetic
       const role = this.axonRoles.get(topicBig) || this._becomeRoot(topicBig, 'metricson-terminal');
       if (!role) return 'consumed';   // refused: metrics are cosmetic, drop quietly
       this._maybePromoteRoot(role, payload, meta);

@@ -88,8 +88,15 @@ async function main() {
     rc.promote(role, { via: [], topicId: idHex(T) }, { isTerminal: true });
     check('terminal promotion deferred while a closer live root beacons (no flap)', role.isRoot === false);
     am._rootBeacons.delete(T);
+    // 4.102.0 step-down hold: having yielded to NEAR, the node does not retake
+    // the seat just because the beacon went quiet. Before 4.102.0 it did, at
+    // once, and an unreachable-but-alive root became two roots (GH #58).
     rc.promote(role, { via: [], topicId: idHex(T) }, { isTerminal: true });
-    check('promotion proceeds once the beacon is gone', role.isRoot === true);
+    check('beacon gone but inside the step-down hold → still no retake', role.isRoot === false);
+    const t0 = am._now();
+    am._now = () => t0 + am._stepDownHoldMs + 1;
+    rc.promote(role, { via: [], topicId: idHex(T) }, { isTerminal: true });
+    check('promotion proceeds once the beacon is gone AND the hold has expired', role.isRoot === true);
     const tr = transitions(logs);
     check('every flip emitted exactly one root-transition', tr.length === 3, `${tr.length}`);
     check('transitions carry why-codes',
