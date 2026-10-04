@@ -157,9 +157,84 @@ async function main() {
     try { await am._onPub({ topicId: idHex(T), via: [], json: '{}' }, { isTerminal: true, targetId: SELF }); }
     catch (e) { threw = e; }
     check('unreachable held root: PUB returns, no throw', threw === null, threw?.message);
-    check('…nothing sent (no loop seed)', !routed.some((r) => r.payload?.json === '{}'), JSON.stringify(routed));
+    check('…nothing sent (no loop seed)', !routed.some((r) => r.payload?.json === '{}'), JSON.stringify(routed.map((r) => r.type)));
     check('…logged undeliverable step-down-hold', logs.some((l) => l.ev === 'pubsub:undeliverable' && l.ctx?.why === 'step-down-hold'));
     check('…and still held, not re-rooted', am.axonRoles.get(T).isRoot === false);
+  }
+
+  // ── 7. KILL with an EXISTING (demoted, non-root) role (Aster dced6098) ──
+  {
+    const KILL = { msgId: 'a'.repeat(64) };
+    // reachable held root → forwarded, not applied locally
+    {
+      const { am, rc, routed } = makeManager({ selfBig: SELF, neighbors: [NEAR] });
+      rc.become(T, 'sub-terminal');
+      rc.demote(T, idHex(NEAR), 'verify-closer');
+      const seq0 = am.axonRoles.get(T).seq;
+      routed.length = 0;
+      await am._onKill({ topicId: idHex(T), via: [], kill: KILL }, { isTerminal: true, targetId: SELF });
+      check('existing-role KILL, reachable held root → forwarded to it',
+        routed.some((r) => r.payload?.via?.[0] === idHex(NEAR) && r.payload?.kill?.msgId === KILL.msgId));
+      check('…not applied locally (role.seq unchanged)', am.axonRoles.get(T).seq === seq0);
+    }
+    // unreachable held root → held, nothing sent, undeliverable
+    {
+      const { am, rc, routed, logs } = makeManager({ selfBig: SELF, neighbors: [] });
+      rc.become(T, 'sub-terminal');
+      rc.demote(T, idHex(NEAR), 'verify-closer');
+      routed.length = 0;
+      await am._onKill({ topicId: idHex(T), via: [], kill: KILL }, { isTerminal: true, targetId: SELF });
+      check('existing-role KILL, unreachable held root → nothing sent', !routed.some((r) => r.payload?.kill));
+      check('…logged undeliverable step-down-hold',
+        logs.some((l) => l.ev === 'pubsub:undeliverable' && l.ctx?.why === 'step-down-hold' && l.ctx?.type === 'pubsub:kill'));
+    }
+  }
+
+  // ── 8. NO channel to the held root, no role (Aster dced6098) ───────────
+  //       The intercept runs FIRST and forwards on exactly the evidence the
+  //       existing gate for that verb accepts. Anything weaker sends NOTHING
+  //       (a send pinned to an unreachable root falls back and loops here).
+  const subCall  = (am) => am._onSub({ topicId: idHex(T), via: [], subscriberId: idHex((0x80n << 248n) | 0x9999n), since: 0 }, { isTerminal: true, targetId: SELF });
+  const pubCall  = (am) => am._onPub({ topicId: idHex(T), via: [], json: '{}' }, { isTerminal: true, targetId: SELF });
+  const killCall = (am) => am._onKill({ topicId: idHex(T), via: [], kill: { msgId: 'b'.repeat(64) } }, { isTerminal: true, targetId: SELF });
+  const held = () => {
+    const ctx = makeManager({ selfBig: SELF, neighbors: [] });
+    ctx.rc.become(T, 'sub-terminal');
+    ctx.rc.demote(T, idHex(NEAR), 'verify-closer');
+    ctx.am.axonRoles.delete(T);
+    return ctx;
+  };
+  const undeliv = (logs) => logs.some((l) => l.ev === 'pubsub:undeliverable' && l.ctx?.why === 'step-down-hold');
+  // 8a. SUB, fresh UNVERIFIED beacon: the SUB gate is strict, so it sends nothing
+  {
+    const { am, rc, routed, logs } = held();
+    am._rootBeacons.set(T, { root: idHex(NEAR), at: am._now(), exp: am._now() + 90_000 });
+    check('8a precondition: the LOOSE gate would accept this beacon', rc.liveCloserRoot(T, { requireReachable: false }) === idHex(NEAR));
+    routed.length = 0;
+    await subCall(am);
+    check('8a SUB, fresh unverified beacon, no channel → NOTHING sent', routed.length === 0, JSON.stringify(routed.map((r) => r.type)));
+    check('8a …held + undeliverable, no root born', !am.axonRoles.has(T) && undeliv(logs));
+  }
+  // 8b. PUB / KILL, STALE beacon (outside 1.5×BEACON_MS): nothing sent
+  for (const [verb, call] of [['PUB', pubCall], ['KILL', killCall]]) {
+    const { am, rc, routed, logs } = held();
+    am._rootBeacons.set(T, { root: idHex(NEAR), at: am._now() - rc._beaconMs * 2, exp: am._now() + 90_000 });
+    check(`8b ${verb} precondition: no gate accepts the stale beacon`, rc.liveCloserRoot(T, { requireReachable: false }) === null);
+    routed.length = 0;
+    await call(am);
+    check(`8b ${verb}, stale beacon, no channel → NOTHING sent`, routed.length === 0, JSON.stringify(routed.map((r) => r.type)));
+    check(`8b ${verb} …held + undeliverable, no root born`, !am.axonRoles.has(T) && undeliv(logs));
+  }
+  // 8c. PUB / KILL, FRESH beacon: steered ONCE to the held root — the corpse
+  //     window council 146/147 accepted, unchanged by the hold
+  for (const [verb, call] of [['PUB', pubCall], ['KILL', killCall]]) {
+    const { am, routed } = held();
+    am._rootBeacons.set(T, { root: idHex(NEAR), at: am._now(), exp: am._now() + 90_000 });
+    routed.length = 0;
+    await call(am);
+    check(`8c ${verb}, fresh beacon → exactly one send, pinned to the held root`,
+      routed.length === 1 && routed[0].payload?.via?.[0] === idHex(NEAR), JSON.stringify(routed.map((r) => r.type)));
+    check(`8c ${verb} …no root born`, !am.axonRoles.has(T));
   }
 
   console.log(`\n${passed} passed, ${failed} failed`);

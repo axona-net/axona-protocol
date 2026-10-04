@@ -409,18 +409,22 @@ export class RootClaim {
     return h;
   }
 
-  // Where a held node may send a message it will not root: the held root, but
-  // ONLY over a live channel to it. A send pinned to a root this node cannot
-  // reach falls back to topic-id routing, which lands on this node again (it is
-  // the terminus) and loops. A FRESH BEACON IS NOT REACHABILITY: a root that
-  // just died leaves one behind (smoke_root_reconcile phase 4 looped on it).
-  // Null = hold, do not send; the caller logs the message undeliverable and the
-  // sender's own retry/renewal carries it (4.102.0).
-  holdTarget(topicBig) {
+  // Where a held node may send a message it will not root: the held root, on
+  // EXACTLY the evidence the existing closer-root gates accept — nothing looser,
+  // nothing stricter (Aster dced6098: gate the hold consistently).
+  //   requireReachable=true  (SUB): a live channel, or a FRESH VERIFIED record
+  //   requireReachable=false (PUB/KILL): also a fresh beacon (< 1.5×BEACON_MS)
+  // The loose window is the corpse window council 146/147 already accepted; a
+  // failed forward deletes the record (_forwardToRoot), which bounds it. Null =
+  // hold, send nothing: a send pinned to a root with no such evidence falls
+  // back to topic-id routing and returns to this terminus (4.102.0).
+  holdTarget(topicBig, { requireReachable = true } = {}) {
     const m = this.m;
     const h = this.holdFor(topicBig);
     if (!h) return null;
-    return m._isReachableId(h.to) ? h.to : null;
+    if (m._isReachableId(h.to)) return h.to;
+    const c = this.liveCloserRoot(topicBig, { requireReachable });
+    return (c && lc(c) === h.to) ? h.to : null;
   }
 
   // True (and a rate-limited log) when the hold blocks a claim by `via`.

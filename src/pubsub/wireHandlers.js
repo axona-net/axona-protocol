@@ -167,12 +167,40 @@ export const wireHandlersMethods = {
   },
 
   // ── SUBSCRIBE ────────────────────────────────────────────────────────
+  // STEP-DOWN HOLD INTERCEPT (4.102.0). Runs FIRST in the SUB/PUB/KILL
+  // handlers, before any closer-root correction, so the hold's live-channel
+  // rule cannot be bypassed by an older gate that accepts a fresh beacon (Aster
+  // dced6098). Applies to a BARE message (no via: this node is its terminus) on
+  // a held topic this node is not root of:
+  //   · PUB and KILL — whether or not a role exists. A held node does not ingest
+  //     a bare publish or apply a bare kill as if it owned the topic.
+  //   · SUB — only with no role. With a role the node seats the subscriber as an
+  //     ordinary non-root relay, which claims nothing; promote() is held anyway.
+  // Target: the held root, on the same evidence the existing closer-root gate
+  // for that verb accepts (holdTarget); otherwise nothing is sent, the message
+  // is logged undeliverable, and the sender's retry/renewal carries it.
+  // A send pinned to an unreachable root falls back to topic-id routing, which
+  // returns here — so the no-channel case MUST NOT send. Returns true if consumed.
+  _holdIntercept(topicBig, type, payload) {
+    if (Array.isArray(payload.via) && payload.via.length) return false;
+    if (!this._rootClaim.holdFor(topicBig)) return false;
+    const role = this.axonRoles.get(topicBig);
+    if (role?.isRoot) return false;
+    if (type === T.SUB && role) return false;
+    const to = this._rootClaim.holdTarget(topicBig, { requireReachable: type === T.SUB });
+    if (!to) { this._undeliverable(type, topicBig, 'step-down-hold'); return true; }
+    if (type === T.SUB) this._send(T.SUB, { ...payload, via: [to] });
+    else this._forwardToRoot(topicBig, type, payload, to);
+    return true;
+  },
+
   async _onSub(payload, meta) {
     const d = this._topicDecision(payload, meta);
     if (d === 'forward') return;
     if (d === 'reroute') { this._reroute(T.SUB, payload); return 'consumed'; }
 
     const topicBig = idBig(payload.topicId);
+    if (this._holdIntercept(topicBig, T.SUB, payload)) return 'consumed';   // step-down hold (4.102.0)
     // Root-beacon last-mile correction (SUB). A stranded subscribe must not
     // (re)root a near-miss node while a strictly-closer live NEIGHBOUR root is
     // beaconing — defer the seat to that root. Without this only PUB carried the
@@ -183,15 +211,6 @@ export const wireHandlersMethods = {
     if (!this.axonRoles.has(topicBig)) {
       const closer = this._liveCloserRoot(topicBig);
       if (closer) { this._deferToRoot(topicBig, T.SUB, payload, closer); return 'consumed'; }
-      // Step-down hold (4.102.0): this node yielded the topic to a named root
-      // and may not re-root it yet. Send the SUB pinned to that root; if it is
-      // unreachable the subscriber's renewal retries, and the hold expires.
-      if (this._rootClaim.holdFor(topicBig)) {
-        const to = this._rootClaim.holdTarget(topicBig);
-        if (to) this._send(T.SUB, { ...payload, via: [to] });
-        else this._undeliverable(T.SUB, topicBig, 'step-down-hold');
-        return 'consumed';
-      }
       // Alone-in-the-dark guard (v4.19.2). A freshly-joined node subscribes
       // before its mesh has formed: with zero non-bridge neighbours its SUB
       // never leaves the node, terminates at self, and (no beacons heard yet)
@@ -373,6 +392,7 @@ export const wireHandlersMethods = {
     if (d === 'reroute') { this._reroute(T.PUB, payload); return 'consumed'; }
 
     const topicBig = idBig(payload.topicId);
+    if (this._holdIntercept(topicBig, T.PUB, payload)) return 'consumed';   // step-down hold (4.102.0)
     // Root-beacon last-mile correction. At this point I'm the acting target for
     // the publish (bare-topic terminus, or via-pinned to me). If a fresh beacon
     // names a different root genuinely CLOSER to the topic than me, forward to it
@@ -389,14 +409,6 @@ export const wireHandlersMethods = {
       // and a failed forward invalidates the pointer instead of our state.
       if (closer) { this._forwardToRoot(topicBig, T.PUB, payload, closer); return 'consumed'; }
     }
-    // Step-down hold (4.102.0): no role here and a held root named → forward
-    // to it (write flight + ack routing), never re-root by publish.
-    if (!this.axonRoles.has(topicBig) && this._rootClaim.holdFor(topicBig)) {
-      const to = this._rootClaim.holdTarget(topicBig);
-      if (to) this._forwardToRoot(topicBig, T.PUB, payload, to);
-      else this._undeliverable(T.PUB, topicBig, 'step-down-hold');
-      return 'consumed';
-    }
     let role = this.axonRoles.get(topicBig) || this._becomeRoot(topicBig, 'pub-terminal');
     // Admission refused (bridge fence): a declined PUB must be FORWARDED, never
     // swallowed. Dropping it here is silent message loss.
@@ -411,20 +423,7 @@ export const wireHandlersMethods = {
     // Only the root (the topic terminus) stamps. A non-root relay can only reach
     // here for a via-routed publish (a security waypoint) — pop the via and
     // continue toward the topic id. Bare-topic publishes always promote above.
-    if (!role.isRoot) {
-      // A BARE-topic publish that ends here with the root held elsewhere must go
-      // to the held root explicitly. _reroute sends it toward the topic id, and
-      // this node IS the terminus, so it would come straight back: the
-      // synchronous loop _rerouteDeclined documents (4.102.0).
-      const bare = !(Array.isArray(payload.via) && payload.via.length);
-      if (bare && this._rootClaim.holdFor(topicBig)) {
-        const to = this._rootClaim.holdTarget(topicBig);
-        if (to) this._forwardToRoot(topicBig, T.PUB, payload, to);
-        else this._undeliverable(T.PUB, topicBig, 'step-down-hold');
-        return 'consumed';
-      }
-      this._reroute(T.PUB, payload); return 'consumed';
-    }
+    if (!role.isRoot) { this._reroute(T.PUB, payload); return 'consumed'; }
 
     const ingest = await this._ingestPublish(role, payload.json);
     if (ingest?.ok) this._sendIngestAck(meta?.fromId, role, ingest.msgId, 'pub', payload);
@@ -1075,6 +1074,7 @@ export const wireHandlersMethods = {
     if (d === 'forward') return;
     if (d === 'reroute') { this._reroute(T.KILL, payload); return 'consumed'; }
     const topicBig = idBig(payload.topicId);
+    if (this._holdIntercept(topicBig, T.KILL, payload)) return 'consumed';   // step-down hold (4.102.0)
     // Root-beacon last-mile correction (KILL) — same one-shot semantics as PUB:
     // a kill landing on a near-miss node must reach the true root, not mint a
     // competing root that the rest of the tree never consults.
@@ -1085,12 +1085,6 @@ export const wireHandlersMethods = {
       // all over again, with the extra sting that nothing ever retries a kill
       // the app believes it already sent.
       if (closer) { this._forwardToRoot(topicBig, T.KILL, payload, closer); return 'consumed'; }
-    }
-    if (!this.axonRoles.has(topicBig) && this._rootClaim.holdFor(topicBig)) {   // step-down hold (4.102.0)
-      const to = this._rootClaim.holdTarget(topicBig);
-      if (to) this._forwardToRoot(topicBig, T.KILL, payload, to);
-      else this._undeliverable(T.KILL, topicBig, 'step-down-hold');
-      return 'consumed';
     }
     const role = this.axonRoles.get(topicBig) || this._becomeRoot(topicBig, 'kill-terminal');
     if (!role) {
