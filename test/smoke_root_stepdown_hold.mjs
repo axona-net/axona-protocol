@@ -364,6 +364,68 @@ async function main() {
     check('13 …keys are nonces, not message bodies', [...am._holdFwd.keys()].every((k) => /^[0-9a-f]{16}$/.test(k)));
   }
 
+  // ── 14–17. token binding and unconditional non-reforwarding (Aster 7be0b352)
+  const T2 = SELF ^ 0x20n, NEAR2 = T2 ^ 0x1n;
+  const heldTwo = () => {
+    const ctx = makeManager({ selfBig: SELF, neighbors: [NEAR, NEAR2] });
+    for (const [t, n] of [[T, NEAR], [T2, NEAR2]]) {
+      ctx.rc.become(t, 'sub-terminal');
+      ctx.rc.demote(t, idHex(n), 'verify-closer');
+      ctx.am.axonRoles.delete(t);
+      ctx.am._rootBeacons.set(t, { root: idHex(n), at: ctx.am._now(), exp: ctx.am._now() + 90_000 });
+    }
+    ctx.routed.length = 0;
+    return ctx;
+  };
+  const sendsTo = (routed, n) => routed.filter((r) => r.payload?.via?.[0] === idHex(n)).length;
+  // 14. a nonce from topic T presented on held topic T2
+  {
+    const { am, routed, logs } = heldTwo();
+    await am._onPub(pub(500), { isTerminal: true, targetId: SELF });
+    const nonce = routed[0].payload.holdFwd;
+    const r0 = routed.length;
+    await am._onPub({ topicId: idHex(T2), via: [], json: '{"x":1}', holdFwd: nonce }, { isTerminal: true, targetId: SELF });
+    check('14 cross-TOPIC token: fails closed (not forwarded)', routed.length === r0);
+    check('14 …logged as not ours', logs.some((l) => l.ev === 'pubsub:hold-reentry' && l.ctx?.ours === false));
+    check('14 …T2\'s record kept', !!am._rootBeacons.get(T2));
+    check('14 …T\'s guard entry NOT consumed', am._holdFwd.has(nonce));
+  }
+  // 15. a nonce from a PUB presented on a KILL, same topic
+  {
+    const { am, routed, logs } = heldTwo();
+    await am._onPub(pub(501), { isTerminal: true, targetId: SELF });
+    const nonce = routed[0].payload.holdFwd;
+    const r0 = routed.length;
+    await am._onKill({ topicId: idHex(T), via: [], kill: { msgId: 'd'.repeat(64) }, holdFwd: nonce }, { isTerminal: true, targetId: SELF });
+    check('15 cross-VERB token: fails closed', routed.length === r0 && logs.some((l) => l.ev === 'pubsub:hold-reentry' && l.ctx?.ours === false));
+    check('15 …record kept, PUB guard entry not consumed', !!am._rootBeacons.get(T) && am._holdFwd.has(nonce));
+  }
+  // 16. a return delayed past pruning, with a live target still available
+  {
+    const { am, clock, routed, logs } = heldTwo();
+    await am._onPub(pub(502), { isTerminal: true, targetId: SELF });
+    const copy = returned(routed[0]);
+    clock.t += 11_000;                                            // past HOLD_REENTRY_MS
+    am._rootBeacons.set(T, { root: idHex(NEAR), at: clock.t, exp: clock.t + 90_000 });   // refreshed: a target exists
+    await am._onPub(pub(503), { isTerminal: true, targetId: SELF });                     // admission prunes the stale entry
+    check('16 precondition: the stale entry was pruned', !am._holdFwd.has(copy.holdFwd));
+    const r0 = routed.length;
+    await am._onPub(copy, { isTerminal: true, targetId: SELF });
+    check('16 delayed return after pruning: NOT forwarded again', routed.length === r0);
+    check('16 …fails closed as an unknown token', logs.some((l) => l.ev === 'pubsub:undeliverable' && l.ctx?.why === 'step-down-hold-return-unknown'));
+  }
+  // 17. a replay after the first return consumed the token
+  {
+    const { am, routed } = heldTwo();
+    await am._onPub(pub(504), { isTerminal: true, targetId: SELF });
+    const copy = returned(routed[0]);
+    await am._onPub(copy, { isTerminal: true, targetId: SELF });   // first return: consumed
+    am._rootBeacons.set(T, { root: idHex(NEAR), at: am._now() + 1, exp: am._now() + 90_000 });   // a target again
+    const r0 = routed.length;
+    await am._onPub({ ...copy }, { isTerminal: true, targetId: SELF });   // replay
+    check('17 replay after first return: NOT forwarded again', routed.length === r0);
+  }
+
   console.log(`\n${passed} passed, ${failed} failed`);
   process.exit(failed ? 1 : 0);
 }

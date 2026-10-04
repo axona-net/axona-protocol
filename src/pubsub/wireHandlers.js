@@ -192,11 +192,12 @@ export const wireHandlersMethods = {
   // again; _reroute pops the via and the copy re-enters bare. A failed-verdict
   // deletion does not bound that (a delivery back to self is 'consumed').
   //   · Return IDENTITY, not similarity: each forward carries a random
-  //     `holdFwd` nonce recorded with the hold and beacon generation it relied
-  //     on. Only a copy carrying OUR nonce is a return; a sender's retry carries
-  //     none and is an ordinary new message.
-  //   · A returned copy is NEVER forwarded again, so each forward yields at most
-  //     one return: finite.
+  //     `holdFwd` nonce recorded with its topic, verb, and the hold and beacon
+  //     generation it relied on. Only a copy carrying OUR nonce for the SAME
+  //     topic and verb is a return; a sender's retry carries none and is an
+  //     ordinary new message.
+  //   · A bare copy carrying ANY holdFwd token is never forwarded again by this
+  //     intercept (see below), so the bound is unconditional, not a time window.
   //   · Unreachability is inferred, and the beacon record dropped, ONLY if the
   //     hold and the record are still the generation the forward relied on; a
   //     refreshed record or a new hold is kept.
@@ -211,16 +212,28 @@ export const wireHandlersMethods = {
     if (type === T.SUB && role) return false;
     const fwd = (this._holdFwd ??= new Map());
     const now = this._now();
-    // our own forward, returned through the dead-waypoint fallback
-    const back = typeof payload.holdFwd === 'string' ? fwd.get(payload.holdFwd) : undefined;
-    if (back) {
-      fwd.delete(payload.holdFwd);
-      const b = this._rootBeacons.get(topicBig);
-      const sameGen = h.at === back.holdAt && h.to === back.root &&
-                      b && lc(b.root) === back.root && b.at === back.beaconAt;
-      if (sameGen) this._rootBeacons.delete(topicBig);
-      this._log('info', 'hold-reentry', { topic: idHex(topicBig).slice(0, 12), type, to: h.to.slice(0, 10), recordDropped: !!sameGen });
-      this._undeliverable(type, topicBig, 'step-down-hold');
+    // ANY bare copy carrying a holdFwd token is a held-node forward that came
+    // back (or a replay of one). It is NEVER forwarded again by this intercept,
+    // whatever the state of the token (Aster 7be0b352): that, not the 10 s
+    // window, is the finiteness bound. Only a live token bound to THIS topic and
+    // verb is "ours"; it alone may be consumed and may drop a same-generation
+    // record. Unknown, retired, pruned or foreign tokens fail closed.
+    // Scope: a held node that receives ANOTHER node's held-forward copy as a
+    // bare terminus drops it rather than relaying it; the sender's next retry
+    // (no token) is handled normally.
+    if (typeof payload.holdFwd === 'string') {
+      const back = fwd.get(payload.holdFwd);
+      const ours = !!back && back.topic === topicBig && back.type === type;
+      let dropped = false;
+      if (ours) {
+        fwd.delete(payload.holdFwd);
+        const b = this._rootBeacons.get(topicBig);
+        if (h.at === back.holdAt && h.to === back.root && b && lc(b.root) === back.root && b.at === back.beaconAt) {
+          this._rootBeacons.delete(topicBig); dropped = true;
+        }
+      }
+      this._log('info', 'hold-reentry', { topic: idHex(topicBig).slice(0, 12), type, to: h.to.slice(0, 10), ours, recordDropped: dropped });
+      this._undeliverable(type, topicBig, ours ? 'step-down-hold' : 'step-down-hold-return-unknown');
       return true;
     }
     const to = this._rootClaim.holdTarget(topicBig, { requireReachable: type === T.SUB });
@@ -229,7 +242,7 @@ export const wireHandlersMethods = {
     if (fwd.size >= HOLD_FWD_MAX) { this._undeliverable(type, topicBig, 'step-down-hold-saturated'); return true; }
     const nonce = randomNonce();
     const b = this._rootBeacons.get(topicBig);
-    fwd.set(nonce, { at: now, holdAt: h.at, root: h.to, beaconAt: (b && lc(b.root) === h.to) ? b.at : null });
+    fwd.set(nonce, { at: now, topic: topicBig, type, holdAt: h.at, root: h.to, beaconAt: (b && lc(b.root) === h.to) ? b.at : null });
     const out = { ...payload, holdFwd: nonce };
     if (type === T.SUB) this._send(T.SUB, { ...out, via: [to] });
     else this._forwardToRoot(topicBig, type, out, to);
