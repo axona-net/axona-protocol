@@ -39,6 +39,7 @@
 
 import { DHT }            from '../contracts/DHT.js';
 import { Synapse }        from './Synapse.js';
+import { DeadPeers }      from './DeadPeers.js';
 import { Subscription }   from './Subscription.js';
 import { clz264, toHex, fromHex, isHexId, extractS2Prefix, asId, BAD_ID_CODE } from '../utils/hexid.js';
 import { buildPresenceRecord, verifyPresenceRecord } from './presence.js';
@@ -653,7 +654,12 @@ export class AxonaPeer extends DHT {
           node.synaptome?.delete(dead);
           node.incomingSynapses?.delete(dead);
           node.connections?.delete(dead);
-          (node._deadPeers ??= new Set()).add(dead);
+          // Row 1 (Hold-and-Fill v0.5): the mark records WHY and WHEN. A
+          // table some other owner installed as a bare Set keeps its shape;
+          // the reason then lives only in the log line below.
+          const marks = (node._deadPeers ??= new DeadPeers());
+          if (typeof marks.mark === 'function') marks.mark(dead, { kind: 'loss', cause: reason ?? 'unknown' });
+          else marks.add(dead);
           this._axonaManager?.pubsubPeerDied?.(toHex(dead));   // purge ghost root beacons
           // reason (4.76.3): the transport-level close cause, threaded through
           // mesh _retire → onPeerLost. Transports that do not supply one (sim,
