@@ -19,9 +19,14 @@ import {
   METRICS_PUB_MS, METRICS_COALESCE_MS,
 } from './constants.js';
 import { idHex, idBig, lc, isHexId } from './ids.js';
-// A held node treats the same message returning within this window as proof
-// the held root is unreachable from here (see _holdIntercept, 4.102.0).
+// Step-down hold re-entry guard (see _holdIntercept, 4.102.0): how long a
+// forward's return nonce is remembered, and how many may be outstanding.
 const HOLD_REENTRY_MS = 10_000;
+const HOLD_FWD_MAX    = 256;
+const randomNonce = () => {
+  const b = new Uint8Array(8); globalThis.crypto.getRandomValues(b);
+  return Array.from(b, (x) => x.toString(16).padStart(2, '0')).join('');
+};
 import { verifyEnvelope, checkFreshness } from './envelope.js';
 import { verifyKill } from './kill.js';
 import { deriveTopicIdBig } from './post.js';
@@ -182,15 +187,21 @@ export const wireHandlersMethods = {
   // accepts (holdTarget). Otherwise nothing is sent; the message is logged
   // undeliverable and the sender's retry/renewal carries it.
   //
-  // RE-ENTRY BOUND (Aster 5d38ca23). A send pinned to a root that is in fact
-  // unreachable falls back to topic-id routing and lands HERE again; _reroute
-  // pops the via and the same message re-enters as bare. A failed-verdict
-  // deletion does not bound that: a delivery back to self is 'consumed', not
-  // 'failed'. So the RETURN itself is the evidence: the same message back at
-  // this held node within HOLD_REENTRY_MS means the held root is unreachable
-  // from here. The beacon record naming it is dropped (no gate accepts it
-  // again), the return is logged, and nothing is sent. One send per message
-  // per window, then held.
+  // RE-ENTRY BOUND (Aster 5d38ca23, b7b4bbc3). A send pinned to a held root
+  // that is in fact unreachable falls back to topic-id routing and lands HERE
+  // again; _reroute pops the via and the copy re-enters bare. A failed-verdict
+  // deletion does not bound that (a delivery back to self is 'consumed').
+  //   · Return IDENTITY, not similarity: each forward carries a random
+  //     `holdFwd` nonce recorded with the hold and beacon generation it relied
+  //     on. Only a copy carrying OUR nonce is a return; a sender's retry carries
+  //     none and is an ordinary new message.
+  //   · A returned copy is NEVER forwarded again, so each forward yields at most
+  //     one return: finite.
+  //   · Unreachability is inferred, and the beacon record dropped, ONLY if the
+  //     hold and the record are still the generation the forward relied on; a
+  //     refreshed record or a new hold is kept.
+  //   · Bounded: at most HOLD_FWD_MAX outstanding nonces, each HOLD_REENTRY_MS.
+  //     Saturated → fail CLOSED (do not forward, do not evict a live guard).
   _holdIntercept(topicBig, type, payload) {
     if (Array.isArray(payload.via) && payload.via.length) return false;
     const h = this._rootClaim.holdFor(topicBig);
@@ -198,26 +209,30 @@ export const wireHandlersMethods = {
     const role = this.axonRoles.get(topicBig);
     if (role?.isRoot) return false;
     if (type === T.SUB && role) return false;
-    const ident = type === T.SUB ? payload.subscriberId
-                : type === T.KILL ? payload.kill?.msgId
-                : (payload.attemptId ?? payload.json);
-    const key = `${type}|${idHex(topicBig)}|${ident}`;
-    const seen = (this._holdSeen ??= new Map());
+    const fwd = (this._holdFwd ??= new Map());
     const now = this._now();
-    const last = seen.get(key);
-    if (last !== undefined && now - last < HOLD_REENTRY_MS) {
+    // our own forward, returned through the dead-waypoint fallback
+    const back = typeof payload.holdFwd === 'string' ? fwd.get(payload.holdFwd) : undefined;
+    if (back) {
+      fwd.delete(payload.holdFwd);
       const b = this._rootBeacons.get(topicBig);
-      if (b && lc(b.root) === h.to) this._rootBeacons.delete(topicBig);
-      this._log('info', 'hold-reentry', { topic: idHex(topicBig).slice(0, 12), type, to: h.to.slice(0, 10) });
+      const sameGen = h.at === back.holdAt && h.to === back.root &&
+                      b && lc(b.root) === back.root && b.at === back.beaconAt;
+      if (sameGen) this._rootBeacons.delete(topicBig);
+      this._log('info', 'hold-reentry', { topic: idHex(topicBig).slice(0, 12), type, to: h.to.slice(0, 10), recordDropped: !!sameGen });
       this._undeliverable(type, topicBig, 'step-down-hold');
       return true;
     }
     const to = this._rootClaim.holdTarget(topicBig, { requireReachable: type === T.SUB });
     if (!to) { this._undeliverable(type, topicBig, 'step-down-hold'); return true; }
-    seen.set(key, now);
-    if (seen.size > 1000) for (const [k, t] of seen) { if (now - t >= HOLD_REENTRY_MS) seen.delete(k); }
-    if (type === T.SUB) this._send(T.SUB, { ...payload, via: [to] });
-    else this._forwardToRoot(topicBig, type, payload, to);
+    for (const [k, e] of fwd) { if (now - e.at >= HOLD_REENTRY_MS) fwd.delete(k); }   // ≤ HOLD_FWD_MAX entries
+    if (fwd.size >= HOLD_FWD_MAX) { this._undeliverable(type, topicBig, 'step-down-hold-saturated'); return true; }
+    const nonce = randomNonce();
+    const b = this._rootBeacons.get(topicBig);
+    fwd.set(nonce, { at: now, holdAt: h.at, root: h.to, beaconAt: (b && lc(b.root) === h.to) ? b.at : null });
+    const out = { ...payload, holdFwd: nonce };
+    if (type === T.SUB) this._send(T.SUB, { ...out, via: [to] });
+    else this._forwardToRoot(topicBig, type, out, to);
     return true;
   },
 

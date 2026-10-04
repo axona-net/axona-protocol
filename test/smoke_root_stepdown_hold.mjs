@@ -296,6 +296,74 @@ async function main() {
     await reentry('KILL', () => ({ topicId: idHex(T), via: [], kill }), {});
   }
 
+  // ── 10–13. the return guard is IDENTITY, generation-checked, bounded ────
+  //           (Aster b7b4bbc3)
+  const heldReachable = () => {
+    const ctx = makeManager({ selfBig: SELF, neighbors: [NEAR] });
+    ctx.rc.become(T, 'sub-terminal');
+    ctx.rc.demote(T, idHex(NEAR), 'verify-closer');
+    ctx.am.axonRoles.delete(T);
+    ctx.am._rootBeacons.set(T, { root: idHex(NEAR), at: ctx.am._now(), exp: ctx.am._now() + 90_000 });
+    ctx.routed.length = 0;
+    return ctx;
+  };
+  const pub = (n) => ({ topicId: idHex(T), via: [], json: `{"n":${n}}` });
+  const returned = (r) => ({ ...r.payload, via: [] });   // a forward come back bare after the reroute pop
+
+  // 10. a sender RETRY (same message, no return) is not a return
+  {
+    const { am, routed, logs } = heldReachable();
+    await am._onPub(pub(1), { isTerminal: true, targetId: SELF });
+    await am._onPub(pub(1), { isTerminal: true, targetId: SELF });   // the sender's retry: no nonce
+    check('10 duplicate-without-return: both copies forwarded', routed.length === 2, `${routed.length}`);
+    check('10 …no hold-reentry inferred', !logs.some((l) => l.ev === 'pubsub:hold-reentry'));
+    check('10 …the beacon record is kept', !!am._rootBeacons.get(T));
+    check('10 …each forward carries its own nonce', routed[0].payload.holdFwd && routed[0].payload.holdFwd !== routed[1].payload.holdFwd);
+  }
+  // 11. a return AFTER the record was refreshed: the newer record survives
+  {
+    const { am, clock, routed, logs } = heldReachable();
+    await am._onPub(pub(2), { isTerminal: true, targetId: SELF });
+    clock.t += 1_000;
+    am._rootBeacons.set(T, { root: idHex(NEAR), at: clock.t, exp: clock.t + 90_000 });   // refreshed
+    const fresh = am._rootBeacons.get(T);
+    const sends0 = routed.length;
+    await am._onPub(returned(routed[0]), { isTerminal: true, targetId: SELF });
+    check('11 refreshed record: the return is recognised', logs.some((l) => l.ev === 'pubsub:hold-reentry' && l.ctx?.recordDropped === false));
+    check('11 …the NEWER record is NOT deleted', am._rootBeacons.get(T) === fresh);
+    check('11 …the returned copy is not forwarded again', routed.length === sends0);
+  }
+  // 12. a return after a NEW hold generation: nothing deleted
+  {
+    const { am, clock, routed, logs } = heldReachable();
+    await am._onPub(pub(3), { isTerminal: true, targetId: SELF });
+    clock.t += 1_000;
+    am._stepDownHold.set(T, { ...am._stepDownHold.get(T), at: clock.t });                // re-armed hold
+    await am._onPub(returned(routed[0]), { isTerminal: true, targetId: SELF });
+    check('12 new hold: the return is recognised but the record is kept',
+      logs.some((l) => l.ev === 'pubsub:hold-reentry' && l.ctx?.recordDropped === false) && !!am._rootBeacons.get(T));
+  }
+  // 12b. a return in the SAME generation drops the record (the evidence case)
+  {
+    const { am, routed, logs } = heldReachable();
+    await am._onPub(pub(4), { isTerminal: true, targetId: SELF });
+    await am._onPub(returned(routed[0]), { isTerminal: true, targetId: SELF });
+    check('12b same generation: record dropped on return',
+      logs.some((l) => l.ev === 'pubsub:hold-reentry' && l.ctx?.recordDropped === true) && !am._rootBeacons.get(T));
+  }
+  // 13. SATURATION: a burst of distinct messages inside the window
+  {
+    const { am, routed, logs } = heldReachable();
+    for (let n = 0; n < 300; n++) await am._onPub(pub(100 + n), { isTerminal: true, targetId: SELF });
+    const sat = logs.filter((l) => l.ev === 'pubsub:undeliverable' && l.ctx?.why === 'step-down-hold-saturated').length;
+    check('13 burst of 300: at most 256 forwarded', routed.length === 256, `${routed.length}`);
+    check('13 …the rest fail CLOSED (saturated, not forwarded)', sat === 44, `${sat}`);
+    check('13 …the guard map never exceeds its bound', am._holdFwd.size <= 256, `${am._holdFwd.size}`);
+    await am._onPub(returned(routed[0]), { isTerminal: true, targetId: SELF });
+    check('13 …the FIRST active guard was not evicted (its return still recognised)', logs.some((l) => l.ev === 'pubsub:hold-reentry'));
+    check('13 …keys are nonces, not message bodies', [...am._holdFwd.keys()].every((k) => /^[0-9a-f]{16}$/.test(k)));
+  }
+
   console.log(`\n${passed} passed, ${failed} failed`);
   process.exit(failed ? 1 : 0);
 }
