@@ -310,7 +310,7 @@ export class AxonaManager {
     // the seat 45-89 s later, every time: two live roots for council on
     // 2026-10-02/03 (GH #58). A dead root still gets replaced, after the hold.
     // 0 disables. Topic -> { to, at, lastLog }.
-    this._stepDownHoldMs  = envNum('STEPDOWN_HOLD_MS', 600_000);
+    this._stepDownHoldMs  = envNum('STEPDOWN_HOLD_MS', 300_000);
     this._stepDownHold    = new Map();
     this._rolesReapedIdle = 0;
     this._rolesReapedDead = 0;   // subscriber-less AND message-less: reaped on sight

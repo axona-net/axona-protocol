@@ -377,10 +377,17 @@ export class RootClaim {
     if (to === m.nodeId) return false;               // never "demote toward self"
     this._set(role, false, why, { to: toHex.slice(0, 10) });
     m._upstream.set(topicBig, [lc(toHex)]);
-    // Step-down hold (4.102.0): having yielded to a named root, do not retake
-    // the seat by self-promotion until the hold expires. Messages that reach
-    // this node as terminus meanwhile are forwarded to the named root.
-    m._stepDownHold?.set(topicBig, { to: lc(toHex), at: m._now(), lastLog: 0 });
+    // Step-down hold (4.102.0): having yielded to a STRICTLY CLOSER named root,
+    // do not retake the seat by self-promotion until the hold expires. Only a
+    // closer target arms it: an epoch-superseded demotion can yield to a FARTHER
+    // node, and holding there let the true root and a spurious one each defer
+    // to the other with neither allowed back — zero roots for the whole hold
+    // (smoke_root_reconcile phase 5). The keyspace-closest node may always
+    // reclaim; the hold binds only the node that the keyspace says should not
+    // own the topic.
+    if ((to ^ topicBig) < (m.nodeId ^ topicBig)) {
+      m._stepDownHold?.set(topicBig, { to: lc(toHex), at: m._now(), lastLog: 0 });
+    }
     m._sendSubscribe(topicBig);
     return true;
   }

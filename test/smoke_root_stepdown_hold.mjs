@@ -132,6 +132,19 @@ async function main() {
     check('…sent pinned to the held root', routed.some((r) => r.payload?.via?.[0] === idHex(NEAR) && r.payload?.subscriberId === idHex(OTHER)));
   }
 
+  // ── 5b. yielding to a FARTHER node (epoch-superseded) arms NO hold ─────
+  //        Otherwise the true root and a spurious one can each defer to the
+  //        other and hold: zero roots for the whole hold.
+  {
+    const FAR = T ^ (0x1n << 200n);
+    const { rc } = makeManager({ selfBig: SELF, neighbors: [] });
+    const role = rc.become(T, 'sub-terminal');
+    rc.demote(T, idHex(FAR), 'epoch-superseded');
+    check('demote to a FARTHER node arms no hold', rc.holdFor(T) === null);
+    rc.promote(role, bare, terminal);
+    check('…so the closer node may reclaim at once', role.isRoot === true);
+  }
+
   // ── 6. held root UNREACHABLE: hold, send nothing, log — never loop ─────
   //       A send pinned to an unreachable root falls back to topic-id routing,
   //       which lands on this terminus again. The hold must not send at all.

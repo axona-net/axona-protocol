@@ -203,18 +203,31 @@ await fab.settle();
 check('stranded subscriber S3 still receives (deferred seat worked)', S3.got.includes ? S3.got.length >= 1 : false, `S3 got ${S3.got.length}`);
 check('S1 keeps receiving after the strand episode', S1.got.length === 3 || S1.got.length === 2, `S1 got ${S1.got.length}`);
 
-console.log('— phase 4 (churn safety): true root dies; its live beacon must not stall promotion —');
+console.log('— phase 4 (churn safety): true root dies; A takes over after its step-down hold —');
 fab.kill(B.id);
-// B's beacon is still within TTL in A's cache — but B is no longer a live
-// neighbour, so the reachability gate opens and A must promote immediately.
+// A yielded to B in phase 2, so A holds a step-down hold (4.102.0, David
+// 2026-10-04, option A with a 5-minute clock). Before 4.102.0 A promoted
+// IMMEDIATELY here; that same rule, applied to a root that is alive but
+// unreachable, produced two council roots on 2026-10-02/03 (GH #58). The cost
+// is accepted: a root that really died is replaced after the hold, not at once.
 A.am.axonRoles.delete(T);               // fresh strand, worst case
 const S4 = fab.addNode(near(0x4c));     // brand-new subscriber, knows only A
 fab.link(S4.id, A.id);
 S4.am.pubsubSubscribe(T); S4.am.mySubscriptions.get(T).since = 0;
 await fab.settle();
 await fab.tickAll();
+check('inside the hold, A does NOT re-root (and nothing loops)', !fab.roots(T).includes(idHex(A.id).slice(-4)), JSON.stringify(fab.roots(T)));
+// The production hold is 300 s. Advancing the SHARED fabric clock that far
+// ages every envelope this test signs with the real clock past the C-2
+// freshness window, so later phases' publishes drop as stale (found
+// 2026-10-04). Shorten A's hold for this test only; the contract under test —
+// held, then promoted after expiry — does not depend on its length.
+A.am._stepDownHoldMs = 30_000;
+fab.advance(A.am._stepDownHoldMs + 1);  // the hold expires
+await fab.tickAll();                     // S4's renewal re-sends its SUB
+await fab.tickAll();
 const rootsAfterDeath = fab.roots(T);
-check('A promoted immediately despite B\'s unexpired beacon', rootsAfterDeath.includes(idHex(A.id).slice(-4)), JSON.stringify(rootsAfterDeath));
+check('A promoted once the hold expired, despite B\'s beacon history', rootsAfterDeath.includes(idHex(A.id).slice(-4)), JSON.stringify(rootsAfterDeath));
 // Publishes tolerate a short corpse window (the loose freshness branch defers
 // toward the dead root's beacon for ≤1.5×BEACON_MS after its last emission,
 // then goes silent). Advance past it — the pre-4.19 kernel looped on the full
