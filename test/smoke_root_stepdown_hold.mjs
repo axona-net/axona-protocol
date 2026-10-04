@@ -19,6 +19,8 @@
 // Run: node test/smoke_root_stepdown_hold.mjs
 import { AxonaManager } from '../src/pubsub/AxonaManager.js';
 import { sealTestDht } from './lib/testCapability.mjs';
+import { buildKill } from '../src/pubsub/kill.js';
+import { createAuthorIdentity } from '../src/identity/index.js';
 
 let passed = 0, failed = 0;
 const check = (label, cond, extra = '') => {
@@ -164,7 +166,10 @@ async function main() {
 
   // ── 7. KILL with an EXISTING (demoted, non-root) role (Aster dced6098) ──
   {
-    const KILL = { msgId: 'a'.repeat(64) };
+    // A VALIDLY SIGNED kill (Aster 5d38ca23): the old fixture failed signature
+    // verification, so "not applied locally" held with or without the hold.
+    const author = await createAuthorIdentity();
+    const KILL = await buildKill({ topicId: idHex(T), msgId: 'a'.repeat(64), seq: 1, identity: author });
     // reachable held root → forwarded, not applied locally
     {
       const { am, rc, routed } = makeManager({ selfBig: SELF, neighbors: [NEAR] });
@@ -235,6 +240,60 @@ async function main() {
     check(`8c ${verb}, fresh beacon → exactly one send, pinned to the held root`,
       routed.length === 1 && routed[0].payload?.via?.[0] === idHex(NEAR), JSON.stringify(routed.map((r) => r.type)));
     check(`8c ${verb} …no root born`, !am.axonRoles.has(T));
+  }
+
+  // ── 9. RE-ENTRY through a dead-waypoint fallback (Aster 5d38ca23) ───────
+  //       The held root is DEAD but a gate still accepts it (fresh verified
+  //       record for SUB, fresh beacon for PUB/KILL). Every send pinned to it
+  //       falls back to topic-id routing and re-enters THIS node as terminus,
+  //       via intact, exactly as a real fallback does; _topicDecision then
+  //       reroutes (pops the via) and the message arrives bare again. The bound
+  //       must be finite, and the node must not reclaim the root while held.
+  async function reentry(verb, payloadOf, beacon) {
+    const handlers = new Map();
+    const queue = [];
+    const logs = [];
+    let sends = 0;
+    const clock = { t: 2_000_000 };
+    const dht = {
+      getSelfId: () => SELF,
+      onRoutedMessage: (type, h) => handlers.set(type, h),
+      verdictsSupported: false,
+      // the only live node is SELF: every send — pinned to the dead root or
+      // bare — ends at SELF as terminus (the dead-waypoint fall-through)
+      routeMessage: (target, type, payload) => { sends++; queue.push({ type, payload }); },
+      neighbors: () => [],
+      bridgeId: () => null,
+    };
+    const am = new AxonaManager({ dht: sealTestDht(dht), emitLog: (lvl, ev, ctx) => logs.push({ ev, ctx }) });
+    am._now = () => clock.t;
+    const rc = am._rootClaim;
+    rc.become(T, 'sub-terminal');
+    rc.demote(T, idHex(NEAR), 'verify-closer');
+    am.axonRoles.delete(T);
+    am._rootBeacons.set(T, { root: idHex(NEAR), at: clock.t, exp: clock.t + 90_000, ...beacon });
+    queue.length = 0; sends = 0;          // count only the message under test, not demote()'s own SUB
+    const type = { SUB: 'pubsub:sub', PUB: 'pubsub:pub', KILL: 'pubsub:kill' }[verb];
+    queue.push({ type, payload: payloadOf() });
+    let steps = 0, capped = false;
+    while (queue.length) {
+      if (++steps > 200) { capped = true; break; }
+      const j = queue.shift();
+      const h = handlers.get(j.type);
+      if (h) { try { await h(j.payload, { isTerminal: true, targetId: SELF, fromId: idHex(SELF) }); } catch { /* counted below */ } }
+    }
+    check(`9 ${verb}: re-entry is FINITE (settled in ${steps} steps, cap 200)`, !capped);
+    check(`9 ${verb}: bounded sends (${sends} ≤ 3)`, sends <= 3, `sends=${sends}`);
+    check(`9 ${verb}: hold-reentry logged`, logs.some((l) => l.ev === 'pubsub:hold-reentry'));
+    check(`9 ${verb}: no root reclaimed while held`, !am.axonRoles.get(T)?.isRoot);
+    check(`9 ${verb}: the record naming the unreachable held root was dropped`, !am._rootBeacons.get(T));
+  }
+  {
+    const author = await createAuthorIdentity();
+    const kill = await buildKill({ topicId: idHex(T), msgId: 'c'.repeat(64), seq: 1, identity: author });
+    await reentry('SUB',  () => ({ topicId: idHex(T), via: [], subscriberId: idHex((0x80n << 248n) | 0x9999n), since: 0 }), { verified: true });
+    await reentry('PUB',  () => ({ topicId: idHex(T), via: [], json: '{"m":1}' }), {});
+    await reentry('KILL', () => ({ topicId: idHex(T), via: [], kill }), {});
   }
 
   console.log(`\n${passed} passed, ${failed} failed`);

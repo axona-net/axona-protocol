@@ -19,6 +19,9 @@ import {
   METRICS_PUB_MS, METRICS_COALESCE_MS,
 } from './constants.js';
 import { idHex, idBig, lc, isHexId } from './ids.js';
+// A held node treats the same message returning within this window as proof
+// the held root is unreachable from here (see _holdIntercept, 4.102.0).
+const HOLD_REENTRY_MS = 10_000;
 import { verifyEnvelope, checkFreshness } from './envelope.js';
 import { verifyKill } from './kill.js';
 import { deriveTopicIdBig } from './post.js';
@@ -168,27 +171,51 @@ export const wireHandlersMethods = {
 
   // ── SUBSCRIBE ────────────────────────────────────────────────────────
   // STEP-DOWN HOLD INTERCEPT (4.102.0). Runs FIRST in the SUB/PUB/KILL
-  // handlers, before any closer-root correction, so the hold's live-channel
-  // rule cannot be bypassed by an older gate that accepts a fresh beacon (Aster
-  // dced6098). Applies to a BARE message (no via: this node is its terminus) on
-  // a held topic this node is not root of:
+  // handlers, before any closer-root correction, so the hold cannot be
+  // bypassed (Aster dced6098). Applies to a BARE message (no via: this node is
+  // its terminus) on a held topic this node is not root of:
   //   · PUB and KILL — whether or not a role exists. A held node does not ingest
   //     a bare publish or apply a bare kill as if it owned the topic.
   //   · SUB — only with no role. With a role the node seats the subscriber as an
   //     ordinary non-root relay, which claims nothing; promote() is held anyway.
-  // Target: the held root, on the same evidence the existing closer-root gate
-  // for that verb accepts (holdTarget); otherwise nothing is sent, the message
-  // is logged undeliverable, and the sender's retry/renewal carries it.
-  // A send pinned to an unreachable root falls back to topic-id routing, which
-  // returns here — so the no-channel case MUST NOT send. Returns true if consumed.
+  // Target: the held root on the same evidence the existing gate for that verb
+  // accepts (holdTarget). Otherwise nothing is sent; the message is logged
+  // undeliverable and the sender's retry/renewal carries it.
+  //
+  // RE-ENTRY BOUND (Aster 5d38ca23). A send pinned to a root that is in fact
+  // unreachable falls back to topic-id routing and lands HERE again; _reroute
+  // pops the via and the same message re-enters as bare. A failed-verdict
+  // deletion does not bound that: a delivery back to self is 'consumed', not
+  // 'failed'. So the RETURN itself is the evidence: the same message back at
+  // this held node within HOLD_REENTRY_MS means the held root is unreachable
+  // from here. The beacon record naming it is dropped (no gate accepts it
+  // again), the return is logged, and nothing is sent. One send per message
+  // per window, then held.
   _holdIntercept(topicBig, type, payload) {
     if (Array.isArray(payload.via) && payload.via.length) return false;
-    if (!this._rootClaim.holdFor(topicBig)) return false;
+    const h = this._rootClaim.holdFor(topicBig);
+    if (!h) return false;
     const role = this.axonRoles.get(topicBig);
     if (role?.isRoot) return false;
     if (type === T.SUB && role) return false;
+    const ident = type === T.SUB ? payload.subscriberId
+                : type === T.KILL ? payload.kill?.msgId
+                : (payload.attemptId ?? payload.json);
+    const key = `${type}|${idHex(topicBig)}|${ident}`;
+    const seen = (this._holdSeen ??= new Map());
+    const now = this._now();
+    const last = seen.get(key);
+    if (last !== undefined && now - last < HOLD_REENTRY_MS) {
+      const b = this._rootBeacons.get(topicBig);
+      if (b && lc(b.root) === h.to) this._rootBeacons.delete(topicBig);
+      this._log('info', 'hold-reentry', { topic: idHex(topicBig).slice(0, 12), type, to: h.to.slice(0, 10) });
+      this._undeliverable(type, topicBig, 'step-down-hold');
+      return true;
+    }
     const to = this._rootClaim.holdTarget(topicBig, { requireReachable: type === T.SUB });
     if (!to) { this._undeliverable(type, topicBig, 'step-down-hold'); return true; }
+    seen.set(key, now);
+    if (seen.size > 1000) for (const [k, t] of seen) { if (now - t >= HOLD_REENTRY_MS) seen.delete(k); }
     if (type === T.SUB) this._send(T.SUB, { ...payload, via: [to] });
     else this._forwardToRoot(topicBig, type, payload, to);
     return true;

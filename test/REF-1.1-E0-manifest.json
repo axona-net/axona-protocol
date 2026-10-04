@@ -5,7 +5,7 @@
     "onNotification",
     "onRoutedMessage"
   ],
-  "treeHash": "cb936cd98a8ecf06df1eb754aa0300e631519641",
+  "treeHash": "b0410d7c02478a100e6f04ee5ce02579da545987",
   "filesScanned": 81,
   "summary": {
     "migration-target": 39,
@@ -187,7 +187,7 @@
     },
     {
       "file": "pubsub/wireHandlers.js",
-      "line": 45,
+      "line": 48,
       "callee": "registerFrame",
       "receiver": "this._frameDoor",
       "wire": "pubsub:sub",
@@ -196,7 +196,7 @@
     },
     {
       "file": "pubsub/wireHandlers.js",
-      "line": 46,
+      "line": 49,
       "callee": "registerFrame",
       "receiver": "this._frameDoor",
       "wire": "pubsub:unsub",
@@ -205,7 +205,7 @@
     },
     {
       "file": "pubsub/wireHandlers.js",
-      "line": 47,
+      "line": 50,
       "callee": "registerFrame",
       "receiver": "this._frameDoor",
       "wire": "pubsub:pub",
@@ -214,7 +214,7 @@
     },
     {
       "file": "pubsub/wireHandlers.js",
-      "line": 48,
+      "line": 51,
       "callee": "registerFrame",
       "receiver": "this._frameDoor",
       "wire": "pubsub:deliver",
@@ -223,7 +223,7 @@
     },
     {
       "file": "pubsub/wireHandlers.js",
-      "line": 49,
+      "line": 52,
       "callee": "registerFrame",
       "receiver": "this._frameDoor",
       "wire": "pubsub:adopt",
@@ -232,7 +232,7 @@
     },
     {
       "file": "pubsub/wireHandlers.js",
-      "line": 50,
+      "line": 53,
       "callee": "registerFrame",
       "receiver": "this._frameDoor",
       "wire": "pubsub:pullup",
@@ -241,7 +241,7 @@
     },
     {
       "file": "pubsub/wireHandlers.js",
-      "line": 51,
+      "line": 54,
       "callee": "registerFrame",
       "receiver": "this._frameDoor",
       "wire": "pubsub:handoffack",
@@ -250,7 +250,7 @@
     },
     {
       "file": "pubsub/wireHandlers.js",
-      "line": 52,
+      "line": 55,
       "callee": "registerFrame",
       "receiver": "this._frameDoor",
       "wire": "pubsub:replayup",
@@ -259,7 +259,7 @@
     },
     {
       "file": "pubsub/wireHandlers.js",
-      "line": 53,
+      "line": 56,
       "callee": "registerFrame",
       "receiver": "this._frameDoor",
       "wire": "pubsub:handoff",
@@ -268,7 +268,7 @@
     },
     {
       "file": "pubsub/wireHandlers.js",
-      "line": 54,
+      "line": 57,
       "callee": "registerFrame",
       "receiver": "this._frameDoor",
       "wire": "pubsub:replicate",
@@ -277,7 +277,7 @@
     },
     {
       "file": "pubsub/wireHandlers.js",
-      "line": 55,
+      "line": 58,
       "callee": "registerFrame",
       "receiver": "this._frameDoor",
       "wire": "pubsub:kill",
@@ -286,7 +286,7 @@
     },
     {
       "file": "pubsub/wireHandlers.js",
-      "line": 56,
+      "line": 59,
       "callee": "registerFrame",
       "receiver": "this._frameDoor",
       "wire": "pubsub:ingestack",
@@ -295,7 +295,7 @@
     },
     {
       "file": "pubsub/wireHandlers.js",
-      "line": 57,
+      "line": 60,
       "callee": "registerFrame",
       "receiver": "this._frameDoor",
       "wire": "pubsub:receiptprobe",
@@ -304,7 +304,7 @@
     },
     {
       "file": "pubsub/wireHandlers.js",
-      "line": 58,
+      "line": 61,
       "callee": "registerFrame",
       "receiver": "this._frameDoor",
       "wire": "pubsub:receiptnack",
@@ -313,7 +313,7 @@
     },
     {
       "file": "pubsub/wireHandlers.js",
-      "line": 59,
+      "line": 62,
       "callee": "registerFrame",
       "receiver": "this._frameDoor",
       "wire": "pubsub:touch",
@@ -322,7 +322,7 @@
     },
     {
       "file": "pubsub/wireHandlers.js",
-      "line": 60,
+      "line": 63,
       "callee": "registerFrame",
       "receiver": "this._frameDoor",
       "wire": "pubsub:pull",
@@ -331,7 +331,7 @@
     },
     {
       "file": "pubsub/wireHandlers.js",
-      "line": 61,
+      "line": 64,
       "callee": "registerFrame",
       "receiver": "this._frameDoor",
       "wire": "pubsub:pullresp",
@@ -340,7 +340,7 @@
     },
     {
       "file": "pubsub/wireHandlers.js",
-      "line": 62,
+      "line": 65,
       "callee": "registerFrame",
       "receiver": "this._frameDoor",
       "wire": "pubsub:rootbeacon",
@@ -349,7 +349,7 @@
     },
     {
       "file": "pubsub/wireHandlers.js",
-      "line": 63,
+      "line": 66,
       "callee": "registerFrame",
       "receiver": "this._frameDoor",
       "wire": "pubsub:metricson",
