@@ -13,10 +13,15 @@
 //      produces a mark with cause 'unknown'.
 //   4. The table exists on a fresh NeuronNode before any death, so a foreign
 //      died-handler wired first does not install a bare Set over it.
+//   5. A known cause (the web transport's 4.76.3 close reason) is forwarded
+//      into the mark, and a later no-information add() for the same death
+//      keeps it (Aster fb79c09e).
+//   6. A bare Set installed over the table by another owner keeps working:
+//      membership is recorded, nothing throws, no mark exists.
 //
-// With the row-1 change removed (a bare Set), checks 1, 3 and 4 fail: a Set
-// has no get(), no mark(), and a fresh node has no table. Checks 2 pass with
-// either shape, which is the "no behaviour change" half of the fence.
+// With the row-1 wiring removed (a bare Set), checks 1, 4 and 5 fail: a Set
+// has no get(), no mark(), and a fresh node has no table. Checks 2 and 6 pass
+// with either shape, which is the "no behaviour change" half of the fence.
 //
 // Run: node test/fence_dead_mark_reason.mjs
 // =====================================================================
@@ -85,17 +90,49 @@ async function makePeer(net, domain, lat, lng, identity = null) {
   check('2 re-bind deletes the mark', !a.node._deadPeers.has(b.big));
   check('2 after re-bind greedy next hop toward b is b', a.peer._greedyNextHopToward(b.big) === b.big);
 
-  // 3. The Set-compatible writer.
+  // 3. The Set-compatible writer, and how it composes with mark() in both
+  //    orders (Aster fb79c09e): add() is membership only and never
+  //    overwrites a known mark; mark() always records the latest cause.
   const t = new DeadPeers();
   t.add(7n);
   check('3 add(id) marks with cause unknown', t.get(7n)?.cause === 'unknown' && t.get(7n)?.kind === 'loss');
   check('3 add(id) counts as one entry', t.size === 1 && t.has(7n));
   t.mark(7n, { cause: 'pong-timeout' });
-  check('3 mark() replaces the entry, latest cause wins', t.get(7n)?.cause === 'pong-timeout' && t.size === 1);
+  check('3 add then mark: mark() replaces the entry, latest cause wins', t.get(7n)?.cause === 'pong-timeout' && t.size === 1);
   t.mark(8n, { kind: 'policy', cause: 'identity', at: 5 });
   check('3 mark() keeps an explicit kind and at', t.get(8n)?.kind === 'policy' && t.get(8n)?.at === 5);
+  t.add(8n);
+  check('3 mark then add: add() preserves the known cause', t.get(8n)?.cause === 'identity');
+  check('3 mark then add: add() preserves kind and at', t.get(8n)?.kind === 'policy' && t.get(8n)?.at === 5);
+  check('3 mark then add: still one entry for the id', t.size === 2);
   t.delete(7n);
   check('3 delete() behaves as the Set did', !t.has(7n) && t.size === 1);
+
+  // 5. The kernel's onPeerDied forwards a KNOWN cause (the web transport's
+  //    4.76.3 close reason) into the mark. The sim transport never supplies
+  //    one, so invoke the registered died-handlers with a reason directly.
+  const c = await makePeer(net, domain, 40.2, -74.2);
+  await a.transport.openConnection(c.hex); await wait(15);
+  check('5 setup: c bound at a, not marked', a.transport.isConnected(c.big) && !a.node._deadPeers.has(c.big));
+  for (const h of a.transport._diedHandlers) h(c.big, 'pong-timeout');
+  check('5 known cause forwarded into the mark', a.node._deadPeers.get?.(c.big)?.cause === 'pong-timeout', String(a.node._deadPeers.get?.(c.big)?.cause));
+  check('5 kind is loss on the known-cause path', a.node._deadPeers.get?.(c.big)?.kind === 'loss');
+  // The bridge's legacy add() for the SAME death, arriving after the kernel's
+  // mark, does not erase the cause.
+  a.node._deadPeers.add(c.big);
+  check('5 a later no-information add() keeps the known cause', a.node._deadPeers.get?.(c.big)?.cause === 'pong-timeout');
+
+  // 6. Foreign-Set fallback: a bare Set installed over the table by some
+  //    other owner keeps working; the id is recorded, nothing throws, and
+  //    the reason lives only in the peer-died-evicted log line.
+  a.node._deadPeers = new Set();
+  let threw = false;
+  try { for (const h of a.transport._diedHandlers) h(c.big, 'send-fail'); } catch { threw = true; }
+  check('6 foreign Set: handler does not throw', !threw);
+  check('6 foreign Set: id recorded by membership', a.node._deadPeers.has(c.big));
+  check('6 foreign Set: no mark (Set has no get)', typeof a.node._deadPeers.get !== 'function');
+  a.node._deadPeers = new DeadPeers();   // restore for teardown
+  await c.transport.stop().catch(() => {});
 
   await a.peer.stop().catch(() => {});
   await b2.peer.stop().catch(() => {});

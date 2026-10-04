@@ -39,10 +39,16 @@ export class DeadPeers extends Map {
 
   /**
    * Set-compatible writer for consumers that predate the mark (the bridge).
+   * MEMBERSHIP ONLY: an id already marked keeps its mark. The bridge's
+   * handler and the kernel's fire for the SAME death, in either order; the
+   * kernel's carries the cause and the bridge's carries nothing, so a
+   * no-information add must never overwrite a known cause or move `at`
+   * (Aster fb79c09e). A mark persists until the peer re-binds, so there is
+   * no second death to record under the same mark.
    * @param {bigint} id
    * @returns {this}
    */
   add(id) {
-    return this.mark(id);
+    return this.has(id) ? this : this.mark(id);
   }
 }
