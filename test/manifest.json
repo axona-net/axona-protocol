@@ -1075,6 +1075,11 @@
       "file": "fence_no_anneal_below_cap.mjs",
       "class": "default",
       "note": "Hold-and-Fill v0.5/v0.7 (axona-docs 4334504, 95c2ff4) row 6: the kernel anneal (_tryAnneal, called from the transit site) is REMOVED, not patched: it deleted its victim and closed the channel before trying a candidate through the bound-only openConnection, so under lookup load it pruned below cap and replaced nothing (Aster 2552a639, Vega 127cb170). _addByVitality below cap is an admit of a bound candidate; AT CAP it is skipped BEFORE the open (design case 36; Aster 76bc93dd item 5, Vega 79ccdf05 row 5): no openConnection, no delete, no insert, no closeConnection, vitality-swap-skipped counted and logged, the low-vitality incumbent stays, a bound candidate stays bound. The temperature still cools. Ships with rows 4 and 5 in the accounting release."
+    },
+    {
+      "file": "fence_hold_and_fill_integration.mjs",
+      "class": "default",
+      "note": "Hold-and-Fill Phase 1 (axona-docs v0.9 de10fd4), the COMBINED PIN hold-and-fill-phase1: rows 1, 2b, 3, 4, 5, 6, 10+13 together. The three integration obligations named for the combined review: A. at cap with the gate armed, a grace close blocked by a duty keeps the channel and writes NO mark; once the duty ends the fire closes it VOLUNTARILY (no onPeerDied, no loss mark, identity still ELIGIBLE); overflow closes only the oldest PERMITTED pending close and reports all-blocked otherwise; an involuntary loss still marks. B. closeConnection on the web transport unbinds first, then the ledger record goes CLOSING and stays CHARGED until the PC reports 'closed'; with enforce on at C_phys an allocation during CLOSING is refused and the first 'closed' lets the next through; no onPeerDied on the voluntary close. C. design case 61 RECORDED as an observation (row 15 NOT STARTED): two below-cap _addByVitality calls both insert, size 5 at cap 4, as on 270835d; the row-6 half at cap opens nothing and inserts nothing. Rewritten when row 15 lands."
     }
   ]
 }

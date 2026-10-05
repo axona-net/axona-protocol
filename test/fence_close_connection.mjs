@@ -17,8 +17,12 @@
 //      is one of the classified rows of the design's boundary table (v0.5
 //      "The boundary"): peer-leaving, _clearGracePending, the gate's grace
 //      close, the gate's overflow close, the gate-swap victim,
-//      _addByVitality's victim, _tryAnneal's victim, _evictAndReplace's dead
-//      synapse. A new caller fails this check until it is classified.
+//      _evictAndReplace's dead synapse. A new caller fails this check until
+//      it is classified. As read at 270835d the list also held
+//      _addByVitality's victim and _tryAnneal's victim (eight sites); row 6
+//      (0e335d5) removed the anneal and the at-cap swap, so on the combined
+//      tree (hold-and-fill-phase1) there are six sites and those two callers
+//      are REQUIRED ABSENT: their return fails this check too.
 //
 // With the row-5 change reverted (unbind only), checks 1 fail: the mesh
 // still has the peer and the PC is open.
@@ -98,13 +102,14 @@ globalThis.RTCPeerConnection = FakePC;
     // classify each site by the nearest enclosing method name above it
     const methodOf = (ln) => { for (let i = ln - 1; i >= 0; i--) { const m = lines[i].match(/^  (?:async )?([A-Za-z_]\w*)\s*\(.*\)\s*\{\s*$/); if (m) return m[1]; } return '?'; };
     const found = sites.map(ln => methodOf(ln));
-    const allowed = ['_clearGracePending', '_seedSynaptomeWithSponsor', '_admitOrImprove', '_addByVitality', '_tryAnneal', '_evictAndReplace', '_installRoutingHandlers'];
+    const allowed = ['_clearGracePending', '_seedSynaptomeWithSponsor', '_admitOrImprove', '_evictAndReplace', '_installRoutingHandlers'];
     // `_installRoutingHandlers` holds the peer-leaving notification handler
     // (AxonaPeer.js ~:888): the departing peer announced itself; involuntary.
     const unknown = found.filter(m => !allowed.includes(m));
     check('5 every closeConnection caller is a classified row', unknown.length === 0, `unclassified: ${JSON.stringify(unknown)} all: ${JSON.stringify(found)}`);
-    check('5 the classified callers are all still present (the table is the code)', ['_clearGracePending', '_seedSynaptomeWithSponsor', '_admitOrImprove', '_addByVitality', '_tryAnneal', '_evictAndReplace'].every(m => found.includes(m)), JSON.stringify(found));
-    check('5 site count as read at 270835d: eight', sites.length === 8, String(sites.length) + ' at lines ' + sites.join(','));
+    check('5 the classified callers are all still present (the table is the code)', ['_clearGracePending', '_seedSynaptomeWithSponsor', '_admitOrImprove', '_evictAndReplace', '_installRoutingHandlers'].every(m => found.includes(m)), JSON.stringify(found));
+    check('5 row 6 callers are absent: no _addByVitality victim, no _tryAnneal', !found.includes('_addByVitality') && !found.includes('_tryAnneal') && !/_tryAnneal\s*\(/.test(src), JSON.stringify(found));
+    check('5 site count on the combined tree: six (eight at 270835d minus row 6)', sites.length === 6, String(sites.length) + ' at lines ' + sites.join(','));
   }
 
   console.log(`\n${passed} passed, ${failed} failed`);
