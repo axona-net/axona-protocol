@@ -1060,6 +1060,11 @@
       "file": "fence_channel_ledger.mjs",
       "class": "default",
       "note": "Hold-and-Fill v0.5/v0.7 (axona-docs 4334504, 95c2ff4) row 3: the channel and peer records, reduced. One record per RTCPeerConnection keyed by the mesh's incarnation tag (ALLOCATED at PC construction, NEGOTIATING at the first frame, OPEN at dc-open, CLOSING at _retire with the peer pointer cleared in the same step, GONE at the transport's 'closed' or by escalation after closeEscalateMs), one per bound identity (bindPeer/unbindPeer). Counts: chan(all) < C_phys, inbound-unbound < C_inbound, outbound-pending < P_pending, checked BEFORE the PC exists. Default enforce:false counts would-be refusals (rollout step 2's measurement); enforce:true refuses an outbound dial or an inbound offer with nothing built. Part A is the module; part B drives the real MeshManager with a fake RTCPeerConnection. Not a live WebRTC test."
+    },
+    {
+      "file": "fence_duty_gate.mjs",
+      "class": "default",
+      "note": "Hold-and-Fill v0.7 (axona-docs 95c2ff4) row 4: the duty gate. AxonaPeer.mayRetire(id) reads AxonaManager.obligationsOf(hex): installed roles (upstream, principal, replica, seated subscriber, handoff party in flight) and QUEUED ingest dependencies (a REPLICATE waiting in repairPlane's ingest queue pins its principal from enqueue through the end of fn(); REPLAY_UP declares none; an overflow drop pins nothing; every _ingestEnqueue caller declares). Consulted by the admission gate's grace close (blocked → refuse-grace-blocked, channel kept, timer re-armed), its overflow close and its swap victim (swap-blocked). Not by involuntary loss, stop() or leave(). Fails closed when the reader throws. With mayRetire or its call sites removed, parts 4 and 5 fail."
     }
   ]
 }
