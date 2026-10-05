@@ -8,10 +8,13 @@
 // RTCPeerConnection and checks that every lifecycle event lands in the
 // ledger at the right moment: ALLOCATED at PC construction, NEGOTIATING at
 // the first frame, OPEN at dc-open, CLOSING at _retire, GONE at the
-// transport's 'closed' or by escalation; that the peer record follows
-// bindPeer/unbindPeer; that with enforce off (the default) nothing is
-// refused and the would-refuse counters move; and that with enforce on an
-// outbound dial and an inbound offer are refused with no PC built.
+// transport's 'closed' and ONLY there (escalation forces a second close and
+// releases nothing, Aster 09f59626 R3-A); that the peer record follows
+// bindPeer/unbindPeer including the duplicate-resolution branch (R3-B) and
+// full retire→unbind→closed churn (R3-C); that with enforce off (the
+// default) nothing is refused and the would-refuse counters move; and that
+// with enforce on an outbound dial and an inbound offer are refused with no
+// PC built.
 //
 // With the ledger removed from mesh.js (hooks deleted), part B fails; part
 // A is the module alone. Neither part is a live WebRTC test.
@@ -80,20 +83,62 @@ console.log('fence_channel_ledger: row 3 — channel and peer records');
   // case 42: unprompted close of an OPEN channel → GONE in one step, prompted=false
   L.allocate('t2', 'c2', 'in'); L.negotiating('t2'); L.open('t2'); L.bind('c2', 'cc'.repeat(33));
   const u = L.gone('t2');
-  check('A case 42: unprompted gone releases and clears the pointer', u?.prompted === false && L.chanAll() === 0 && L.peer('cc'.repeat(33))?.t === null);
+  check('A case 42: unprompted gone releases and drops the identity from the bound set', u?.prompted === false && L.chanAll() === 0 && L.peer('cc'.repeat(33)) === null);
 
-  // escalation: CLOSING with no 'closed' from the transport
-  L.allocate('t3', 'c3', 'out'); L.negotiating('t3'); L.open('t3');
-  L.closing('t3', 'silent');
+  // escalation (R3-A): CLOSING with no 'closed' from the transport. The timer
+  // forces a second close through onEscalate and RELEASES NOTHING; capacity
+  // waits for the confirmation.
+  const escalated = [];
+  const LE = new ChannelLedger({ cPhys: 1, enforce: true, closeEscalateMs: 50, now: () => now, onEscalate: (t, m) => escalated.push([t, m]),
+    setTimeout: (fn, ms) => { timers.push({ fn, at: now + ms }); return timers.length; }, clearTimeout: (id) => { if (timers[id - 1]) timers[id - 1].fn = null; } });
+  LE.allocate('t3', 'c3', 'out'); LE.negotiating('t3'); LE.open('t3');
+  LE.closing('t3', 'silent');
   now += 49; fire();
-  check('A escalate: before closeEscalateMs the record is still CLOSING', L.record('t3')?.state === CHAN.CLOSING);
+  check('A escalate: before closeEscalateMs the record is CLOSING, nothing escalated', LE.record('t3')?.state === CHAN.CLOSING && escalated.length === 0);
   now += 2; fire();
-  check('A escalate: after closeEscalateMs the record is GONE and counted', L.record('t3') === null && L.stats().closeEscalated === 1);
+  check('A escalate: onEscalate called once with (t, meshId)', escalated.length === 1 && escalated[0][0] === 't3' && escalated[0][1] === 'c3');
+  check('A escalate: the record STAYS CLOSING and charged; closeEscalated 1', LE.record('t3')?.state === CHAN.CLOSING && LE.chanAll() === 1 && LE.stats().closeEscalated === 1);
+  check('A escalate: an unconfirmed close still refuses at cPhys (nothing released on a timer)', LE.mayAllocate('out').ok === false && LE.mayAllocate('out').why === 'phys');
+  check('A escalate: oldestClosingMs reports the wait', LE.stats().oldestClosingMs >= 51);
+  LE.gone('t3');
+  check('A escalate then confirmed close: released now', LE.chanAll() === 0 && LE.mayAllocate('out').ok === true);
+  // a throwing escalation callback is logged, not propagated
+  const LT = new ChannelLedger({ closeEscalateMs: 10, now: () => now, onEscalate: () => { throw new Error('boom'); },
+    setTimeout: (fn, ms) => { timers.push({ fn, at: now + ms }); return timers.length; }, clearTimeout: () => {} });
+  LT.allocate('t9', 'c9', 'out'); LT.closing('t9');
+  let threw = false; now += 11; try { fire(); } catch { threw = true; }
+  check('A escalate: a throwing onEscalate does not propagate; record still CLOSING', !threw && LT.record('t9')?.state === CHAN.CLOSING && LT.stats().closeEscalated === 1);
+  // zero semantics: closeEscalateMs:0 is OFF, not the default
+  const LZ = new ChannelLedger({ closeEscalateMs: 0 });
+  LZ.allocate('z1', 'cz', 'out'); LZ.closing('z1');
+  check('A closeEscalateMs:0 means off: stored as 0, no timer armed', LZ.closeEscalateMs === 0 && LZ.record('z1')?.escalateTimer === null);
+  check('A numeric options: finite values taken as given, others default', new ChannelLedger({ cPhys: 'x', cInbound: 0 }).cPhys === LEDGER_DEFAULTS.cPhys && new ChannelLedger({ cInbound: 0 }).cInbound === 1 && new ChannelLedger({ cPhys: 7 }).cPhys === 7);
 
   // stale events
   const before = L.stats().staleEvent;
   L.gone('t3'); L.open('nope');
   check('A stale events are counted, not applied', L.stats().staleEvent === before + 2);
+
+  // churn (R3-C): retire → unbind → closed leaves no peer record behind
+  L.allocate('t6', 'c6', 'out'); L.negotiating('t6'); L.open('t6'); L.bind('c6', 'ee'.repeat(33));
+  check('A churn: bound', L.stats().boundPeers === 1 && L.stats().peersPointing === 1);
+  L.closing('t6', 'retire');          // token leaves the current map here
+  L.unbind('c6');                     // onPeerLost → unbindPeer arrives AFTER closing
+  check('A churn: unbind after closing still finds the channel; bound set empty', L.stats().boundPeers === 0 && L.record('t6')?.nodeId === null);
+  L.gone('t6');
+  check('A churn: all 0, boundPeers 0', L.chanAll() === 0 && L.stats().boundPeers === 0);
+  // gone without an unbind (transport never called unbindPeer) also drops the record
+  L.allocate('t7', 'c7', 'out'); L.open('t7'); L.bind('c7', 'ff'.repeat(33));
+  L.gone('t7');
+  check('A churn: gone of a bound channel with no other binding drops the record', L.stats().boundPeers === 0);
+  // two channels binding one identity: unbind of one keeps the record on the other
+  L.allocate('t8', 'c8', 'out'); L.open('t8'); L.bind('c8', 'ab'.repeat(33));
+  L.allocate('t8b', 'c8b', 'in'); L.open('t8b'); L.bind('c8b', 'ab'.repeat(33));
+  check('A two bindings: pointer at the newest', L.peer('ab'.repeat(33))?.t === 't8b');
+  L.closing('t8b'); L.unbind('c8b'); L.gone('t8b');
+  check('A two bindings: after the newest goes, the record re-points to the survivor', L.peer('ab'.repeat(33))?.t === 't8' && L.stats().boundPeers === 1);
+  L.closing('t8'); L.unbind('c8'); L.gone('t8');
+  check('A two bindings: after both go, no record', L.stats().boundPeers === 0 && L.chanAll() === 0);
 
   // case 4 shape: an old channel CLOSING beside a new one to the same identity
   L.allocate('t4', 'c4', 'out'); L.negotiating('t4'); L.open('t4'); L.bind('c4', 'dd'.repeat(33));
@@ -102,13 +147,13 @@ console.log('fence_channel_ledger: row 3 — channel and peer records');
   check('A case 4: both channels counted; the peer points at the new one', L.chanAll() === 2 && L.peer('dd'.repeat(33))?.t === 't5');
   L.gone('t4');
   check('A case 4: gone(t_old) releases only t_old; the pointer is untouched', L.chanAll() === 1 && L.peer('dd'.repeat(33))?.t === 't5');
-  L.dispose();
+  L.dispose(); LE.dispose(); LT.dispose(); LZ.dispose();
 }
 
 // ── Part B: the real MeshManager with a fake RTCPeerConnection ────────
 class FakeDC { constructor() { this.readyState = 'connecting'; this.onopen = null; this.onclose = null; this.onmessage = null; this.onerror = null; } send() {} close() { this.readyState = 'closed'; } }
 class FakePC {
-  constructor() { FakePC.instances.push(this); this.connectionState = 'new'; this.iceConnectionState = 'new'; this.remoteDescription = null; this.localDescription = null; this.onconnectionstatechange = null; this.oniceconnectionstatechange = null; this.onicecandidate = null; this.ondatachannel = null; this._dc = null; }
+  constructor() { FakePC.instances.push(this); this.connectionState = 'new'; this.iceConnectionState = 'new'; this.remoteDescription = null; this.localDescription = null; this.onconnectionstatechange = null; this.oniceconnectionstatechange = null; this.onicecandidate = null; this.ondatachannel = null; this._dc = null; this.closeCalls = 0; this.throwOnSecondClose = false; }
   createDataChannel() { this._dc = new FakeDC(); return this._dc; }
   async createOffer() { return { type: 'offer', sdp: 'v=0 offer' }; }
   async createAnswer() { return { type: 'answer', sdp: 'v=0 answer' }; }
@@ -116,7 +161,8 @@ class FakePC {
   async setRemoteDescription(d) { this.remoteDescription = d; }
   async addIceCandidate() {}
   async getStats() { return new Map(); }
-  close() { this.connectionState = 'closed'; if (FakePC.fireClosedOnClose) queueMicrotask(() => { try { this.onconnectionstatechange?.(); } catch {} }); }
+  close() { this.closeCalls++; if (this.throwOnSecondClose && this.closeCalls >= 2) throw new Error('close threw'); this.connectionState = 'closed'; if (FakePC.fireClosedOnClose) queueMicrotask(() => { try { this.onconnectionstatechange?.(); } catch {} }); }
+  fireClosed() { this.connectionState = 'closed'; this.onconnectionstatechange?.(); }
 }
 FakePC.instances = []; FakePC.fireClosedOnClose = true;
 globalThis.RTCPeerConnection = FakePC;
@@ -162,17 +208,38 @@ globalThis.RTCPeerConnection = FakePC;
     mesh.dispose();
   }
 
-  // B3: escalation when the PC never reports 'closed'
+  // B3: escalation when the PC never reports 'closed' (R3-A): a second
+  // pc.close() is forced, the record stays CLOSING and charged, and only the
+  // transport's 'closed' releases it.
   {
     FakePC.fireClosedOnClose = false;
     const mesh = mkMesh({ closeEscalateMs: 30 });
     await mesh._initiateTo('c3'); await tick();
-    mesh._peers.get('c3').dc.onopen();
+    const st = mesh._peers.get('c3'); const pc = st.pc;
+    st.dc.onopen();
     mesh._retire('c3', 'silent');
     await new Promise(r => setTimeout(r, 10));
-    check('B3 before escalation: CLOSING held', mesh.ledgerStats().byState.CLOSING === 1);
+    check('B3 before escalation: CLOSING held, one close() so far', mesh.ledgerStats().byState.CLOSING === 1 && pc.closeCalls === 1);
     await new Promise(r => setTimeout(r, 40));
-    check('B3 escalation released the record and counted it', mesh.ledgerStats().all === 0 && mesh.ledgerStats().closeEscalated === 1);
+    const s = mesh.ledgerStats();
+    check('B3 escalation forced a second pc.close()', pc.closeCalls === 2);
+    check('B3 escalation released NOTHING: still CLOSING, all 1, counted', s.byState.CLOSING === 1 && s.all === 1 && s.closeEscalated === 1);
+    pc.fireClosed();
+    check('B3 the transport\'s closed releases it', mesh.ledgerStats().all === 0 && mesh.ledgerStats().goneTotal === 1);
+    mesh.dispose();
+  }
+  // B3b: the forced close throws — logged, record still CLOSING; confirmed close later releases
+  {
+    FakePC.fireClosedOnClose = false;
+    const mesh = mkMesh({ closeEscalateMs: 20 });
+    await mesh._initiateTo('c3b'); await tick();
+    const st = mesh._peers.get('c3b'); const pc = st.pc; pc.throwOnSecondClose = true;
+    st.dc.onopen();
+    mesh._retire('c3b', 'silent');
+    await new Promise(r => setTimeout(r, 40));
+    check('B3b throwing forced close: counted, still CLOSING, nothing released', pc.closeCalls === 2 && mesh.ledgerStats().byState.CLOSING === 1 && mesh.ledgerStats().closeEscalated === 1);
+    pc.fireClosed();
+    check('B3b confirmed close releases', mesh.ledgerStats().all === 0);
     FakePC.fireClosedOnClose = true;
     mesh.dispose();
   }
@@ -221,6 +288,53 @@ globalThis.RTCPeerConnection = FakePC;
     check('B7 bindPeer → ledger peer record', mesh._ledger.peer('ef'.repeat(33))?.t === mesh._peers.get('g1').inc);
     t.unbindPeer('g1');
     check('B7 unbindPeer → peer record dropped (no other channel)', mesh._ledger.peer('ef'.repeat(33)) === null);
+    mesh.dispose();
+  }
+
+  // B8: duplicate resolution through the REAL transport (R3-B): the ledger's
+  // pointer moves to the winner in the dedup transaction, before the loser's
+  // teardown, in both winner directions and in the no-key case.
+  const dedupCase = async (label, keyOld, keyNew, expectWinner) => {
+    const mesh = mkMesh({ closeEscalateMs: 0 });
+    const t = new WebRTCTransport({ mesh, log: () => {} });
+    await mesh._initiateTo('h1'); await mesh._initiateTo('h2'); await tick();
+    mesh._peers.get('h1').dc.onopen(); mesh._peers.get('h2').dc.onopen();
+    const incOld = mesh._peers.get('h1').inc, incNew = mesh._peers.get('h2').inc;
+    const hex = 'cd'.repeat(33); const nid = BigInt('0x' + hex);
+    t.bindPeer(nid, 'h1', keyOld);
+    t.bindPeer(nid, 'h2', keyNew);          // dedup runs here; loser is disconnected (closing)
+    const winner = expectWinner === 'new' ? 'h2' : 'h1';
+    const winInc = winner === 'h2' ? incNew : incOld;
+    check(`${label}: transport winner is ${winner}`, t.meshIdFor(nid) === winner);
+    check(`${label}: ledger pointer at the winner before the loser's close`, mesh._ledger.peer(hex)?.t === winInc, String(mesh._ledger.peer(hex)?.t));
+    await tick(); await tick();              // the loser's fake PC reports 'closed'
+    const s = mesh.ledgerStats();
+    check(`${label}: after the loser's close: one OPEN bound channel, unboundOpen 0, peersPointing 1, boundPeers 1`, s.all === 1 && s.byState.OPEN === 1 && s.unboundOpen === 0 && s.peersPointing === 1 && s.boundPeers === 1, JSON.stringify(s));
+    check(`${label}: winner record carries the identity`, mesh._ledger.record(winInc)?.nodeId === hex);
+    mesh.dispose();
+  };
+  await dedupCase('B8a new wins (smaller key)', 'zz', 'aa', 'new');
+  await dedupCase('B8b old wins (smaller key)', 'aa', 'zz', 'old');
+  await dedupCase('B8c no keys: keep existing', null, null, 'old');
+
+  // B9: full churn through the real transport (R3-C): retire → onPeerLost →
+  // unbindPeer → transport 'closed' leaves no peer record and no channel.
+  {
+    const mesh = mkMesh({ closeEscalateMs: 0 });
+    const t = new WebRTCTransport({ mesh, log: () => {} });
+    for (let i = 0; i < 3; i++) {
+      const m = `k${i}`;
+      await mesh._initiateTo(m); await tick();
+      mesh._peers.get(m).dc.onopen();
+      const hex = (i + 1).toString(16).padStart(2, '0').repeat(33);
+      t.bindPeer(BigInt('0x' + hex), m);
+      mesh._retire(m, 'churn');            // closing first (token leaves the current map) ...
+      if (!t._unsubPeerLost) t._onPeerLost(m, 'churn');   // ... then onPeerLost → unbindPeer, in production order; delivered by hand if the transport was not started
+      await tick(); await tick();          // 'closed' → gone
+    }
+    const s = mesh.ledgerStats();
+    check('B9 churn: three retire→unbind→closed cycles leave all 0 and boundPeers 0', s.all === 0 && s.boundPeers === 0 && s.goneTotal === 3, JSON.stringify(s));
+    check('B9 churn: transport bound set agrees', t.boundPeers().length === 0);
     mesh.dispose();
   }
 

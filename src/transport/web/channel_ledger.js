@@ -28,11 +28,19 @@
 // sends a first frame, so ALLOCATED has no separate timer here; the record
 // just says how long it sat there.
 //
-// GONE is confirmed by the transport (connectionState 'closed'). A PC that
-// was closed locally and never reports 'closed' is escalated after
-// `closeEscalateMs`: the record is released and `closeEscalated` counts it,
-// so capacity cannot leak on an implementation that stays silent after
-// close(). The design's `escalate(t)` row.
+// GONE is confirmed by the transport (connectionState 'closed') and by
+// NOTHING ELSE. A PC that was closed locally and has not reported 'closed'
+// after `closeEscalateMs` is ESCALATED: `onEscalate(t, meshId)` is called so
+// the owner can force a second pc.close(), `closeEscalated` counts it, and
+// the record STAYS CLOSING AND CHARGED until the transport confirms. A
+// timeout is not evidence that the physical resource is gone (Aster
+// 09f59626 R3-A); an implementation that never confirms shows up as
+// `oldestClosingMs` growing in stats(), which is the measurement, not a
+// leak to paper over. `closeEscalateMs: 0` turns escalation off.
+//
+// The peer record is the CURRENT bound set: an identity has a record while
+// some live channel binds it and none after. History of lost identities is
+// row 1's mark table, not this ledger (R3-C).
 // =====================================================================
 
 export const CHAN = Object.freeze({
@@ -60,6 +68,9 @@ export class ChannelLedger {
    * @param {number}  [opts.pPending]
    * @param {number}  [opts.closeEscalateMs]
    * @param {boolean} [opts.enforce]   false: count would-be refusals; true: refuse
+   * @param {(t:string, meshId:string) => void} [opts.onEscalate]  called once per
+   *        CLOSING record that reaches closeEscalateMs unconfirmed; the owner
+   *        forces a second close. Releases nothing.
    * @param {() => number} [opts.now]
    * @param {(ev:string, data:object) => void} [opts.log]
    * @param {typeof setTimeout} [opts.setTimeout]  injectable for tests
@@ -67,11 +78,16 @@ export class ChannelLedger {
    */
   constructor(opts = {}) {
     const o = { ...LEDGER_DEFAULTS, ...(opts || {}) };
-    this.cPhys    = Math.max(1, Number(o.cPhys)    || LEDGER_DEFAULTS.cPhys);
-    this.cInbound = Math.max(1, Number(o.cInbound) || LEDGER_DEFAULTS.cInbound);
-    this.pPending = Math.max(1, Number(o.pPending) || LEDGER_DEFAULTS.pPending);
-    this.closeEscalateMs = Math.max(0, Number(o.closeEscalateMs) || LEDGER_DEFAULTS.closeEscalateMs);
+    // Explicit parsing: a finite number is taken as given (0 included where
+    // 0 has a meaning); anything else is the default. `Number(x) || dflt`
+    // would turn an explicit 0 into the default (R3-C minor).
+    const num = (v, dflt, min) => { const n = Number(v); return Number.isFinite(n) ? Math.max(min, n) : dflt; };
+    this.cPhys    = num(o.cPhys,    LEDGER_DEFAULTS.cPhys,    1);
+    this.cInbound = num(o.cInbound, LEDGER_DEFAULTS.cInbound, 1);
+    this.pPending = num(o.pPending, LEDGER_DEFAULTS.pPending, 1);
+    this.closeEscalateMs = num(o.closeEscalateMs, LEDGER_DEFAULTS.closeEscalateMs, 0);   // 0 = escalation off
     this.enforce  = o.enforce === true;
+    this._onEscalate = typeof o.onEscalate === 'function' ? o.onEscalate : null;
     this._now     = typeof o.now === 'function' ? o.now : Date.now;
     this._log     = typeof o.log === 'function' ? o.log : () => {};
     this._setTimeout   = typeof o.setTimeout === 'function' ? o.setTimeout : setTimeout;
@@ -182,30 +198,54 @@ export class ChannelLedger {
   bind(meshId, nodeId) {
     const t = this._tByMeshId.get(meshId);
     const c = t ? this._chan.get(t) : null;
-    if (c && LIVE.has(c.state)) c.nodeId = nodeId;
+    if (!c || !LIVE.has(c.state)) { this._stats.staleEvent++; return this._peer.get(nodeId) ?? null; }
+    c.nodeId = nodeId;
     const p = this._peer.get(nodeId) ?? { nodeId, t: null, boundAt: 0 };
-    p.t = c && LIVE.has(c.state) ? t : p.t;
+    p.t = t;                 // the newest binding is the pointer (the dedup winner, R3-B)
     p.boundAt = this._now();
     this._peer.set(nodeId, p);
     return p;
   }
 
-  /** The binding for `meshId` was dropped (unbindPeer). The peer record keeps
-   *  pointing at another channel if one serves the identity, else at none. */
+  /** Another live channel, other than `exceptT`, that binds `nodeId`; its
+   *  token or null. */
+  _otherLiveFor(nodeId, exceptT) {
+    for (const o of this._chan.values()) if (o.t !== exceptT && o.nodeId === nodeId && LIVE.has(o.state)) return o.t;
+    return null;
+  }
+
+  /** Drop or re-point the peer record for `nodeId` after channel `t` stopped
+   *  binding it: point at another live binding channel if one exists, else
+   *  delete the record. The record is the current bound set (R3-C). */
+  _settlePeer(nodeId, t) {
+    if (nodeId == null) return;
+    const p = this._peer.get(nodeId);
+    if (!p) return;
+    const other = this._otherLiveFor(nodeId, t);
+    if (other) { if (p.t === t || p.t == null) p.t = other; }
+    else this._peer.delete(nodeId);
+  }
+
+  /**
+   * The binding for `meshId` was dropped (unbindPeer). The channel is found
+   * by meshId across LIVE records, not only the current-token map: the mesh
+   * marks CLOSING (which retires the token from that map) BEFORE onPeerLost
+   * reaches unbindPeer (R3-C), so a CLOSING channel must still be found here.
+   */
   unbind(meshId) {
+    let c = null;
     const t = this._tByMeshId.get(meshId);
-    const c = t ? this._chan.get(t) : null;
-    const nodeId = c?.nodeId ?? null;
-    if (c) c.nodeId = null;
-    if (nodeId != null) {
-      const p = this._peer.get(nodeId);
-      if (p && p.t === t) {
-        // another live channel for this identity?
-        let other = null;
-        for (const o of this._chan.values()) if (o !== c && o.nodeId === nodeId && LIVE.has(o.state)) { other = o.t; break; }
-        if (other) p.t = other; else this._peer.delete(nodeId);
-      }
+    if (t) c = this._chan.get(t) ?? null;
+    if (!c || c.nodeId == null) {
+      // the current-token map no longer has it, or it is a bound CLOSING one
+      let newest = null;
+      for (const o of this._chan.values()) if (o.meshId === meshId && o.nodeId != null && LIVE.has(o.state) && (!newest || o.seq > newest.seq)) newest = o;
+      c = newest;
     }
+    if (!c) return;
+    const nodeId = c.nodeId;
+    c.nodeId = null;
+    this._settlePeer(nodeId, c.t);
   }
 
   /** CLOSING: a close was issued on `t` (the mesh's _retire). Capacity is
@@ -222,7 +262,14 @@ export class ChannelLedger {
     if (this.closeEscalateMs > 0) {
       c.escalateTimer = this._setTimeout(() => {
         c.escalateTimer = null;
-        if (c.state === CHAN.CLOSING) { this._stats.closeEscalated++; this._log('close-escalated', { t, meshId: c.meshId, reason: c.reason }); this.gone(t); }
+        if (c.state !== CHAN.CLOSING) return;
+        // ESCALATE (v0.7 `escalate(t)`): force a second close through the
+        // owner; the record stays CLOSING and charged; capacity waits for the
+        // transport's confirmation (R3-A). Nothing is released here.
+        this._stats.closeEscalated++;
+        this._log('close-escalated', { t, meshId: c.meshId, reason: c.reason, closingMs: this._now() - c.closingAt });
+        try { this._onEscalate?.(t, c.meshId); }
+        catch (err) { this._log('close-escalate-threw', { t, err: err?.message }); }
       }, this.closeEscalateMs);
       try { c.escalateTimer?.unref?.(); } catch { /* browser timers have no unref */ }
     }
@@ -230,10 +277,12 @@ export class ChannelLedger {
   }
 
   /**
-   * GONE: the transport confirmed the close (connectionState 'closed'), or
-   * the escalation fired. Releases the record's capacity. An unprompted
-   * close (no closing() before it) is the involuntary-loss row: the record
-   * goes straight to GONE and `prompted` is false in the return.
+   * GONE: the transport confirmed the close (connectionState 'closed'). The
+   * ONLY release of a record's capacity. An unprompted close (no closing()
+   * before it) is the involuntary-loss row: the record goes straight to GONE
+   * and `prompted` is false in the return. An identity this channel still
+   * bound is re-pointed to another live binding channel or dropped from the
+   * bound set (R3-C).
    */
   gone(t) {
     const c = this._chan.get(t);
@@ -243,12 +292,10 @@ export class ChannelLedger {
     if (c.escalateTimer) { try { this._clearTimeout(c.escalateTimer); } catch {} c.escalateTimer = null; }
     c.state = CHAN.GONE; c.goneAt = this._now();
     if (this._tByMeshId.get(c.meshId) === t) this._tByMeshId.delete(c.meshId);
-    if (c.nodeId != null) {
-      const p = this._peer.get(c.nodeId);
-      if (p && p.t === t) p.t = null;
-    }
+    const nodeId = c.nodeId; c.nodeId = null;
     this._stats.goneTotal++;
     this._chan.delete(t);   // GONE records are not retained; the token is never reused
+    this._settlePeer(nodeId, t);
     c.prompted = prompted;
     return c;
   }

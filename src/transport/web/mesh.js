@@ -172,8 +172,21 @@ export class MeshManager {
     // predicate, no dial, no close, and with the default `enforce: false` no
     // refusal either — a would-be refusal is counted. `ledger: false` turns
     // it off; an object sets bounds. See channel_ledger.js.
+    /** PCs whose close was issued and not yet confirmed, by incarnation tag,
+     *  so an escalation can force a second close on the same object. */
+    this._closingPcs = new Map();
     this._ledger = (ledger === false) ? null
-      : new ChannelLedger({ ...(ledger && typeof ledger === 'object' ? ledger : {}), log: (ev, data) => this._log(ev, data) });
+      : new ChannelLedger({
+          ...(ledger && typeof ledger === 'object' ? ledger : {}),
+          log: (ev, data) => this._log(ev, data),
+          // ESCALATE: a second pc.close() on the unconfirmed PC. The ledger
+          // keeps the record CLOSING and charged until 'closed' arrives.
+          onEscalate: (t, meshId) => {
+            const pc = this._closingPcs.get(t);
+            this._log('close-escalate', { peerId: meshId, inc: t, hadPc: !!pc });
+            if (pc) { try { pc.close(); } catch (err) { this._log('close-escalate-threw', { inc: t, err: err?.message }); } }
+          },
+        });
     // CONNECTION INCARNATION (4.101.0, council 6a46f038). A peerId is the
     // bridge's connection handle and a same-process retry reuses it, so it
     // cannot tell one RTCPeerConnection from the next. Every PC gets `inc`:
@@ -529,6 +542,7 @@ export class MeshManager {
     // the ledger's escalation timers are cleared with everything else. The
     // records are not released; nothing will read them again.
     this._ledger?.dispose();
+    this._closingPcs.clear();
   }
 
   /**
@@ -1240,7 +1254,7 @@ export class MeshManager {
       // Row 3: the transport confirmed the close. Prompted (after our own
       // _retire) or unprompted (the involuntary row), the record goes GONE
       // and its capacity is released here and only here, or by escalation.
-      if (state.inc) this._ledger?.gone(state.inc);
+      if (state.inc) { this._ledger?.gone(state.inc); this._closingPcs.delete(state.inc); }
       this._notify();
     }
   }
@@ -1316,6 +1330,7 @@ export class MeshManager {
     // the same step. Capacity waits for the transport's 'closed' (gone) or
     // the ledger's escalation. A state that never got a PC has no record.
     if (state.inc) this._ledger?.closing(state.inc, reason);
+    if (state.inc && state.pc && this._ledger) this._closingPcs.set(state.inc, state.pc);
     if (state.dc) try { state.dc.close(); } catch {}
     if (state.pc) try { state.pc.close(); } catch {}
     this._peers.delete(peerId);

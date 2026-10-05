@@ -243,6 +243,10 @@ export class WebRTCTransport extends Transport {
       this._nodeIdByMeshId.set(winnerMeshId, nodeId);
       this._nodeIdByMeshId.delete(loserMeshId);
       this._channelKeyByMeshId.delete(loserMeshId);
+      // Row 3 (R3-B): the ledger's peer record moves to the winner IN THIS
+      // transaction, before the loser's teardown, so a surviving bound route
+      // is never an unbound open channel in the ledger.
+      try { this._mesh?.ledgerBind?.(winnerMeshId, nodeId.toString(16).padStart(66, '0')); } catch { /* bookkeeping only */ }
       try { this._mesh?.disconnect?.(loserMeshId, 'duplicate-nodeId'); }
       catch (err) { this._log('mesh-dedup-disconnect-threw', { loserMeshId, err: err.message }); }
       return;   // identity was already bound — not a new peer, no onPeerBound
