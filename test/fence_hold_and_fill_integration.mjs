@@ -199,7 +199,8 @@ globalThis.RTCPeerConnection = FakePC;
     const s1 = mesh.ledgerStats();
     check('B1 after closeConnection: identity unbound (peer record gone) BEFORE the channel is', !t.ownsPeer(NID) && s1.boundPeers === 0);
     check('B1 channel CLOSING and still CHARGED: chanAll 1, pc.close() called once', s1.byState.CLOSING === 1 && s1.all === 1 && pc.closeCalls === 1, J(s1));
-    check('B1 the ledger record carries the close reason', mesh._ledger.record(tok)?.state === CHAN.CLOSING);
+    // INT-1 (Aster 5a811599): read the reason itself, not only the state; a mutant that nulls the reason must fail here.
+    check('B1 the ledger record carries the close reason', mesh._ledger.record(tok)?.state === CHAN.CLOSING && mesh._ledger.record(tok)?.reason === 'closeConnection', J(mesh._ledger.record(tok)));
     check('B1 voluntary: no onPeerDied', died.length === 0, J(died));
     pc.fireClosed(); await tick();
     const s2 = mesh.ledgerStats();
@@ -215,9 +216,11 @@ globalThis.RTCPeerConnection = FakePC;
     await t2.closeConnection(NID2);
     check('B2 CLOSING holds the slot', mesh2.ledgerStats().byState.CLOSING === 1 && mesh2.ledgerStats().all === 1);
     const before = FakePC.instances.length;
+    const refusedBefore = mesh2.ledgerStats().refusedOut;
     await mesh2._initiateTo('d2'); await tick();
     const sR = mesh2.ledgerStats();
-    check('B2 allocation during CLOSING refused: no PC built, refused counted', FakePC.instances.length === before && !mesh2._peers.has('d2') && (sR.refused?.outbound ?? sR.refusedOutbound ?? sR.wouldRefuse?.outbound ?? 1) >= 1, J(sR));
+    // INT-2 (Aster 5a811599): the pinned stats field is refusedOut; assert its delta with no fallback that passes on absence.
+    check('B2 allocation during CLOSING refused: no PC built, refusedOut +1', FakePC.instances.length === before && !mesh2._peers.has('d2') && typeof sR.refusedOut === 'number' && sR.refusedOut === refusedBefore + 1, J({ refusedBefore, stats: sR }));
     st2.pc.fireClosed(); await tick();
     check('B2 first closed releases: chanAll 0', mesh2.ledgerStats().all === 0);
     await mesh2._initiateTo('d3'); await tick();
