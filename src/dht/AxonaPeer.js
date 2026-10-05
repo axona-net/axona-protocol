@@ -631,6 +631,32 @@ export class AxonaPeer extends DHT {
       });
     }
 
+    // Row 13 (Hold-and-Fill v0.5/v0.7): class A's signal. A negotiation that
+    // never opened ended; onPeerDied never fires for it (the channel never
+    // had a user), so until this row the kernel could not mark the identity
+    // and the next tick could dial it again. The mark is written ONLY when
+    // no OPEN channel to the identity exists (Vega 79ccdf05): a failed
+    // SECOND negotiation to a peer we already reach must not punch a hole in
+    // a live route, because routing and candidate selection skip marked ids.
+    if (transport && typeof transport.onNegotiationFailed === 'function') {
+      this._onNegotiationFailedUnsub = transport.onNegotiationFailed((peerBig, reason) => {
+        try {
+          if (typeof peerBig !== 'bigint') return;
+          const node = this._node;
+          if (!node) return;
+          let open = false;
+          try { open = typeof transport.isConnected === 'function' && transport.isConnected(peerBig); } catch { open = false; }
+          if (open) { this._emitLog?.('info', 'negotiation-failed-beside-live', { peer: toHex(peerBig), reason: reason ?? 'unknown' }); return; }
+          const marks = (node._deadPeers ??= new DeadPeers());
+          if (typeof marks.fail === 'function') marks.fail(peerBig, reason ?? 'unknown');
+          else marks.add(peerBig);
+          this._emitLog?.('info', 'negotiation-failed-marked', { peer: toHex(peerBig), reason: reason ?? 'unknown' });
+        } catch (err) {
+          if (typeof console !== 'undefined') console.warn('AxonaPeer.onNegotiationFailed: mark failed', err);
+        }
+      });
+    }
+
     // Symmetric counterpart to onPeerBound: when a peer's channel dies
     // (heartbeat timeout / send-fail eviction at the transport, or a bridge
     // socket close), EVICT it from the synaptome immediately.  Until this
@@ -654,11 +680,13 @@ export class AxonaPeer extends DHT {
           node.synaptome?.delete(dead);
           node.incomingSynapses?.delete(dead);
           node.connections?.delete(dead);
-          // Row 1 (Hold-and-Fill v0.5): the mark records WHY and WHEN. A
-          // table some other owner installed as a bare Set keeps its shape;
+          // Row 1 (Hold-and-Fill v0.5): the mark records WHY and WHEN. Row 10
+          // (v0.7 "Marks"): this is the FAIL input of the mark automaton; a
+          // first death writes the mark, a later one advances its schedule.
+          // A table some other owner installed as a bare Set keeps its shape;
           // the reason then lives only in the log line below.
           const marks = (node._deadPeers ??= new DeadPeers());
-          if (typeof marks.mark === 'function') marks.mark(dead, { kind: 'loss', cause: reason ?? 'unknown' });
+          if (typeof marks.fail === 'function') marks.fail(dead, reason ?? 'unknown');
           else marks.add(dead);
           this._axonaManager?.pubsubPeerDied?.(toHex(dead));   // purge ghost root beacons
           // reason (4.76.3): the transport-level close cause, threaded through
@@ -4520,10 +4548,26 @@ export class AxonaPeer extends DHT {
    * @param {bigint} peerId
    * @param {string} source  provenance tag ('triadic'|'hopCache'|'lateralSpread')
    */
+  /**
+   * ELIGIBLE(id) of the mark automaton (Hold-and-Fill v0.7 "Marks", row 10),
+   * the one predicate nomination and dialing use. A table installed as a
+   * bare Set by another owner answers by membership, as before.
+   * @param {bigint} id
+   */
+  _isEligibleCandidate(id) {
+    const marks = this._node?._deadPeers;
+    if (!marks) return true;
+    if (typeof marks.eligible === 'function') return marks.eligible(id);
+    return !marks.has(id);
+  }
+
   async _considerCandidate(peerId, source) {
     const node = this._node;
     if (!node?.synaptome || typeof peerId !== 'bigint') return;
     if (peerId === node.id || node.synaptome.has(peerId)) return;
+    // Row 10: a marked identity is dialed on its schedule only; an unmarked
+    // one is not dialed while a full state holds.
+    if (!this._isEligibleCandidate(peerId)) { this._dialIneligible = (this._dialIneligible || 0) + 1; return; }
     const t = node.transport;
     const bindingCapable = t
       && typeof t.onPeerBound   === 'function'
@@ -4545,6 +4589,10 @@ export class AxonaPeer extends DHT {
       if (this._attemptGuard && !this._attemptGuard.allow(peerId)) return;
       this._verifyProbes = (this._verifyProbes ?? 0) + 1;
       this._attemptGuard?.begin(peerId);
+      // Row 10: CONSUME at ISSUE. Every reservation above succeeded; the
+      // attempt goes out now. An exhausted mark advances its refill window
+      // here, so a second evaluation in the window is ineligible.
+      try { this._node?._deadPeers?.consume?.(peerId); } catch { /* bookkeeping only */ }
       let opened = false;
       try { opened = await t.openConnection(peerId); }
       catch { /* unverifiable → not admitted */ }
@@ -4764,15 +4812,17 @@ export class AxonaPeer extends DHT {
     // a probe-target advertised even if WE had just marked that peer
     // dead.  The _evictAndReplace caller would then admit the same
     // dead peer back into the synaptome via _addByVitality, undoing
-    // the eviction.  Filter dead ids at assembly time.
-    const dead = node._deadPeers || new Set();
+    // the eviction.  Filter at assembly time — by ELIGIBILITY (row 10),
+    // not by mark existence: a marked identity whose schedule has come due
+    // is a candidate again; an unmarked one is not while MARKS-FULL or
+    // POLICY-FULL holds.
     const candidates = [];
     outer:
     for (const r of settled) {
       if (r.status !== 'fulfilled' || !Array.isArray(r.value)) continue;
       for (const id of r.value) {
         if (id === node.id) continue;
-        if (dead.has(id)) continue;
+        if (!this._isEligibleCandidate(id)) continue;
         if (node.synaptome.has(id)) continue;
         const stratum = clz264(node.id ^ id);
         if (stratum < lo || stratum > hi) continue;

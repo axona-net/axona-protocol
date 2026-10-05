@@ -36,6 +36,7 @@ import { NeuronNode }               from '../src/dht/NeuronNode.js';
 import { SimNetwork, simTransport } from '../src/transport/sim/index.js';
 import { createNodeIdentity }       from '../src/identity/index.js';
 import { fromHex }                  from '../src/utils/hexid.js';
+import { DeadPeers }                from '../src/dht/DeadPeers.js';
 
 let passed = 0, failed = 0;
 const check = (label, ok, extra = '') => { console.log(`  ${ok ? '✓' : '✗'} ${label}${ok ? '' : ' ' + extra}`); ok ? passed++ : failed++; };
@@ -142,6 +143,15 @@ async function main() {
   // ── FEEDBACK: each injected death schedules ONE debounced refill pass ──
   {
     const { t, nearest, recOf } = await scenario(true);
+    // Hold-and-Fill row 10 paces a dead identity's re-dial by its loss mark
+    // (first retry after B = 30 s), so with the default pacing a just-killed
+    // successor is not a candidate inside this measurement's 300 ms window and
+    // the count would read 0. This smoke measures the refill TRIGGER's
+    // boundedness (one coalesced pass per death, not multiplicative), not the
+    // pacing, so the pacing is zeroed for the measurement: B = 0 makes a mark
+    // due the instant it is written. The pacing has its own fence
+    // (fence_mark_automaton.mjs).
+    t.node._deadPeers = new DeadPeers({ B: 0 });
     instrumentDials(t, new Set());                          // converge (nothing unbindable)
     for (let k = 0; k < 8; k++) { await t.peer._maintainSynaptome(); await wait(15); }
     // Count dials caused purely by injected deaths (real onPeerDied → reschedule).

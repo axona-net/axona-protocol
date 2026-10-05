@@ -64,6 +64,9 @@ const RETRY_AFTER_MS   = 5000;   // single retry after pc-failed (B10)
 // discovery can re-drive, and bounds the offerer retry loop. Generous so it is
 // a safety net, not a primary mechanism: healthy channels open in well under it.
 const NEGOTIATION_DEADLINE_MS = 30000;
+/** Row 13: _retire reasons on a never-opened channel that mean the attempt
+ *  FAILED (as opposed to being retried or the mesh going away). */
+const NEGOTIATION_FAILED_REASONS = new Set(['negotiation-timeout', 'pc-closed', 'peer-left', 'disconnect']);
 // One reaper interval drives EVERY per-peer liveness decision (see _reapTick):
 // while never-opened it enforces NEGOTIATION_DEADLINE_MS; once open it folds the
 // pong-timeout (DEAD_PONG_MS), send-fail (SEND_FAIL_LIMIT) and stale-display
@@ -237,6 +240,8 @@ export class MeshManager {
     this._messageListeners = new Set();
     /** @type {Set<(peerId: string) => void>} */
     this._peerLostListeners = new Set();
+    /** Row 13: never-opened negotiations that failed. @type {Set<(peerId: string, reason: string) => void>} */
+    this._negotiationFailedListeners = new Set();
     // v2.0.2 — per-frame ping/pong traffic notifications.  Without
     // this, application UIs that want a "channel is actually moving
     // bytes" indicator have to roll their own (see axona-peer's
@@ -366,6 +371,24 @@ export class MeshManager {
   onPeerLost(callback) {
     this._peerLostListeners.add(callback);
     return () => this._peerLostListeners.delete(callback);
+  }
+
+  /**
+   * Row 13 (Hold-and-Fill v0.5/v0.7, axona-docs 4334504, 95c2ff4): a
+   * negotiation that NEVER OPENED ended. onPeerLost fires only for a channel
+   * that had opened (see _retire), so class A — pc-failed / negotiation
+   * timeout before dc-open — had no signal and the kernel could not write a
+   * loss mark for it (Vega b8bd9ec3). Fires `callback(peerId, reason)` from
+   * _retire when the channel never opened, for the reasons that mean the
+   * attempt FAILED: 'negotiation-timeout', 'pc-closed', 'peer-left',
+   * 'disconnect' (a cancelled attempt). Not for 'retry' (the same attempt
+   * continues), 'dispose' or 'reset' (the mesh is going away). Returns an
+   * unsubscribe fn.
+   * @param {(peerId: string, reason: string) => void} callback
+   */
+  onNegotiationFailed(callback) {
+    this._negotiationFailedListeners.add(callback);
+    return () => this._negotiationFailedListeners.delete(callback);
   }
 
   /**
@@ -1286,6 +1309,16 @@ export class MeshManager {
           this._log('peer-lost-listener-threw', {
             peerId, err: err.message,
           });
+        }
+      }
+    } else if (notifyLost && !wasOpen && NEGOTIATION_FAILED_REASONS.has(reason)) {
+      // Row 13: the channel never opened and the attempt is over. Class A's
+      // signal. 'retry' keeps the attempt alive and is excluded above by
+      // notifyLost=false; dispose/reset are not failures.
+      for (const cb of this._negotiationFailedListeners) {
+        try { cb(peerId, reason); }
+        catch (err) {
+          this._log('negotiation-failed-listener-threw', { peerId, err: err.message });
         }
       }
     }

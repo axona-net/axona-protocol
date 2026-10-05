@@ -105,6 +105,7 @@ export class CompositeTransport extends Transport {
     for (const [type, h] of this._reqHandlers) this._fanOutRequest(t, type, h);
     for (const [type, h] of this._ntfHandlers) this._fanOutNotification(t, type, h);
     for (const h of this._peerDiedHandlers)    t.onPeerDied(h);
+    if (typeof t.onNegotiationFailed === 'function') for (const h of (this._negotiationFailedHandlers ?? [])) t.onNegotiationFailed(h);
     for (const reg of this._peerBoundRegistrars) reg(t);
   }
 
@@ -266,6 +267,19 @@ export class CompositeTransport extends Transport {
     return () => {
       const i = this._peerDiedHandlers.indexOf(handler);
       if (i >= 0) this._peerDiedHandlers.splice(i, 1);
+      for (const u of unsubs) try { u(); } catch {}
+    };
+  }
+
+  /** Row 13: fan out to every sub-transport that has the signal (the WebRTC
+   *  one); the bridge WebSocket never negotiates a peer channel. */
+  onNegotiationFailed(handler) {
+    (this._negotiationFailedHandlers ??= []).push(handler);
+    const unsubs = this._subs.filter(t => typeof t.onNegotiationFailed === 'function').map(t => t.onNegotiationFailed(handler));
+    return () => {
+      const a = this._negotiationFailedHandlers;
+      const i = a ? a.indexOf(handler) : -1;
+      if (i >= 0) a.splice(i, 1);
       for (const u of unsubs) try { u(); } catch {}
     };
   }
