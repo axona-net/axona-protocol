@@ -1080,6 +1080,11 @@
       "file": "fence_hold_and_fill_integration.mjs",
       "class": "default",
       "note": "Hold-and-Fill Phase 1 (axona-docs v0.9 de10fd4), the COMBINED PIN hold-and-fill-phase1: rows 1, 2b, 3, 4, 5, 6, 10+13 together. The three integration obligations named for the combined review: A. at cap with the gate armed, a grace close blocked by a duty keeps the channel and writes NO mark; once the duty ends the fire closes it VOLUNTARILY (no onPeerDied, no loss mark, identity still ELIGIBLE); overflow closes only the oldest PERMITTED pending close and reports all-blocked otherwise; an involuntary loss still marks. B. closeConnection on the web transport unbinds first, then the ledger record goes CLOSING and stays CHARGED until the PC reports 'closed'; with enforce on at C_phys an allocation during CLOSING is refused and the first 'closed' lets the next through; no onPeerDied on the voluntary close. C. design case 61 RECORDED as an observation (row 15 NOT STARTED): two below-cap _addByVitality calls both insert, size 5 at cap 4, as on 270835d; the row-6 half at cap opens nothing and inserts nothing. Rewritten when row 15 lands."
+    },
+    {
+      "file": "fence_self_integrate_bigint.mjs",
+      "class": "default",
+      "note": "Hold-and-Fill v0.15 (axona-docs e4809d2) row 11: _selfIntegrate passes the BigInt to openConnection (it passed a hex string into a BigInt-keyed map, so on the web transport it could never open even to a bound neighbour; the sim normalises hex and hid it) and, on `false`, dials the stranger through connectViaRelay ONLY under the attempt guard (allow → begin → end; CONSUME at issue, row 10); without the guard it is the bound-only dial with the key fixed. Vega 79ccdf05's two-sided fence: bound neighbour opens with no guard; unbound opens nothing without the guard and relays once with it; a guard refusal and a not-due mark issue nothing; the REAL WebRTCTransport answers true to the BigInt and false to the hex of the same bound identity. With toHex(id) restored, A fails; with the guard condition removed, B fails."
     }
   ]
 }

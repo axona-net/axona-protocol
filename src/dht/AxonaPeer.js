@@ -1342,22 +1342,56 @@ export class AxonaPeer extends DHT {
     if (!Array.isArray(closest) || closest.length === 0) return 0;
 
     // Targets: discovered neighbours we aren't already connected to (skip self).
+    // Row 10 (Hold-and-Fill v0.7 "Marks"): a dial site consults ELIGIBILITY,
+    // not membership; a marked neighbour whose refill is not due is skipped.
+    const t = node.transport;
+    const stats = { targets: 0, ineligible: 0, guardRefused: 0, opened: 0, relayed: 0, relayUnavailable: 0 };
+    this._selfIntegrateLast = stats;
     const targets = [];
     for (const id of closest) {
       if (typeof id !== 'bigint' || id === selfId) continue;
-      if (typeof node.transport.isConnected === 'function' && node.transport.isConnected(id)) continue;
+      if (typeof t.isConnected === 'function' && t.isConnected(id)) continue;
+      if (!this._isEligibleCandidate(id)) { stats.ineligible++; continue; }
       targets.push(id);
     }
+    stats.targets = targets.length;
 
-    let opened = 0;
+    // Row 11 (Hold-and-Fill v0.5/v0.15, axona-docs e4809d2): the transport keys
+    // its bindings by BigInt. Until this change the id went out as a HEX
+    // STRING, which never matched, so on the web transport this method could
+    // not open even to a bound neighbour and opened nothing; the sim transport
+    // normalises hex, which is why the smoke never saw it. The BigInt is
+    // passed now. `openConnection` is bound-only: `false` means "no binding",
+    // and the only way to reach a stranger is the relayed-signaling dial,
+    // `connectViaRelay`. That fallback is GATED: it exists only when the
+    // attempt guard is installed (the launcher arms it with the fill), each
+    // dial passes `allow`, and CONSUME runs at issue (row 10). Without the
+    // guard this is the bound-only dial it always was, with the key fixed.
+    // The token discipline (end at bind, cancel or deadline) is row 8's.
+    const guard = this._attemptGuard ?? null;
+    const dial = async (id) => {
+      if (guard) {
+        if (!guard.allow(id)) { stats.guardRefused++; return false; }
+        guard.begin(id);
+      }
+      let opened = false;
+      try { opened = (await t.openConnection(id)) !== false; }
+      catch { opened = false; }
+      finally { guard?.end(id, opened); }
+      if (opened) { stats.opened++; return true; }
+      if (guard && typeof t.connectViaRelay === 'function') {
+        try { node._deadPeers?.consume?.(id); } catch { /* bookkeeping only */ }
+        let issued = false;
+        try { issued = t.connectViaRelay(toHex(id)) === true; } catch { issued = false; }
+        if (issued) stats.relayed++; else stats.relayUnavailable++;
+      }
+      return false;
+    };
     for (let i = 0; i < targets.length; i += concurrency) {
-      const batch = targets.slice(i, i + concurrency);
-      const settled = await Promise.allSettled(
-        batch.map(id => node.transport.openConnection(toHex(id))),
-      );
-      for (const r of settled) if (r.status === 'fulfilled' && r.value !== false) opened++;
+      await Promise.allSettled(targets.slice(i, i + concurrency).map(dial));
     }
-    return opened;
+    this._emitLog?.('info', 'self-integrate', { ...stats, guarded: !!guard });
+    return stats.opened;
   }
 
   // ── Synaptome maintenance (Synaptome-Maintenance-v0.1) ─────────────────
