@@ -114,7 +114,11 @@ const neighbour = (self, seed) => self ^ (1n << BigInt(seed));
     check('C opened 0 (unbound)', n === 0);
     check('C connectViaRelay called ONCE with the hex of the neighbour', t.calls.relay.length === 1 && t.calls.relay[0] === toHex(nb), J(t.calls.relay));
     check('C CONSUME ran once for the neighbour at issue', consumed.length === 1 && consumed[0] === nb);
-    check('C guard: one attempt recorded, not in flight (begin+end once)', g.attemptsOf(nb) === 1 && g.allow(nb) === false, `attempts=${g.attemptsOf(nb)} allow=${g.allow(nb)}`);
+    // Row 8 (fence_guard_token): an ISSUED relay dial keeps its token until
+    // bind, deadline or the sweep, so right after the dial the attempt is in
+    // flight with nothing counted yet. (Row 11 alone ended it here; row 8
+    // moved the end to the bind / deadline handlers.)
+    check('C guard: the attempt is HELD after the issued dial (in flight, attempts 0, allow false)', g.inflightOf(nb) === true && g.attemptsOf(nb) === 0 && g.allow(nb) === false, `inflight=${g.inflightOf(nb)} attempts=${g.attemptsOf(nb)} allow=${g.allow(nb)}`);
     check('C stats: relayed 1, guarded true (carried in _selfIntegrateLast)', peer._selfIntegrateLast?.relayed === 1 && peer._selfIntegrateLast?.guardRefused === 0 && peer._selfIntegrateLast?.guarded === true, J(peer._selfIntegrateLast));
     // backoff: an immediate second pass is refused by the guard; nothing issued
     const n2 = await peer._selfIntegrate();
