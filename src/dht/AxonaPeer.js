@@ -751,8 +751,8 @@ export class AxonaPeer extends DHT {
    *                          successful lookup through us
    *
    * Not yet wired (low-impact for cold lookup success, queued):
-   *   · local_probe       — needed by _tryAnneal (anneal not run
-   *                          in the kernel-driven loop yet)
+   *   · local_probe       — serves _localCandidate for dead-synapse
+   *                          replacement (the kernel anneal is gone, row 6)
    *   · route_msg         — needed by peer.routeMessage()
    *   · find_closest_set  — needed by AxonaManager K-closest queries
    *
@@ -1367,9 +1367,11 @@ export class AxonaPeer extends DHT {
   // Candidates route through `_considerCandidate` → B-3 first-party verification
   // + budgeted openConnection, so a forged "near" id can NEVER poison the table
   // (eclipse-safe). Bounded per tick; a no-op once the quota is full. Long-range
-  // / per-stratum "finger" coverage is maintained by the existing anneal path
-  // (`_tryAnneal`); both are needed (sim: near-only holds occupancy but delivery
-  // still collapses when long-range is starved).
+  // / per-stratum "finger" coverage WAS the anneal path (`_tryAnneal`, removed
+  // by Hold-and-Fill row 6 because it pruned below cap and replaced nothing);
+  // under Hold-and-Fill it is the fill (row 12) that supplies the other bands,
+  // and both are needed (sim: near-only holds occupancy but delivery still
+  // collapses when long-range is starved).
   //
   // OPT-IN via the `synaptomeMaintain` constructor option (default off → inert).
   // v1 uses `findKClosest` as the authoritative nearest source (local-first,
@@ -4701,23 +4703,28 @@ export class AxonaPeer extends DHT {
     await this._addByVitality(syn);
   }
 
-  /** Admission gate.  Same logic as engine._addByVitality verbatim. */
+  /**
+   * Admission by vitality. BELOW CAP this is an admit of a bound candidate:
+   * open (bound-only on the web transport) and insert. AT CAP it was a swap
+   * (delete the lowest-vitality victim, close it, insert the candidate) and
+   * is SKIPPED BEFORE THE OPEN (Hold-and-Fill v0.5 row 6, axona-docs
+   * 4334504; Aster 76bc93dd item 5, Vega 79ccdf05 row 5): no open, no
+   * delete, no insert, counted `vitality-swap-skipped`. An unbound candidate
+   * never had a channel; a bound one stays bound and is reconciled by the
+   * fill (row 7) when it is armed. The at-cap replacement is Phase 2's swap
+   * rule, which asks the duty gate; until it exists a node at cap holds.
+   */
   async _addByVitality(newSyn) {
     const node   = this._node;
     const domain = this._domain;
     const cap = node._maxSynaptome ?? domain.MAX_SYNAPTOME;
 
-    let victim = null;
     if (node.synaptome.size >= cap) {
-      let minV = Infinity, minVAny = Infinity, victimAny = null;
-      for (const s of node.synaptome.values()) {
-        if (s.inertia > domain.simEpoch) continue;
-        const v = this._vitality(s);
-        if (v < minVAny) { minVAny = v; victimAny = s; }
-        if (!s.bootstrap && v < minV) { minV = v; victim = s; }
-      }
-      victim = victim ?? victimAny;
-      if (!victim) return false;
+      this._vitalitySwapSkipped = (this._vitalitySwapSkipped || 0) + 1;
+      this._emitLog?.('info', 'vitality-swap-skipped', {
+        candidate: toHex(newSyn.peerId), size: node.synaptome.size, cap, source: newSyn._addedBy ?? null,
+      });
+      return false;
     }
 
     const opened = await node.transport.openConnection(newSyn.peerId);
@@ -4726,11 +4733,6 @@ export class AxonaPeer extends DHT {
     const measuredLat = node.transport.getLatency(newSyn.peerId);
     newSyn.latency = (measuredLat >= 0) ? measuredLat : 200;
 
-    if (victim) {
-      node.synaptome.delete(victim.peerId);
-      node.connections?.delete(victim.peerId);
-      await node.transport.closeConnection(victim.peerId);
-    }
     node.addSynapse(newSyn);
     return true;
   }
@@ -4776,56 +4778,17 @@ export class AxonaPeer extends DHT {
     }
   }
 
-  /**
-   * Anneal step — replace the weakest synapse with a candidate from
-   * the under-represented stratum group.  Emits 'anneal-fired' via
-   * the engine's event bus (Phase 3 retains shared bus; future phase
-   * may split per-peer).
-   */
-  async _tryAnneal() {
-    const node   = this._node;
-    const domain = this._domain;
-    if (!node.alive || node.synaptome.size === 0) return;
-
-    let victim = null, weakW = Infinity;
-    for (const s of node.synaptome.values()) {
-      if (s.inertia > domain.simEpoch) continue;
-      if (s.weight < weakW) { weakW = s.weight; victim = s; }
-    }
-    if (!victim) return;
-
-    const counts = new Array(domain.STRATA_GROUPS).fill(0);
-    for (const s of node.synaptome.values()) {
-      counts[Math.min(domain.STRATA_GROUPS - 1, s.stratum >>> 2)]++;
-    }
-    let targetGroup = 0, minCount = Infinity;
-    for (let g = 0; g < domain.STRATA_GROUPS; g++) {
-      if (counts[g] < minCount) { minCount = counts[g]; targetGroup = g; }
-    }
-
-    const lo = targetGroup * 4, hi = lo + 3;
-    const candidate = await this._localCandidate(lo, hi);
-    if (!candidate || node.synaptome.has(candidate.id)) return;
-
-    node.synaptome.delete(victim.peerId);
-    node.connections?.delete(victim.peerId);
-    await node.transport.closeConnection(victim.peerId);
-
-    const opened = await node.transport.openConnection(candidate.id);
-    if (!opened) return;
-
-    const measuredLat = node.transport.getLatency(candidate.id);
-    const latMs   = (measuredLat >= 0) ? measuredLat : 200;
-    const stratum = clz264(node.id ^ candidate.id);
-    const syn     = new Synapse({ peerId: candidate.id, latencyMs: latMs, stratum });
-    syn.weight    = 0.1;
-    syn._addedBy  = 'anneal';
-    node.addSynapse(syn);
-    domain._emit({
-      type: 'anneal-fired', timestamp: Date.now(),
-      observerId: node.id, evicted: victim.peerId, admitted: candidate.id,
-    });
-  }
+  // _tryAnneal lived here until Hold-and-Fill v0.5 row 6 (axona-docs
+  // 4334504). It deleted the weakest synapse and closed its channel, THEN
+  // tried a candidate through the bound-only openConnection, which returns
+  // false for any stranger (webrtc.js:323-325), so under lookup load it
+  // pruned the table below cap and replaced nothing (v0.1 "What the code does
+  // today", Aster 2552a639: the defect is conditional, a bound-not-in-table
+  // candidate could open; Vega 127cb170). Removed, not patched: Rule 1 says
+  // no voluntary path removes a peer below cap, and the at-cap replacement
+  // anneal was the ancestor of is Phase 2's swap rule, which opens before it
+  // deletes and asks the duty gate first. The 'anneal-fired' event has no
+  // emitter in the kernel now; the sim engine's own anneal is untouched.
 
   /**
    * Dead-synapse replacement.  Closes the dead channel, finds a
@@ -5504,10 +5467,14 @@ export class AxonaPeer extends DHT {
     if (node.id !== sourceId) this._recordTransit(sourceId, nextId);
 
     node.temperature = Math.max(domain.T_MIN, node.temperature * domain.ANNEAL_COOLING);
-    if (Math.random() < node.temperature * domain.ANNEAL_RATE_SCALE) {
-      this._tryAnneal().catch(err =>
-        console.error(`AxonaPeer: anneal failed at ${node.id.toString(16)}:`, err));
-    }
+    // ANNEAL IS GONE (Hold-and-Fill v0.5 row 6, axona-docs 4334504). It
+    // deleted its victim and closed the channel BEFORE it tried the
+    // candidate, with a bound-only openConnection that returns false for any
+    // stranger, so under lookup load it pruned the table below cap and
+    // replaced nothing (v0.1 "What the code does today"; Aster 2552a639,
+    // Vega 127cb170). Rule 1: below cap no voluntary path removes a peer.
+    // The at-cap replacement it was the ancestor of is Phase 2's swap rule.
+    // The temperature still cools so its readers see the same series.
 
     // Lazy channel-open: synapses added by hop_cache / lateral_spread /
     // triadic_introduce point at peers we may not have opened a

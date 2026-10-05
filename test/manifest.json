@@ -1070,6 +1070,11 @@
       "file": "fence_close_connection.mjs",
       "class": "default",
       "note": "Hold-and-Fill v0.5/v0.7 (axona-docs 4334504, 95c2ff4) row 5: WebRTCTransport.closeConnection CLOSES. Before: unbind only, the RTCPeerConnection stayed open, pinging, owned by no one. Now: unbind FIRST (so the mesh's onPeerLost is not an active-route death and no peer-died fires: a voluntary close is not a loss), then mesh.disconnect → _retire → CLOSING → the transport's 'closed'. Idempotent. Involuntary loss still fires onPeerDied. Static caller list: every closeConnection site in AxonaPeer.js is one of the design's classified rows (peer-leaving in start, _clearGracePending, the gate's grace/overflow closes and swap victim in _seedSynaptomeWithSponsor/_admitOrImprove, _addByVitality, _tryAnneal, _evictAndReplace); a new caller fails until classified. Ships with rows 4 and 6 in the accounting release: with them, no live channel is closed by a voluntary path the duty gate does not cover."
+    },
+    {
+      "file": "fence_no_anneal_below_cap.mjs",
+      "class": "default",
+      "note": "Hold-and-Fill v0.5/v0.7 (axona-docs 4334504, 95c2ff4) row 6: the kernel anneal (_tryAnneal, called from the transit site) is REMOVED, not patched: it deleted its victim and closed the channel before trying a candidate through the bound-only openConnection, so under lookup load it pruned below cap and replaced nothing (Aster 2552a639, Vega 127cb170). _addByVitality below cap is an admit of a bound candidate; AT CAP it is skipped BEFORE the open (design case 36; Aster 76bc93dd item 5, Vega 79ccdf05 row 5): no openConnection, no delete, no insert, no closeConnection, vitality-swap-skipped counted and logged, the low-vitality incumbent stays, a bound candidate stays bound. The temperature still cools. Ships with rows 4 and 5 in the accounting release."
     }
   ]
 }
