@@ -1065,6 +1065,11 @@
       "file": "fence_duty_gate.mjs",
       "class": "default",
       "note": "Hold-and-Fill v0.7 (axona-docs 95c2ff4) row 4: the duty gate. AxonaPeer.mayRetire(id) reads AxonaManager.obligationsOf(hex): installed roles (upstream, principal, replica, seated subscriber, handoff party in flight) and QUEUED ingest dependencies (a REPLICATE waiting in repairPlane's ingest queue pins its principal from enqueue through the end of fn(); REPLAY_UP declares none; an overflow drop pins nothing; every _ingestEnqueue caller declares). Consulted by the admission gate's grace close (blocked → refuse-grace-blocked, channel kept, timer re-armed), its overflow close and its swap victim (swap-blocked). Not by involuntary loss, stop() or leave(). Fails closed when the reader throws. With mayRetire or its call sites removed, parts 4 and 5 fail."
+    },
+    {
+      "file": "fence_close_connection.mjs",
+      "class": "default",
+      "note": "Hold-and-Fill v0.5/v0.7 (axona-docs 4334504, 95c2ff4) row 5: WebRTCTransport.closeConnection CLOSES. Before: unbind only, the RTCPeerConnection stayed open, pinging, owned by no one. Now: unbind FIRST (so the mesh's onPeerLost is not an active-route death and no peer-died fires: a voluntary close is not a loss), then mesh.disconnect → _retire → CLOSING → the transport's 'closed'. Idempotent. Involuntary loss still fires onPeerDied. Static caller list: every closeConnection site in AxonaPeer.js is one of the design's classified rows (peer-leaving in start, _clearGracePending, the gate's grace/overflow closes and swap victim in _seedSynaptomeWithSponsor/_admitOrImprove, _addByVitality, _tryAnneal, _evictAndReplace); a new caller fails until classified. Ships with rows 4 and 6 in the accounting release: with them, no live channel is closed by a voluntary path the duty gate does not cover."
     }
   ]
 }

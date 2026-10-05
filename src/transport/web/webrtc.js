@@ -357,9 +357,31 @@ export class WebRTCTransport extends Transport {
     });
   }
 
+  /**
+   * CLOSE the channel to `nodeId` (Hold-and-Fill v0.5 row 5, axona-docs
+   * 4334504). Until this change closeConnection only UNBOUND: the identity
+   * lost its route while the RTCPeerConnection stayed open, pinging, counted
+   * by nothing and owned by no one (v0.1, "a physical-channel reservation
+   * with no owner"). Now it unbinds and then tears the channel down through
+   * the mesh's single teardown (_retire → CLOSING → the transport's
+   * 'closed').
+   *
+   * ORDER MATTERS. unbind FIRST, then disconnect: the mesh's onPeerLost
+   * reaches _onPeerLost with the identity already unbound, so it is NOT an
+   * active-route death, no peer-died fires, and the kernel writes no loss
+   * mark. A voluntary close is not a death (v0.7, Rule 1's reason table:
+   * `loss` is involuntary only). The redundant-channel log line names the
+   * reason so a voluntary close is distinguishable from a dedup loser.
+   *
+   * Idempotent: no binding → nothing to close; a channel already retired →
+   * mesh.disconnect no-ops.
+   */
   async closeConnection(nodeId) {
     const meshId = this._meshIdByNodeId.get(nodeId);
-    if (meshId) this.unbindPeer(meshId);
+    if (!meshId) return;
+    this.unbindPeer(meshId);
+    try { this._mesh?.disconnect?.(meshId, 'closeConnection'); }
+    catch (err) { this._log('close-connection-threw', { meshId, err: err?.message }); }
   }
 
   isConnected(nodeId) {
@@ -642,6 +664,10 @@ export class WebRTCTransport extends Transport {
         p.reject(new TransportError(ErrorCodes.TRANSPORT_PEER_UNREACHABLE,
           `peer ${String(nodeId)} died`, { context: { nodeId: String(nodeId) } }));
       }
+    } else if (reason === 'closeConnection') {
+      // Row 5: a voluntary close this node issued; the identity was unbound
+      // first, so this is not a death and no peer-died fires.
+      this._log('peer-closed-voluntary', { meshId });
     } else {
       this._log('peer-lost-redundant-channel', { meshId, nodeId: nodeId === undefined ? null : String(nodeId) });
     }
