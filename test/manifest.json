@@ -1050,6 +1050,11 @@
       "file": "fence_mark_automaton.mjs",
       "class": "default",
       "note": "Hold-and-Fill v0.7 (axona-docs 95c2ff4, \"Marks\") rows 10 + 13, on row 1's marks. Row 10: the mark automaton — one predicate ELIGIBLE for nomination and dialing; FAIL counts failures and schedules (B·factor^(n−1), the A_max-th failure takes the R_refill schedule); CONSUME at issue advances an exhausted mark's window so one window issues at most once; BIND deletes; dueAt on the monotonic clock; exact MARKS-FULL (evicts only exhausted-and-waiting marks, hysteresis) and POLICY-FULL; add() is membership with attempts 0. Kernel: _localCandidate and _considerCandidate filter by eligibility, CONSUME at issue. Row 13: mesh.onNegotiationFailed for a never-opened channel (negotiation-timeout, pc-closed, peer-left, disconnect; not retry/dispose/reset); WebRTCTransport resolves a hex meshId to the identity; the kernel writes a mark ONLY when no OPEN channel to the identity exists. Deviation stated: inbound bind of a marked identity is accepted and deletes the mark (the transport binds before the kernel can consult ELIGIBLE)."
+    },
+    {
+      "file": "fence_client_hello_nodeid.mjs",
+      "class": "default",
+      "note": "Hold-and-Fill v0.5 (axona-docs 4334504) row 2b: the client-hello carries nodeId = identity.id, the hex id the peer will authenticate as on hello-ack, so the bridge's same-region anchor affinity (bridge row 2) has the newcomer's region at admission, which precedes the binding. First frame and reconnect both carry it; the Boundary-4 row projects and types it and does NOT require it, so a 4.102.0 client without the field admits unchanged. An unauthenticated claim: the bridge reads it as an anchor-selection / list-order hint only. With the field removed from web/index.js, checks 1 and 2 fail."
     }
   ]
 }
