@@ -310,6 +310,16 @@ export function webTransport({
                                            // enforce a MIN_KERNEL_VERSION floor
                                            // (STRICT_VERSION island) independent
                                            // of the app's own `version`
+            // Row 2b (Hold-and-Fill v0.5, axona-docs 4334504): the hex nodeId
+            // this peer will AUTHENTICATE AS on hello-ack. The bridge sends
+            // its peer-list on admission, before hello-ack binds the nodeId,
+            // so its same-region anchor affinity can only see the region
+            // through this field. It is a CLAIM, unauthenticated: the bridge
+            // (2.145.0+row 2) reads it as an anchor-selection / list-order
+            // hint and for nothing else; binding, graduation region and
+            // custody read the bound identity. A bridge without row 2
+            // ignores an unknown field.
+            nodeId:        localNodeIdHex,
             ...(meshRelay ? { capabilities: ['mesh-relay'] } : {}),
           }));
         } catch (err) {
