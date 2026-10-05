@@ -1097,6 +1097,9 @@ export class AxonaPeer extends DHT {
   // the abrupt (stop) and graceful (leave) paths: every timer cleared, every
   // pending channel closed NOW (it was refused; only its reclamation was
   // deferred), map emptied. Idempotent — the second call sees an empty map.
+  // Called from stop() and leave(): the node itself departs after its
+  // handoff, so these closes are not voluntary retirements of a peer below
+  // cap and the duty gate (mayRetire, row 4) is not consulted here.
   _clearGracePending() {
     for (const [sponsor, handle] of this._gracePending) {
       clearTimeout(handle);
@@ -1930,9 +1933,18 @@ export class AxonaPeer extends DHT {
         // if the peer was admitted meanwhile. Pending state is bounded:
         // over graceMaxPending, the oldest pending close fires immediately.
         const graceMs = this._gateCfg.closeGraceMs ?? 0;
+        // Row 4: every voluntary close here asks the duty gate first. A
+        // refused close keeps the channel and is reported with the duty
+        // named; the grace path re-arms and asks again at the next fire.
         const doClose = () => {
+          const gate = this.mayRetire(sponsor);
+          if (!gate.ok) {
+            this._emitLog?.('info', 'refuse-grace-blocked', { peer: toHex(sponsor), duty: gate.duty });
+            return false;
+          }
           try { const p = this._node.transport?.closeConnection?.(sponsor); p?.catch?.(() => { /* best-effort */ }); }
           catch { /* best-effort */ }
+          return true;
         };
         // v4.68.1 (Aster review 1c11a94e finding 1): a deferred close KEEPS
         // a physical channel open, so deferral capacity derives from live
@@ -1959,19 +1971,29 @@ export class AxonaPeer extends DHT {
                 + this._gracePending.size + 1 <= cap);
           if (graceOn && headroom) {
             while (this._gracePending.size >= (this._gateCfg.graceMaxPending ?? 64)) {
-              const [oldSponsor, oldHandle] = this._gracePending.entries().next().value;
+              // Row 4: the oldest pending close that the duty gate permits.
+              // If every pending close is a duty, none is closed and the
+              // overflow is reported; the bound on pending closes yields to
+              // the obligations, which is Rule 1.
+              let picked = null;
+              for (const [s] of this._gracePending) { if (this.mayRetire(s).ok) { picked = s; break; } }
+              if (picked === null) { this._emitLog?.('info', 'grace-overflow-all-blocked', { pending: this._gracePending.size }); break; }
+              const oldHandle = this._gracePending.get(picked);
               clearTimeout(oldHandle);
-              this._gracePending.delete(oldSponsor);
-              try { const p = this._node.transport?.closeConnection?.(oldSponsor); p?.catch?.(() => { /* */ }); }
+              this._gracePending.delete(picked);
+              try { const p = this._node.transport?.closeConnection?.(picked); p?.catch?.(() => { /* */ }); }
               catch { /* best-effort */ }
             }
-            const handle = setTimeout(() => {
-              this._gracePending.delete(sponsor);
-              if (this._node?.synaptome?.has?.(sponsor)) return;   // rescued: admitted meanwhile
-              doClose();
-            }, graceMs);
-            if (typeof handle?.unref === 'function') handle.unref();
-            this._gracePending.set(sponsor, handle);
+            const arm = () => {
+              const handle = setTimeout(() => {
+                this._gracePending.delete(sponsor);
+                if (this._node?.synaptome?.has?.(sponsor)) return;   // rescued: admitted meanwhile
+                if (!doClose()) arm();                                // duty: keep the channel, ask again after another grace window
+              }, graceMs);
+              if (typeof handle?.unref === 'function') handle.unref();
+              this._gracePending.set(sponsor, handle);
+            };
+            arm();
           } else {
             doClose();
           }
@@ -2140,12 +2162,51 @@ export class AxonaPeer extends DHT {
     }
     if (victimKey === null) return false;                               // refuse: no admissible swap
 
+    // Row 4: the duty gate. A voluntary close of a peer this node owes
+    // something to is refused and reported; the swap is void.
+    const gate = this.mayRetire(victimKey);
+    if (!gate.ok) {
+      this._emitLog?.('info', 'swap-blocked', { victim: toHex(victimKey), duty: gate.duty });
+      return false;
+    }
     syn.delete(victimKey);
     node.connections?.delete(victimKey);
     try { const p = node.transport?.closeConnection?.(victimKey); p?.catch?.(() => { /* best-effort */ }); }
     catch { /* best-effort */ }
     this._seedInsert(sponsor, 'gate-swap');
     return true;
+  }
+
+  /**
+   * THE DUTY GATE (Hold-and-Fill v0.7 row 4, axona-docs 95c2ff4). May this
+   * node VOLUNTARILY close its channel to `id`? Reads the kernel's existing
+   * role state through AxonaManager.obligationsOf: installed roles (upstream,
+   * principal, replica, seated subscriber, handoff party) and queued role
+   * work (a REPLICATE waiting in the ingest queue names its principal). No
+   * duty → ok. A duty → refused, with the duty named, and the caller keeps
+   * the peer and its resources and tries again when the state changes.
+   *
+   * Consulted by every voluntary close below cap: the admission gate's
+   * grace close, its overflow close and its swap victim. NOT consulted by
+   * involuntary loss (a dead channel enters the role's own recovery) and not
+   * by stop()/leave(), where the node itself departs after its handoff.
+   *
+   * FAIL CLOSED on a reader that throws: "cannot say" is a duty.
+   * @param {bigint|string} id  nodeId (BigInt) or lowercase hex
+   * @returns {{ ok: boolean, duty: string|null }}
+   */
+  mayRetire(id) {
+    let hex;
+    try { hex = (typeof id === 'bigint') ? toHex(id).toLowerCase() : String(id).toLowerCase(); }
+    catch { return { ok: false, duty: 'unresolvable-id' }; }
+    const am = this._axonaManager ?? null;
+    if (!am || typeof am.obligationsOf !== 'function') return { ok: true, duty: null };   // no pubsub, no duties
+    try {
+      const kinds = am.obligationsOf(hex);
+      return kinds.length ? { ok: false, duty: kinds.join(',') } : { ok: true, duty: null };
+    } catch (err) {
+      return { ok: false, duty: `reader-threw:${err?.message ?? 'unknown'}` };
+    }
   }
 
   /**

@@ -421,8 +421,20 @@ export const repairPlaneMethods = {
   // once this macrotask's inline budget (INGEST_SLICE_MS) is spent, or a
   // backlog exists, work spills to the queue. Either way, ingest CPU per
   // macrotask turn is bounded.
-  async _ingestEnqueue(fn) {
+  // DEPENDENCY (Hold-and-Fill v0.7 row 4, axona-docs 95c2ff4 "The duty gate").
+  // A queued payload may install a role toward a peer when it is processed
+  // (REPLICATE → becomeBackup(principal)); between arrival and processing
+  // that peer is a duty this node has accepted and its role state does not
+  // yet show. Every caller DECLARES the peer its payload will name (`dep`,
+  // lowercase hex) or null, and the declaration rides the queue entry. The
+  // duty gate (AxonaManager.obligationsOf / obligedPeers) reads the queued
+  // and the in-flight dependency, so a voluntary close cannot land in the
+  // interval. The pin is held from enqueue through the end of fn(): that
+  // covers the install, which happens before fn's first await, with margin.
+  // An overflow drop pins nothing: nothing was accepted.
+  async _ingestEnqueue(fn, dep = null) {
     const q = (this._ingestQueue ??= []);
+    const dependency = (typeof dep === 'string' && dep) ? dep.toLowerCase() : null;
     // Inline is single-flight: a burst's SECOND arrival — landing while the
     // first is still verifying — goes to the queue, which is exactly what
     // distinguishes a storm from ordinary sequential traffic.
@@ -435,8 +447,9 @@ export const repairPlaneMethods = {
       }
       if (nowMs - this._inlineSliceStart < INGEST_SLICE_MS) {
         this._ingestInlineActive = true;
+        this._ingestActiveDep = dependency;
         try { await fn(); } catch { /* ingest is best-effort; anti-entropy re-heals */ }
-        finally { this._ingestInlineActive = false; }
+        finally { this._ingestInlineActive = false; this._ingestActiveDep = null; }
         return;
       }
     }
@@ -445,7 +458,7 @@ export const repairPlaneMethods = {
       if ((this._ingestDropped & 255) === 1) this._log('warn', 'ingest-overflow', { dropped: this._ingestDropped, queued: q.length });
       return;
     }
-    q.push(fn);
+    q.push({ fn, dep: dependency });
     if (!this._ingestPumping) { this._ingestPumping = true; this._ingestPump(); }
   },
 
@@ -455,14 +468,28 @@ export const repairPlaneMethods = {
       while (q.length) {
         const t0 = Date.now();                       // wall clock: CPU slicing, not sim time
         while (q.length && (Date.now() - t0) < INGEST_SLICE_MS) {
-          const fn = q.shift();
-          try { await fn(); } catch { /* ingest is best-effort; anti-entropy re-heals */ }
+          const entry = q.shift();
+          // The pin moves from the queue entry to the in-flight slot in this
+          // same synchronous step; no await between the shift and the start
+          // of fn(), so the dependency is never unpinned before its install.
+          this._ingestActiveDep = entry.dep;
+          try { await entry.fn(); } catch { /* ingest is best-effort; anti-entropy re-heals */ }
+          finally { this._ingestActiveDep = null; }
         }
         if (q.length) await new Promise(r => (typeof setImmediate === 'function' ? setImmediate(r) : setTimeout(r, 0)));
       }
     } finally {
       this._ingestPumping = false;
     }
+  },
+
+  /** Row 4: peers that queued or in-flight ingest work will name when it is
+   *  processed (lowercase hex). Read by the duty gate. */
+  queuedDependencies() {
+    const out = new Set();
+    if (this._ingestActiveDep) out.add(this._ingestActiveDep);
+    for (const e of (this._ingestQueue ?? [])) if (e && e.dep) out.add(e.dep);
+    return out;
   },
 
   // Resolves once every queued ingest has been processed — for tests and for
@@ -1128,6 +1155,11 @@ export const repairPlaneMethods = {
     // Within a tier, larger caches first (more messages at stake per send).
     const tier = (j) => j.role.isRoot ? ((j.role.replicas?.size ?? 0) === 0 ? 0 : 1) : 2;
     jobs.sort((a, b) => (tier(a) - tier(b)) || (b.role.cache.length - a.role.cache.length));
+    // Row 4: every party to a handoff in flight is a duty while this runs
+    // (AxonaManager._walkObligations reads heir/alt from here). leave() may
+    // abandon this promise at its time bound; the marker then stays set on a
+    // node that is departing anyway.
+    this._handoffInFlight = jobs;
     let i = 0;
     const resolver = async () => {
       while (i < jobs.length) {
@@ -1309,6 +1341,7 @@ export const repairPlaneMethods = {
         Promise.resolve(this._syncPush(target, j.t, j.role, policy)).catch(() => {});
       } catch { /* best-effort */ }
     }
+    this._handoffInFlight = null;
   },
 
   // ── lifecycle: renewal + eviction + TTL sweep ────────────────────────
