@@ -1435,12 +1435,25 @@ export class AxonaPeer extends DHT {
     this._maintainInflight = true;
     try {
       const self = node.id;
+      // ── Row 7 (Hold-and-Fill v0.15, axona-docs e4809d2): RECONCILE FIRST.
+      // Every identity the transport holds BOUND that is not in the table is
+      // offered to admit(), with zero new dial. Until this change the tick
+      // treated a bound peer as "connected" (isConn below) and skipped it, so
+      // a channel that bound but was never admitted — the gate's refused
+      // candidate after its grace, a bind whose seed threw, a peer that
+      // bound while the table was at cap — stayed bound and out of the
+      // table for the life of the channel, and no tick ever took it. The
+      // offer is the existing admit path (_seedSynaptomeWithSponsor: the
+      // gate when armed, the legacy below-cap seed otherwise): admitted →
+      // in the table; refused → stays BOUND and charged, and with the gate
+      // armed its grace timer starts (case 2). GATED with the tick itself.
+      const rec = this._reconcileBound();
       let nearest;
       // Request kNear+1: findKClosest(self, …) returns self as the closest entry,
       // so without the +1 we'd only ever fill kNear-1 successors.
       try { nearest = await this.findKClosest(self, cfg.kNear + 1); }
-      catch { return 0; }
-      if (!Array.isArray(nearest)) return 0;
+      catch { return rec.admitted; }
+      if (!Array.isArray(nearest)) return rec.admitted;
       const isConn = (id) => node.synaptome?.has(id)
         || (typeof node.transport?.isConnected === 'function' && node.transport.isConnected(id));
       const deficit = [];
@@ -1463,6 +1476,32 @@ export class AxonaPeer extends DHT {
       }
       return attempted;
     } finally { this._maintainInflight = false; }
+  }
+
+  /**
+   * Row 7: the reconcile step of the fill tick. Offers every BOUND identity
+   * that is not in the table to the admit path, dialing nothing. Returns the
+   * counts; records them on this._reconcileLast and logs when anything was
+   * offered. Idempotent: a refused identity is offered again next tick and
+   * refused again until the table has room or its channel is lost.
+   * @returns {{bound:number, offered:number, admitted:number, refused:number}}
+   */
+  _reconcileBound() {
+    const node = this._node; const t = node?.transport;
+    const out = { bound: 0, offered: 0, admitted: 0, refused: 0 };
+    this._reconcileLast = out;
+    if (!this._maintainCfg || !node?.synaptome || typeof t?.boundPeers !== 'function') return out;
+    let bound = [];
+    try { bound = t.boundPeers() ?? []; } catch { bound = []; }
+    out.bound = bound.length;
+    for (const id of bound) {
+      if (typeof id !== 'bigint' || id === node.id || node.synaptome.has(id)) continue;
+      out.offered++;
+      try { this._seedSynaptomeWithSponsor(id); } catch { /* admit is best-effort; refusal is the normal case at cap */ }
+      if (node.synaptome.has(id)) out.admitted++; else out.refused++;
+    }
+    if (out.offered) this._emitLog?.('info', 'synaptome-reconcile', { ...out });
+    return out;
   }
 
   // Debounced trigger — coalesce a burst of near-neighbour losses into one pass.
