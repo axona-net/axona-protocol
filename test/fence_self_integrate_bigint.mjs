@@ -18,6 +18,9 @@
 //   F. Key type at the REAL web transport: WebRTCTransport.openConnection with
 //      the BigInt of a bound identity resolves true; with that identity's hex
 //      string it resolves false — the fact row 11 corrects for.
+//   H, I. R11-1 (Aster d787d245): eligibility re-read at the dial and after the
+//      awaited open; a loss during the open (H) or a loss marking the next
+//      target (I) yields no open / CONSUME / relay for the newly ineligible id.
 //   G. STATIC: `_selfIntegrate` no longer contains `openConnection(toHex(`.
 //
 // With `toHex(id)` restored in the open call, A fails (and F stands as the
@@ -81,7 +84,7 @@ const neighbour = (self, seed) => self ^ (1n << BigInt(seed));
     check('A bound neighbour, no guard: opened 1', n === 1, String(n));
     check('A the transport received a BIGINT, not a hex string', t.calls.open.length === 1 && typeof t.calls.open[0] === 'bigint', J(t.calls.open));
     check('A relay fallback never called', t.calls.relay.length === 0);
-    check('A stats: opened 1, relayed 0, guarded false', peer._selfIntegrateLast?.opened === 1 && peer._selfIntegrateLast?.relayed === 0, J(peer._selfIntegrateLast));
+    check('A stats: opened 1, relayed 0, guarded false (carried in _selfIntegrateLast)', peer._selfIntegrateLast?.opened === 1 && peer._selfIntegrateLast?.relayed === 0 && peer._selfIntegrateLast?.guarded === false, J(peer._selfIntegrateLast));
   }
 
   // B. unbound neighbour, no guard: gated, nothing issued
@@ -112,7 +115,7 @@ const neighbour = (self, seed) => self ^ (1n << BigInt(seed));
     check('C connectViaRelay called ONCE with the hex of the neighbour', t.calls.relay.length === 1 && t.calls.relay[0] === toHex(nb), J(t.calls.relay));
     check('C CONSUME ran once for the neighbour at issue', consumed.length === 1 && consumed[0] === nb);
     check('C guard: one attempt recorded, not in flight (begin+end once)', g.attemptsOf(nb) === 1 && g.allow(nb) === false, `attempts=${g.attemptsOf(nb)} allow=${g.allow(nb)}`);
-    check('C stats: relayed 1, guarded true', peer._selfIntegrateLast?.relayed === 1 && peer._selfIntegrateLast?.guardRefused === 0, J(peer._selfIntegrateLast));
+    check('C stats: relayed 1, guarded true (carried in _selfIntegrateLast)', peer._selfIntegrateLast?.relayed === 1 && peer._selfIntegrateLast?.guardRefused === 0 && peer._selfIntegrateLast?.guarded === true, J(peer._selfIntegrateLast));
     // backoff: an immediate second pass is refused by the guard; nothing issued
     const n2 = await peer._selfIntegrate();
     check('C second pass inside the backoff: guard refused, no second relay dial, no second CONSUME', n2 === 0 && t.calls.relay.length === 1 && consumed.length === 1 && peer._selfIntegrateLast?.guardRefused === 1, J(peer._selfIntegrateLast));
@@ -142,6 +145,34 @@ const neighbour = (self, seed) => self ^ (1n << BigInt(seed));
     const n = await peer._selfIntegrate();
     check('E marked-not-due neighbour skipped before any open; due one dialed', n === 0 && t.calls.open.length === 1 && t.calls.open[0] === due && peer._selfIntegrateLast?.ineligible === 1, J({ open: t.calls.open, stats: peer._selfIntegrateLast }));
     check('E the due neighbour fell through to the relay dial', t.calls.relay.length === 1 && t.calls.relay[0] === toHex(due));
+  }
+
+
+  // H. R11-1 (Aster d787d245): a loss DURING the awaited open marks the target;
+  //    the fallback must see the current eligibility: no CONSUME, no relay.
+  {
+    const t = fakeTransport();
+    const { peer, node, big } = await makePeer(t, { attemptGuard: {} });
+    const nb = neighbour(big, 206);
+    node._deadPeers = new DeadPeers({ B: 60000 });
+    const consumed = []; const oc = node._deadPeers.consume.bind(node._deadPeers); node._deadPeers.consume = (id) => { consumed.push(id); return oc(id); };
+    t.openConnection = async (id) => { t.calls.open.push(id); await tick(); node._deadPeers.fail(nb, 'intervening-loss'); return false; };
+    peer.findKClosest = async () => [nb];
+    const n = await peer._selfIntegrate();
+    check('H loss during the open: eligible at build, ineligible at the effect boundary → NO relay, NO consume', n === 0 && t.calls.open.length === 1 && t.calls.relay.length === 0 && consumed.length === 0 && peer._selfIntegrateLast?.ineligibleAfterOpen === 1, J({ relay: t.calls.relay, consumed: consumed.length, stats: peer._selfIntegrateLast }));
+  }
+
+  // I. R11-1: concurrency 1, two targets; the first open's loss callback marks
+  //    the SECOND target before its dial starts → no open, no relay for it.
+  {
+    const t = fakeTransport();
+    const { peer, node, big } = await makePeer(t, { attemptGuard: {} });
+    const a = neighbour(big, 207), b = neighbour(big, 208);
+    node._deadPeers = new DeadPeers({ B: 60000 });
+    t.openConnection = async (id) => { t.calls.open.push(id); await tick(); if (id === a) node._deadPeers.fail(b, 'intervening-loss'); return false; };
+    peer.findKClosest = async () => [a, b];
+    const n = await peer._selfIntegrate({ concurrency: 1 });
+    check('I the second target, marked by the first open\'s loss, is not opened and not relayed; the first is relayed once', n === 0 && t.calls.open.length === 1 && t.calls.open[0] === a && t.calls.relay.length === 1 && t.calls.relay[0] === toHex(a) && peer._selfIntegrateLast?.ineligible === 1, J({ open: t.calls.open, relay: t.calls.relay, stats: peer._selfIntegrateLast }));
   }
 
   // F. the real web transport's key type

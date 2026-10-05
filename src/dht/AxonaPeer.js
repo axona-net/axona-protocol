@@ -1345,7 +1345,7 @@ export class AxonaPeer extends DHT {
     // Row 10 (Hold-and-Fill v0.7 "Marks"): a dial site consults ELIGIBILITY,
     // not membership; a marked neighbour whose refill is not due is skipped.
     const t = node.transport;
-    const stats = { targets: 0, ineligible: 0, guardRefused: 0, opened: 0, relayed: 0, relayUnavailable: 0 };
+    const stats = { targets: 0, ineligible: 0, ineligibleAfterOpen: 0, guardRefused: 0, opened: 0, relayed: 0, relayUnavailable: 0, guarded: false };
     this._selfIntegrateLast = stats;
     const targets = [];
     for (const id of closest) {
@@ -1369,7 +1369,12 @@ export class AxonaPeer extends DHT {
     // guard this is the bound-only dial it always was, with the key fixed.
     // The token discipline (end at bind, cancel or deadline) is row 8's.
     const guard = this._attemptGuard ?? null;
+    stats.guarded = !!guard;
     const dial = async (id) => {
+      // R11-1 (Aster d787d245): eligibility is re-read at the dial itself,
+      // not only when the target list was built; a later batch can start
+      // after a loss has marked its target.
+      if (!this._isEligibleCandidate(id)) { stats.ineligible++; return false; }
       if (guard) {
         if (!guard.allow(id)) { stats.guardRefused++; return false; }
         guard.begin(id);
@@ -1379,6 +1384,12 @@ export class AxonaPeer extends DHT {
       catch { opened = false; }
       finally { guard?.end(id, opened); }
       if (opened) { stats.opened++; return true; }
+      // R11-1: the open was awaited, a loss callback may have marked this
+      // identity meanwhile, and openConnection's false is not only "no
+      // binding" (disappearance, failed/closed state, its 15 s timeout).
+      // Eligibility is re-read at the effect boundary: a newly ineligible
+      // target gets no CONSUME and no relay dial.
+      if (!this._isEligibleCandidate(id)) { stats.ineligibleAfterOpen++; return false; }
       if (guard && typeof t.connectViaRelay === 'function') {
         try { node._deadPeers?.consume?.(id); } catch { /* bookkeeping only */ }
         let issued = false;
@@ -1390,7 +1401,7 @@ export class AxonaPeer extends DHT {
     for (let i = 0; i < targets.length; i += concurrency) {
       await Promise.allSettled(targets.slice(i, i + concurrency).map(dial));
     }
-    this._emitLog?.('info', 'self-integrate', { ...stats, guarded: !!guard });
+    this._emitLog?.('info', 'self-integrate', { ...stats });
     return stats.opened;
   }
 
