@@ -1155,6 +1155,10 @@ export class AxonaPeer extends DHT {
       this._onPeerDiedUnsub();
       this._onPeerDiedUnsub = null;
     }
+    if (this._onNegotiationFailedUnsub) {          // row 13 (Aster 1816f5e6 R10/13-A)
+      this._onNegotiationFailedUnsub();
+      this._onNegotiationFailedUnsub = null;
+    }
     if (this._maintainTimer) {
       clearInterval(this._maintainTimer);
       this._maintainTimer = null;
@@ -1599,6 +1603,10 @@ export class AxonaPeer extends DHT {
     if (this._onPeerDiedUnsub) {
       try { this._onPeerDiedUnsub(); } catch { /* swallow */ }
       this._onPeerDiedUnsub = null;
+    }
+    if (this._onNegotiationFailedUnsub) {          // row 13 (Aster 1816f5e6 R10/13-A)
+      try { this._onNegotiationFailedUnsub(); } catch { /* swallow */ }
+      this._onNegotiationFailedUnsub = null;
     }
 
     // (5) close transport

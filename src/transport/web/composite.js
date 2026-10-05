@@ -105,7 +105,7 @@ export class CompositeTransport extends Transport {
     for (const [type, h] of this._reqHandlers) this._fanOutRequest(t, type, h);
     for (const [type, h] of this._ntfHandlers) this._fanOutNotification(t, type, h);
     for (const h of this._peerDiedHandlers)    t.onPeerDied(h);
-    if (typeof t.onNegotiationFailed === 'function') for (const h of (this._negotiationFailedHandlers ?? [])) t.onNegotiationFailed(h);
+    if (typeof t.onNegotiationFailed === 'function') for (const e of (this._negotiationFailedHandlers ?? [])) e.unsubs.push(t.onNegotiationFailed(e.handler));
     for (const reg of this._peerBoundRegistrars) reg(t);
   }
 
@@ -272,15 +272,21 @@ export class CompositeTransport extends Transport {
   }
 
   /** Row 13: fan out to every sub-transport that has the signal (the WebRTC
-   *  one); the bridge WebSocket never negotiates a peer channel. */
+   *  one); the bridge WebSocket never negotiates a peer channel. Each
+   *  registration is an entry {handler, unsubs}; a sub-transport added later
+   *  appends its unsubscribe to the entry (addSubtransport), so the closure
+   *  returned here removes the late registration too (Aster 1816f5e6
+   *  R10/13-A). Idempotent: a second call of the closure does nothing. */
   onNegotiationFailed(handler) {
-    (this._negotiationFailedHandlers ??= []).push(handler);
-    const unsubs = this._subs.filter(t => typeof t.onNegotiationFailed === 'function').map(t => t.onNegotiationFailed(handler));
+    const entry = { handler, unsubs: [] };
+    (this._negotiationFailedHandlers ??= []).push(entry);
+    for (const t of this._subs) if (typeof t.onNegotiationFailed === 'function') entry.unsubs.push(t.onNegotiationFailed(handler));
     return () => {
       const a = this._negotiationFailedHandlers;
-      const i = a ? a.indexOf(handler) : -1;
+      const i = a ? a.indexOf(entry) : -1;
       if (i >= 0) a.splice(i, 1);
-      for (const u of unsubs) try { u(); } catch {}
+      const us = entry.unsubs; entry.unsubs = [];
+      for (const u of us) try { u(); } catch {}
     };
   }
 

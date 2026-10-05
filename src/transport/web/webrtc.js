@@ -172,8 +172,10 @@ export class WebRTCTransport extends Transport {
     if (!this._started) return;
     if (this._unsubMessage)  this._unsubMessage();
     if (this._unsubPeerLost) this._unsubPeerLost();
+    if (this._unsubNegotiationFailed) { try { this._unsubNegotiationFailed(); } catch { /* idempotent */ } }   // row 13 (Aster 1816f5e6 R10/13-A)
     this._unsubMessage  = null;
     this._unsubPeerLost = null;
+    this._unsubNegotiationFailed = null;
     // Reject every outstanding request.
     for (const [, p] of this._pending) {
       clearTimeout(p.timer);

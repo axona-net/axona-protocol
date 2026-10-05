@@ -50,7 +50,9 @@
  * BIND, eviction and restart reset the accounting by policy.
  *
  * TWO FULL STATES, exact, no Bloom filter:
- *   MARKS-FULL   size ≥ M_marks latches; lifts below M_marks − M_hyst. While
+ *   MARKS-FULL   LOSS marks ≥ M_marks latches; lifts below M_marks − M_hyst
+ *                (the Map holds loss and policy marks together; each kind
+ *                has its own bound and count, Aster 1816f5e6). While
  *                latched no UNMARKED identity is eligible. A new loss mark at
  *                the bound evicts the OLDEST exhausted-and-waiting mark
  *                (attempts = A_max, token 0), and only such a mark; with none
@@ -224,7 +226,7 @@ export class DeadPeers extends Map {
   stats() {
     let exhausted = 0, waiting = 0;
     for (const m of this.values()) if (m.kind === 'loss' && m.attempts >= this.cfg.A_max) { exhausted++; if (!m.token) waiting++; }
-    return { size: this.size, policy: this._policyCount, exhausted, exhaustedWaiting: waiting, marksFull: this._fullLatched, policyFull: this.policyFull(), ...this._stats, cfg: { ...this.cfg } };
+    return { size: this.size, loss: this.lossCount(), policy: this._policyCount, exhausted, exhaustedWaiting: waiting, marksFull: this._fullLatched, policyFull: this.policyFull(), ...this._stats, cfg: { ...this.cfg } };
   }
 
   // ── internals ──────────────────────────────────────────────────────
@@ -234,15 +236,22 @@ export class DeadPeers extends Map {
     return now + this.cfg.B * Math.pow(this.cfg.factor, attempts - 1);
   }
 
+  /** Loss marks in the table. The two bounds are separate (Aster 1816f5e6
+   *  R10/13-C): M_marks bounds LOSS marks, M_policy bounds POLICY marks; the
+   *  Map holds both, and size is their sum. */
+  lossCount() { return this.size - this._policyCount; }
+
   _latch() {
-    if (this.size >= this.cfg.M_marks) this._fullLatched = true;
-    else if (this.size < this.cfg.M_marks - this.cfg.M_hyst) this._fullLatched = false;
+    const loss = this.lossCount();
+    if (loss >= this.cfg.M_marks) this._fullLatched = true;
+    else if (loss < this.cfg.M_marks - this.cfg.M_hyst) this._fullLatched = false;
   }
 
-  /** May a NEW loss mark be written? At the bound, evict the oldest
-   *  exhausted-and-waiting loss mark; with none, refuse. */
+  /** May a NEW loss mark be written? At the loss bound, evict the oldest
+   *  exhausted-and-waiting loss mark; with none, refuse. Policy marks are
+   *  never candidates and never counted here. */
   _admitWrite(id) {
-    if (this.size < this.cfg.M_marks) return true;
+    if (this.lossCount() < this.cfg.M_marks) return true;
     let victim = null;
     for (const [k, m] of this) {
       if (m.kind !== 'loss' || m.attempts < this.cfg.A_max || m.token) continue;
@@ -258,9 +267,9 @@ export class DeadPeers extends Map {
     const m = this.get(id);
     if (m && m.kind === 'policy') { m.cause = cause; m.at = Number.isFinite(at) ? at : this._wall(); return; }
     if (this.policyFull()) { this._stats.policyRefused++; return; }
-    if (m) super.delete(id);           // a loss mark becomes a policy mark
+    if (m) super.delete(id);           // a loss mark becomes a policy mark (leaves the loss count)
     this.set(id, { kind: 'policy', cause, at: Number.isFinite(at) ? at : this._wall(), attempts: 0, dueAt: Infinity, token: 0, seq: ++this._seq });
     this._policyCount++;
-    this._latch();
+    this._latch();                     // the loss count may have dropped
   }
 }

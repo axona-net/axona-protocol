@@ -85,13 +85,25 @@ console.log('fence_mark_automaton: rows 10 + 13');
   D.fail(X, 'z'); check('A after BIND the next loss starts at attempts 1', D.get(X).attempts === 1);
   D.clear();
 
-  // reservation refusal consumes nothing: CONSUME is only called at issue; no call → nothing changes
-  const E = mk(); const Y = 2n;
-  for (let i = 0; i < 3; i++) { E.fail(Y); }
-  now += 5000; E.eligible(Y);
-  const before = { ...E.get(Y) };
-  check('A case 45: a nominated-but-deferred attempt (no CONSUME) leaves token and dueAt', E.get(Y).token === before.token && E.get(Y).dueAt === before.dueAt);
-  E.clear();
+  // (case 45's actual refused reservation is exercised on the kernel in part B)
+
+  // R10/13-C: two bounds, one Map. M_marks bounds LOSS marks, M_policy bounds
+  // POLICY marks; policy marks never latch MARKS-FULL and are never evicted.
+  const Q = new DeadPeers({ M_marks: 2, M_hyst: 1, M_policy: 4, now: () => now, wall: () => wall });
+  Q.mark(30n, { kind: 'policy' }); Q.mark(31n, { kind: 'policy' }); Q.mark(32n, { kind: 'policy' });
+  check('A C: three policy marks with M_marks 2: size 3, loss 0, policy 3, MARKS-FULL not latched', Q.size === 3 && Q.lossCount() === 0 && Q.stats().policy === 3 && !Q.marksFull());
+  Q.fail(33n); Q.fail(34n);
+  check('A C: two loss marks then latch MARKS-FULL at M_marks 2 (policy marks not counted)', Q.lossCount() === 2 && Q.marksFull());
+  check('A C: a third loss mark is refused (no exhausted mark to evict), policy marks untouched', Q.fail(35n) === null && Q.size === 5 && Q.stats().policy === 3);
+  Q.mark(36n, { kind: 'policy' });
+  check('A C: fourth policy mark fills M_policy; a fifth is refused and counted', Q.policyFull() && (Q.mark(37n, { kind: 'policy' }), !Q.has(37n)) && Q.stats().policyRefused === 1);
+  Q.mark(33n, { kind: 'policy' });
+  check('A C: a loss mark becoming policy is refused at POLICY-FULL and stays a loss mark', Q.get(33n).kind === 'loss');
+  Q.delete(30n); Q.mark(33n, { kind: 'policy' });
+  check('A C: with a policy slot free, a loss mark becomes a policy mark and leaves the loss count (1); MARKS-FULL still latched at hysteresis (lifts below M_marks − M_hyst = 1)', Q.get(33n).kind === 'policy' && Q.lossCount() === 1 && Q.marksFull());
+  Q.delete(34n);
+  check('A C: loss count 0 → MARKS-FULL lifts; policy marks remain', Q.lossCount() === 0 && !Q.marksFull() && Q.stats().policy === 4);
+  Q.clear();
 
   // add(): membership with attempts 0; composition rules from row 1
   const F = mk(); const Z = 3n;
@@ -131,7 +143,14 @@ console.log('fence_mark_automaton: rows 10 + 13');
   check('A 20n exhausted and waiting', Mf.get(20n).attempts === 3 && Mf.get(20n).token === 0);
   const r2 = Mf.fail(24n);
   check('A case 38: a new loss mark evicts the oldest exhausted-and-waiting mark only', r2 !== null && Mf.has(24n) && !Mf.has(20n) && Mf.stats().evicted === 1 && Mf.size === 4);
-  check('A a policy mark is never evicted', (() => { Mf.mark(21n, { kind: 'policy' }); Mf.fail(22n); Mf.fail(22n); Mf.fail(23n); Mf.fail(23n); const before = Mf.has(21n); const x = Mf.fail(25n); return before && Mf.has(21n) && x !== null && !Mf.has(22n); })());
+  check('A a policy mark is never evicted', (() => {
+    Mf.mark(21n, { kind: 'policy' });            // 21n leaves the loss count (loss 3 of M_marks 4)
+    Mf.fail(26n);                                 // loss back at the bound (4)
+    Mf.fail(22n); Mf.fail(22n); Mf.fail(23n); Mf.fail(23n);   // 22n, 23n exhausted and waiting
+    const before = Mf.has(21n);
+    const x = Mf.fail(25n);                       // must evict the OLDEST exhausted-and-waiting loss mark (22n), never 21n
+    return before && Mf.has(21n) && x !== null && !Mf.has(22n) && Mf.has(23n) && Mf.get(21n).kind === 'policy';
+  })());
   // the evicted identity returns as a stranger
   check('A the evicted identity returns as a stranger (no mark); while MARKS-FULL it is ineligible like any stranger', !Mf.has(20n) && Mf.eligible(20n) === false);
   Mf.delete(24n); Mf.delete(25n);
@@ -175,6 +194,18 @@ async function makePeer(net, domain, lat, lng, opts = {}) {
     check('B2 eligible: the attempt issues (open fails: no such node) and CONSUME advanced the window', opens.length === 1 && a.node._deadPeers.get(Z)?.dueAt === 3000 && a.node._deadPeers.stats().consumed === 1, JSON.stringify(a.node._deadPeers.get(Z)));
     await a.peer._considerCandidate(Z, 'test');
     check('B2 same window: refused again', opens.length === 1 && a.peer._dialIneligible === 2);
+    // case 45, an ACTUAL refused reservation: at the probe bound _considerCandidate
+    // returns before issue; the mark is eligible but nothing is consumed.
+    now = 3000;                                            // window due again
+    const savedProbes = a.peer._verifyProbes; a.peer._verifyProbes = 8;   // MAX_VERIFY_PROBES
+    const mBefore = { ...a.node._deadPeers.get(Z) }; const consumedBefore = a.node._deadPeers.stats().consumed;
+    await a.peer._considerCandidate(Z, 'test');
+    const mAfter = a.node._deadPeers.get(Z);
+    // The predicate's lazy REFILL may set the token during the eligibility
+    // test; that is evaluation, not issue. What a refused reservation must
+    // leave alone is the WINDOW (dueAt) and the consumed count.
+    check('B2 case 45: reservation refused at the probe bound → no open, no CONSUME, dueAt unchanged, still eligible', opens.length === 1 && a.node._deadPeers.stats().consumed === consumedBefore && mAfter.dueAt === mBefore.dueAt && a.peer._isEligibleCandidate(Z) === true, JSON.stringify({ before: mBefore, after: mAfter }));
+    a.peer._verifyProbes = savedProbes;
     a.transport.openConnection = origOpen;
     // B3: a bind on our channel deletes the mark. NOT IMPLEMENTED / NOT
     // ACCEPTED (Aster 4c07cab5): v0.7 case 44 has identify consult ELIGIBLE
@@ -236,35 +267,76 @@ async function makePeer(net, domain, lat, lng, opts = {}) {
     check('C3 dispose does not fire', fails.length === 2);
     await t.stop().catch(() => {});
 
-    // C4: the kernel marks only when no OPEN channel exists — through AxonaPeer with a fake transport that offers the hook
-    const marks = new DeadPeers({ B: 100, A_max: 2, R_refill: 1000 });
-    let connected = false; let handler = null;
-    const fakeT = {
-      onNegotiationFailed: (h) => { handler = h; return () => {}; },
-      isConnected: () => connected,
-    };
-    const node = new NeuronNode({ id: 7n, lat: 0, lng: 0 }); node._deadPeers = marks;
-    // drive the kernel's subscription body directly, as AxonaPeer.start wires it
-    const peer = new AxonaPeer({ domain: new AxonaDomain(), node, transport: null });
-    peer._node = node;
-    const logs = []; peer._emitLog = (l, m, c) => logs.push([m, c]);
-    // emulate the wiring: the same code path AxonaPeer.start installs when transport.onNegotiationFailed exists
-    if (typeof fakeT.onNegotiationFailed === 'function') {
-      fakeT.onNegotiationFailed((peerBig, reason) => {
-        let open = false; try { open = fakeT.isConnected(peerBig); } catch {}
-        if (open) { peer._emitLog('info', 'negotiation-failed-beside-live', { peer: toHex(peerBig), reason }); return; }
-        marks.fail(peerBig, reason); peer._emitLog('info', 'negotiation-failed-marked', { peer: toHex(peerBig), reason });
+    // C4: THE INSTALLED CALLBACK (Aster 1816f5e6 R10/13-B). A started AxonaPeer
+    // on a real sim transport WRAPPED to expose onNegotiationFailed (captured)
+    // and a controllable isConnected; AxonaPeer.start subscribes exactly as
+    // in production, and the failure is delivered through that subscription.
+    // A no-op return at the start of the real callback fails these checks.
+    {
+      const net2 = new SimNetwork(); const dom2 = new AxonaDomain();
+      const id2 = await createNodeIdentity({ lat: 3, lng: 3 });
+      const sim = simTransport({ network: net2, identity: id2, heartbeatMs: 0 });
+      await sim.start(id2.id);
+      let captured = null; let connectedOverride = null;
+      const wrapped = new Proxy(sim, {
+        get(target, prop, recv) {
+          if (prop === 'onNegotiationFailed') return (h) => { captured = h; return () => { captured = null; }; };
+          if (prop === 'isConnected') return (id) => (connectedOverride == null ? target.isConnected(id) : connectedOverride);
+          const v = Reflect.get(target, prop, recv);
+          return typeof v === 'function' ? v.bind(target) : v;
+        },
       });
+      const node2 = new NeuronNode({ id: fromHex(id2.id), lat: 3, lng: 3 }); node2.transport = wrapped;
+      const marks = new DeadPeers({ B: 100, A_max: 2, R_refill: 1000 }); node2._deadPeers = marks;
+      const peer2 = new AxonaPeer({ domain: dom2, node: node2, nodeIdentity: id2, transport: wrapped });
+      const logs = []; const origLog2 = peer2._emitLog.bind(peer2); peer2._emitLog = (l, m, c) => { logs.push([m, c]); return origLog2(l, m, c); };
+      await peer2.start();
+      check('C4 start subscribed the real onNegotiationFailed callback', typeof captured === 'function' && typeof peer2._onNegotiationFailedUnsub === 'function');
+      const ID = fromHex(HEX);
+      connectedOverride = true; captured(ID, 'negotiation-timeout');
+      check('C4 case 37 (installed callback): beside a LIVE channel → no mark, beside-live logged', !marks.has(ID) && logs.some(([m]) => m === 'negotiation-failed-beside-live'));
+      connectedOverride = false; captured(ID, 'negotiation-timeout');
+      check('C4 case 35 (installed callback): no open channel → loss mark with the reason, attempts 1', marks.get(ID)?.kind === 'loss' && marks.get(ID)?.cause === 'negotiation-timeout' && marks.get(ID)?.attempts === 1 && logs.some(([m]) => m === 'negotiation-failed-marked'));
+      captured(ID, 'pc-closed');
+      check('C4 one physical failure → exactly one FAIL increment per delivery', marks.get(ID)?.attempts === 2);
+      await peer2.stop();
+      check('C4 stop() released the subscription (idempotent cleanup)', captured === null && peer2._onNegotiationFailedUnsub === null);
+      await sim.stop().catch(() => {});
     }
-    const ID = fromHex(HEX);
-    connected = true; handler(ID, 'negotiation-timeout');
-    check('C4 case 37: failed negotiation beside a LIVE channel writes no mark', !marks.has(ID) && logs.some(([m]) => m === 'negotiation-failed-beside-live'));
-    connected = false; handler(ID, 'negotiation-timeout');
-    check('C4 case 35: failed negotiation with no open channel writes a loss mark with the reason', marks.get(ID)?.kind === 'loss' && marks.get(ID)?.cause === 'negotiation-timeout' && marks.get(ID)?.attempts === 1);
-    // C5: the real AxonaPeer.start wiring exists (static)
+    // C5: the lifecycle at the transport and composite layers (R10/13-A)
+    {
+      const mesh2 = new MeshManager({ sendSignal: () => {}, log: () => {} });
+      const t2 = new WebRTCTransport({ mesh: mesh2, log: () => {} });
+      const got = []; t2.onNegotiationFailed((id, r) => got.push([String(id), r]));
+      await t2.start();
+      check('C5 one listener after start', mesh2._negotiationFailedListeners.size === 1);
+      await t2.stop();
+      check('C5 stop detaches the mesh listener', mesh2._negotiationFailedListeners.size === 0 && t2._unsubNegotiationFailed === null);
+      await mesh2._initiateTo('cc'.repeat(33)); await tick(); mesh2._retire('cc'.repeat(33), 'negotiation-timeout');
+      check('C5 a failure while stopped reaches no handler', got.length === 0);
+      await t2.start();
+      check('C5 restart: exactly one listener, not two', mesh2._negotiationFailedListeners.size === 1);
+      await mesh2._initiateTo('cc'.repeat(33)); await tick(); mesh2._retire('cc'.repeat(33), 'negotiation-timeout');
+      check('C5 one failure → exactly one handler call', got.length === 1);
+      await t2.stop(); mesh2.dispose();
+      // composite: a late-added sub-transport's registration is removed by the same unsubscribe
+      const { CompositeTransport } = await import('../src/transport/web/composite.js');
+      const comp = new CompositeTransport({ localNodeId: 1n, log: () => {} });
+      const calls = [];
+      const un = comp.onNegotiationFailed((id, r) => calls.push(r));
+      const meshL = new MeshManager({ sendSignal: () => {}, log: () => {} });
+      const late = new WebRTCTransport({ mesh: meshL, log: () => {} });
+      await late.start();
+      comp.addSubtransport(late);
+      check('C5 composite: late sub registered the handler', (late._negotiationFailedHandlers ?? []).length === 1);
+      un(); un();
+      check('C5 composite: the same unsubscribe removed the late registration; a second call is a no-op', (late._negotiationFailedHandlers ?? []).length === 0 && (comp._negotiationFailedHandlers ?? []).length === 0);
+      await late.stop(); meshL.dispose();
+    }
+    // C6: the real AxonaPeer.start wiring exists (static; labelled as such)
     const { readFileSync } = await import('node:fs');
     const src = readFileSync(new URL('../src/dht/AxonaPeer.js', import.meta.url), 'utf8');
-    check('C5 AxonaPeer.start subscribes transport.onNegotiationFailed and checks isConnected before marking', /transport\.onNegotiationFailed\(\(peerBig, reason\)/.test(src) && /negotiation-failed-beside-live/.test(src) && /negotiation-failed-marked/.test(src));
+    check('C6 (static) AxonaPeer.start subscribes transport.onNegotiationFailed and checks isConnected before marking', /transport\.onNegotiationFailed\(\(peerBig, reason\)/.test(src) && /negotiation-failed-beside-live/.test(src) && /negotiation-failed-marked/.test(src));
   }
 
   console.log(`\n${passed} passed, ${failed} failed`);
