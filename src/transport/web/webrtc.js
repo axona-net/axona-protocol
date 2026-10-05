@@ -252,6 +252,8 @@ export class WebRTCTransport extends Transport {
     this._meshIdByNodeId.set(nodeId, meshId);
     this._nodeIdByMeshId.set(meshId, nodeId);
     this._log('bindPeer', { nodeId: String(nodeId), meshId });
+    // Row 3: the channel ledger's peer record points at this channel now.
+    try { this._mesh?.ledgerBind?.(meshId, nodeId.toString(16).padStart(66, '0')); } catch { /* bookkeeping only */ }
     if (isNew && this._peerBoundHandlers) {
       for (const h of this._peerBoundHandlers) {
         try { h(nodeId); }
@@ -264,6 +266,8 @@ export class WebRTCTransport extends Transport {
     const nodeId = this._nodeIdByMeshId.get(meshId);
     this._nodeIdByMeshId.delete(meshId);
     this._channelKeyByMeshId.delete(meshId);
+    // Row 3: the ledger's peer record stops pointing at this channel.
+    try { this._mesh?.ledgerUnbind?.(meshId); } catch { /* bookkeeping only */ }
     // Only clear the forward mapping if THIS meshId is still the active
     // route for the nodeId.  A deduped-duplicate loser must not unbind the
     // surviving winner (which now owns the nodeId under a different meshId).
