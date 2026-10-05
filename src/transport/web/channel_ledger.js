@@ -49,6 +49,12 @@ export const CHAN = Object.freeze({
 
 const LIVE = new Set([CHAN.ALLOCATED, CHAN.NEGOTIATING, CHAN.OPEN, CHAN.CLOSING]);
 const PRE_OPEN = new Set([CHAN.ALLOCATED, CHAN.NEGOTIATING]);
+// POINTER ELIGIBILITY is not PHYSICAL RETENTION (Aster 38ea5f3e). A CLOSING
+// channel is charged until the transport confirms, but a peer record never
+// points at one: v0.7, "a peer record points at a channel only in
+// ALLOCATED, NEGOTIATING or OPEN; the moment its channel enters CLOSING the
+// pointer is cleared in the same step."
+const POINTABLE = new Set([CHAN.ALLOCATED, CHAN.NEGOTIATING, CHAN.OPEN]);
 
 export const LEDGER_DEFAULTS = Object.freeze({
   // C_phys_req(cap) = cap + P_pending + C_inbound + 4 with cap 50 (the
@@ -198,7 +204,7 @@ export class ChannelLedger {
   bind(meshId, nodeId) {
     const t = this._tByMeshId.get(meshId);
     const c = t ? this._chan.get(t) : null;
-    if (!c || !LIVE.has(c.state)) { this._stats.staleEvent++; return this._peer.get(nodeId) ?? null; }
+    if (!c || !POINTABLE.has(c.state)) { this._stats.staleEvent++; return this._peer.get(nodeId) ?? null; }
     c.nodeId = nodeId;
     const p = this._peer.get(nodeId) ?? { nodeId, t: null, boundAt: 0 };
     p.t = t;                 // the newest binding is the pointer (the dedup winner, R3-B)
@@ -207,21 +213,29 @@ export class ChannelLedger {
     return p;
   }
 
-  /** Another live channel, other than `exceptT`, that binds `nodeId`; its
-   *  token or null. */
-  _otherLiveFor(nodeId, exceptT) {
-    for (const o of this._chan.values()) if (o.t !== exceptT && o.nodeId === nodeId && LIVE.has(o.state)) return o.t;
-    return null;
+  /** Another POINTABLE channel (ALLOCATED, NEGOTIATING or OPEN; never
+   *  CLOSING), other than `exceptT`, that binds `nodeId`; its token or null.
+   *  Prefers an OPEN one. */
+  _otherPointableFor(nodeId, exceptT) {
+    let pre = null;
+    for (const o of this._chan.values()) {
+      if (o.t === exceptT || o.nodeId !== nodeId || !POINTABLE.has(o.state)) continue;
+      if (o.state === CHAN.OPEN) return o.t;
+      if (pre === null) pre = o.t;
+    }
+    return pre;
   }
 
   /** Drop or re-point the peer record for `nodeId` after channel `t` stopped
-   *  binding it: point at another live binding channel if one exists, else
-   *  delete the record. The record is the current bound set (R3-C). */
+   *  binding it, or stopped being pointable: point at another POINTABLE
+   *  binding channel if one exists, else delete the record. The record is the
+   *  current bound set (R3-C); a CLOSING channel is never the pointer even
+   *  while it is still charged (38ea5f3e). */
   _settlePeer(nodeId, t) {
     if (nodeId == null) return;
     const p = this._peer.get(nodeId);
     if (!p) return;
-    const other = this._otherLiveFor(nodeId, t);
+    const other = this._otherPointableFor(nodeId, t);
     if (other) { if (p.t === t || p.t == null) p.t = other; }
     else this._peer.delete(nodeId);
   }
@@ -255,9 +269,13 @@ export class ChannelLedger {
     if (!c || c.state === CHAN.CLOSING || c.state === CHAN.GONE) { if (!c || c.state === CHAN.GONE) this._stats.staleEvent++; return c ?? null; }
     c.state = CHAN.CLOSING; c.closingAt = this._now(); c.reason = reason;
     if (this._tByMeshId.get(c.meshId) === t) this._tByMeshId.delete(c.meshId);
+    // The pointer leaves this channel in the same step as CLOSING: it moves
+    // to another pointable binding channel if one exists, else the identity
+    // leaves the bound set. The CLOSING record keeps its nodeId for the
+    // unbind that follows, and stays charged.
     if (c.nodeId != null) {
       const p = this._peer.get(c.nodeId);
-      if (p && p.t === t) p.t = null;   // the pointer is cleared in the same step as CLOSING
+      if (p && p.t === t) this._settlePeer(c.nodeId, t);
     }
     if (this.closeEscalateMs > 0) {
       c.escalateTimer = this._setTimeout(() => {

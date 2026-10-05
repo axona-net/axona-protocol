@@ -1253,7 +1253,8 @@ export class MeshManager {
       }
       // Row 3: the transport confirmed the close. Prompted (after our own
       // _retire) or unprompted (the involuntary row), the record goes GONE
-      // and its capacity is released here and only here, or by escalation.
+      // and its capacity is released here and only here. Escalation forces a
+      // second close and releases nothing.
       if (state.inc) { this._ledger?.gone(state.inc); this._closingPcs.delete(state.inc); }
       this._notify();
     }

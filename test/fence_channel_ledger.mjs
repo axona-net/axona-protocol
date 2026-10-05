@@ -50,7 +50,7 @@ console.log('fence_channel_ledger: row 3 — channel and peer records');
   L.bind('c1', 'aa'.repeat(33));
   check('A bind: peer record points at t1', L.peer('aa'.repeat(33))?.t === 't1' && L.record('t1').nodeId === 'aa'.repeat(33));
   L.closing('t1', 'test');
-  check('A closing: state CLOSING, pointer cleared in the same step, capacity NOT released', L.record('t1').state === CHAN.CLOSING && L.peer('aa'.repeat(33))?.t === null && L.chanAll() === 1);
+  check('A closing: state CLOSING, the identity leaves the bound set in the same step (no other binding), capacity NOT released', L.record('t1').state === CHAN.CLOSING && L.peer('aa'.repeat(33)) === null && L.chanAll() === 1);
   const g = L.gone('t1');
   check('A gone (prompted): released, record dropped, prompted=true', g?.prompted === true && L.chanAll() === 0 && L.record('t1') === null);
 
@@ -139,6 +139,57 @@ console.log('fence_channel_ledger: row 3 — channel and peer records');
   check('A two bindings: after the newest goes, the record re-points to the survivor', L.peer('ab'.repeat(33))?.t === 't8' && L.stats().boundPeers === 1);
   L.closing('t8'); L.unbind('c8'); L.gone('t8');
   check('A two bindings: after both go, no record', L.stats().boundPeers === 0 && L.chanAll() === 0);
+
+  // POINTER ELIGIBILITY vs PHYSICAL RETENTION (Aster 38ea5f3e): a CLOSING
+  // channel is charged but never pointed at. Escalation off here.
+  const LP = new ChannelLedger({ closeEscalateMs: 0 });
+  const ID = '77'.repeat(33);
+  // Aster's schedule: bind old; closing old (unconfirmed); bind new; closing new; unbind new.
+  LP.allocate('o', 'mo', 'out'); LP.open('o'); LP.bind('mo', ID);
+  LP.closing('o', 'retire');
+  check('P1 closing old: pointer leaves old at once; no other binding → record dropped; old still charged', LP.peer(ID) === null && LP.chanAll() === 1 && LP.record('o').state === CHAN.CLOSING);
+  LP.allocate('n', 'mn', 'out'); LP.open('n'); LP.bind('mn', ID);
+  check('P1 bind new: record points at new (OPEN), never at closing old', LP.peer(ID)?.t === 'n');
+  LP.closing('n', 'retire');
+  check('P1 closing new: both CLOSING and charged, NO pointer, boundPeers 0', LP.chanAll() === 2 && LP.peer(ID) === null && LP.stats().boundPeers === 0 && LP.stats().peersPointing === 0);
+  LP.unbind('mn');
+  check('P1 unbind new: still no pointer', LP.peer(ID) === null);
+  LP.gone('n');
+  check('P1 gone new: pointer never resurrected onto closing old', LP.peer(ID) === null && LP.chanAll() === 1);
+  LP.gone('o');
+  check('P1 gone old: all 0', LP.chanAll() === 0);
+  // Variant: gone without unbind, old closed first then new gone
+  LP.allocate('o2', 'mo2', 'out'); LP.open('o2'); LP.bind('mo2', ID);
+  LP.allocate('n2', 'mn2', 'out'); LP.open('n2'); LP.bind('mn2', ID);
+  LP.closing('o2');
+  check('P2 old closing while new OPEN: pointer stays on new', LP.peer(ID)?.t === 'n2');
+  LP.gone('n2');   // no unbind delivered
+  check('P2 new gone without unbind: no pointer onto closing old; record dropped', LP.peer(ID) === null && LP.record('o2').state === CHAN.CLOSING);
+  LP.gone('o2');
+  // Variant: other order — new closes first, old is OPEN: pointer settles on old (positive control)
+  LP.allocate('o3', 'mo3', 'out'); LP.open('o3'); LP.bind('mo3', ID);
+  LP.allocate('n3', 'mn3', 'in');  LP.open('n3'); LP.bind('mn3', ID);
+  check('P3 setup: pointer at newest', LP.peer(ID)?.t === 'n3');
+  LP.closing('n3');
+  check('P3 new closing, old OPEN: pointer settles on the OPEN alternate (positive control)', LP.peer(ID)?.t === 'o3' && LP.stats().peersPointing === 1);
+  LP.unbind('mn3'); LP.gone('n3');
+  check('P3 after new is gone: pointer still on old', LP.peer(ID)?.t === 'o3');
+  LP.closing('o3'); LP.unbind('mo3'); LP.gone('o3');
+  check('P3 all gone: no record', LP.peer(ID) === null && LP.chanAll() === 0);
+  // Variant: a NEGOTIATING alternate is pointable; a CLOSING one is not
+  LP.allocate('o4', 'mo4', 'out'); LP.open('o4'); LP.bind('mo4', ID);
+  LP.allocate('n4', 'mn4', 'out'); LP.negotiating('n4'); LP.bind('mn4', ID);
+  check('P4 setup: pointer at the newest (NEGOTIATING) binding', LP.peer(ID)?.t === 'n4');
+  LP.closing('o4');
+  check('P4 old closing: pointer stays on the negotiating alternate', LP.peer(ID)?.t === 'n4');
+  LP.closing('n4');
+  check('P4 both closing: no pointer', LP.peer(ID) === null && LP.chanAll() === 2);
+  LP.gone('o4'); LP.gone('n4');
+  // A bind that arrives for a channel already CLOSING is stale and points nowhere
+  LP.allocate('o5', 'mo5', 'out'); LP.open('o5'); LP.closing('o5');
+  const st0 = LP.stats().staleEvent; LP.bind('mo5', ID);
+  check('P5 bind on a CLOSING channel is stale; no pointer', LP.peer(ID) === null && LP.stats().staleEvent === st0 + 1);
+  LP.gone('o5'); LP.dispose();
 
   // case 4 shape: an old channel CLOSING beside a new one to the same identity
   L.allocate('t4', 'c4', 'out'); L.negotiating('t4'); L.open('t4'); L.bind('c4', 'dd'.repeat(33));
