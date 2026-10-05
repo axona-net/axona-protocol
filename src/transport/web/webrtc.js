@@ -39,6 +39,7 @@
 // =====================================================================
 
 import { Transport }    from '../../contracts/Transport.js';
+import { isHexId, fromHex } from '../../utils/hexid.js';   // row 13: a failed attempt names its identity only through a hex meshId
 import {
   TransportError,
   ErrorCodes,
@@ -159,6 +160,10 @@ export class WebRTCTransport extends Transport {
     }
     this._unsubMessage  = this._mesh.onMessage((peerId, msg) => this._onMessage(peerId, msg));
     this._unsubPeerLost = this._mesh.onPeerLost((peerId, reason) => this._onPeerLost(peerId, reason));
+    // Row 13: class A's signal, when the mesh provides it.
+    this._unsubNegotiationFailed = (typeof this._mesh.onNegotiationFailed === 'function')
+      ? this._mesh.onNegotiationFailed((peerId, reason) => this._onNegotiationFailed(peerId, reason))
+      : null;
     this._started = true;
     this._log('transport-started', { localNodeId: String(this._localNodeId) });
   }
@@ -167,8 +172,10 @@ export class WebRTCTransport extends Transport {
     if (!this._started) return;
     if (this._unsubMessage)  this._unsubMessage();
     if (this._unsubPeerLost) this._unsubPeerLost();
+    if (this._unsubNegotiationFailed) { try { this._unsubNegotiationFailed(); } catch { /* idempotent */ } }   // row 13 (Aster 1816f5e6 R10/13-A)
     this._unsubMessage  = null;
     this._unsubPeerLost = null;
+    this._unsubNegotiationFailed = null;
     // Reject every outstanding request.
     for (const [, p] of this._pending) {
       clearTimeout(p.timer);
@@ -427,6 +434,42 @@ export class WebRTCTransport extends Transport {
       const i = this._peerDiedHandlers.indexOf(handler);
       if (i >= 0) this._peerDiedHandlers.splice(i, 1);
     };
+  }
+
+  /**
+   * Row 13: a negotiation to an IDENTITY failed before it ever opened.
+   * Fires `handler(nodeIdBig, reason)`. The identity is known only when the
+   * meshId is a hex nodeId (the bridgeless connectViaRelay path dials by
+   * nodeId); a bridge connection handle that never bound names no one, and
+   * nothing fires for it. Never fires for an attempt that opened; that is
+   * onPeerDied's.
+   * @param {(nodeId: bigint, reason: string) => void} handler
+   * @returns {() => void}
+   */
+  onNegotiationFailed(handler) {
+    if (typeof handler !== 'function') {
+      throw new TypeError('onNegotiationFailed: handler must be a function');
+    }
+    (this._negotiationFailedHandlers ??= []).push(handler);
+    return () => {
+      const a = this._negotiationFailedHandlers;
+      const i = a ? a.indexOf(handler) : -1;
+      if (i >= 0) a.splice(i, 1);
+    };
+  }
+
+  _onNegotiationFailed(meshId, reason) {
+    let nodeId = this._nodeIdByMeshId.get(meshId);
+    if (nodeId === undefined) {
+      // A never-opened channel has no binding; the only identity a failed
+      // attempt can name is the one it was dialed BY, i.e. a hex meshId.
+      if (typeof meshId === 'string' && isHexId(meshId)) { try { nodeId = fromHex(meshId); } catch { nodeId = undefined; } }
+    }
+    if (nodeId === undefined) { this._log('negotiation-failed-anonymous', { meshId, reason }); return; }
+    for (const h of (this._negotiationFailedHandlers ?? [])) {
+      try { h(nodeId, reason); }
+      catch (err) { this._log('negotiation-failed-handler-threw', { reportedId: String(nodeId), err: err.message }); }
+    }
   }
 
   /**
