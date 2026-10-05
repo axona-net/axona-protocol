@@ -9,10 +9,21 @@
 //      seated subscriber, handoff party in flight, queued ingest dependency.
 //      obligedPeers() is the same walk as a Set.
 //   2. QUEUED DEPENDENCY (Aster c34f3c85 P1-B). A queued REPLICATE pins its
-//      principal from enqueue, through the in-flight slot, until fn() ends;
+//      principal from enqueue, through the in-flight count, until fn() ends;
 //      an overflow drop pins nothing; REPLAY_UP declares none; the pin
 //      transfers to the installed role in the same synchronous step as the
 //      dequeue (no await between shift and the start of fn).
+//   2b. CONCURRENCY (Aster 01bb6555 R4-A): in-flight is a count per
+//      dependency; an inline fn awaiting beside a pumped one keeps both
+//      pinned in either completion order; identical dependencies stay
+//      pinned until the last use completes; a null REPLAY_UP overlapping
+//      changes nothing.
+//   2c. THE REAL PATH (R4-B): am._onReplicate → _ingestEnqueue → _syncIngest
+//      → becomeBackup, inline and through the actual q.shift(), with the
+//      pin probed inside becomeBackup at the install and at an injected
+//      await placed before the install; a NEGATIVE CONTROL with the pin
+//      removed shows the probe sees the gap (75cd61d8); overflow installs no
+//      role and pins no dependency.
 //   3. CALLER DECLARATION. Every _ingestEnqueue call site in src passes a
 //      second argument (static read of the source).
 //   4. mayRetire(id): ok with no duty; refused with the duty named; fails
@@ -125,6 +136,125 @@ console.log('fence_duty_gate: row 4 — the duty gate');
   check('2 overflow: the dropped payload pins nothing', (am._ingestDropped || 0) > dropped && !am.queuedDependencies().has(DROPPED) && am.queuedDependencies().has(H(0x62)), `dropped=${am._ingestDropped} q=${am._ingestQueue.length}`);
   am._ingestInlineActive = false; am._ingestPumping = true; am._ingestPump(); await Promise.all(big); await am._ingestIdle();
   check('2 overflow: after draining, nothing pinned', am.queuedDependencies().size === 0);
+}
+
+// ── 2b. concurrency (Aster 01bb6555 R4-A): in-flight is a count per dependency
+{
+  const am = manager();
+  const A = H(0x64), B = H(0x65);
+  let relA, relB; const gA = new Promise(r => { relA = r; }); const gB = new Promise(r => { relB = r; });
+  // inline A, awaiting
+  const pA = am._ingestEnqueue(async () => { await gA; }, A);
+  check('2b inline A awaiting: [A]', am.queuedDependencies().has(A) && !am.queuedDependencies().has(B));
+  // B arrives while A awaits → queued → pump starts and runs B concurrently
+  const pB = am._ingestEnqueue(async () => { await gB; }, B);
+  await wait(0);
+  const s1 = am.queuedDependencies();
+  check('2b B in flight beside A: BOTH pinned', s1.has(A) && s1.has(B), JSON.stringify([...s1]));
+  relA(); await pA; await wait(0);
+  const s2 = am.queuedDependencies();
+  check('2b A done, B still awaiting: B pinned, A released', !s2.has(A) && s2.has(B), JSON.stringify([...s2]));
+  relB(); await pB; await am._ingestIdle();
+  check('2b both done: empty', am.queuedDependencies().size === 0);
+  // the other completion order
+  let relA2, relB2; const gA2 = new Promise(r => { relA2 = r; }); const gB2 = new Promise(r => { relB2 = r; });
+  const pA2 = am._ingestEnqueue(async () => { await gA2; }, A);
+  const pB2 = am._ingestEnqueue(async () => { await gB2; }, B);
+  await wait(0);
+  relB2(); await pB2; await wait(0);
+  const s3 = am.queuedDependencies();
+  check('2b B done first, A still awaiting: A pinned, B released', s3.has(A) && !s3.has(B), JSON.stringify([...s3]));
+  relA2(); await pA2; await am._ingestIdle();
+  // identical dependencies: pinned until the LAST use completes
+  let relX, relY; const gX = new Promise(r => { relX = r; }); const gY = new Promise(r => { relY = r; });
+  const pX = am._ingestEnqueue(async () => { await gX; }, A);
+  const pY = am._ingestEnqueue(async () => { await gY; }, A);
+  await wait(0);
+  relX(); await pX; await wait(0);
+  check('2b identical deps: first use done, still pinned by the second', am.queuedDependencies().has(A));
+  relY(); await pY; await am._ingestIdle();
+  check('2b identical deps: last use done, released', !am.queuedDependencies().has(A));
+  // a null (REPLAY_UP) overlapping a pinned one changes nothing
+  let relN, relC; const gN = new Promise(r => { relN = r; }); const gC = new Promise(r => { relC = r; });
+  const pC = am._ingestEnqueue(async () => { await gC; }, A);
+  const pN = am._ingestEnqueue(async () => { await gN; }, null);
+  await wait(0);
+  check('2b null REPLAY_UP overlapping: A pinned, nothing else', am.queuedDependencies().size === 1 && am.queuedDependencies().has(A));
+  relN(); await pN; await wait(0);
+  check('2b null done: A still pinned', am.queuedDependencies().has(A));
+  relC(); await pC; await am._ingestIdle();
+  check('2b all done: empty', am.queuedDependencies().size === 0);
+}
+
+// ── 2c. the REAL path (Aster 01bb6555 R4-B): _onReplicate → _ingestEnqueue →
+//        _syncIngest → becomeBackup, inline and queued, with the pin probed at
+//        the install and at an injected pre-install await.
+{
+  const am = manager();
+  am._rootReplicas = true;                       // backup duty enabled on this node
+  const PRINCIPAL = H(0x66);
+  const topicHex = H(0x0a);                      // a topic id this node does not root
+  const payload = { topicId: topicHex, from: PRINCIPAL, msgs: [], dels: [] };
+  const meta = { targetId: am.nodeId, fromId: null };
+  // probe inside becomeBackup: the registry must still name the principal at the install
+  const rc = am._rootClaim; const origBecome = rc.becomeBackup.bind(rc);
+  const atInstall = [];
+  rc.becomeBackup = (t, role, from) => { atInstall.push({ pinned: am.queuedDependencies().has(PRINCIPAL), kinds: am.obligationsOf(PRINCIPAL) }); return origBecome(t, role, from); };
+  // INLINE path (queue empty, no inline active)
+  await am._onReplicate(payload, meta);
+  await am._ingestIdle();
+  const roleBig = BigInt('0x' + topicHex);
+  check('2c inline: becomeBackup installed backupOf = principal', am.axonRoles.get(roleBig)?.backupOf === PRINCIPAL);
+  check('2c inline: at the install the principal was pinned (queued-ingest) — the union never dropped it', atInstall.length === 1 && atInstall[0].pinned === true && atInstall[0].kinds.includes('queued-ingest'), JSON.stringify(atInstall));
+  check('2c inline: after processing, protected by the installed role (principal)', am.obligationsOf(PRINCIPAL).includes('principal') && !am.queuedDependencies().has(PRINCIPAL));
+  // QUEUED path on a second topic: force the queue by holding the pump
+  const topic2 = H(0x0b); const payload2 = { ...payload, topicId: topic2 };
+  atInstall.length = 0;
+  am._ingestInlineActive = true; am._ingestPumping = true;      // the entry queues
+  const p2 = am._onReplicate(payload2, meta);
+  check('2c queued: pinned while in the queue, no role yet', am.queuedDependencies().has(PRINCIPAL) && am.axonRoles.get(BigInt('0x' + topic2)) === undefined);
+  // the principal is ALREADY protected by topic-1's installed role; remove it to isolate the queue pin
+  am.axonRoles.delete(roleBig);
+  check('2c queued: with the installed role gone, the queue pin alone still names the principal', am.obligationsOf(PRINCIPAL).join() === 'queued-ingest');
+  am._ingestInlineActive = false; am._ingestPumping = true; am._ingestPump();   // the actual shift
+  await p2; await am._ingestIdle();
+  check('2c queued: installed through the actual q.shift() path', am.axonRoles.get(BigInt('0x' + topic2))?.backupOf === PRINCIPAL);
+  check('2c queued: at the install the principal was pinned', atInstall.length === 1 && atInstall[0].pinned === true, JSON.stringify(atInstall));
+  // INJECTED AWAIT before the install: the pin must cover the gap
+  const topic3 = H(0x0c); const payload3 = { ...payload, topicId: topic3 };
+  am.axonRoles.delete(BigInt('0x' + topic2));
+  const origIngest = am._syncIngest.bind(am);
+  const duringGap = [];
+  am._syncIngest = async (pl, mt, pol) => { await wait(5); duringGap.push(am.obligationsOf(PRINCIPAL)); return origIngest(pl, mt, pol); };
+  atInstall.length = 0;
+  await am._onReplicate(payload3, meta); await am._ingestIdle();
+  check('2c injected await before the install: the union still named the principal during the gap', duringGap.length === 1 && duringGap[0].includes('queued-ingest'), JSON.stringify(duringGap));
+  check('2c injected await: install still pinned, role installed', atInstall[0]?.pinned === true && am.axonRoles.get(BigInt('0x' + topic3))?.backupOf === PRINCIPAL);
+  am._syncIngest = origIngest; rc.becomeBackup = origBecome;
+  // NEGATIVE CONTROL (Aster 75cd61d8): remove BOTH protections before the
+  // install (no in-flight pin, no queued entry since inline runs it) and
+  // keep the injected await: the probe must now see the principal
+  // UNPROTECTED during the gap. This shows the probes detect the gap the
+  // accounting closes; it is the fence's teeth, not the design's behaviour.
+  const topic5 = H(0x0e); const payload5 = { ...payload, topicId: topic5 };
+  am.axonRoles.delete(BigInt('0x' + topic3));
+  const origPin = am._pinInFlight; am._pinInFlight = () => {};           // the defect, reintroduced
+  const gapBroken = [];
+  am._syncIngest = async (pl, mt, pol) => { await wait(5); gapBroken.push(am.obligationsOf(PRINCIPAL)); return origIngest(pl, mt, pol); };
+  await am._onReplicate(payload5, meta); await am._ingestIdle();
+  check('2c NEGATIVE CONTROL: with the pin removed the probe sees the principal unprotected during the gap', gapBroken.length === 1 && gapBroken[0].length === 0, JSON.stringify(gapBroken));
+  check('2c NEGATIVE CONTROL: the role still installs afterwards (so the gap, not the install, is what the pin closes)', am.axonRoles.get(BigInt('0x' + topic5))?.backupOf === PRINCIPAL);
+  am._pinInFlight = origPin; am._syncIngest = origIngest;
+  am.axonRoles.delete(BigInt('0x' + topic5));
+  // OVERFLOW admits no dependency and installs no role
+  const topic4 = H(0x0d); const payload4 = { ...payload, topicId: topic4, from: H(0x67) };
+  am._ingestInlineActive = true; am._ingestPumping = true;
+  const held = []; for (let i = 0; i < INGEST_QUEUE_MAX; i++) held.push(am._ingestEnqueue(async () => {}, null));
+  const before = am._ingestDropped || 0;
+  await am._onReplicate(payload4, meta);
+  check('2c overflow: dropped, no dependency pinned, no role installed', (am._ingestDropped || 0) === before + 1 && !am.queuedDependencies().has(H(0x67)) && am.axonRoles.get(BigInt('0x' + topic4)) === undefined);
+  am._ingestInlineActive = false; am._ingestPumping = true; am._ingestPump(); await Promise.all(held); await am._ingestIdle();
+  check('2c overflow: after draining, still no role for the dropped topic', am.axonRoles.get(BigInt('0x' + topic4)) === undefined);
 }
 
 // ── 3. caller declaration (static) ────────────────────────────────────

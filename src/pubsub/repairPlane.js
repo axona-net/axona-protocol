@@ -428,10 +428,27 @@ export const repairPlaneMethods = {
   // yet show. Every caller DECLARES the peer its payload will name (`dep`,
   // lowercase hex) or null, and the declaration rides the queue entry. The
   // duty gate (AxonaManager.obligationsOf / obligedPeers) reads the queued
-  // and the in-flight dependency, so a voluntary close cannot land in the
+  // and the in-flight dependencies, so a voluntary close cannot land in the
   // interval. The pin is held from enqueue through the end of fn(): that
   // covers the install, which happens before fn's first await, with margin.
   // An overflow drop pins nothing: nothing was accepted.
+  //
+  // IN-FLIGHT IS A COUNT PER DEPENDENCY, not one slot (Aster 01bb6555 R4-A):
+  // an inline fn can be awaiting while the pump runs a queued one, two
+  // entries can name the same principal, and the pin must hold until the
+  // LAST active use of that principal completes.
+  _pinInFlight(dep) {
+    if (!dep) return;
+    const m = (this._ingestInFlight ??= new Map());
+    m.set(dep, (m.get(dep) || 0) + 1);
+  },
+  _unpinInFlight(dep) {
+    if (!dep) return;
+    const m = this._ingestInFlight;
+    if (!m) return;
+    const n = (m.get(dep) || 0) - 1;
+    if (n <= 0) m.delete(dep); else m.set(dep, n);
+  },
   async _ingestEnqueue(fn, dep = null) {
     const q = (this._ingestQueue ??= []);
     const dependency = (typeof dep === 'string' && dep) ? dep.toLowerCase() : null;
@@ -447,9 +464,9 @@ export const repairPlaneMethods = {
       }
       if (nowMs - this._inlineSliceStart < INGEST_SLICE_MS) {
         this._ingestInlineActive = true;
-        this._ingestActiveDep = dependency;
+        this._pinInFlight(dependency);
         try { await fn(); } catch { /* ingest is best-effort; anti-entropy re-heals */ }
-        finally { this._ingestInlineActive = false; this._ingestActiveDep = null; }
+        finally { this._ingestInlineActive = false; this._unpinInFlight(dependency); }
         return;
       }
     }
@@ -469,12 +486,12 @@ export const repairPlaneMethods = {
         const t0 = Date.now();                       // wall clock: CPU slicing, not sim time
         while (q.length && (Date.now() - t0) < INGEST_SLICE_MS) {
           const entry = q.shift();
-          // The pin moves from the queue entry to the in-flight slot in this
+          // The pin moves from the queue entry to the in-flight count in this
           // same synchronous step; no await between the shift and the start
           // of fn(), so the dependency is never unpinned before its install.
-          this._ingestActiveDep = entry.dep;
+          this._pinInFlight(entry.dep);
           try { await entry.fn(); } catch { /* ingest is best-effort; anti-entropy re-heals */ }
-          finally { this._ingestActiveDep = null; }
+          finally { this._unpinInFlight(entry.dep); }
         }
         if (q.length) await new Promise(r => (typeof setImmediate === 'function' ? setImmediate(r) : setTimeout(r, 0)));
       }
@@ -487,7 +504,7 @@ export const repairPlaneMethods = {
    *  processed (lowercase hex). Read by the duty gate. */
   queuedDependencies() {
     const out = new Set();
-    if (this._ingestActiveDep) out.add(this._ingestActiveDep);
+    if (this._ingestInFlight) for (const [dep, n] of this._ingestInFlight) if (n > 0) out.add(dep);
     for (const e of (this._ingestQueue ?? [])) if (e && e.dep) out.add(e.dep);
     return out;
   },
@@ -1156,9 +1173,19 @@ export const repairPlaneMethods = {
     const tier = (j) => j.role.isRoot ? ((j.role.replicas?.size ?? 0) === 0 ? 0 : 1) : 2;
     jobs.sort((a, b) => (tier(a) - tier(b)) || (b.role.cache.length - a.role.cache.length));
     // Row 4: every party to a handoff in flight is a duty while this runs
-    // (AxonaManager._walkObligations reads heir/alt from here). leave() may
-    // abandon this promise at its time bound; the marker then stays set on a
-    // node that is departing anyway.
+    // (AxonaManager._walkObligations reads heir/alt from here).
+    // LIFETIME, exactly (Aster 01bb6555): the marker is set here, at job
+    // construction, and cleared when this function RETURNS, after Phase C
+    // has ISSUED its fire-and-forget pushes. It represents the ORCHESTRATION
+    // of the handoff, not the completion of any send, and it is not custody
+    // discharge: an acked handoff is discharged by its ack (handoffArrived),
+    // never by this marker clearing. After the return the node is departing;
+    // the gate has no further voluntary close to guard, and leave() may
+    // abandon this promise at its time bound, which leaves the marker set on
+    // a node that is leaving anyway. Retry selection may overwrite heir/alt
+    // while an earlier send is unresolved; the marker then names the current
+    // targets, and the earlier target is protected by nothing but the
+    // departure itself.
     this._handoffInFlight = jobs;
     let i = 0;
     const resolver = async () => {
