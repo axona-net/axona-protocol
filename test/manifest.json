@@ -1055,6 +1055,11 @@
       "file": "fence_client_hello_nodeid.mjs",
       "class": "default",
       "note": "Hold-and-Fill v0.5 (axona-docs 4334504) row 2b: the client-hello carries nodeId = identity.id, the hex id the peer will authenticate as on hello-ack, so the bridge's same-region anchor affinity (bridge row 2) has the newcomer's region at admission, which precedes the binding. First frame and reconnect both carry it; the Boundary-4 row projects and types it and does NOT require it, so a 4.102.0 client without the field admits unchanged. An unauthenticated claim: the bridge reads it as an anchor-selection / list-order hint only. With the field removed from web/index.js, checks 1 and 2 fail."
+    },
+    {
+      "file": "fence_channel_ledger.mjs",
+      "class": "default",
+      "note": "Hold-and-Fill v0.5/v0.7 (axona-docs 4334504, 95c2ff4) row 3: the channel and peer records, reduced. One record per RTCPeerConnection keyed by the mesh's incarnation tag (ALLOCATED at PC construction, NEGOTIATING at the first frame, OPEN at dc-open, CLOSING at _retire with the peer pointer cleared in the same step, GONE at the transport's 'closed' or by escalation after closeEscalateMs), one per bound identity (bindPeer/unbindPeer). Counts: chan(all) < C_phys, inbound-unbound < C_inbound, outbound-pending < P_pending, checked BEFORE the PC exists. Default enforce:false counts would-be refusals (rollout step 2's measurement); enforce:true refuses an outbound dial or an inbound offer with nothing built. Part A is the module; part B drives the real MeshManager with a fake RTCPeerConnection. Not a live WebRTC test."
     }
   ]
 }
