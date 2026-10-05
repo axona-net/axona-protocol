@@ -14,8 +14,8 @@
       "rowType": "mesh:signal-routed"
     },
     {
-      "identity": "dht/AxonaPeer.js:3215|axona:direct|request|this._b6door",
-      "callSite": "dht/AxonaPeer.js:3215",
+      "identity": "dht/AxonaPeer.js:3278|axona:direct|request|this._b6door",
+      "callSite": "dht/AxonaPeer.js:3278",
       "primitive": "registerFrame",
       "receiver": "this._b6door",
       "wire": "axona:direct",
@@ -24,8 +24,8 @@
       "rowType": "direct:axona-direct-request"
     },
     {
-      "identity": "dht/AxonaPeer.js:3231|axona:direct|notification|this._b6door",
-      "callSite": "dht/AxonaPeer.js:3231",
+      "identity": "dht/AxonaPeer.js:3294|axona:direct|notification|this._b6door",
+      "callSite": "dht/AxonaPeer.js:3294",
       "primitive": "registerFrame",
       "receiver": "this._b6door",
       "wire": "axona:direct",
@@ -34,8 +34,8 @@
       "rowType": "direct:axona-direct-notify"
     },
     {
-      "identity": "dht/AxonaPeer.js:3803|__tunneled_direct__|routed|peer._b6door",
-      "callSite": "dht/AxonaPeer.js:3803",
+      "identity": "dht/AxonaPeer.js:3866|__tunneled_direct__|routed|peer._b6door",
+      "callSite": "dht/AxonaPeer.js:3866",
       "primitive": "registerFrame",
       "receiver": "peer._b6door",
       "wire": "__tunneled_direct__",
@@ -344,8 +344,8 @@
       "rowType": "pubsub:metricson"
     },
     {
-      "identity": "transport/web/index.js:1053|hello|notification|composite._b2door",
-      "callSite": "transport/web/index.js:1053",
+      "identity": "transport/web/index.js:1063|hello|notification|composite._b2door",
+      "callSite": "transport/web/index.js:1063",
       "primitive": "registerFrame",
       "receiver": "composite._b2door",
       "wire": "hello",
@@ -354,8 +354,8 @@
       "rowType": "transport:hello"
     },
     {
-      "identity": "transport/web/index.js:1054|hello-ack|notification|composite._b2door",
-      "callSite": "transport/web/index.js:1054",
+      "identity": "transport/web/index.js:1064|hello-ack|notification|composite._b2door",
+      "callSite": "transport/web/index.js:1064",
       "primitive": "registerFrame",
       "receiver": "composite._b2door",
       "wire": "hello-ack",
@@ -364,8 +364,8 @@
       "rowType": "transport:hello-ack"
     },
     {
-      "identity": "transport/web/index.js:1096|hello|notification|composite._b3door",
-      "callSite": "transport/web/index.js:1096",
+      "identity": "transport/web/index.js:1106|hello|notification|composite._b3door",
+      "callSite": "transport/web/index.js:1106",
       "primitive": "registerFrame",
       "receiver": "composite._b3door",
       "wire": "hello",
@@ -374,8 +374,8 @@
       "rowType": "mesh:hello"
     },
     {
-      "identity": "transport/web/index.js:1097|hello-sig|notification|composite._b3door",
-      "callSite": "transport/web/index.js:1097",
+      "identity": "transport/web/index.js:1107|hello-sig|notification|composite._b3door",
+      "callSite": "transport/web/index.js:1107",
       "primitive": "registerFrame",
       "receiver": "composite._b3door",
       "wire": "hello-sig",
@@ -384,8 +384,8 @@
       "rowType": "mesh:hello-sig"
     },
     {
-      "identity": "transport/web/index.js:1101|cap-attest|notification|composite._b2door",
-      "callSite": "transport/web/index.js:1101",
+      "identity": "transport/web/index.js:1111|cap-attest|notification|composite._b2door",
+      "callSite": "transport/web/index.js:1111",
       "primitive": "registerFrame",
       "receiver": "composite._b2door",
       "wire": "cap-attest",
