@@ -33,8 +33,9 @@
 // channel has ONE pinger. The offerer pings first, every `pingIntervalMs`;
 // the other end pongs at once and sends nothing of its own. A side that has
 // received no ping for `takeoverMs` becomes the pinger (the offerer waits a
-// further `tiebreakMs`, so that when both sides start pinging at once the
-// responder yields and the pair converges within one cycle). A side that
+// further `tiebreakMs`, defence in depth so that two pongers do not take
+// the role in the same tick; what a collision does is decided below). A
+// side that
 // RECEIVES a ping stops pinging: the most recent pinger keeps the role, and
 // the one that was silent stays the ponger — if A goes quiet, B takes over,
 // A pongs and A does not resume. Each ping carries `hb: 1` (the protocol
@@ -43,9 +44,10 @@
 // whether it is still ACTIVELY sending: a pinger whose own last ping is
 // older than one interval plus a tick has stalled or slept and yields
 // whatever its role; a pinger that is actively sending is in a CROSSING,
-// resolved by role — the responder yields, the offerer keeps — so two sides
-// that start or wake together converge deterministically with no assumption
-// about delivery delay or tick phase. A ping WITHOUT the marker is a
+// resolved by role — the responder yields, the offerer keeps. The decision
+// itself needs no clock comparison; how soon the pair settles is the
+// contract block's business below, and it is conditional. A ping WITHOUT
+// the marker is a
 // pre-4.105.0 peer's: in that legacy mode this end never yields and keeps
 // its own 2 s pings for its own measurement while still ponging (SP-1). The
 // ping's rtt lets the ponger learn the latency.
