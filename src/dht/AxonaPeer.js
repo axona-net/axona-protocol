@@ -5116,10 +5116,14 @@ export class AxonaPeer extends DHT {
       // − other attempts in flight) is read here, BEFORE the open and before
       // anything is consumed, on both paths. On the RELAY path it is read
       // again at the relay issue below, after the awaited open; where the
-      // open IS the dial there is no second read (Vega 7702b4de) — the
-      // consume has run and a failed open ends as a failure. No
-      // availability: the token is RELEASED (no count), nothing consumed,
-      // the caller keeps the nomination. Legacy (unarmed) paths unchanged.
+      // open IS the dial there is no second read (Vega 7702b4de): the
+      // consume has run, and a failed open then ends as a counted failure
+      // when the identity is still eligible, or is released on the
+      // post-open eligibility re-read when the consume moved its window (a
+      // just-refilled exhausted mark; R11-1) — never a deficit deferral. No
+      // availability here: the token is RELEASED (no count), nothing
+      // consumed, the caller keeps the nomination. Legacy (unarmed) paths
+      // unchanged.
       if (this._fillArmed() && this._fillAvailability(true) <= 0) {
         this._verifyProbes = Math.max(0, (this._verifyProbes ?? 1) - 1);
         this._attemptGuard?.release?.(peerId, k);
@@ -5154,7 +5158,8 @@ export class AxonaPeer extends DHT {
       // R2-I1: availability re-read after the awaited open, at the relay
       // issue — on the RELAY path only (Vega 7702b4de): where the open is the
       // dial the consume has already run and the open was the attempt, so a
-      // failed open ends the token as a failure below, as before.
+      // failed open falls through to end(false) below when the identity is
+      // still eligible (the re-read above released it otherwise), as before.
       if (!openIsTheDial && this._fillArmed() && this._fillAvailability(true) <= 0) {
         this._attemptGuard?.release?.(peerId, k);
         this._dialDeferredDeficit = (this._dialDeferredDeficit ?? 0) + 1;
