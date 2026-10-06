@@ -14,8 +14,8 @@
       "rowType": "mesh:signal-routed"
     },
     {
-      "identity": "dht/AxonaPeer.js:3365|axona:direct|request|this._b6door",
-      "callSite": "dht/AxonaPeer.js:3365",
+      "identity": "dht/AxonaPeer.js:3336|axona:direct|request|this._b6door",
+      "callSite": "dht/AxonaPeer.js:3336",
       "primitive": "registerFrame",
       "receiver": "this._b6door",
       "wire": "axona:direct",
@@ -24,8 +24,8 @@
       "rowType": "direct:axona-direct-request"
     },
     {
-      "identity": "dht/AxonaPeer.js:3381|axona:direct|notification|this._b6door",
-      "callSite": "dht/AxonaPeer.js:3381",
+      "identity": "dht/AxonaPeer.js:3352|axona:direct|notification|this._b6door",
+      "callSite": "dht/AxonaPeer.js:3352",
       "primitive": "registerFrame",
       "receiver": "this._b6door",
       "wire": "axona:direct",
@@ -34,8 +34,8 @@
       "rowType": "direct:axona-direct-notify"
     },
     {
-      "identity": "dht/AxonaPeer.js:3953|__tunneled_direct__|routed|peer._b6door",
-      "callSite": "dht/AxonaPeer.js:3953",
+      "identity": "dht/AxonaPeer.js:3924|__tunneled_direct__|routed|peer._b6door",
+      "callSite": "dht/AxonaPeer.js:3924",
       "primitive": "registerFrame",
       "receiver": "peer._b6door",
       "wire": "__tunneled_direct__",

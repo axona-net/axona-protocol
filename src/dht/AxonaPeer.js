@@ -2416,6 +2416,19 @@ export class AxonaPeer extends DHT {
       }
     }
 
+    // ── Row 9 (Hold-and-Fill v0.15, axona-docs e4809d2): the hop_cache SENDER.
+    // The receiver has existed since the hop-cache design (every node admits
+    // a `hop_cache {target}` frame through _considerCandidate) and nothing
+    // ever sent one: the only emitter on this path was lateral_spread, from
+    // the node that admitted the target, to its own region-mates. So a
+    // lookup that passed through useful nodes taught them nothing. Now the
+    // ORIGINATOR of a SUCCESSFUL lookup tells the hops on its trace about the
+    // target it found, nearest the target first, at most LATERAL_K of them,
+    // once per successful lookup. The sender checks the maintenance arm
+    // flag itself (v0.4: standing on the lookup path is not a gate, as
+    // lateral_spread shows): with the fill unarmed nothing is sent.
+    if (result.found) this._sendHopCache(targetKey, result.trace);
+
     const hops = result.path.length - 1;
     this._bumpLookupStats(result.found, hops, result.totalTimeMs);
     domain._emit({
@@ -4822,6 +4835,41 @@ export class AxonaPeer extends DHT {
 
     node.addSynapse(newSyn);
     return true;
+  }
+
+  /**
+   * Row 9: the hop_cache sender. GATED on the maintenance arm flag
+   * (`synaptomeMaintain`, armed by the launcher with the fill). Sends
+   * `hop_cache { target, depth: 0 }` to at most LATERAL_K distinct hops of the
+   * trace, nearest the target first, never to self or to the target, once
+   * per call. Opportunistic: a hop whose channel is not open is skipped by
+   * the transport and the lookup's result is unaffected. THE COUNTS ARE
+   * ATTEMPTS (Aster a8cd8f25): notify() on the web transport returns without
+   * sending for an absent binding or a closed channel, and the composite
+   * returns on no route; nothing here knows whether a frame left or arrived.
+   * @param {bigint} targetKey
+   * @param {Array<{fromId: bigint}>} trace
+   * @returns {number} notify attempts issued
+   */
+  _sendHopCache(targetKey, trace) {
+    if (!this._maintainCfg) return 0;
+    const node = this._node; const t = node?.transport;
+    if (!t || typeof t.notify !== 'function' || !Array.isArray(trace)) return 0;
+    const selfId = node.id; const K = this._domain?.LATERAL_K ?? 3;
+    const hops = []; const seen = new Set();
+    for (let i = trace.length - 1; i >= 0 && hops.length < K; i--) {
+      const hop = trace[i]?.fromId;
+      if (typeof hop !== 'bigint' || hop === selfId || hop === targetKey || seen.has(hop)) continue;
+      seen.add(hop); hops.push(hop);
+    }
+    for (const hop of hops) {
+      t.notify(hop, 'hop_cache', { target: targetKey, depth: 0 })
+        .catch(() => { /* opportunistic — see _reinforceWave comment */ });
+    }
+    this._hopCacheAttempts = (this._hopCacheAttempts ?? 0) + hops.length;
+    this._hopCacheLast = { target: targetKey, hops, attempted: hops.length };
+    if (hops.length) this._emitLog?.('info', 'hop-cache-attempted', { target: toHex(targetKey), hops: hops.length });
+    return hops.length;
   }
 
   /** LTP reinforcement wave along a successful lookup trace.  The
