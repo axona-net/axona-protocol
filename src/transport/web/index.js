@@ -1292,7 +1292,13 @@ export function webTransport({
     }
     log('relay-connect-initiate', { to: toHex });
     mesh._initiateTo(toHex);
-    return true;
+    // Row 8: return the incarnation of the negotiation just started (the
+    // state exists synchronously after _initiateTo), so the dialer can
+    // correlate the channel's terminal event with its guard token. `true`
+    // when the mesh cannot say (a refused allocation returns false below).
+    const inc = (typeof mesh.incFor === 'function') ? mesh.incFor(toHex) : null;
+    if (inc == null && !mesh.hasPeer(toHex)) return false;   // the ledger refused the allocation; nothing was started
+    return inc ?? true;
   };
   // Advisory capability surface (forward-compat; functional gate is the flag).
   composite.capabilities = () => (meshRelay ? ['mesh-relay'] : []);

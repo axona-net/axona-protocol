@@ -616,7 +616,13 @@ export class AxonaPeer extends DHT {
 
     // onPeerBound handler receives BigInt (contract).
     if (transport && typeof transport.onPeerBound === 'function') {
-      this._onPeerBoundUnsub = transport.onPeerBound((peerBig) => {
+      this._onPeerBoundUnsub = transport.onPeerBound((peerBig, _meshId, inc) => {
+        // Row 8: BIND ends the attempt's guard token (expiry-on-bind). A bind
+        // of an identity this guard never dialed is ignored by the guard; a
+        // bind on another incarnation than the one the attempt started is
+        // ignored too (R8-2). Transports that cannot name the incarnation
+        // pass none and the token ends by identity alone.
+        try { this._attemptGuard?.end(peerBig, true, Date.now(), undefined, inc ?? undefined); } catch { /* bookkeeping only */ }
         // A (re)bound peer is alive — clear any dead-mark from a prior drop,
         // or it would stay shadow-banned: routing skips _deadPeers, and the
         // synaptome-seed below would re-add a synapse the router then ignores.
@@ -639,13 +645,26 @@ export class AxonaPeer extends DHT {
     // SECOND negotiation to a peer we already reach must not punch a hole in
     // a live route, because routing and candidate selection skip marked ids.
     if (transport && typeof transport.onNegotiationFailed === 'function') {
-      this._onNegotiationFailedUnsub = transport.onNegotiationFailed((peerBig, reason) => {
+      this._onNegotiationFailedUnsub = transport.onNegotiationFailed((peerBig, reason, inc) => {
         try {
           if (typeof peerBig !== 'bigint') return;
           const node = this._node;
           if (!node) return;
           let open = false;
           try { open = typeof transport.isConnected === 'function' && transport.isConnected(peerBig); } catch { open = false; }
+          // Row 8: DEADLINE ends the attempt's guard token. Beside a live
+          // channel the identity is bound (the duplicate row): the token ends
+          // as a bind and counts no failure; otherwise it ends as a failure
+          // and the guard's backoff runs. Exactly once, by token state, and
+          // only for the channel incarnation the attempt started (R8-2): an
+          // old channel's deadline after a newer dial ends nothing, and the
+          // mark below is not advanced for it either.
+          let ended = true;
+          try { ended = this._attemptGuard ? this._attemptGuard.end(peerBig, open, Date.now(), undefined, inc ?? undefined) : true; } catch { ended = true; }
+          if (this._attemptGuard && !ended && this._attemptGuard.inflightOf?.(peerBig)) {
+            this._emitLog?.('info', 'negotiation-failed-stale-incarnation', { peer: toHex(peerBig), reason: reason ?? 'unknown' });
+            return;   // a newer attempt to this identity is in flight; this event is not its deadline
+          }
           if (open) { this._emitLog?.('info', 'negotiation-failed-beside-live', { peer: toHex(peerBig), reason: reason ?? 'unknown' }); return; }
           const marks = (node._deadPeers ??= new DeadPeers());
           if (typeof marks.fail === 'function') marks.fail(peerBig, reason ?? 'unknown');
@@ -1370,32 +1389,39 @@ export class AxonaPeer extends DHT {
     // The token discipline (end at bind, cancel or deadline) is row 8's.
     const guard = this._attemptGuard ?? null;
     stats.guarded = !!guard;
+    guard?.sweep?.();   // row 8: fail-safe deadline before asking allow
     const dial = async (id) => {
       // R11-1 (Aster d787d245): eligibility is re-read at the dial itself,
       // not only when the target list was built; a later batch can start
       // after a loss has marked its target.
       if (!this._isEligibleCandidate(id)) { stats.ineligible++; return false; }
+      let k;
       if (guard) {
         if (!guard.allow(id)) { stats.guardRefused++; return false; }
-        guard.begin(id);
+        k = guard.begin(id);
       }
       let opened = false;
       try { opened = (await t.openConnection(id)) !== false; }
       catch { opened = false; }
-      finally { guard?.end(id, opened); }
-      if (opened) { stats.opened++; return true; }
+      if (opened) { stats.opened++; guard?.end(id, true, Date.now(), k); return true; }
       // R11-1: the open was awaited, a loss callback may have marked this
       // identity meanwhile, and openConnection's false is not only "no
       // binding" (disappearance, failed/closed state, its 15 s timeout).
       // Eligibility is re-read at the effect boundary: a newly ineligible
-      // target gets no CONSUME and no relay dial.
-      if (!this._isEligibleCandidate(id)) { stats.ineligibleAfterOpen++; return false; }
+      // target gets no CONSUME and no relay dial. Row 8: nothing went out,
+      // so the token is RELEASED, not ended — no attempt is counted.
+      if (!this._isEligibleCandidate(id)) { stats.ineligibleAfterOpen++; guard?.release?.(id, k); return false; }
       if (guard && typeof t.connectViaRelay === 'function') {
         try { node._deadPeers?.consume?.(id); } catch { /* bookkeeping only */ }
-        let issued = false;
-        try { issued = t.connectViaRelay(toHex(id)) === true; } catch { issued = false; }
-        if (issued) stats.relayed++; else stats.relayUnavailable++;
+        let issued = false, inc = null;
+        try { const r = t.connectViaRelay(toHex(id)); issued = r !== false && r != null; inc = (typeof r === 'string') ? r : null; } catch { issued = false; }
+        // Row 8: an issued relay dial keeps its token until bind, deadline or
+        // the sweep, correlated with the channel it started; one that could
+        // not be issued ends it here as a failure.
+        if (issued) { guard.attach?.(id, k, inc); stats.relayed++; return false; }
+        stats.relayUnavailable++;
       }
+      guard?.end(id, false, Date.now(), k);
       return false;
     };
     for (let i = 0; i < targets.length; i += concurrency) {
@@ -4757,23 +4783,44 @@ export class AxonaPeer extends DHT {
       // candidate is re-probed on every nomination forever — the c16d12b
       // storm. With it: in-flight dedup, bounded retry with backoff, expiry
       // on exhaustion; the dht:presence record is the release valve.
+      // Row 8: the fail-safe deadline for attempts whose signal never came.
+      this._attemptGuard?.sweep?.();
       if (this._attemptGuard && !this._attemptGuard.allow(peerId)) return;
       this._verifyProbes = (this._verifyProbes ?? 0) + 1;
-      this._attemptGuard?.begin(peerId);
-      // Row 10: CONSUME at ISSUE. Every reservation above succeeded; the
-      // attempt goes out now. An exhausted mark advances its refill window
-      // here, so a second evaluation in the window is ineligible.
-      try { this._node?._deadPeers?.consume?.(peerId); } catch { /* bookkeeping only */ }
+      const k = this._attemptGuard?.begin(peerId);
+      // Row 10's CONSUME at ISSUE sits where the dial actually goes out
+      // (Aster a2c1d79f R8-1). On a transport WITH connectViaRelay (web) the
+      // open below is bound-only and issues nothing on the wire; consuming
+      // before it moved a due exhausted mark's window forward so the
+      // post-await eligibility re-read then refused the dial the mark had
+      // just permitted — the consume is at the relay issue below. On a
+      // transport WITHOUT connectViaRelay (the sim, a legacy node transport)
+      // the open IS the dial, so the consume stays here (row 10's fence).
+      const openIsTheDial = typeof t.connectViaRelay !== 'function';
+      if (openIsTheDial) { try { this._node?._deadPeers?.consume?.(peerId); } catch { /* bookkeeping only */ } }
       let opened = false;
       try { opened = await t.openConnection(peerId); }
       catch { /* unverifiable → not admitted */ }
-      finally {
-        this._verifyProbes = Math.max(0, (this._verifyProbes ?? 1) - 1);
-        // The relay fallback below is fire-and-forget signaling on the SAME
-        // attempt — its eventual bind clears the entry via expiry-on-bind
-        // when the candidate is re-nominated bound.
-        this._attemptGuard?.end(peerId, opened);
-      }
+      finally { this._verifyProbes = Math.max(0, (this._verifyProbes ?? 1) - 1); }
+      // Row 8 (Hold-and-Fill v0.15, case 16): ONE token per attempt, ended
+      // EXACTLY ONCE at BIND, CANCEL or DEADLINE. Until this change the
+      // token ended here, before the relay dial below went out, so the dial
+      // ran outside the guard: the identity read as not in flight, a second
+      // nomination could dial it again, and the bind or timeout of the real
+      // channel counted nothing. Now: a bound-only open that succeeded IS the
+      // bind; a relay dial that was issued keeps the token, which the
+      // peer-bound handler ends on bind and the negotiation-failed handler
+      // (row 13) ends on deadline, with the guard's sweep as the fail-safe;
+      // a dial that could not be issued ends the token here as a failure,
+      // which is what the guard counted before (its brake on a never-binding
+      // candidate when relay is disabled). Deferring without a count when the
+      // relay is merely throttled is row 12's reservation step.
+      if (opened) { this._attemptGuard?.end(peerId, true, Date.now(), k); return; }
+      // R11-1 (Aster d787d245), the same boundary here: the open was awaited
+      // and a loss may have marked the identity meanwhile; re-read
+      // eligibility before any effect. Nothing went out: the token is
+      // RELEASED without counting an attempt.
+      if (!this._isEligibleCandidate(peerId)) { this._dialIneligibleAfterOpen = (this._dialIneligibleAfterOpen ?? 0) + 1; this._attemptGuard?.release?.(peerId, k); return; }
       // AUTONOMOUS BRIDGELESS CONNECT.  openConnection only succeeds for a
       // peer the transport already has a (bridge-assigned) binding for; a peer
       // discovered purely peer-to-peer (triadic_introduce / hop_cache /
@@ -4787,10 +4834,22 @@ export class AxonaPeer extends DHT {
       // state; connectViaRelay itself no-ops when meshRelay is disabled, when
       // we're not yet meshed (cold bootstrap still needs the rendezvous), or
       // when a channel/binding to the peer already exists.
-      if (!opened && typeof t.connectViaRelay === 'function') {
-        try { t.connectViaRelay(toHex(peerId)); }
-        catch { /* best-effort; falls back to bridge if relay can't route */ }
+      let issued = false, inc = null;
+      if (typeof t.connectViaRelay === 'function') {
+        // Row 10: CONSUME at ISSUE, immediately before the dial goes out.
+        try { this._node?._deadPeers?.consume?.(peerId); } catch { /* bookkeeping only */ }
+        try {
+          const r = t.connectViaRelay(toHex(peerId));
+          issued = r !== false && r != null;
+          inc = (typeof r === 'string') ? r : null;   // row 8: the started negotiation's incarnation
+        } catch { issued = false; /* best-effort; falls back to bridge if relay can't route */ }
       }
+      if (issued) {
+        this._attemptGuard?.attach?.(peerId, k, inc);                                     // correlate the token with THIS channel
+        this._guardTokensHeld = (this._guardTokensHeld ?? 0) + 1;
+        return;                                                                           // token lives: bind / deadline / sweep
+      }
+      this._attemptGuard?.end(peerId, false, Date.now(), k);                              // cancel: nothing went out
       return;
     }
 
