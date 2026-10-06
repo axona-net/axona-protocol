@@ -58,7 +58,7 @@ function main() {
     const mesh = newMesh();
     const lost = [];
     mesh.onPeerLost(id => lost.push(id));
-    const st = fakeState({ lastPongAt: Date.now() - 11_000 });  // > DEAD_PONG_MS (10s)
+    const st = fakeState({ lastPongAt: Date.now() - 21_000, openedAt: Date.now() - 60_000 });  // > heartbeat deadMs (20 s; one pinger per channel, David 2026-10-06)
     mesh._peers.set(PEER, st);
     const r = mesh._reapTick(st);
     check('pong-timeout reaped',                 r === 'reaped-pong');
@@ -66,12 +66,12 @@ function main() {
     check('onPeerLost fired with peerId',        lost.length === 1 && lost[0] === PEER);
   }
 
-  // ── stale (3s<gap<10s) → marked stale, NOT evicted ────────────────
+  // ── stale (10s<gap<20s) → marked stale, NOT evicted ───────────────
   {
     const mesh = newMesh();
     const lost = [];
     mesh.onPeerLost(id => lost.push(id));
-    const st = fakeState({ lastPongAt: Date.now() - 4_000 });
+    const st = fakeState({ lastPongAt: Date.now() - 11_000, openedAt: Date.now() - 60_000 });
     mesh._peers.set(PEER, st);
     const r = mesh._reapTick(st);
     check('stale gap returns stale',             r === 'stale');
