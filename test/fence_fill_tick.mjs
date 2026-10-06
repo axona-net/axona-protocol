@@ -36,6 +36,7 @@ import { AxonaPeer }                from '../src/dht/AxonaPeer.js';
 import { AxonaDomain }              from '../src/dht/AxonaDomain.js';
 import { NeuronNode }               from '../src/dht/NeuronNode.js';
 import { Synapse }                  from '../src/dht/Synapse.js';
+import { DeadPeers }                from '../src/dht/DeadPeers.js';
 import { SimNetwork, simTransport } from '../src/transport/sim/index.js';
 import { createNodeIdentity }       from '../src/identity/index.js';
 import { fromHex, toHex, clz264 }   from '../src/utils/hexid.js';
@@ -390,6 +391,33 @@ const tick = async (rec) => { rec.peer._deficitBackoff?.reset(); return rec.peer
       const r4 = await tick(u);
       check('E7c three competing attempts begun during the search (cap 4, table 0): availability 1 → exactly ONE fill dial', r4 === 1 && u.peer._fillLast.dialed === 1 && u.ctl.relay.length === 1 && gu.inflightCount() === 4 && u.peer._fillCache.size === 2, J({ r4, rep: u.peer._fillLast, relay: u.ctl.relay.length, inflight: gu.inflightCount() }));
       await u.peer.stop().catch(() => {});
+      // (d) Vega 7702b4de: where the open IS the dial (no connectViaRelay) the consume runs before the
+      // open; a failed open is the attempt and ends as a failure — never a deficit deferral after it.
+      const o = await makePeer(net, domain, 5, 11, ARMED, true);   // relayReturn null → no connectViaRelay on this transport
+      o.node._maxSynaptome = 4; o.peer.findKClosest = async () => [o.big];
+      const go = o.peer._attemptGuard;
+      o.node._deadPeers = new DeadPeers({ B: 0, A_max: 1, R_refill: 40 });   // an EXHAUSTED mark whose refill comes due: its token (1) is what CONSUME spends (row 10)
+      const C = stranger(o.big, 230); o.node._deadPeers.fail(C, 'prior-loss'); await wait(60);
+      const dueBefore = (o.peer._isEligibleCandidate(C), o.node._deadPeers.get(C)?.token);   // eligible() grants the refill token
+      check('E7d setup: sim-shaped (open is the dial), a due exhausted mark on the candidate (token 1), cap 4, table 0', typeof o.transport.connectViaRelay !== 'function' && o.peer._isEligibleCandidate(C) && dueBefore === 1 && o.peer._nominateCandidate(C, 'near'), J({ relay: typeof o.transport.connectViaRelay, eligible: o.peer._isEligibleCandidate(C), token: dueBefore }));
+      o.ctl.openOverride = async () => { craft(o, 31n); craft(o, 32n); craft(o, 33n); craft(o, 34n); return false; };   // the open fills the table, then fails
+      const dd = o.peer._dialDeferredDeficit ?? 0;
+      const r5 = await tick(o);
+      const rep5 = o.peer._fillLast;
+      // On this path the consume runs BEFORE the open and spends the refill window; the post-open
+      // eligibility re-read (R11-1) then finds the identity ineligible and RELEASES the token. That is
+      // row 10/11's pre-existing outcome and it is kept; what must not happen is a deficit deferral
+      // after a consume.
+      check('E7d (due exhausted mark) the consume stood (token spent → 0); no deficit deferral; the post-open re-read released the token (R11-1), candidate dropped', rep5.deferred === 0 && (o.peer._dialDeferredDeficit ?? 0) === dd && o.node._deadPeers.get(C)?.token === 0 && !go.inflightOf(C) && (o.peer._dialIneligibleAfterOpen ?? 0) === 1 && !o.peer._fillCache.has(C) && r5 === 0 && o.node.synaptome.size === 4, J({ r5, rep5, token: o.node._deadPeers.get(C)?.token, inel: o.peer._dialIneligibleAfterOpen, dd: o.peer._dialDeferredDeficit }));
+      // an UNMARKED candidate on the same path: the failed open is the ATTEMPT — ended as a failure,
+      // counted, never deferred on deficit although the table is now at cap
+      const D = stranger(o.big, 231);
+      o.node._maxSynaptome = 5; o.peer._nominateCandidate(D, 'near'); o.node._maxSynaptome = 4;   // nominated while a slot exists; the tick then sees deficit 0 → bump cap by one so the tick runs the dial
+      o.node._maxSynaptome = 5; o.ctl.openOverride = async () => { craft(o, 35n); return false; };   // the open takes the last slot, then fails
+      const r6 = await tick(o);
+      const rep6 = o.peer._fillLast;
+      check('E7d (unmarked) the failed open IS the attempt: ended as a failure (attempts 1, not in flight), cancelled 1, no deficit deferral, candidate dropped', r6 === 1 && rep6.cancelled === 1 && rep6.deferred === 0 && go.attemptsOf(D) === 1 && !go.inflightOf(D) && !o.peer._fillCache.has(D) && (o.peer._dialDeferredDeficit ?? 0) === dd && o.node.synaptome.size === 5, J({ r6, rep6, attempts: go.attemptsOf(D), dd: o.peer._dialDeferredDeficit }));
+      await o.peer.stop().catch(() => {});
     }
   }
 
@@ -472,6 +500,7 @@ const tick = async (rec) => { rec.peer._deficitBackoff?.reset(); return rec.peer
     check('G R2-I1: the tick reads availability live before each dial, after the attempt bound', /if \(rep\.dialed \+ rep\.cancelled >= cfg\.maxPerTick\) break;[\s\S]*?if \(this\._fillAvailability\(\) <= 0\) \{ rep\.availStop = true; break; \}/.test(body) && body.indexOf('_fillAvailability() <= 0') < body.indexOf('_considerCandidate'));
     const ccb = (() => { const c0 = src.indexOf('  async _considerCandidate('); return src.slice(c0, src.indexOf('\n  }\n', c0)); })();
     check('G R2-I1: the dial reads availability (own token excluded) BEFORE the open and AGAIN at the relay issue after the awaited open; both release and return deferred-deficit', (ccb.match(/this\._fillAvailability\(true\) <= 0/g) || []).length === 2 && ccb.indexOf('_fillAvailability(true) <= 0') < ccb.indexOf('await t.openConnection(peerId)') && ccb.lastIndexOf('_fillAvailability(true) <= 0') > ccb.indexOf('await t.openConnection(peerId)') && ccb.lastIndexOf('_fillAvailability(true) <= 0') < ccb.indexOf('t.connectViaRelay(toHex(peerId))') && (ccb.match(/return 'deferred-deficit';/g) || []).length === 2);
+    check('G Vega 7702b4de: the post-open availability read is gated to the RELAY path (!openIsTheDial), where nothing has been consumed yet', /if \(!openIsTheDial && this\._fillArmed\(\) && this\._fillAvailability\(true\) <= 0\) \{/.test(ccb) && ccb.indexOf('if (openIsTheDial) { try { this._node?._deadPeers?.consume?.(peerId);') < ccb.indexOf('!openIsTheDial && this._fillArmed()'));
     check('G R2-I1: availability = cap − admitted − in-flight, with the own token excluded on request', /_fillAvailability\(excludeOwn = false\) \{[\s\S]*?guard\.inflightCount\(\) - \(excludeOwn \? 1 : 0\)[\s\S]*?return \(cap - node\.synaptome\.size\) - Math\.max\(0, inflight\);/.test(src));
     check('G R12-2: the dial reads null as a capacity refusal, releases the token and returns deferred; CONSUME only for an issued dial', /if \(r === null\) deferred = true;/.test(ccb) && /if \(issued\) \{ try \{ this\._node\?\._deadPeers\?\.consume\?\.\(peerId\);/.test(ccb) && /if \(deferred\) \{[\s\S]*?release\?\.\(peerId, k\);[\s\S]*?return 'deferred';/.test(ccb) && ccb.lastIndexOf('consume?.(peerId)') > ccb.indexOf('t.connectViaRelay(toHex(peerId))'));   // the earlier consume is the sim's open-is-the-dial branch (row 10)
     check('G R12-2: the tick keeps a deferred candidate nominated and reports it deferred, not dialed', /if \(out === 'deferred' \|\| out === 'deferred-deficit'\) \{[\s\S]*?rep\.deferred\+\+;[\s\S]*?break;/.test(body) && body.indexOf("out === 'deferred'") < body.indexOf('cache.delete(id);\n      if (out'));

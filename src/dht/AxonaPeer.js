@@ -5149,8 +5149,11 @@ export class AxonaPeer extends DHT {
       // eligibility before any effect. Nothing went out: the token is
       // RELEASED without counting an attempt.
       if (!this._isEligibleCandidate(peerId)) { this._dialIneligibleAfterOpen = (this._dialIneligibleAfterOpen ?? 0) + 1; this._attemptGuard?.release?.(peerId, k); return 'skip'; }
-      // R2-I1: availability re-read after the awaited open, at the relay issue.
-      if (this._fillArmed() && this._fillAvailability(true) <= 0) {
+      // R2-I1: availability re-read after the awaited open, at the relay
+      // issue — on the RELAY path only (Vega 7702b4de): where the open is the
+      // dial the consume has already run and the open was the attempt, so a
+      // failed open ends the token as a failure below, as before.
+      if (!openIsTheDial && this._fillArmed() && this._fillAvailability(true) <= 0) {
         this._attemptGuard?.release?.(peerId, k);
         this._dialDeferredDeficit = (this._dialDeferredDeficit ?? 0) + 1;
         return 'deferred-deficit';
