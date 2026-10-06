@@ -320,8 +320,25 @@ globalThis.RTCPeerConnection = FakePC;
     if (dz.peer._maintainTimer) { clearInterval(dz.peer._maintainTimer); dz.peer._maintainTimer = null; }
     dz.peer.findKClosest = async () => [dz.big];
     check('D control: maintenance + guard WITHOUT the gate is not armed; nominate is inert', dz.peer._fillArmed() === false && dz.peer._nominateCandidate(dz.big ^ (1n << 150n), 'near') === false && dz.peer._fillCache.size === 0);
+    // D2 (Aster 2e8142a5 R2-I1) on the sim with real binds: the awaited near search admits three at
+    // cap 4 before the dial phase runs; availability is read live, so exactly ONE real dial goes out,
+    // the table reaches cap exactly, two nominations stay, and the next tick is at-cap.
+    const e = await makePeer(net, domain, 24, 24, ARMED);
+    e.peer._requireAxonaManager('fence');
+    if (e.peer._maintainTimer) { clearInterval(e.peer._maintainTimer); e.peer._maintainTimer = null; }
+    e.node._maxSynaptome = 4;
+    const eOpens = []; const eOrig = e.transport.openConnection.bind(e.transport);
+    e.transport.openConnection = async (id) => { eOpens.push(id); return eOrig(id); };
+    const es = []; for (let i = 0; i < 3; i++) { const s = await makePeer(net, domain, 40 + i, 40 + i, {}); es.push(s); e.peer._nominateCandidate(s.big, 'near'); }
+    e.peer.findKClosest = async () => { craft(e, 21n); craft(e, 22n); craft(e, 23n); return [e.big]; };
+    e.peer._deficitBackoff.reset();
+    const re1 = await e.peer._maintainSynaptome(); await wait(40);
+    check('D2 the search admitted three at cap 4: ONE real dial (bound and admitted), table 4 exactly, two still nominated, filling', re1 === 1 && e.peer._fillLast.dialed === 1 && eOpens.length === 1 && e.node.synaptome.size === 4 && e.peer._fillCache.size === 2 && e.peer._fillLast.state === 'filling' && e.peer._gracePending.size === 0, J({ re1, rep: e.peer._fillLast, opens: eOpens.length, table: e.node.synaptome.size }));
+    e.peer._deficitBackoff.reset();
+    const re2 = await e.peer._maintainSynaptome();
+    check('D2 next tick: at-cap, no opens, nominations untouched', re2 === 0 && e.peer._fillLast.state === 'at-cap' && eOpens.length === 1 && e.peer._fillCache.size === 2, J(e.peer._fillLast));
     for (const t of a.peer._gracePending.values()) clearTimeout(t);
-    await stopAll(a, b, c, dz, ...ss);
+    await stopAll(a, b, c, dz, e, ...ss, ...es);
   }
 
   console.log(`\n${passed} passed, ${failed} failed`);

@@ -1635,6 +1635,20 @@ export class AxonaPeer extends DHT {
     return true;
   }
 
+  /**
+   * R2-I1 (Aster 2e8142a5): the fill's live AVAILABILITY — admissions the
+   * table can still take net of attempts already in flight, read at the
+   * moment of asking. `excludeOwn` is set by a dial that has already begun
+   * its own token, so that token is not counted against itself.
+   */
+  _fillAvailability(excludeOwn = false) {
+    const node = this._node; const guard = this._attemptGuard;
+    if (!node?.synaptome) return 0;
+    const cap = node._maxSynaptome ?? this._domain.MAX_SYNAPTOME;
+    const inflight = guard ? guard.inflightCount() - (excludeOwn ? 1 : 0) : 0;
+    return (cap - node.synaptome.size) - Math.max(0, inflight);
+  }
+
   /** The channel-token half of the reservation: may the transport allocate an outbound channel now? */
   _transportMayDial() {
     const t = this._node?.transport;
@@ -1702,12 +1716,17 @@ export class AxonaPeer extends DHT {
     const cap = node._maxSynaptome ?? this._domain.MAX_SYNAPTOME;
     const admitted = node.synaptome.size;
     const inflight = guard.inflightCount();
-    // INTEGRATION (the Rule 2 pin): the tick's dial budget is bounded by the
-    // DEFICIT as well as maxPerTick, net of attempts already in flight —
-    // dialing past the deficit binds peers the gate then refuses at cap and
-    // closes after grace, which is churn Rule 2 forbids ("stop at cap").
+    // INTEGRATION (the Rule 2 pin; Aster 2e8142a5 R2-I1): dialing past the
+    // deficit binds peers the gate then refuses at cap and closes after
+    // grace, which is churn Rule 2 forbids ("stop at cap"). The AVAILABILITY
+    // that bounds a dial is cap − admitted − attempts in flight, and it is
+    // read LIVE at each issue (this._fillAvailability), never from a
+    // snapshot: the near search and every bound-only open are awaited, and
+    // admissions land during them. The per-tick attempt bound (R12-4) is a
+    // separate predicate. `budget` here is the tick's starting picture, for
+    // the report only.
     const budget = Math.max(0, Math.min(cfg.maxPerTick, (cap - admitted) - inflight));
-    const rep = { cap, admitted, deficit: cap - admitted, inflight, budget, near: 0, directory: null, cache: this._fillCache.size, dialed: 0, cancelled: 0, deferred: 0, deferredAt: null, refused: 0, ineligible: 0, state: null };
+    const rep = { cap, admitted, deficit: cap - admitted, inflight, budget, availStop: false, near: 0, directory: null, cache: this._fillCache.size, dialed: 0, cancelled: 0, deferred: 0, deferredAt: null, refused: 0, ineligible: 0, state: null };
     if (rep.deficit <= 0) {                                          // Rule 2: stop at cap
       rep.state = 'at-cap';
       this._fillReport(rep);
@@ -1734,9 +1753,11 @@ export class AxonaPeer extends DHT {
       // R12-4 (Aster 3fac1dce): the per-tick budget bounds ATTEMPTS MADE —
       // dials out AND cancels — not dials alone, or a run of cancellations
       // (relay false, relay throw) would drain the cache in one tick past
-      // maxPerTick. Deferrals and skips cost nothing against it. The budget
-      // is min(maxPerTick, deficit − in-flight) (the integration pin).
-      if (rep.dialed + rep.cancelled >= budget) break;
+      // maxPerTick. Deferrals and skips cost nothing against it.
+      if (rep.dialed + rep.cancelled >= cfg.maxPerTick) break;
+      // R2-I1: availability read LIVE before each dial — admissions during
+      // the awaited search or an earlier dial's open have already landed.
+      if (this._fillAvailability() <= 0) { rep.availStop = true; break; }
       if (node.synaptome.has(id) || this._isBoundPeer(id)) { cache.delete(id); continue; }   // held meanwhile
       if (!this._isEligibleCandidate(id)) { cache.delete(id); rep.ineligible++; continue; }   // marked meanwhile
       const pending = guard.inflightCount();
@@ -1750,11 +1771,15 @@ export class AxonaPeer extends DHT {
       if (!guard.allow(id)) { rep.refused++; continue; }            // FAIR RETRY: on its schedule, stays nominated
       let out = 'failed';
       try { out = await this._considerCandidate(id, 'fill'); } catch { out = 'failed'; }
-      if (out === 'deferred') {
-        // Case 45 at the allocation boundary: the dial released its token and
-        // consumed nothing; the candidate stays nominated for a later tick.
-        rep.deferred++; rep.deferredAt = 'issue'; st.dialDeferred++;
-        this._emitLog?.('info', 'dial-deferred', { at: 'issue', pending: guard.inflightCount(), pPending: cfg.pPending });
+      if (out === 'deferred' || out === 'deferred-deficit') {
+        // Case 45 at the allocation boundary (capacity), or R2-I1 at the
+        // issue boundary (no deficit left once the awaited open returned):
+        // the dial released its token and consumed nothing; the candidate
+        // stays nominated for a later tick.
+        const at = out === 'deferred' ? 'issue' : 'deficit';
+        rep.deferred++; rep.deferredAt = at; st.dialDeferred++;
+        this._emitLog?.('info', 'dial-deferred', { at, pending: guard.inflightCount(), pPending: cfg.pPending, avail: this._fillAvailability() });
+        if (at === 'deficit') rep.availStop = true;
         break;
       }
       cache.delete(id);
@@ -1764,9 +1789,10 @@ export class AxonaPeer extends DHT {
     }
     rep.cache = cache.size;
     const d = rep.directory;
+    rep.avail = this._fillAvailability();
     if (rep.dialed > 0) rep.state = 'filling';
+    else if (rep.availStop || rep.avail <= 0) rep.state = guard.inflightCount() > 0 ? 'pending' : 'at-cap';   // R2-I1: the deficit is covered (in flight) or gone (admitted meanwhile)
     else if (rep.deferred > 0) rep.state = 'deferred';
-    else if (budget === 0 && inflight > 0) rep.state = 'pending';   // the deficit is covered by attempts in flight; nothing to dial yet
     else if (cache.size === 0) {
       // R12-3: an outage is reported only from a request that could not be
       // sent; silence after a sent request is 'unknown', never inferred.
@@ -5086,6 +5112,18 @@ export class AxonaPeer extends DHT {
       // just permitted — the consume is at the relay issue below. On a
       // transport WITHOUT connectViaRelay (the sim, a legacy node transport)
       // the open IS the dial, so the consume stays here (row 10's fence).
+      // R2-I1 (Aster 2e8142a5): under the fill, availability (cap − admitted
+      // − other attempts in flight) is read at the issue boundary, BEFORE
+      // the open — on the sim the open IS the dial — and again at the relay
+      // issue below, after the awaited open. No availability: the token is
+      // RELEASED (no count), nothing consumed, the caller keeps the
+      // nomination. Legacy (unarmed) paths are unchanged.
+      if (this._fillArmed() && this._fillAvailability(true) <= 0) {
+        this._verifyProbes = Math.max(0, (this._verifyProbes ?? 1) - 1);
+        this._attemptGuard?.release?.(peerId, k);
+        this._dialDeferredDeficit = (this._dialDeferredDeficit ?? 0) + 1;
+        return 'deferred-deficit';
+      }
       const openIsTheDial = typeof t.connectViaRelay !== 'function';
       if (openIsTheDial) { try { this._node?._deadPeers?.consume?.(peerId); } catch { /* bookkeeping only */ } }
       let opened = false;
@@ -5111,6 +5149,12 @@ export class AxonaPeer extends DHT {
       // eligibility before any effect. Nothing went out: the token is
       // RELEASED without counting an attempt.
       if (!this._isEligibleCandidate(peerId)) { this._dialIneligibleAfterOpen = (this._dialIneligibleAfterOpen ?? 0) + 1; this._attemptGuard?.release?.(peerId, k); return 'skip'; }
+      // R2-I1: availability re-read after the awaited open, at the relay issue.
+      if (this._fillArmed() && this._fillAvailability(true) <= 0) {
+        this._attemptGuard?.release?.(peerId, k);
+        this._dialDeferredDeficit = (this._dialDeferredDeficit ?? 0) + 1;
+        return 'deferred-deficit';
+      }
       // AUTONOMOUS BRIDGELESS CONNECT.  openConnection only succeeds for a
       // peer the transport already has a (bridge-assigned) binding for; a peer
       // discovered purely peer-to-peer (triadic_introduce / hop_cache /

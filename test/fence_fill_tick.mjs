@@ -349,6 +349,48 @@ const tick = async (rec) => { rec.peer._deficitBackoff?.reset(); return rec.peer
       check('E6 capacity deferral costs zero attempts and stops the phase; nominations untouched', r4 === 0 && z.peer._fillLast.deferred === 1 && z.peer._fillLast.cancelled === 0 && z.peer._fillCache.size === 3, J(z.peer._fillLast));
       await z.peer.stop().catch(() => {});
     }
+
+    // E7 (Aster 2e8142a5 R2-I1): availability is read LIVE at the issue boundary, never from the tick's
+    // snapshot. (a) Aster's reproducer: the awaited near search itself admits three at cap 4 → ONE
+    // attempt, not three; the next tick is 'pending' with that attempt in flight. (b) admission during
+    // the awaited bound-only open → the relay issue is deferred on deficit: token released, nothing
+    // consumed, nomination kept. (c) competing attempts begun during the search count against it.
+    {
+      const v = await makePeer(net, domain, 5, 9, ARMED, true);
+      v.node._maxSynaptome = 4; v.peer._maintainCfg.pPending = 8;
+      const gv = v.peer._attemptGuard;
+      let n = 0; v.ctl.relayReturn = () => `inc-v${++n}`; v.ctl.openOverride = async () => false;
+      const three = [0, 1, 2].map(i => stranger(v.big, 200 + i)); for (const c of three) v.peer._nominateCandidate(c, 'near');
+      v.peer.findKClosest = async () => { craft(v, 11n); craft(v, 12n); craft(v, 13n); return [v.big]; };   // the lookup ADMITS three
+      const r1 = await tick(v);
+      const rep1 = v.peer._fillLast;
+      check('E7a the search admitted three at cap 4 (snapshot said deficit 4): exactly ONE attempt issued, two still nominated, filling', r1 === 1 && rep1.budget === 3 && rep1.dialed === 1 && v.ctl.relay.length === 1 && gv.inflightCount() === 1 && v.peer._fillCache.size === 2 && rep1.state === 'filling', J({ r1, rep1, relay: v.ctl.relay.length, inflight: gv.inflightCount(), cache: v.peer._fillCache.size }));
+      const r2 = await tick(v);
+      check('E7a next tick: availability 0 (one in flight covers the deficit): no dial, state pending, nominations kept', r2 === 0 && v.peer._fillLast.dialed === 0 && v.peer._fillLast.availStop === true && v.peer._fillLast.state === 'pending' && v.peer._fillCache.size === 2 && v.ctl.relay.length === 1, J(v.peer._fillLast));
+      // (b) the held attempt times out (slot and deficit free again), then the bound-only open admits the 4th
+      const held = three.find(c => gv.inflightOf(c));
+      v.ctl.connected = false; v.ctl.negCb(held, 'negotiation-timeout', 'inc-v1'); v.ctl.connected = null;
+      v.peer.findKClosest = async () => [v.big];
+      v.ctl.openOverride = async () => { craft(v, 14n); return false; };   // during the awaited open the table reaches cap
+      const marksB = v.node._deadPeers; const relayB = v.ctl.relay.length; const next = [...v.peer._fillCache.keys()];
+      const r3 = await tick(v);
+      const rep3 = v.peer._fillLast; const cand = next.find(c => !v.peer._fillCache.has(c));
+      check('E7b admission during the awaited open: the relay issue is DEFERRED on deficit — no relay call, token released (attempts 0, not in flight), nothing consumed, nomination kept, logged at:deficit', r3 === 0 && rep3.deferred === 1 && rep3.deferredAt === 'deficit' && rep3.dialed === 0 && v.ctl.relay.length === relayB && cand === undefined && next.every(c => gv.attemptsOf(c) === 0 && !gv.inflightOf(c) && marksB.get(c) == null) && (v.peer._dialDeferredDeficit ?? 0) === 1 && v.logs.some(([m, c]) => m === 'dial-deferred' && c.at === 'deficit'), J({ r3, rep3, relay: v.ctl.relay.length - relayB, cache: v.peer._fillCache.size }));
+      check('E7b the tick reports at-cap (nothing in flight, the table filled meanwhile)', rep3.state === 'at-cap' && v.node.synaptome.size === 4);
+      v.ctl.openOverride = async () => false;
+      await v.peer.stop().catch(() => {});
+      // (c) competing attempts begun during the search
+      const u = await makePeer(net, domain, 5, 10, ARMED, true);
+      u.node._maxSynaptome = 4; u.peer._maintainCfg.pPending = 8;
+      const gu = u.peer._attemptGuard;
+      let m = 0; u.ctl.relayReturn = () => `inc-u${++m}`; u.ctl.openOverride = async () => false;
+      for (let i = 0; i < 3; i++) u.peer._nominateCandidate(stranger(u.big, 210 + i), 'near');
+      const others = [0, 1, 2].map(i => stranger(u.big, 220 + i));
+      u.peer.findKClosest = async () => { for (const o of others) gu.begin(o); return [u.big]; };   // another path's three dials go out during the search
+      const r4 = await tick(u);
+      check('E7c three competing attempts begun during the search (cap 4, table 0): availability 1 → exactly ONE fill dial', r4 === 1 && u.peer._fillLast.dialed === 1 && u.ctl.relay.length === 1 && gu.inflightCount() === 4 && u.peer._fillCache.size === 2, J({ r4, rep: u.peer._fillLast, relay: u.ctl.relay.length, inflight: gu.inflightCount() }));
+      await u.peer.stop().catch(() => {});
+    }
   }
 
   // ── F. liveness ────────────────────────────────────────────────────────
@@ -425,10 +467,14 @@ const tick = async (rec) => { rec.peer._deficitBackoff?.reset(); return rec.peer
     check('G ledger.canAllocate counts nothing and logs nothing', c0 > 0 && !/_stats|_log\(/.test(cb));
     // successor (Aster a2106a2a)
     check('G R12-1: the fill tick sweeps the guard at its own boundary BEFORE the capacity check', i('guard.sweep?.()') > 0 && i('guard.sweep?.()') < i('inflightCount()'));
-    check('G R12-4: the per-tick budget bounds attempts made (dialed + cancelled), not dials alone; the budget is min(maxPerTick, deficit − in-flight)', /if \(rep\.dialed \+ rep\.cancelled >= budget\) break;/.test(body) && !/if \(rep\.dialed >= cfg\.maxPerTick\) break;/.test(body) && /const budget = Math\.max\(0, Math\.min\(cfg\.maxPerTick, \(cap - admitted\) - inflight\)\);/.test(body));
-    const cc = src.indexOf('  async _considerCandidate('); const ccb = src.slice(cc, src.indexOf('\n  }\n', cc));
+    check('G R12-4: the per-tick budget bounds attempts made (dialed + cancelled), not dials alone', /if \(rep\.dialed \+ rep\.cancelled >= cfg\.maxPerTick\) break;/.test(body) && !/if \(rep\.dialed >= cfg\.maxPerTick\) break;/.test(body));
+    // R2-I1 (Aster 2e8142a5): availability is read LIVE at every issue boundary, never from the tick's snapshot
+    check('G R2-I1: the tick reads availability live before each dial, after the attempt bound', /if \(rep\.dialed \+ rep\.cancelled >= cfg\.maxPerTick\) break;[\s\S]*?if \(this\._fillAvailability\(\) <= 0\) \{ rep\.availStop = true; break; \}/.test(body) && body.indexOf('_fillAvailability() <= 0') < body.indexOf('_considerCandidate'));
+    const ccb = (() => { const c0 = src.indexOf('  async _considerCandidate('); return src.slice(c0, src.indexOf('\n  }\n', c0)); })();
+    check('G R2-I1: the dial reads availability (own token excluded) BEFORE the open and AGAIN at the relay issue after the awaited open; both release and return deferred-deficit', (ccb.match(/this\._fillAvailability\(true\) <= 0/g) || []).length === 2 && ccb.indexOf('_fillAvailability(true) <= 0') < ccb.indexOf('await t.openConnection(peerId)') && ccb.lastIndexOf('_fillAvailability(true) <= 0') > ccb.indexOf('await t.openConnection(peerId)') && ccb.lastIndexOf('_fillAvailability(true) <= 0') < ccb.indexOf('t.connectViaRelay(toHex(peerId))') && (ccb.match(/return 'deferred-deficit';/g) || []).length === 2);
+    check('G R2-I1: availability = cap − admitted − in-flight, with the own token excluded on request', /_fillAvailability\(excludeOwn = false\) \{[\s\S]*?guard\.inflightCount\(\) - \(excludeOwn \? 1 : 0\)[\s\S]*?return \(cap - node\.synaptome\.size\) - Math\.max\(0, inflight\);/.test(src));
     check('G R12-2: the dial reads null as a capacity refusal, releases the token and returns deferred; CONSUME only for an issued dial', /if \(r === null\) deferred = true;/.test(ccb) && /if \(issued\) \{ try \{ this\._node\?\._deadPeers\?\.consume\?\.\(peerId\);/.test(ccb) && /if \(deferred\) \{[\s\S]*?release\?\.\(peerId, k\);[\s\S]*?return 'deferred';/.test(ccb) && ccb.lastIndexOf('consume?.(peerId)') > ccb.indexOf('t.connectViaRelay(toHex(peerId))'));   // the earlier consume is the sim's open-is-the-dial branch (row 10)
-    check('G R12-2: the tick keeps a deferred candidate nominated and reports it deferred, not dialed', /if \(out === 'deferred'\) \{[\s\S]*?rep\.deferred\+\+;[\s\S]*?break;/.test(body) && body.indexOf("out === 'deferred'") < body.indexOf('cache.delete(id);\n      if (out'));
+    check('G R12-2: the tick keeps a deferred candidate nominated and reports it deferred, not dialed', /if \(out === 'deferred' \|\| out === 'deferred-deficit'\) \{[\s\S]*?rep\.deferred\+\+;[\s\S]*?break;/.test(body) && body.indexOf("out === 'deferred'") < body.indexOf('cache.delete(id);\n      if (out'));
     const msrc = readFileSync(new URL('../src/transport/web/mesh.js', import.meta.url), 'utf8');
     check('G R12-2: the web transport answers null for the relay throttle and for a ledger-refused allocation', /relay-connect-throttled[\s\S]*?return null;/.test(isrc) && /mesh\.allocRefusedFor\(toHex\)\) \? null : false/.test(isrc) && /_lastAllocRefusal = \{ peerId, why: may\.why \}/.test(msrc));
     check('G R12-3: the directory step records sent/unavailable only; the onPeerList handler records the answer; rendezvous needs unavailable, silence is unknown', /d\.state = sent \? 'sent' : 'unavailable'/.test(src) && /d\.state = 'answered'; d\.answeredAt = Date\.now\(\); d\.offered = peers\.length;/.test(src) && /d\.state === 'unavailable'\) rep\.state = 'fill-stalled:rendezvous'/.test(body) && /d\.state === 'sent'\) rep\.state = 'fill-unknown'/.test(body));
