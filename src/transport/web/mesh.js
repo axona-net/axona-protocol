@@ -73,20 +73,36 @@
 //   liveness, each reapMs, independent of role: since := now − max(lastRxAt,
 //     openedAt); > staleMs → 'stale'; > deadMs → evicted (onPeerLost).
 // ASSUMPTIONS: the data channel is ORDERED (created with ordered: true) and
-// delivers each frame once, within a delay well below deadMs; each end's
-// event loop eventually runs its timers and handlers; the two clocks are
-// not compared (`t` round-trips, `since` is the sender's own reading).
-// WHAT IS CLAIMED: in steady state exactly one end pings. After any
-// disturbance (a stalled loop, a sleep of one or both ends, frames queued
-// across a pause and delivered on resume), the pair is back to exactly one
-// pinger within ONE takeover window — takeoverMs + tiebreakMs + tickMs + one
-// delivery — and stays there while both ends are live. INSIDE that window
-// there may be a transient with ZERO pingers (queued pre-pause pings
-// arriving while both loops still look stalled make both yield) or TWO
-// pingers (both wake and send before either delivery lands); neither is a
-// liveness event, because every one of those frames is a receipt and the
-// liveness clock runs on receipts. Not claimed: convergence under a channel
-// that reorders or drops frames, or clocks that are compared across ends.
+// delivers each frame once; each end's event loop EVENTUALLY runs its
+// timers and handlers; each end's clock is monotonic for the durations
+// measured here and is never compared with the other end's (`t` only
+// round-trips; `since` is the sender's own reading and is logged, nothing
+// decides on it).
+// WHAT IS CLAIMED (Aster 19ce354d drew this boundary):
+//  · Steady state: exactly one end pings.
+//  · Eventual convergence: after a disturbance ends — a stalled loop, a
+//    sleep of one or both ends, frames queued across a pause and delivered
+//    on resume — with the stabilization origin at the last frame sent or
+//    callback run before it ended, the pair eventually reaches exactly one
+//    pinger and stays there while both ends are live. Eventual scheduling
+//    alone gives no finite time for this.
+//  · A bound, under more: when timer and handler lateness is at most L and
+//    one delivery takes at most D, with takeoverMs > pingIntervalMs + tickMs
+//    + 2D + L, the pair is back to one pinger within takeoverMs + tiebreakMs
+//    + tickMs + D of the stabilization origin. The fence's schedules run
+//    well inside those bounds and observe the window; outside them only the
+//    eventual claim holds.
+//  · Transients: inside that time there may be ZERO pingers (queued
+//    pre-pause pings arriving while both loops still look stalled make both
+//    yield) or TWO (both wake and send before either delivery lands). Each
+//    of those frames is a receipt, so the transient itself moves no liveness
+//    clock toward eviction.
+//  · Eviction is excluded only for a pause SHORTER than deadMs whose queued
+//    receipts are processed before the reaper's next tick. A pause past
+//    deadMs, or a reaper tick that runs before the queued receipts, evicts
+//    the peer — and is right to: nothing was received for deadMs.
+// NOT CLAIMED: convergence under a channel that reorders or drops frames;
+// any bound without the lateness and delivery limits above.
 const HEARTBEAT_DEFAULTS = Object.freeze({
   pingIntervalMs: 2000,   // the pinger's cadence
   takeoverMs:     5000,   // silence before the ponger becomes the pinger
@@ -1357,8 +1373,9 @@ export class MeshManager {
       const now = Date.now();
       const last = state.rttBuffer.at(-1);
       // hb: the protocol marker (a ping without it is a legacy peer's);
-      // since: the silence I observed from the far end before sending, so a
-      // receiver that is pinging too can tell a takeover from a crossing;
+      // since: the silence I observed from the far end before sending —
+      // LOGGED by the receiver, never decided on (the receiver's own
+      // activity decides a crossing; see the 'ping' handler);
       // rtt: my last measured round trip, for the ponger's latency.
       const since = now - Math.max(state.lastPingRxAt, state.openedAt || now);
       state.dc.send(JSON.stringify({ type: 'ping', hb: 1, t: now, since, ...(typeof last === 'number' ? { rtt: last } : {}) }));

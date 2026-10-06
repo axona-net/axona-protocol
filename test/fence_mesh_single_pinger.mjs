@@ -171,6 +171,11 @@ const stop = (...sides) => { for (const s of sides) { if (s.st.pingTimer) clearI
       const A = side('offerer', 'B', da, logs), B = side('responder', 'A', db, logs);
       await wait(500);
       check('G1c a new channel between two new ends starts without the legacy flag and in the single-pinger steady state', A.st.peerLegacy === false && B.st.peerLegacy === false && A.st.pinger && !B.st.pinger && pingsSent(db) === 0);
+      // same-manager retire then reconnect: the legacy flag lives on the retired state and does not carry over
+      A.st.peerLegacy = true;
+      A.mesh._retire('B', 'test-retire');
+      const st2 = A.mesh._newPeerState('B', 'offerer');
+      check('G1c same manager, retire then reconnect: the old state is gone and the fresh state carries no legacy flag', !A.mesh._peers.has('B') && st2.peerLegacy === false && st2.pinger === false && st2.lastRxAt === 0);
       stop(A, B);
     }
   }
@@ -304,7 +309,7 @@ const stop = (...sides) => { for (const s of sides) { if (s.st.pingTimer) clearI
   // ── F. static ────────────────────────────────────────────────────────
   {
     const src = readFileSync(new URL('../src/transport/web/mesh.js', import.meta.url), 'utf8');
-    check('F-1 the header states the state machine, the ordered-delivery assumption and the bounded convergence claim with its transients', /THE PER-CHANNEL STATE MACHINE/.test(src) && /ASSUMPTIONS: the data channel is ORDERED/.test(src) && /within ONE takeover window/.test(src) && /transient with ZERO pingers/.test(src) && /createDataChannel\(DC_LABEL, \{ ordered: true \}\)/.test(src));
+    check('F-1 the header states the state machine, the ordered-delivery assumption, EVENTUAL convergence, the bound only under bounded lateness and delivery, the transients, and the eviction exclusion', /THE PER-CHANNEL STATE MACHINE/.test(src) && /ASSUMPTIONS: the data channel is ORDERED/.test(src) && /Eventual convergence:/.test(src) && /takeoverMs > pingIntervalMs \+ tickMs\n\/\/\s+\+ 2D \+ L/.test(src) && /there may be ZERO pingers/.test(src) && /Eviction is excluded only for a pause SHORTER than deadMs/.test(src) && /NOT CLAIMED:/.test(src) && !/within ONE takeover window — takeoverMs/.test(src) && /createDataChannel\(DC_LABEL, \{ ordered: true \}\)/.test(src));
     check('F0 the ping carries hb: 1, since and the last rtt; a ping without hb is a legacy peer (never yield, keep own pings); a stalled pinger yields whatever its role, an active one resolves the crossing by role (responder yields)', /type: 'ping', hb: 1, t: now, since,/.test(src) && /if \(msg\.hb !== 1\) \{[\s\S]*?state\.peerLegacy = true;[\s\S]*?if \(!state\.pinger\) state\.pinger = true;/.test(src) && /const active = state\.lastPingTxAt > 0 && \(now - state\.lastPingTxAt\) <= this\._hb\.pingIntervalMs \+ this\._hb\.tickMs;/.test(src) && /if \(!active\) \{\n\s*state\.pinger = false;[\s\S]*?cause: 'stalled'/.test(src) && /else if \(state\.role === 'responder'\) \{\n\s*state\.pinger = false;[\s\S]*?cause: 'crossing'/.test(src) && !/if \(since >= this\._hb\.takeoverMs\)/.test(src));
     check('F1 defaults: ping 2000, takeover 5000, tiebreak 1000, stale 10000, dead 20000', /pingIntervalMs: 2000,[\s\S]*?takeoverMs:\s+5000,[\s\S]*?tiebreakMs:\s+1000,[\s\S]*?staleMs:\s+10000,[\s\S]*?deadMs:\s+20000,/.test(src));
     check('F1 dc.onopen hands the heartbeat to _openHeartbeat, which gives the OFFERER the role', /this\._openHeartbeat\(state\);\n\s*this\._notify\(\);\n\s*\};/.test(src) && /_openHeartbeat\(state\) \{\n\s*state\.pinger = state\.role === 'offerer';/.test(src));

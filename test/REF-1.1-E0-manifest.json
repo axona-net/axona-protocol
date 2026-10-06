@@ -5,7 +5,7 @@
     "onNotification",
     "onRoutedMessage"
   ],
-  "treeHash": "fe74feb8cdd6657eaa6fb762be7976abbbd2ee59",
+  "treeHash": "55f6ca3cd9271bf9381cb218d1b4d9803af9cfc5",
   "filesScanned": 83,
   "summary": {
     "migration-target": 39,
@@ -475,7 +475,7 @@
     },
     {
       "file": "transport/web/mesh.js",
-      "line": 444,
+      "line": 460,
       "callee": "onMessage",
       "receiver": "def",
       "wire": "—",
