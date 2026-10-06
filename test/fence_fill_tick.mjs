@@ -320,6 +320,35 @@ const tick = async (rec) => { rec.peer._deficitBackoff?.reset(); return rec.peer
       gy.inflightMaxMs = 45000;
       await y.peer.stop().catch(() => {});
     }
+
+    // E6 (Aster 3fac1dce R12-4): the per-tick budget bounds ATTEMPTS MADE, dials and cancels alike.
+    // Eight eligible strangers, maxPerTick 3, preflight true, bound-only open false, relay false →
+    // three attempts, three cancels, five nominations untouched. Same with a throwing relay. Mixed:
+    // one held then cancels → dialed 1 + cancelled 2 = 3. A true capacity deferral still costs zero.
+    {
+      const z = await makePeer(net, domain, 5, 8, ARMED, true);
+      z.node._maxSynaptome = 20; z.peer.findKClosest = async () => [z.big];
+      const gz = z.peer._attemptGuard;
+      z.ctl.mayDial = true; z.ctl.openOverride = async () => false; z.ctl.relayReturn = false;   // every relay dial: not issued (cancel)
+      const eight = [0, 1, 2, 3, 4, 5, 6, 7].map(i => stranger(z.big, 180 + i));
+      for (const c of eight) z.peer._nominateCandidate(c, 'near');
+      const r1 = await tick(z);
+      const rep1 = z.peer._fillLast; const counted = eight.filter(c => gz.attemptsOf(c) === 1).length;
+      check('E6 relay false ×8, maxPerTick 3: THREE attempts (cancelled 3, dialed 0), three relay calls, three guard-counted, FIVE still nominated', r1 === 3 && rep1.cancelled === 3 && rep1.dialed === 0 && z.ctl.relay.length === 3 && counted === 3 && z.peer._fillCache.size === 5, J({ r1, rep1, relay: z.ctl.relay.length, counted, cache: z.peer._fillCache.size }));
+      z.ctl.relayReturn = () => { throw new Error('relay threw'); };
+      const r2 = await tick(z);
+      check('E6 a THROWING relay ×5 remaining: again three attempts, two still nominated', r2 === 3 && z.peer._fillLast.cancelled === 3 && z.peer._fillCache.size === 2, J({ r2, rep: z.peer._fillLast, cache: z.peer._fillCache.size }));
+      // mixed: the first dial is issued and held, the rest cancel
+      const more = [0, 1, 2, 3].map(i => stranger(z.big, 190 + i)); for (const c of more) z.peer._nominateCandidate(c, 'near');
+      let calls = 0; z.ctl.relayReturn = () => (++calls === 1 ? 'inc-mixed' : false);
+      const r3 = await tick(z);
+      check('E6 mixed outcomes: held 1 + cancelled 2 = the budget of 3; the rest stay nominated', r3 === 3 && z.peer._fillLast.dialed === 1 && z.peer._fillLast.cancelled === 2 && z.peer._fillCache.size === 3 && gz.inflightCount() === 1, J({ r3, rep: z.peer._fillLast, cache: z.peer._fillCache.size }));
+      // a true capacity deferral still costs nothing against the budget and stops the phase
+      z.ctl.relayReturn = () => null;
+      const r4 = await tick(z);
+      check('E6 capacity deferral costs zero attempts and stops the phase; nominations untouched', r4 === 0 && z.peer._fillLast.deferred === 1 && z.peer._fillLast.cancelled === 0 && z.peer._fillCache.size === 3, J(z.peer._fillLast));
+      await z.peer.stop().catch(() => {});
+    }
   }
 
   // ── F. liveness ────────────────────────────────────────────────────────
@@ -396,6 +425,7 @@ const tick = async (rec) => { rec.peer._deficitBackoff?.reset(); return rec.peer
     check('G ledger.canAllocate counts nothing and logs nothing', c0 > 0 && !/_stats|_log\(/.test(cb));
     // successor (Aster a2106a2a)
     check('G R12-1: the fill tick sweeps the guard at its own boundary BEFORE the capacity check', i('guard.sweep?.()') > 0 && i('guard.sweep?.()') < i('inflightCount()'));
+    check('G R12-4: the per-tick budget bounds attempts made (dialed + cancelled), not dials alone', /if \(rep\.dialed \+ rep\.cancelled >= cfg\.maxPerTick\) break;/.test(body) && !/if \(rep\.dialed >= cfg\.maxPerTick\) break;/.test(body));
     const cc = src.indexOf('  async _considerCandidate('); const ccb = src.slice(cc, src.indexOf('\n  }\n', cc));
     check('G R12-2: the dial reads null as a capacity refusal, releases the token and returns deferred; CONSUME only for an issued dial', /if \(r === null\) deferred = true;/.test(ccb) && /if \(issued\) \{ try \{ this\._node\?\._deadPeers\?\.consume\?\.\(peerId\);/.test(ccb) && /if \(deferred\) \{[\s\S]*?release\?\.\(peerId, k\);[\s\S]*?return 'deferred';/.test(ccb) && ccb.lastIndexOf('consume?.(peerId)') > ccb.indexOf('t.connectViaRelay(toHex(peerId))'));   // the earlier consume is the sim's open-is-the-dial branch (row 10)
     check('G R12-2: the tick keeps a deferred candidate nominated and reports it deferred, not dialed', /if \(out === 'deferred'\) \{[\s\S]*?rep\.deferred\+\+;[\s\S]*?break;/.test(body) && body.indexOf("out === 'deferred'") < body.indexOf('cache.delete(id);\n      if (out'));

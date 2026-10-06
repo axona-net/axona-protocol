@@ -1725,7 +1725,11 @@ export class AxonaPeer extends DHT {
     const cache = this._fillCache;
     const ordered = [...cache.keys()].sort((a, b) => ((a ^ self) < (b ^ self) ? -1 : 1));
     for (const id of ordered) {
-      if (rep.dialed >= cfg.maxPerTick) break;
+      // R12-4 (Aster 3fac1dce): the per-tick budget bounds ATTEMPTS MADE —
+      // dials out AND cancels — not dials alone, or a run of cancellations
+      // (relay false, relay throw) would drain the cache in one tick past
+      // maxPerTick. Deferrals and skips cost nothing against it.
+      if (rep.dialed + rep.cancelled >= cfg.maxPerTick) break;
       if (node.synaptome.has(id) || this._isBoundPeer(id)) { cache.delete(id); continue; }   // held meanwhile
       if (!this._isEligibleCandidate(id)) { cache.delete(id); rep.ineligible++; continue; }   // marked meanwhile
       const pending = guard.inflightCount();
