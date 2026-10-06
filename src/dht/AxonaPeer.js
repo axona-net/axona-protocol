@@ -1427,11 +1427,6 @@ export class AxonaPeer extends DHT {
     const node = this._node;
     if (!cfg || this._maintainInflight || !node?.alive) return 0;
     if (typeof node.transport?.openConnection !== 'function') return 0;
-    // Slice 3: deficit backoff (opt-in, rides the attempt guard). A pass that
-    // attempted nothing backs the next search off exponentially — an empty
-    // deficit is usually an unpopulated band, and searching cannot fill it.
-    // Any attempt, or any verified presence record, resets the backoff.
-    if (this._deficitBackoff && !this._deficitBackoff.allow()) return 0;
     this._maintainInflight = true;
     try {
       const self = node.id;
@@ -1447,13 +1442,21 @@ export class AxonaPeer extends DHT {
       // gate when armed, the legacy below-cap seed otherwise): admitted →
       // in the table; refused → stays BOUND and charged, and with the gate
       // armed its grace timer starts (case 2). GATED with the tick itself.
-      const rec = this._reconcileBound();
+      this._reconcileBound();   // admissions are read from this._reconcileLast; the return below counts DIALS only
+      // Slice 3: deficit backoff (opt-in, rides the attempt guard). A pass that
+      // attempted nothing backs the next SEARCH off exponentially — an empty
+      // deficit is usually an unpopulated band, and searching cannot fill it.
+      // Any attempt, or any verified presence record, resets the backoff.
+      // Row 7 successor (Aster 4287a1ff R7-1): the backoff gates the search and
+      // dial phase ONLY. The reconcile above needs no dial and runs on every
+      // tick the flag allows; reconciliation does not reset the search budget.
+      if (this._deficitBackoff && !this._deficitBackoff.allow()) return 0;
       let nearest;
       // Request kNear+1: findKClosest(self, …) returns self as the closest entry,
       // so without the +1 we'd only ever fill kNear-1 successors.
       try { nearest = await this.findKClosest(self, cfg.kNear + 1); }
-      catch { return rec.admitted; }
-      if (!Array.isArray(nearest)) return rec.admitted;
+      catch { return 0; }
+      if (!Array.isArray(nearest)) return 0;
       const isConn = (id) => node.synaptome?.has(id)
         || (typeof node.transport?.isConnected === 'function' && node.transport.isConnected(id));
       const deficit = [];

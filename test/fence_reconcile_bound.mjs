@@ -21,8 +21,16 @@
 //   E. STATIC: _reconcileBound is called before findKClosest in
 //      _maintainSynaptome and returns before anything when _maintainCfg is
 //      unset.
+//   F. R7-1 (Aster 4287a1ff): synaptomeMaintain AND attemptGuard on, three
+//      sim-bound identities out of an available table, the DeficitBackoff
+//      armed by onEmpty() so allow() is false: the tick still reconciles
+//      (admitted 3) and performs NO search (findKClosest not called) and no
+//      dial; the search budget is not reset by the reconciliation; the
+//      return value counts dials (0), admissions are read from
+//      _reconcileLast. STATIC: the backoff gate sits below the reconcile.
 //
-// With the reconcile call removed from the tick, B and C fail.
+// With the reconcile call removed from the tick, B and C fail. With the
+// backoff gate moved back above the reconcile, F fails.
 //
 // Run: node test/fence_reconcile_bound.mjs
 // =====================================================================
@@ -132,11 +140,32 @@ const spy = (a) => { const calls = { open: [], consider: [] }; const oo = a.tran
     for (const x of [a, ...ps]) await x.peer.stop().catch(() => {});
   }
 
+  // F. R7-1: search backoff must not suppress the bound-only reconcile
+  {
+    const net = new SimNetwork();
+    const a = await makePeer(net, domain, 4, 4, { synaptomeMaintain: true, attemptGuard: {} });
+    a.node._maxSynaptome = 20;
+    const ps = await threeBoundOut(net, domain, a);
+    check('F setup: flag on, guard on, deficit backoff present, three bound-not-in-table', !!a.peer._maintainCfg && !!a.peer._attemptGuard && !!a.peer._deficitBackoff && ps.every(p => !a.node.synaptome.has(p.big)));
+    a.peer._deficitBackoff.onEmpty(); a.peer._deficitBackoff.onEmpty();
+    check('F setup: backoff armed (allow false)', a.peer._deficitBackoff.allow() === false);
+    const calls = spy(a); let searches = 0;
+    a.peer.findKClosest = async () => { searches++; return [a.big]; };
+    const ret = await a.peer._maintainSynaptome();
+    check('F the tick RECONCILED under backoff: admitted 3, no search, no dial, return counts dials (0)', ps.every(p => a.node.synaptome.has(p.big)) && a.peer._reconcileLast?.admitted === 3 && searches === 0 && calls.open.length === 0 && calls.consider.length === 0 && ret === 0, J({ admitted: a.peer._reconcileLast?.admitted, searches, calls, ret }));
+    check('F the search budget was not reset by the reconciliation (allow still false)', a.peer._deficitBackoff.allow() === false);
+    a.peer._deficitBackoff.reset();
+    await a.peer._maintainSynaptome();
+    check('F with the backoff clear the search runs again', searches === 1);
+    for (const x of [a, ...ps]) await x.peer.stop().catch(() => {});
+  }
+
   // E. static
   {
     const src = readFileSync(new URL('../src/dht/AxonaPeer.js', import.meta.url), 'utf8');
     const s = src.indexOf('async _maintainSynaptome('); const e = src.indexOf('\n  }\n', s); const body = src.slice(s, e);
     check('E _maintainSynaptome reconciles BEFORE findKClosest', body.indexOf('this._reconcileBound()') > 0 && body.indexOf('this._reconcileBound()') < body.indexOf('this.findKClosest(self'));
+    check('E the deficit-backoff gate sits BELOW the reconcile (R7-1)', body.indexOf('this._reconcileBound()') < body.indexOf('this._deficitBackoff.allow()'));
     const r = src.indexOf('  _reconcileBound() {'); const rb = src.slice(r, src.indexOf('\n  }\n', r));
     check('E _reconcileBound returns before anything when the flag is unset', /if \(!this\._maintainCfg \|\| !node\?\.synaptome \|\| typeof t\?\.boundPeers !== 'function'\) return out;/.test(rb));
   }
