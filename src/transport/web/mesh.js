@@ -74,37 +74,40 @@
 //     the role.)
 //   liveness, each reapMs, independent of role: since := now − max(lastRxAt,
 //     openedAt); > staleMs → 'stale'; > deadMs → evicted (onPeerLost).
-// ASSUMPTIONS: the data channel is ORDERED (created with ordered: true) and
-// delivers each frame once; each end's event loop EVENTUALLY runs its
-// timers and handlers; each end's clock is monotonic for the durations
-// measured here and is never compared with the other end's (`t` only
-// round-trips; `since` is the sender's own reading and is logged, nothing
-// decides on it).
-// WHAT IS CLAIMED (Aster 19ce354d drew this boundary):
-//  · Steady state: exactly one end pings.
-//  · Eventual convergence: after a disturbance ends — a stalled loop, a
-//    sleep of one or both ends, frames queued across a pause and delivered
-//    on resume — with the stabilization origin at the last frame sent or
-//    callback run before it ended, the pair eventually reaches exactly one
-//    pinger and stays there while both ends are live. Eventual scheduling
-//    alone gives no finite time for this.
-//  · A bound, under more: when timer and handler lateness is at most L and
-//    one delivery takes at most D, with takeoverMs > pingIntervalMs + tickMs
-//    + 2D + L, the pair is back to one pinger within takeoverMs + tiebreakMs
-//    + tickMs + D of the stabilization origin. The fence's schedules run
-//    well inside those bounds and observe the window; outside them only the
-//    eventual claim holds.
-//  · Transients: inside that time there may be ZERO pingers (queued
+// ENVIRONMENT THIS RELIES ON (assumptions, not things the code implements):
+// the data channel is ORDERED (created with ordered: true) and delivers each
+// frame once; each end's event loop runs its timers and handlers, late or
+// not; the clock the code reads is Date.now(), and the code never compares
+// one end's reading with the other's (`t` only round-trips; `since` is the
+// sender's own reading and is logged, nothing decides on it) — whether that
+// clock moves monotonically is the host's property, not this file's.
+// WHAT IS ESTABLISHED, AND HOW:
+//  · In steady state exactly one end pings. Observed in the fence (A).
+//  · After a disturbance — a stalled loop, a sleep of one or both ends,
+//    frames queued across a pause and delivered on resume — the fence
+//    OBSERVES the pair back at exactly one pinger within its own window of
+//    takeoverMs + tiebreakMs + tickMs + 50 ms, in its scaled schedules (B,
+//    C, H, I), and holding there. That is an observation of those
+//    schedules. It is NOT a general finite bound: a timer or handler that
+//    the host runs late can hold a side in the ponger role past any such
+//    window, and nothing here constrains lateness (review, 2026-10-06).
+//  · The property the code is WRITTEN TO, stated as a conditional and not
+//    proven here: if, once a disturbance has ended, every due tick and
+//    every delivered frame's handler is eventually run and frames keep
+//    arriving in order, the pair reaches one pinger and holds it while
+//    both ends are live. "Eventually" admits arbitrarily long gaps; no
+//    deadline is claimed.
+//  · Transients the fence observes on the way: ZERO pingers (queued
 //    pre-pause pings arriving while both loops still look stalled make both
-//    yield) or TWO (both wake and send before either delivery lands). Each
-//    of those frames is a receipt, so the transient itself moves no liveness
-//    clock toward eviction.
-//  · Eviction is excluded only for a pause SHORTER than deadMs whose queued
-//    receipts are processed before the reaper's next tick. A pause past
-//    deadMs, or a reaper tick that runs before the queued receipts, evicts
-//    the peer — and is right to: nothing was received for deadMs.
+//    yield) and TWO (both wake and send before either delivery lands). Each
+//    such frame is a receipt and advances the liveness clock.
+//  · Eviction follows receipt age at the reaper's check: a peer is evicted
+//    when, at a reaper tick, nothing has been received for more than
+//    deadMs. A pause is survived only if queued receipts are processed
+//    before a reaper check finds the age past deadMs; the code orders
+//    nothing between the two.
 // NOT CLAIMED: convergence under a channel that reorders or drops frames;
-// any bound without the lateness and delivery limits above.
+// any finite convergence bound.
 const HEARTBEAT_DEFAULTS = Object.freeze({
   pingIntervalMs: 2000,   // the pinger's cadence
   takeoverMs:     5000,   // silence before the ponger becomes the pinger
