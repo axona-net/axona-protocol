@@ -134,13 +134,182 @@ const stop = (...sides) => { for (const s of sides) { if (s.st.pingTimer) clearI
     stop(A, B);
   }
 
+  // ── G. mixed version (Aster 528c77b6 SP-1): a legacy 1 Hz two-loop peer ─
+  // The legacy end is an emulator of 4.104.0's loop: a ping without `hb`
+  // every 1 s and an immediate pong to every ping it receives. Aster's
+  // pairing with the real main MeshManager is the independent check.
+  {
+    const legacySide = (dc, pingEveryMs = 1000) => {
+      const s = { pingsSent: 0, pongsSent: 0, rtts: [], timer: null };
+      dc.onmessage = (ev) => { const m = JSON.parse(ev.data); if (m.type === 'ping') { s.pongsSent++; dc.send(JSON.stringify({ type: 'pong', t: m.t, peerT: Date.now() })); } else if (m.type === 'pong') s.rtts.push(Date.now() - m.t); };
+      s.timer = setInterval(() => { if (dc.readyState === 'open') { s.pingsSent++; dc.send(JSON.stringify({ type: 'ping', t: Date.now() })); } }, pingEveryMs);
+      return s;
+    };
+    // G1 new RESPONDER facing a legacy offerer
+    {
+      const logs = []; const [dl, dn] = channelPair();
+      const L = legacySide(dl, 100);                       // scaled: the legacy loop at 100 ms (its 1 s)
+      const N = side('responder', 'L', dn, logs);
+      await wait(900);
+      check('G1 new responder vs legacy pinger: legacy detected, NEVER yields, keeps its own pings (≥3 in 0.9 s at 200 ms) and measures its own RTT', N.st.peerLegacy === true && N.st.pinger === true && pingsSent(dn) >= 3 && N.mesh.getLatency('L') >= 0 && !logs.some(([e]) => e === 'ping-yield') && logs.some(([e]) => e === 'ping-legacy-peer'), J({ legacy: N.st.peerLegacy, pinger: N.st.pinger, pn: pingsSent(dn), lat: N.mesh.getLatency('L') }));
+      check('G1 the legacy end is still answered: a pong for every legacy ping (its own liveness holds) and it measures RTT from our pongs', pongsSent(dn) === L.pingsSent && L.rtts.length >= 1, J({ pongs: pongsSent(dn), legacyPings: L.pingsSent, legacyRtts: L.rtts.length }));
+      check('G1 liveness on the new end stays live (receipts flowing)', N.st.state === 'open' && N.st.lastRxAt > N.st.openedAt);
+      clearInterval(L.timer); stop(N);
+    }
+    // G1b new OFFERER facing a legacy responder that also pings (the old loop pings from both ends)
+    {
+      const logs = []; const [dn, dl] = channelPair();
+      const N = side('offerer', 'L', dn, logs);
+      const L = legacySide(dl, 100);
+      await wait(900);
+      check('G1b new offerer vs legacy two-loop peer: keeps the role, never yields, legacy detected, RTT known, pongs every legacy ping', N.st.pinger === true && N.st.peerLegacy === true && !logs.some(([e]) => e === 'ping-yield') && N.mesh.getLatency('L') >= 0 && pongsSent(dn) === L.pingsSent, J({ pinger: N.st.pinger, legacy: N.st.peerLegacy, lat: N.mesh.getLatency('L'), pongs: pongsSent(dn), lp: L.pingsSent }));
+      clearInterval(L.timer); stop(N);
+    }
+    // G1c reconnect: a fresh channel to a NEW peer starts clean (no legacy flag carried over)
+    {
+      const logs = []; const [da, db] = channelPair();
+      const A = side('offerer', 'B', da, logs), B = side('responder', 'A', db, logs);
+      await wait(500);
+      check('G1c a new channel between two new ends starts without the legacy flag and in the single-pinger steady state', A.st.peerLegacy === false && B.st.peerLegacy === false && A.st.pinger && !B.st.pinger && pingsSent(db) === 0);
+      stop(A, B);
+    }
+  }
+
+  // ── H. convergence under crossing delivery, equal tick phase, suspend/resume ─
+  {
+    // H1 both start as pingers, delivery 150 ms (> tick 50, > tiebreak 100), ticks started in the same macrotask
+    {
+      const logs = []; const [da, db] = channelPair();
+      const slow = (dc) => { const orig = dc.send.bind(dc); dc.send = (data) => { dc.sent.push(JSON.parse(data)); const to = dc.peer; setTimeout(() => { if (to.readyState === 'open' && to.onmessage) to.onmessage({ data }); }, 150); }; return orig; };
+      slow(da); slow(db);
+      const A = side('offerer', 'B', da, logs), B = side('responder', 'A', db, logs);
+      B.st.pinger = true;                                      // collision
+      await wait(700);
+      check('H1 crossing pings with slow delivery: the RESPONDER yields on the crossing, the OFFERER keeps; one pinger, zero takeovers, no double-yield', A.st.pinger === true && B.st.pinger === false && A.st.takeovers === 0 && B.st.takeovers === 0 && logs.some(([e, d]) => e === 'ping-yield' && d.cause === 'crossing' && d.role === 'responder') && !logs.some(([e, d]) => e === 'ping-yield' && d.role === 'offerer'), J({ a: A.st.pinger, b: B.st.pinger, logs: logs.filter(([e]) => e.startsWith('ping-')).map(([e, d]) => `${e}:${d.role}:${d.cause ?? ''}`) }));
+      const pa = pingsSent(da); await wait(450);
+      check('H1 steady afterwards: the offerer pings, the responder is quiet', pingsSent(da) >= pa + 2 && pingsSent(db) <= 2, J({ pa: [pa, pingsSent(da)], pb: pingsSent(db) }));
+      stop(A, B);
+    }
+    // H2 the legitimate takeover carries since ≥ takeoverMs and the quiet side yields even though it is the offerer
+    {
+      const logs = []; const [da, db] = channelPair();
+      const A = side('offerer', 'B', da, logs), B = side('responder', 'A', db, logs);
+      await wait(300);
+      clearInterval(A.st.pingTimer); A.st.pingTimer = null;   // A's loop stops (channel still answers)
+      await wait(HB.takeoverMs + 300);
+      A.mesh._startPingLoop(A.st);                             // A's loop resumes
+      await wait(400);
+      const y = logs.find(([e, d]) => e === 'ping-yield' && d.role === 'offerer');
+      check('H2 after B\'s legitimate takeover, A (its loop stalled) yielded with cause stalled, the far end\'s since ≥ takeoverMs logged, and stays the ponger after its loop resumes', A.st.pinger === false && B.st.pinger === true && !!y && y[1].cause === 'stalled' && y[1].since >= HB.takeoverMs, J({ a: A.st.pinger, b: B.st.pinger, y: y && y[1] }));
+      stop(A, B);
+    }
+    // H4 (Aster 2e70fefc): SHARED suspension — both ends asleep past takeoverMs, both wake in the same
+    // tick, both pings carry since ≥ takeoverMs and cross. Both are actively sending, so the role rule
+    // decides: the responder yields, the offerer keeps; no zero-pinger window, no repeated takeovers.
+    {
+      const logs = []; const [da, db] = channelPair();
+      const A = side('offerer', 'B', da, logs), B = side('responder', 'A', db, logs);
+      await wait(300);
+      clearInterval(A.st.pingTimer); clearInterval(B.st.pingTimer); A.st.pingTimer = B.st.pingTimer = null;
+      da.readyState = db.readyState = 'suspended';            // both asleep: nothing sent or received
+      await wait(HB.takeoverMs + 300);
+      da.readyState = db.readyState = 'open';
+      B.st.pinger = true; A.st.pinger = true;                 // both woke as pingers (B's takeover threshold is met; A kept its role)
+      A.mesh._startPingLoop(A.st); B.mesh._startPingLoop(B.st);   // same macrotask: the first pings cross
+      await wait(500);
+      const sinceSeen = logs.filter(([e, d]) => (e === 'ping-yield' || e === 'ping-crossing-kept') && typeof d.since === 'number' && d.since >= HB.takeoverMs).length;
+      check('H4 both woke with since ≥ takeoverMs and crossed: the RESPONDER yielded (crossing), the OFFERER kept; exactly one pinger', A.st.pinger === true && B.st.pinger === false && logs.some(([e, d]) => e === 'ping-yield' && d.role === 'responder' && d.cause === 'crossing') && !logs.some(([e, d]) => e === 'ping-yield' && d.role === 'offerer') && sinceSeen >= 1, J({ a: A.st.pinger, b: B.st.pinger, sinceSeen, ping: logs.filter(([e]) => e.startsWith('ping-')).map(([e, d]) => `${e}:${d.role}:${d.cause ?? ''}:${d.since ?? ''}`) }));
+      const pa = pingsSent(da); await wait(450);
+      check('H4 steady afterwards: the offerer pings, the responder is quiet, no further takeover', pingsSent(da) >= pa + 2 && B.st.pinger === false && B.st.takeovers === 0 && A.st.state !== 'stale' && B.st.state !== 'stale', J({ pa: [pa, pingsSent(da)], bt: B.st.takeovers }));
+      stop(A, B);
+    }
+    // H3 suspend/resume of the WHOLE pinger (no pongs, no handler) then wake: one pinger within an interval, no stale on the waker's side afterwards
+    {
+      const logs = []; const [da, db] = channelPair();
+      const A = side('offerer', 'B', da, logs), B = side('responder', 'A', db, logs);
+      await wait(300);
+      clearInterval(A.st.pingTimer); A.st.pingTimer = null; da.readyState = 'suspended';   // A asleep: sends and receives nothing
+      await wait(HB.takeoverMs + 400);
+      check('H3 while A sleeps, B takes over and pings into silence', B.st.pinger === true && B.st.takeovers === 1);
+      da.readyState = 'open'; A.mesh._startPingLoop(A.st);     // A wakes
+      await wait(600);
+      const one = (A.st.pinger ? 1 : 0) + (B.st.pinger ? 1 : 0);
+      check('H3 after A wakes: exactly ONE pinger within an interval, both ends live again', one === 1 && A.st.state !== 'stale' && B.st.state !== 'stale' && A.mesh._peers.has('B') && B.mesh._peers.has('A'), J({ a: A.st.pinger, b: B.st.pinger, as: A.st.state, bs: B.st.state }));
+      stop(A, B);
+    }
+  }
+
+  // ── I. frames queued across a pause and delivered on resume (Aster a9150fe4, Vega ff719a58) ─
+  // The channel pair can be HELD: frames sent while held are queued in order and delivered on
+  // release, before anything new. The transient (zero pingers) and the bound (one pinger within
+  // one takeover window = takeoverMs + tiebreakMs + tickMs + delivery) are asserted separately.
+  {
+    const holdablePair = () => {
+      const q = []; let held = false;
+      const mk = () => ({ readyState: 'open', sent: [], onmessage: null, peer: null,
+        send(data) { this.sent.push(JSON.parse(data)); const to = this.peer; const deliver = () => { if (to.readyState === 'open' && to.onmessage) to.onmessage({ data }); }; if (held) q.push(deliver); else setTimeout(deliver, 1); },
+        close() { this.readyState = 'closed'; } });
+      const a = mk(), b = mk(); a.peer = b; b.peer = a;
+      return { a, b, hold: () => { held = true; }, release: () => { held = false; const items = q.splice(0); items.forEach((d, i) => setTimeout(d, 1 + i)); } };
+    };
+    const WINDOW = HB.takeoverMs + HB.tiebreakMs + HB.tickMs + 50;
+    const pingers = (A, B) => (A.st.pinger ? 1 : 0) + (B.st.pinger ? 1 : 0);
+    // I1 SHARED pause: both loops stop (their last frames may still be in flight → queued), both wake,
+    //    the queued frames land first.
+    {
+      const logs = []; const P = holdablePair();
+      const A = side('offerer', 'B', P.a, logs), B = side('responder', 'A', P.b, logs);
+      await wait(300);
+      P.hold();                                                  // delivery pauses: the next frames queue
+      await wait(HB.pingIntervalMs + 20);                        // A sends ≥1 ping into the queue; B's pong to an earlier ping may queue too
+      clearInterval(A.st.pingTimer); clearInterval(B.st.pingTimer); A.st.pingTimer = B.st.pingTimer = null;
+      await wait(HB.takeoverMs + 300);                           // both asleep past the takeover threshold
+      const seen = []; const probe = setInterval(() => seen.push(pingers(A, B)), 25);
+      A.st.pinger = true; B.st.pinger = true;                    // both wake believing they ping (B's threshold is met)
+      A.mesh._startPingLoop(A.st); B.mesh._startPingLoop(B.st);
+      P.release();                                               // the pre-pause frames land first, then the wake's pings
+      await wait(WINDOW);
+      clearInterval(probe);
+      check('I1 after a shared pause with frames queued: exactly ONE pinger within one takeover window, no eviction, neither stale', pingers(A, B) === 1 && A.mesh._peers.has('B') && B.mesh._peers.has('A') && A.st.state !== 'stale' && B.st.state !== 'stale', J({ a: A.st.pinger, b: B.st.pinger, seen: seen.join('') }));
+      check('I1 the transient is recorded as such: zero or two pingers may appear inside the window, then one holds', seen.length > 0 && seen.slice(-4).every(n => n === 1), J({ seen: seen.join(''), yields: logs.filter(([e]) => e === 'ping-yield').map(([, d]) => `${d.role}:${d.cause}`) }));
+      stop(A, B);
+    }
+    // I2 ASYMMETRIC pause: only A pauses (its loop stops and its channel holds); B keeps pinging after
+    //    taking over, its frames queue toward A; on A's resume the queue lands while A's wake ping goes out.
+    {
+      const logs = []; const P = holdablePair();
+      const A = side('offerer', 'B', P.a, logs), B = side('responder', 'A', P.b, logs);
+      await wait(300);
+      P.hold(); clearInterval(A.st.pingTimer); A.st.pingTimer = null;   // A asleep; everything in flight queues
+      await wait(HB.takeoverMs + 400);
+      check('I2 while A sleeps (frames queued), B took the role', B.st.pinger === true && B.st.takeovers === 1);
+      A.mesh._startPingLoop(A.st); P.release();                  // A wakes with its old role flag; the queue lands
+      await wait(WINDOW);
+      check('I2 after the asymmetric resume: exactly ONE pinger within one takeover window, no eviction', pingers(A, B) === 1 && A.mesh._peers.has('B') && B.mesh._peers.has('A'), J({ a: A.st.pinger, b: B.st.pinger, yields: logs.filter(([e]) => e === 'ping-yield').map(([, d]) => `${d.role}:${d.cause}`) }));
+      stop(A, B);
+    }
+    // I3 both send before either delivery lands (new crossing, no queue): the role rule alone decides
+    {
+      const logs = []; const P = holdablePair();
+      const A = side('offerer', 'B', P.a, logs), B = side('responder', 'A', P.b, logs);
+      P.hold(); B.st.pinger = true;                              // both ping; nothing delivers yet
+      await wait(HB.pingIntervalMs + 60);                        // both have sent at least one ping into the queue
+      P.release();
+      await wait(300);
+      check('I3 both sent before either delivery: the RESPONDER yields on the crossing, the OFFERER keeps; one pinger, no takeover', A.st.pinger === true && B.st.pinger === false && logs.some(([e, d]) => e === 'ping-yield' && d.role === 'responder' && d.cause === 'crossing') && A.st.takeovers === 0 && B.st.takeovers === 0, J({ a: A.st.pinger, b: B.st.pinger, yields: logs.filter(([e]) => e === 'ping-yield').map(([, d]) => `${d.role}:${d.cause}`) }));
+      stop(A, B);
+    }
+  }
+
   // ── F. static ────────────────────────────────────────────────────────
   {
     const src = readFileSync(new URL('../src/transport/web/mesh.js', import.meta.url), 'utf8');
+    check('F-1 the header states the state machine, the ordered-delivery assumption and the bounded convergence claim with its transients', /THE PER-CHANNEL STATE MACHINE/.test(src) && /ASSUMPTIONS: the data channel is ORDERED/.test(src) && /within ONE takeover window/.test(src) && /transient with ZERO pingers/.test(src) && /createDataChannel\(DC_LABEL, \{ ordered: true \}\)/.test(src));
+    check('F0 the ping carries hb: 1, since and the last rtt; a ping without hb is a legacy peer (never yield, keep own pings); a stalled pinger yields whatever its role, an active one resolves the crossing by role (responder yields)', /type: 'ping', hb: 1, t: now, since,/.test(src) && /if \(msg\.hb !== 1\) \{[\s\S]*?state\.peerLegacy = true;[\s\S]*?if \(!state\.pinger\) state\.pinger = true;/.test(src) && /const active = state\.lastPingTxAt > 0 && \(now - state\.lastPingTxAt\) <= this\._hb\.pingIntervalMs \+ this\._hb\.tickMs;/.test(src) && /if \(!active\) \{\n\s*state\.pinger = false;[\s\S]*?cause: 'stalled'/.test(src) && /else if \(state\.role === 'responder'\) \{\n\s*state\.pinger = false;[\s\S]*?cause: 'crossing'/.test(src) && !/if \(since >= this\._hb\.takeoverMs\)/.test(src));
     check('F1 defaults: ping 2000, takeover 5000, tiebreak 1000, stale 10000, dead 20000', /pingIntervalMs: 2000,[\s\S]*?takeoverMs:\s+5000,[\s\S]*?tiebreakMs:\s+1000,[\s\S]*?staleMs:\s+10000,[\s\S]*?deadMs:\s+20000,/.test(src));
     check('F1 dc.onopen hands the heartbeat to _openHeartbeat, which gives the OFFERER the role', /this\._openHeartbeat\(state\);\n\s*this\._notify\(\);\n\s*\};/.test(src) && /_openHeartbeat\(state\) \{\n\s*state\.pinger = state\.role === 'offerer';/.test(src));
     check('F1 the reaper\'s liveness clock is the last RECEIPT (ping or pong), falling back to openedAt', /const lastRx = Math\.max\(state\.lastRxAt \?\? 0, state\.lastPongAt \?\? 0, state\.lastPingRxAt \?\? 0, state\.openedAt \?\? 0\);/.test(src));
-    check('F1 receiving a ping YIELDS the role and pongs; the ponger takes over after takeoverMs (+ tiebreak for the offerer)', /if \(state\.pinger\) \{\n\s*state\.pinger = false;\n\s*this\._log\('ping-yield'/.test(src) && /const wait = hb\.takeoverMs \+ \(state\.role === 'offerer' \? hb\.tiebreakMs : 0\);/.test(src));
+    check('F1 the ponger takes over after takeoverMs (+ tiebreak for the offerer, defence in depth)', /const wait = hb\.takeoverMs \+ \(state\.role === 'offerer' \? hb\.tiebreakMs : 0\);/.test(src));
     check('F1 no end pings on a fixed 1 Hz loop any more (PING_INTERVAL_MS gone; the scheduler is _heartbeatTick)', !/PING_INTERVAL_MS/.test(src) && /setInterval\(\(\) => this\._heartbeatTick\(state\), this\._hb\.tickMs\)/.test(src));
   }
 

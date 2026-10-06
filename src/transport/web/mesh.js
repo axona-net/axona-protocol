@@ -37,14 +37,56 @@
 // responder yields and the pair converges within one cycle). A side that
 // RECEIVES a ping stops pinging: the most recent pinger keeps the role, and
 // the one that was silent stays the ponger — if A goes quiet, B takes over,
-// A pongs and A does not resume. The pinger measures the round trip; the
-// ping carries the last measured RTT so the ponger learns the same latency.
+// A pongs and A does not resume. Each ping carries `hb: 1` (the protocol
+// marker), `since` (the silence the pinger observed before sending; logged)
+// and the last measured `rtt`. A receiver that is itself pinging asks
+// whether it is still ACTIVELY sending: a pinger whose own last ping is
+// older than one interval plus a tick has stalled or slept and yields
+// whatever its role; a pinger that is actively sending is in a CROSSING,
+// resolved by role — the responder yields, the offerer keeps — so two sides
+// that start or wake together converge deterministically with no assumption
+// about delivery delay or tick phase. A ping WITHOUT the marker is a
+// pre-4.105.0 peer's: in that legacy mode this end never yields and keeps
+// its own 2 s pings for its own measurement while still ponging (SP-1). The
+// ping's rtt lets the ponger learn the latency.
 // Liveness counts ANY receipt (ping or pong): nothing received for `staleMs`
 // marks the channel stale (display only), nothing for `deadMs` evicts the
 // peer (onPeerLost fires), even when dc.readyState still lies 'open' (Safari
 // after sleep). A channel that opens and never hears anything also dies at
 // `deadMs`; before this change such a channel lived until a send threw.
 // Overridable through the constructor's `heartbeat` option (tests scale it).
+//
+// THE PER-CHANNEL STATE MACHINE, as a contract (Aster a9150fe4):
+//   role ∈ {PINGER, PONGER}; set at open: offerer → PINGER, responder → PONGER.
+//   PINGER, each tickMs: if now − lastPingTxAt ≥ pingIntervalMs, send ping.
+//   PONGER, each tickMs: if now − max(lastPingRxAt, openedAt) ≥ takeoverMs
+//     (+ tiebreakMs when I am the offerer) → PINGER, send ping ("takeover").
+//   on ping received (any role): pong at once; lastPingRxAt = now; then
+//     · no `hb` marker → legacy peer: PINGER (and stay there), never yield;
+//     · PONGER → stay PONGER;
+//     · PINGER and my own lastPingTxAt is older than pingIntervalMs + tickMs
+//       → PONGER ("stalled": my loop was not running; the far end took over);
+//     · PINGER and actively sending → a CROSSING: responder → PONGER,
+//       offerer stays PINGER.
+//   on pong received: lastRxAt = now; rtt recorded. (A pong never changes
+//     the role.)
+//   liveness, each reapMs, independent of role: since := now − max(lastRxAt,
+//     openedAt); > staleMs → 'stale'; > deadMs → evicted (onPeerLost).
+// ASSUMPTIONS: the data channel is ORDERED (created with ordered: true) and
+// delivers each frame once, within a delay well below deadMs; each end's
+// event loop eventually runs its timers and handlers; the two clocks are
+// not compared (`t` round-trips, `since` is the sender's own reading).
+// WHAT IS CLAIMED: in steady state exactly one end pings. After any
+// disturbance (a stalled loop, a sleep of one or both ends, frames queued
+// across a pause and delivered on resume), the pair is back to exactly one
+// pinger within ONE takeover window — takeoverMs + tiebreakMs + tickMs + one
+// delivery — and stays there while both ends are live. INSIDE that window
+// there may be a transient with ZERO pingers (queued pre-pause pings
+// arriving while both loops still look stalled make both yield) or TWO
+// pingers (both wake and send before either delivery lands); neither is a
+// liveness event, because every one of those frames is a receipt and the
+// liveness clock runs on receipts. Not claimed: convergence under a channel
+// that reorders or drops frames, or clocks that are compared across ends.
 const HEARTBEAT_DEFAULTS = Object.freeze({
   pingIntervalMs: 2000,   // the pinger's cadence
   takeoverMs:     5000,   // silence before the ponger becomes the pinger
@@ -553,6 +595,7 @@ export class MeshManager {
       pinger:     p.pinger,
       lastRxAt:   p.lastRxAt,
       takeovers:  p.takeovers,
+      peerLegacy: p.peerLegacy,
       rttLast:    p.rttBuffer.at(-1) ?? null,
       rttAvg:     p.rttBuffer.length
                     ? p.rttBuffer.reduce((a, b) => a + b, 0) / p.rttBuffer.length
@@ -871,6 +914,10 @@ export class MeshManager {
       lastPingTxAt: 0,
       lastRxAt: 0,
       takeovers: 0,
+      // The far end sent a ping without the protocol marker: a pre-4.105.0
+      // peer running two 1 Hz loops. In legacy mode this end never yields and
+      // keeps its own pings for its own measurement (SP-1).
+      peerLegacy: false,
       rttBuffer: [],
       pendingCandidates: [],
       pingTimer: null,
@@ -1169,13 +1216,45 @@ export class MeshManager {
 
       if (msg.type === 'ping') {
         const now = Date.now();
+        const silenceBefore = Math.max(state.lastPingRxAt, state.openedAt || 0);
         state.lastPingRxAt = now;
         state.lastRxAt = now;
-        // ONE PINGER: receiving a ping means the other side holds the role.
-        // If I was pinging too, I stop — the most recent pinger keeps it.
-        if (state.pinger) {
-          state.pinger = false;
-          this._log('ping-yield', { peerId: state.peerId, role: state.role });
+        if (msg.hb !== 1) {
+          // LEGACY PEER (SP-1, Aster 528c77b6): no protocol marker, so the far
+          // end runs the old two-loop heartbeat and understands no handover.
+          // This end never yields to it and measures for itself: it keeps (or
+          // takes) the pinger role, while still ponging every legacy ping so
+          // the far end's own liveness holds. Frames on such a channel: its
+          // 1 Hz ping+pong plus our 2 s ping+pong.
+          if (!state.peerLegacy) {
+            state.peerLegacy = true;
+            this._log('ping-legacy-peer', { peerId: state.peerId, role: state.role });
+          }
+          if (!state.pinger) state.pinger = true;
+        } else if (state.pinger) {
+          // ONE PINGER: the other side is pinging too. The decision is about
+          // ME, not about the far end's clock (Aster 2e70fefc, Vega c141c90f:
+          // after a shared suspension both pings can carry since ≥ takeoverMs,
+          // so a rule keyed on `since` makes both yield). Am I still actively
+          // sending? If my own last ping is older than one interval plus a
+          // tick, my loop has stalled or slept: the far end took the role
+          // legitimately and I yield, whatever my role — if A goes quiet, B
+          // takes over, A pongs and does not resume. If I AM actively sending,
+          // this is a CROSSING (both started at once, both woke at once, a
+          // ping in flight each way) and it is resolved by role: the responder
+          // yields, the offerer keeps. Deterministic, with no assumption about
+          // delivery delay or tick phase. The far end's `since` is logged.
+          const since = (typeof msg.since === 'number' && msg.since >= 0) ? msg.since : null;
+          const active = state.lastPingTxAt > 0 && (now - state.lastPingTxAt) <= this._hb.pingIntervalMs + this._hb.tickMs;
+          if (!active) {
+            state.pinger = false;
+            this._log('ping-yield', { peerId: state.peerId, role: state.role, cause: 'stalled', since, idleMs: state.lastPingTxAt ? now - state.lastPingTxAt : null });
+          } else if (state.role === 'responder') {
+            state.pinger = false;
+            this._log('ping-yield', { peerId: state.peerId, role: state.role, cause: 'crossing', since });
+          } else {
+            this._log('ping-crossing-kept', { peerId: state.peerId, role: state.role, since, sinceMine: now - silenceBefore });
+          }
         }
         // The pinger's measured round trip rides on its ping so this end
         // learns the same latency without pinging itself.
@@ -1277,7 +1356,12 @@ export class MeshManager {
     try {
       const now = Date.now();
       const last = state.rttBuffer.at(-1);
-      state.dc.send(JSON.stringify({ type: 'ping', t: now, ...(typeof last === 'number' ? { rtt: last } : {}) }));
+      // hb: the protocol marker (a ping without it is a legacy peer's);
+      // since: the silence I observed from the far end before sending, so a
+      // receiver that is pinging too can tell a takeover from a crossing;
+      // rtt: my last measured round trip, for the ponger's latency.
+      const since = now - Math.max(state.lastPingRxAt, state.openedAt || now);
+      state.dc.send(JSON.stringify({ type: 'ping', hb: 1, t: now, since, ...(typeof last === 'number' ? { rtt: last } : {}) }));
       state.lastPingTxAt = now;
       state.pings++;
       state.sendFailures = 0;          // a successful send clears the streak
