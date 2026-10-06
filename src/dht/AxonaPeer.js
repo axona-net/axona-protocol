@@ -1701,7 +1701,13 @@ export class AxonaPeer extends DHT {
     try { guard.sweep?.(); } catch { /* bookkeeping only */ }
     const cap = node._maxSynaptome ?? this._domain.MAX_SYNAPTOME;
     const admitted = node.synaptome.size;
-    const rep = { cap, admitted, deficit: cap - admitted, near: 0, directory: null, cache: this._fillCache.size, dialed: 0, cancelled: 0, deferred: 0, deferredAt: null, refused: 0, ineligible: 0, state: null };
+    const inflight = guard.inflightCount();
+    // INTEGRATION (the Rule 2 pin): the tick's dial budget is bounded by the
+    // DEFICIT as well as maxPerTick, net of attempts already in flight —
+    // dialing past the deficit binds peers the gate then refuses at cap and
+    // closes after grace, which is churn Rule 2 forbids ("stop at cap").
+    const budget = Math.max(0, Math.min(cfg.maxPerTick, (cap - admitted) - inflight));
+    const rep = { cap, admitted, deficit: cap - admitted, inflight, budget, near: 0, directory: null, cache: this._fillCache.size, dialed: 0, cancelled: 0, deferred: 0, deferredAt: null, refused: 0, ineligible: 0, state: null };
     if (rep.deficit <= 0) {                                          // Rule 2: stop at cap
       rep.state = 'at-cap';
       this._fillReport(rep);
@@ -1728,8 +1734,9 @@ export class AxonaPeer extends DHT {
       // R12-4 (Aster 3fac1dce): the per-tick budget bounds ATTEMPTS MADE —
       // dials out AND cancels — not dials alone, or a run of cancellations
       // (relay false, relay throw) would drain the cache in one tick past
-      // maxPerTick. Deferrals and skips cost nothing against it.
-      if (rep.dialed + rep.cancelled >= cfg.maxPerTick) break;
+      // maxPerTick. Deferrals and skips cost nothing against it. The budget
+      // is min(maxPerTick, deficit − in-flight) (the integration pin).
+      if (rep.dialed + rep.cancelled >= budget) break;
       if (node.synaptome.has(id) || this._isBoundPeer(id)) { cache.delete(id); continue; }   // held meanwhile
       if (!this._isEligibleCandidate(id)) { cache.delete(id); rep.ineligible++; continue; }   // marked meanwhile
       const pending = guard.inflightCount();
@@ -1759,6 +1766,7 @@ export class AxonaPeer extends DHT {
     const d = rep.directory;
     if (rep.dialed > 0) rep.state = 'filling';
     else if (rep.deferred > 0) rep.state = 'deferred';
+    else if (budget === 0 && inflight > 0) rep.state = 'pending';   // the deficit is covered by attempts in flight; nothing to dial yet
     else if (cache.size === 0) {
       // R12-3: an outage is reported only from a request that could not be
       // sent; silence after a sent request is 'unknown', never inferred.

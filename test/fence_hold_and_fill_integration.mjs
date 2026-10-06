@@ -39,6 +39,21 @@
 // 3's hooks removed, B fails; with row 6 reverted, A's "no open at cap"
 // and C's at-cap half fail.
 //
+//   D. RULE 2 TOGETHER (the fill-rule2-integration pin: rows 7, 8, 9, 11,
+//      12 over the Phase 1 pin; v0.15 e4809d2). One ARMED node (maintain +
+//      guard + gate) on the sim with real peers and real tables: the tick
+//      RECONCILES two bound-not-in-table peers with zero dials (row 7),
+//      then FILLS from the cache nearest-first under the guard (rows 8, 12),
+//      each dial binding and admitting through the gate; the dial budget is
+//      bounded by the DEFICIT as well as maxPerTick, so the table reaches
+//      cap exactly and the next tick stops at-cap with the leftover
+//      nominations untouched and no opens (Rule 2: stop at cap, no churn
+//      from binding past it). The hop_cache sender (row 9) and the fill
+//      share the maintenance arm. Guard tokens issued by the fill end at
+//      bind (row 8). With the reconcile removed, D's first tick admits only
+//      by dialing (admitted-by-reconcile 0); with the deficit bound
+//      removed, the second tick dials past cap and the gate refuses one.
+//
 // Run: node test/fence_hold_and_fill_integration.mjs
 // =====================================================================
 import { AxonaPeer }                from '../src/dht/AxonaPeer.js';
@@ -262,6 +277,51 @@ globalThis.RTCPeerConnection = FakePC;
     const r = await a.peer._addByVitality(candidateSyn(a, d.big, 'lateral'));
     check('C at cap (row 6): returns false, no open, no insert, vitality-swap-skipped counted', r === false && a.node.synaptome.size === before && !a.node.synaptome.has(d.big) && (a.peer._vitalitySwapSkipped || 0) >= 1);
     await stopAll(a, b, c, d);
+  }
+
+  // ── D. Rule 2 together: reconcile, then fill to cap exactly, then stop (rows 7, 8, 9, 11, 12) ──
+  console.log('\n  D. the fill rows together on one armed node: reconcile, fill nearest-first under the guard, stop at cap');
+  {
+    const ARMED = { synaptomeMaintain: { kNear: 5, maxPerTick: 3, kCache: 8, pPending: 4, directoryMs: 1000 }, attemptGuard: {}, admissionGate: { kNear: 5, sparseFloor: 2, closeGraceMs: 60000 } };
+    const a = await makePeer(net, domain, 20, 20, ARMED);
+    a.peer._requireAxonaManager('fence');
+    if (a.peer._maintainTimer) { clearInterval(a.peer._maintainTimer); a.peer._maintainTimer = null; }
+    a.node._maxSynaptome = 6;
+    const g = a.peer._attemptGuard;
+    const opens = []; const origOpen = a.transport.openConnection.bind(a.transport);
+    a.transport.openConnection = async (id) => { opens.push(id); return origOpen(id); };
+    const logs = []; const ol = a.peer._emitLog.bind(a.peer); a.peer._emitLog = (l, m, c) => { logs.push([m, c]); return ol(l, m, c); };
+    // two real peers bound to a and taken OUT of its table (row 7's case)
+    const b = await makePeer(net, domain, 21, 21, {}); const c = await makePeer(net, domain, 22, 22, {});
+    await b.transport.openConnection(a.hex); await c.transport.openConnection(a.hex); await wait(20);
+    a.node.synaptome.delete(b.big); a.node.synaptome.delete(c.big);
+    // five real strangers, nominated into the fill's cache (row 12's case); the near search is isolated
+    const ss = []; for (let i = 0; i < 5; i++) { const s = await makePeer(net, domain, 30 + i, 30 + i, {}); ss.push(s); a.peer._nominateCandidate(s.big, 'near'); }
+    a.peer.findKClosest = async () => [a.big];
+    check('D setup: armed (maintain+guard+gate), cap 6, table 0, two bound-not-in-table, five nominated, none opened', a.peer._fillArmed() && a.node.synaptome.size === 0 && a.transport.isConnected(b.hex) && a.transport.isConnected(c.hex) && a.peer._fillCache.size === 5 && opens.length === 0);
+    const byDist = [...ss].sort((x, y) => ((x.big ^ a.big) < (y.big ^ a.big) ? -1 : 1)).map(s => s.big);
+    a.peer._deficitBackoff.reset();
+    const r1 = await a.peer._maintainSynaptome(); await wait(40);
+    const rec1 = a.peer._reconcileLast, fill1 = a.peer._fillLast;
+    check('D tick 1 RECONCILED first: b and c admitted with zero dials for them (offered 2, admitted 2)', rec1?.offered === 2 && rec1?.admitted === 2 && a.node.synaptome.has(b.big) && a.node.synaptome.has(c.big) && !opens.includes(b.big) && !opens.includes(c.big), J(rec1));
+    check('D tick 1 then FILLED: deficit 4 after the reconcile, budget 3 → three dials NEAREST-FIRST, each bound and admitted through the gate; table 5; two still nominated; return 3', r1 === 3 && fill1.admitted === 2 && fill1.deficit === 4 && fill1.budget === 3 && fill1.dialed === 3 && opens.length === 3 && byDist.slice(0, 3).every(id => a.node.synaptome.has(id)) && a.node.synaptome.size === 5 && a.peer._fillCache.size === 2, J({ r1, fill1, opens: opens.length, table: a.node.synaptome.size }));
+    check('D tick 1 guard tokens: each fill dial\'s token ENDED AT BIND (nothing in flight, attempts 0), no marks', g.inflightCount() === 0 && byDist.slice(0, 3).every(id => g.attemptsOf(id) === 0) && a.node._deadPeers.size === 0);
+    a.peer._deficitBackoff.reset();
+    const r2 = await a.peer._maintainSynaptome(); await wait(40);
+    const fill2 = a.peer._fillLast;
+    check('D tick 2: deficit 1 → budget 1 → ONE dial, table AT CAP exactly (6), one still nominated, no refusal at the gate, no grace timer', r2 === 1 && fill2.deficit === 1 && fill2.budget === 1 && fill2.dialed === 1 && a.node.synaptome.size === 6 && a.peer._fillCache.size === 1 && opens.length === 4 && a.peer._gracePending.size === 0, J({ r2, fill2, table: a.node.synaptome.size, grace: a.peer._gracePending.size }));
+    a.peer._deficitBackoff.reset();
+    const r3 = await a.peer._maintainSynaptome();
+    check('D tick 3 AT CAP: at-cap, zero opens, the leftover nomination untouched, table unchanged (Rule 2: stop at cap)', r3 === 0 && a.peer._fillLast.state === 'at-cap' && opens.length === 4 && a.peer._fillCache.size === 1 && a.node.synaptome.size === 6, J(a.peer._fillLast));
+    // row 9 shares the arm: a FOUND lookup from this node sends hop_cache attempts (gated on _maintainCfg)
+    check('D row 9 shares the maintenance arm: the hop_cache sender is gated on the same _maintainCfg the fill reads', !!a.peer._maintainCfg && typeof a.peer._sendHopCache === 'function' && a.peer._sendHopCache(a.big ^ 1n, []) === 0);
+    // disarmed control: the same node without the gate runs the legacy near refill and builds no cache
+    const dz = await makePeer(net, domain, 23, 23, { synaptomeMaintain: true, attemptGuard: {} });
+    if (dz.peer._maintainTimer) { clearInterval(dz.peer._maintainTimer); dz.peer._maintainTimer = null; }
+    dz.peer.findKClosest = async () => [dz.big];
+    check('D control: maintenance + guard WITHOUT the gate is not armed; nominate is inert', dz.peer._fillArmed() === false && dz.peer._nominateCandidate(dz.big ^ (1n << 150n), 'near') === false && dz.peer._fillCache.size === 0);
+    for (const t of a.peer._gracePending.values()) clearTimeout(t);
+    await stopAll(a, b, c, dz, ...ss);
   }
 
   console.log(`\n${passed} passed, ${failed} failed`);
