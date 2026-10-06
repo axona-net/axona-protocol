@@ -4801,10 +4801,13 @@ export class AxonaPeer extends DHT {
    * `hop_cache { target, depth: 0 }` to at most LATERAL_K distinct hops of the
    * trace, nearest the target first, never to self or to the target, once
    * per call. Opportunistic: a hop whose channel is not open is skipped by
-   * the transport and the lookup's result is unaffected.
+   * the transport and the lookup's result is unaffected. THE COUNTS ARE
+   * ATTEMPTS (Aster a8cd8f25): notify() on the web transport returns without
+   * sending for an absent binding or a closed channel, and the composite
+   * returns on no route; nothing here knows whether a frame left or arrived.
    * @param {bigint} targetKey
    * @param {Array<{fromId: bigint}>} trace
-   * @returns {number} frames sent
+   * @returns {number} notify attempts issued
    */
   _sendHopCache(targetKey, trace) {
     if (!this._maintainCfg) return 0;
@@ -4821,9 +4824,9 @@ export class AxonaPeer extends DHT {
       t.notify(hop, 'hop_cache', { target: targetKey, depth: 0 })
         .catch(() => { /* opportunistic — see _reinforceWave comment */ });
     }
-    this._hopCacheSent = (this._hopCacheSent ?? 0) + hops.length;
-    this._hopCacheLast = { target: targetKey, hops, sent: hops.length };
-    if (hops.length) this._emitLog?.('info', 'hop-cache-sent', { target: toHex(targetKey), hops: hops.length });
+    this._hopCacheAttempts = (this._hopCacheAttempts ?? 0) + hops.length;
+    this._hopCacheLast = { target: targetKey, hops, attempted: hops.length };
+    if (hops.length) this._emitLog?.('info', 'hop-cache-attempted', { target: toHex(targetKey), hops: hops.length });
     return hops.length;
   }
 

@@ -12,6 +12,8 @@
 //         or to the target; once per successful lookup (a second lookup
 //         sends again; a failed lookup sends nothing; an empty trace sends
 //         nothing); the per-peer counters and log line agree.
+//      NOTE: the sender's counters are notify ATTEMPTS (Aster a8cd8f25), not
+//      delivery evidence; only part B observes a received frame.
 //   B. End to end on the sim network: chain A — B — C — T. With A armed,
 //      A.lookup(T) routes through B and C; a hop RECEIVES hop_cache{T} from
 //      A and the frame reaches _considerCandidate(T, 'hopCache') — the
@@ -74,7 +76,7 @@ const recordNotify = (rec) => { const calls = []; const orig = rec.transport.not
     a.peer._lookupStep = async () => ({ found: true, trace: mkTrace(a.big, hops, target), path: [a.big, ...hops, target], totalTimeMs: 1 });
     const r = await a.peer.lookup(target);
     const hc = calls.filter(c => c.type === 'hop_cache');
-    check('A1 flag OFF: a successful lookup sends NO hop_cache', r.found === true && hc.length === 0 && (a.peer._hopCacheSent ?? 0) === 0, J(hc));
+    check('A1 flag OFF: a successful lookup sends NO hop_cache', r.found === true && hc.length === 0 && (a.peer._hopCacheAttempts ?? 0) === 0, J(hc));
     check('A1 _maintainCfg is null without synaptomeMaintain', a.peer._maintainCfg === null);
     await a.peer.stop().catch(() => {});
   }
@@ -94,7 +96,7 @@ const recordNotify = (rec) => { const calls = []; const orig = rec.transport.not
     check('A2 flag ON: exactly LATERAL_K hop_cache frames for a 5-hop trace', hc.length === K, String(hc.length));
     check('A2 payload is { target: <BigInt>, depth: 0 }', hc.every(c => typeof c.body?.target === 'bigint' && c.body.target === target && c.body.depth === 0), J(hc.map(c => c.body)));
     check('A2 recipients: distinct hops, nearest the target first, never self or target', hc.map(c => c.to).join() === [hops[4], hops[3], hops[2]].join() && !hc.some(c => c.to === a.big || c.to === target), J(hc.map(c => c.to)));
-    check('A2 counters and log agree', a.peer._hopCacheSent === K && a.peer._hopCacheLast?.sent === K && logs.some(([m, c]) => m === 'hop-cache-sent' && c?.hops === K), J(a.peer._hopCacheLast));
+    check('A2 counters and log agree (ATTEMPTS, not deliveries)', a.peer._hopCacheAttempts === K && a.peer._hopCacheLast?.attempted === K && logs.some(([m, c]) => m === 'hop-cache-attempted' && c?.hops === K), J(a.peer._hopCacheLast));
     // once per successful lookup: a second lookup sends again; failure sends nothing; empty trace sends nothing
     await a.peer.lookup(target);
     check('A2 a second successful lookup sends again (once per lookup)', calls.filter(c => c.type === 'hop_cache').length === 2 * K);
@@ -136,12 +138,12 @@ const recordNotify = (rec) => { const calls = []; const orig = rec.transport.not
     const r = await A.peer.lookup(T.big);
     await wait(80);
     const viaFrame = considered.filter(c => c.source === 'hopCache' && c.id === T.big);
-    return { r, received, viaFrame: viaFrame.length, aSent: A.peer._hopCacheSent ?? 0, path: r.path.length, stop: async () => { for (const x of [A, B, C, T]) { await x.peer.stop().catch(() => {}); } } };
+    return { r, received, viaFrame: viaFrame.length, aSent: A.peer._hopCacheAttempts ?? 0, path: r.path.length, stop: async () => { for (const x of [A, B, C, T]) { await x.peer.stop().catch(() => {}); } } };
   }
   {
     const on = await chain(true);
     check('B armed: the lookup found T through the chain', on.r.found === true && on.path >= 3, J({ found: on.r.found, path: on.path }));
-    check('B armed: A sent hop_cache (bounded by K)', on.aSent >= 1 && on.aSent <= K, String(on.aSent));
+    check('B armed: A attempted hop_cache (bounded by K; attempts, not deliveries)', on.aSent >= 1 && on.aSent <= K, String(on.aSent));
     check('B armed: a hop received hop_cache from A and the frame reached _considerCandidate(T, hopCache)', on.received >= 1 && on.viaFrame >= 1, J({ received: on.received, viaFrame: on.viaFrame }));
     await on.stop();
     const off = await chain(false);
