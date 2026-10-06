@@ -719,6 +719,10 @@ export class MeshManager {
   ledgerStats() {
     return this._ledger ? this._ledger.stats() : null;
   }
+  /** Row 12: may an outbound channel be allocated now? The ledger's pure predicate; true without a ledger. */
+  canAllocate(dir = 'out') {
+    return this._ledger ? this._ledger.canAllocate(dir).ok : true;
+  }
   /** Row 3: the handshake bound `nodeIdHex` on the channel serving `meshId`. */
   ledgerBind(meshId, nodeIdHex) { this._ledger?.bind(meshId, nodeIdHex); }
   /** Row 3: the binding for `meshId` was dropped. */

@@ -141,6 +141,8 @@ export class AttemptGuard {
   }
 
   inflightOf(id) { return this._state.get(identitySuffix(id))?.inflight ?? false; }
+  /** Row 12: peer(PENDING) — attempts whose dial went out and have not ended. The pending-slot half of the reservation. */
+  inflightCount() { let n = 0; for (const s of this._state.values()) if (s.inflight) n++; return n; }
 
   /** The presence valve. Watermark monotonicity is enforced UPSTREAM (the
    *  presence handler fires hooks only on a fresh gen); this method paces:

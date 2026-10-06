@@ -443,6 +443,8 @@ export function webTransport({
   // Filled in right after the WebRTCTransport is constructed; the mesh degree
   // resolver closes over it. See the note on `degree` below.
   let webrtcRef = null;
+  /** Row 12: kernel handlers for the bridge `peer-list` sample (composite.onPeerList). */
+  const peerListHandlers = new Set();
   const mesh = new MeshManager({
     // THE KEYSPACE REGION COMES FROM THE AUTHENTICATED nodeId, NOT THE
     // SIGNALLING ID (4.96.0 — this was wrong in 4.95.0 and the cap could never
@@ -620,12 +622,15 @@ export function webTransport({
           // so it never re-runs welcome's connId/nonce/handshake bookkeeping.
           applyTurnFrame(frame.turn ?? null);
           return;
-        case 'peer-list':
+        case 'peer-list': {
           b3observe('peer-list', null, frame);   // S4b shadow (no-op unless flag on)
+          const peers = Array.isArray(frame.peers) ? frame.peers : [];
+          for (const h of peerListHandlers) { try { h(peers.slice()); } catch { /* a kernel handler that throws does not stop the bootstrap */ } }   // row 12: the directory sample
           if (typeof mesh.onPeerList === 'function') {
-            return mesh.onPeerList(Array.isArray(frame.peers) ? frame.peers : []);
+            return mesh.onPeerList(peers);
           }
           break;
+        }
         case 'peer-joined':
           b3observe('peer-joined', frame.peerId, frame);   // S4b shadow
           if (typeof mesh.onPeerJoined === 'function' && typeof frame.peerId === 'string') {
@@ -1469,6 +1474,28 @@ export function webTransport({
   composite.channelLedgerStats = () => {
     try { return mesh.ledgerStats ? mesh.ledgerStats() : null; }
     catch { return null; }
+  };
+
+  /**
+   * Row 12 (Hold-and-Fill v0.15, Rule 2): the channel-token half of the fill's
+   * reservation — may an outbound channel be allocated right now? The ledger's
+   * pure predicate (no counting); true when the ledger is off.
+   */
+  composite.mayDial = () => {
+    try { return mesh.canAllocate ? mesh.canAllocate('out') !== false : true; }
+    catch { return true; }
+  };
+
+  /**
+   * Row 12: the DIRECTORY sample. Every bridge `peer-list` frame is handed to
+   * these handlers (hex nodeIds, as the frame carries them) in addition to the
+   * mesh's own bootstrap dialing of it, which is unchanged. The kernel
+   * nominates the sample into its candidate cache.
+   */
+  composite.onPeerList = (handler) => {
+    if (typeof handler !== 'function') throw new TypeError('onPeerList: handler must be a function');
+    peerListHandlers.add(handler);
+    return () => { peerListHandlers.delete(handler); };
   };
 
   return composite;

@@ -253,13 +253,29 @@ export class AxonaPeer extends DHT {
     // K_NEAR XOR-nearest "successor" quota so greedy routing's last-mile descent
     // always completes through churn. OPT-IN (default off) — when omitted the peer
     // behaves exactly as before. `{ kNear, intervalMs, maxPerTick }` overrides.
+    // Row 12 (Hold-and-Fill v0.15, axona-docs e4809d2, Rule 2): the same option
+    // also carries the FILL's parameters — `kCache` (K_cache 64, the candidate
+    // cache bound), `pPending` (P_pending 8, outbound attempts in flight), and
+    // `directoryMs` (the re-contact period T, 10 min, drawn in [T/2, 3T/2]).
+    // The fill itself is ARMED only with the attempt guard and the admission
+    // gate present (see _fillArmed); with maintenance on and either missing
+    // the tick is the legacy near-quota refill, unchanged.
     this._maintainCfg = (synaptomeMaintain && typeof synaptomeMaintain === 'object')
-      ? { kNear: synaptomeMaintain.kNear ?? 5, intervalMs: synaptomeMaintain.intervalMs ?? 15000, maxPerTick: synaptomeMaintain.maxPerTick ?? 3 }
+      ? { kNear: synaptomeMaintain.kNear ?? 5, intervalMs: synaptomeMaintain.intervalMs ?? 15000, maxPerTick: synaptomeMaintain.maxPerTick ?? 3,
+          kCache: synaptomeMaintain.kCache ?? 64, pPending: synaptomeMaintain.pPending ?? 8, directoryMs: synaptomeMaintain.directoryMs ?? 600000 }
       : (synaptomeMaintain === true)
-        ? { kNear: 5, intervalMs: 15000, maxPerTick: 3 }
+        ? { kNear: 5, intervalMs: 15000, maxPerTick: 3, kCache: 64, pPending: 8, directoryMs: 600000 }
         : null;
     this._maintainTimer = null;
     this._maintainInflight = false;
+    /** Row 12: NOMINATED identities (the candidate cache), bigint → { src, at }. */
+    this._fillCache = new Map();
+    this._fillStats = { ticks: 0, nominated: 0, nominateRefusedFull: 0, nominateIneligible: 0, dialed: 0, dialDeferred: 0, directoryRequests: 0, directoryUnavailable: 0 };
+    this._fillLast = null;             // the last tick's report
+    this._fillState = null;            // the last REPORTED liveness state (logged on change only)
+    this._fillDirectoryNextAt = 0;     // the re-contact timer
+    this._fillDirectoryLastOk = null;  // the last directory request's outcome (null: never asked)
+    this._fillDisarmedLogged = false;
     // Hold-or-improve admission gate (Connection-Quality definition v0.6,
     // axona-docs 0e4d75a; council-closed 2026-08-24). Governs the binding-
     // transport admission path (_seedSynaptomeWithSponsor): below the synaptome
@@ -652,6 +668,22 @@ export class AxonaPeer extends DHT {
           }
         }
         return true;
+      });
+    }
+
+    // Row 12: the DIRECTORY sample. A bridge peer-list reaching the transport
+    // is nominated into the candidate cache (the transport's own bootstrap
+    // dialing of that list is unchanged). Inert unless the fill is armed.
+    if (transport && typeof transport.onPeerList === 'function') {
+      this._onPeerListUnsub = transport.onPeerList((peers) => {
+        if (!Array.isArray(peers) || !this._fillArmed()) return;
+        let nominated = 0;
+        for (const p of peers) {
+          let big = null;
+          try { big = typeof p === 'bigint' ? p : fromHex(String(p)); } catch { big = null; }
+          if (big != null && this._nominateCandidate(big, 'directory')) nominated++;
+        }
+        if (nominated) this._emitLog?.('info', 'fill-directory-sample', { offered: peers.length, nominated });
       });
     }
 
@@ -1191,6 +1223,10 @@ export class AxonaPeer extends DHT {
       this._onPeerBoundUnsub();
       this._onPeerBoundUnsub = null;
     }
+    if (this._onPeerListUnsub) {
+      try { this._onPeerListUnsub(); } catch { /* swallow */ }
+      this._onPeerListUnsub = null;
+    }
     if (this._onPeerDiedUnsub) {
       this._onPeerDiedUnsub();
       this._onPeerDiedUnsub = null;
@@ -1495,6 +1531,17 @@ export class AxonaPeer extends DHT {
       // dial phase ONLY. The reconcile above needs no dial and runs on every
       // tick the flag allows; reconciliation does not reset the search budget.
       if (this._deficitBackoff && !this._deficitBackoff.allow()) return 0;
+      // ── Row 12 (Hold-and-Fill v0.15, Rule 2): the FILL. The target is cap,
+      // not kNear; candidates come through the cache; each dial reserves a
+      // pending slot and a channel token first. Armed only with the guard and
+      // the gate present — the launcher's refusal, made in the kernel too, so
+      // maintenance without the guard (the 2026-06-29 storm) cannot fill.
+      // Not armed: the legacy near-quota refill below, unchanged.
+      if (this._fillArmed()) return await this._fillTick(self);
+      if (!this._fillDisarmedLogged) {
+        this._fillDisarmedLogged = true;
+        this._emitLog?.('warn', 'fill-disarmed', { guard: !!this._attemptGuard, gate: !!this._gateCfg });
+      }
       let nearest;
       // Request kNear+1: findKClosest(self, …) returns self as the closest entry,
       // so without the +1 we'd only ever fill kNear-1 successors.
@@ -1523,6 +1570,160 @@ export class AxonaPeer extends DHT {
       }
       return attempted;
     } finally { this._maintainInflight = false; }
+  }
+
+  // ── Row 12 (Hold-and-Fill v0.15, axona-docs e4809d2): the FILL ──────────
+  // Rule 2: while peer(ADMITTED) < cap, discover and dial; stop at cap or when
+  // the fill stalls, and report which. Tick order after the reconcile and the
+  // search-backoff gate: NEIGHBOURS (find_closest_set and lookahead responses,
+  // and the tick's own near search, into the candidate cache bounded by
+  // K_cache) → DIRECTORY (the bridge sample, when the node holds one; asked on
+  // the re-contact timer) → DIAL (up to maxPerTick candidates leave the cache;
+  // each reserves a pending slot — the guard's in-flight count under P_pending
+  // — and a channel token — the transport's ledger predicate — before the
+  // first frame; a dial that cannot reserve is deferred IN PLACE and counted
+  // dial-deferred). Conditional liveness as v0.1: the tick reports
+  // `fill-stalled` with the condition it can tell (SUPPLY: nothing nominated;
+  // RENDEZVOUS: the directory it holds did not answer; FAIR RETRY: every
+  // candidate is on its backoff schedule), `fill-unknown` when it cannot, and
+  // infers nothing from one timeout: MUTUAL CAPACITY and AWAKE are not the
+  // dialer's to tell. Nomination consumes nothing; the attempt is consumed at
+  // the dial (row 10, inside _considerCandidate).
+
+  /** The fill runs only with the guard and the gate present (the arming rule). */
+  _fillArmed() {
+    return !!(this._maintainCfg && this._attemptGuard && this._gateCfg);
+  }
+
+  /** Is `id` bound on the transport right now (held already; never a candidate)? */
+  _isBoundPeer(id) {
+    const t = this._node?.transport;
+    if (typeof t?.boundPeers !== 'function') return false;
+    try { return t.boundPeers().some(p => p === id); } catch { return false; }
+  }
+
+  /**
+   * `nominate(id, src)`: refuse at K_cache, refuse an ineligible identity
+   * (a mark whose schedule has not come due, or an unmarked identity under a
+   * full state), ignore self, the held and the already nominated. Nothing is
+   * consumed. Inert unless the fill is armed, so flag-off builds no cache.
+   * @returns {boolean} true when `id` entered the cache on this call
+   */
+  _nominateCandidate(id, src) {
+    if (!this._fillArmed()) return false;
+    const node = this._node;
+    if (typeof id !== 'bigint' || !node?.synaptome || id === node.id) return false;
+    if (node.synaptome.has(id) || this._isBoundPeer(id)) return false;
+    if (this._fillCache.has(id)) return false;                      // dup: no-op
+    if (!this._isEligibleCandidate(id)) { this._fillStats.nominateIneligible++; return false; }
+    if (this._fillCache.size >= this._maintainCfg.kCache) { this._fillStats.nominateRefusedFull++; return false; }
+    this._fillCache.set(id, { src, at: Date.now() });
+    this._fillStats.nominated++;
+    return true;
+  }
+
+  /** The channel-token half of the reservation: may the transport allocate an outbound channel now? */
+  _transportMayDial() {
+    const t = this._node?.transport;
+    if (typeof t?.mayDial !== 'function') return true;              // no ledger (the sim): nothing to reserve against
+    try { return t.mayDial() !== false; } catch { return true; }
+  }
+
+  /**
+   * DIRECTORY: the kernel side of *Discovery across cohorts* — the re-contact
+   * timer. While below cap, every T drawn in [T/2, 3T/2] the node asks the
+   * transport to re-contact the bridge for introductions; the sample that
+   * comes back arrives through onPeerList and is nominated. The bridge's
+   * registry, sample and re-contact admission are the bridge release's.
+   * @returns {{held: boolean, asked: boolean, ok: boolean|null}}
+   */
+  _fillDirectoryStep() {
+    const t = this._node?.transport;
+    if (typeof t?.requestPeerIntroductions !== 'function') return { held: false, asked: false, ok: null };
+    const now = Date.now();
+    if (now < this._fillDirectoryNextAt) return { held: true, asked: false, ok: this._fillDirectoryLastOk };
+    let ok = false;
+    try { ok = t.requestPeerIntroductions() !== false; } catch { ok = false; }
+    this._fillStats.directoryRequests++;
+    if (!ok) this._fillStats.directoryUnavailable++;
+    this._fillDirectoryLastOk = ok;
+    const T = this._maintainCfg.directoryMs;
+    const nextInMs = Math.round(T * (0.5 + Math.random()));          // U[T/2, 3T/2]
+    this._fillDirectoryNextAt = now + nextInMs;
+    this._emitLog?.('info', 'fill-directory', { ok, nextInMs });
+    return { held: true, asked: true, ok };
+  }
+
+  /** Report the tick's liveness state when it changes; never on every tick. */
+  _fillReport(rep) {
+    this._fillLast = rep;
+    if (rep.state === this._fillState) return;
+    this._fillState = rep.state;
+    if (rep.state.startsWith('fill-stalled:')) {
+      this._emitLog?.('warn', 'fill-stalled', { condition: rep.state.slice('fill-stalled:'.length), cap: rep.cap, admitted: rep.admitted, cache: rep.cache });
+    } else if (rep.state === 'fill-unknown') {
+      this._emitLog?.('warn', 'fill-unknown', { cap: rep.cap, admitted: rep.admitted, cache: rep.cache, refused: rep.refused });
+    } else {
+      this._emitLog?.('info', 'fill-state', { state: rep.state, cap: rep.cap, admitted: rep.admitted });
+    }
+  }
+
+  /**
+   * The fill tick proper (after the reconcile and the backoff gate).
+   * @returns {Promise<number>} dial attempts this tick (the tick's return unit)
+   */
+  async _fillTick(self) {
+    const cfg = this._maintainCfg; const node = this._node; const guard = this._attemptGuard;
+    const st = this._fillStats; st.ticks++;
+    const cap = node._maxSynaptome ?? this._domain.MAX_SYNAPTOME;
+    const admitted = node.synaptome.size;
+    const rep = { cap, admitted, deficit: cap - admitted, near: 0, directory: null, cache: this._fillCache.size, dialed: 0, deferred: 0, refused: 0, ineligible: 0, state: null };
+    if (rep.deficit <= 0) {                                          // Rule 2: stop at cap
+      rep.state = 'at-cap';
+      this._fillReport(rep);
+      if (this._deficitBackoff) this._deficitBackoff.reset();
+      return 0;
+    }
+    // 2. NEIGHBOURS — the tick's own near search; its probes' responses nominate
+    //    inside findKClosest, and the nearest band is nominated here.
+    let nearest = [];
+    try { nearest = await this.findKClosest(self, cfg.kNear + 1); } catch { nearest = []; }
+    if (Array.isArray(nearest)) for (const id of nearest) { if (this._nominateCandidate(id, 'near')) rep.near++; }
+    // 3. DIRECTORY
+    rep.directory = this._fillDirectoryStep();
+    // 4. DIAL — nearest-first out of the cache, each under the reservation
+    const cache = this._fillCache;
+    const ordered = [...cache.keys()].sort((a, b) => ((a ^ self) < (b ^ self) ? -1 : 1));
+    for (const id of ordered) {
+      if (rep.dialed >= cfg.maxPerTick) break;
+      if (node.synaptome.has(id) || this._isBoundPeer(id)) { cache.delete(id); continue; }   // held meanwhile
+      if (!this._isEligibleCandidate(id)) { cache.delete(id); rep.ineligible++; continue; }   // marked meanwhile
+      const pending = guard.inflightCount();
+      if (pending >= cfg.pPending || !this._transportMayDial()) {
+        // Case 45: refused at the reservation → NOMINATED stays, attempts and
+        // token unchanged, counted dial-deferred, and the dial phase stops here.
+        rep.deferred++; st.dialDeferred++;
+        this._emitLog?.('info', 'dial-deferred', { pending, pPending: cfg.pPending, channel: this._transportMayDial() });
+        break;
+      }
+      if (!guard.allow(id)) { rep.refused++; continue; }            // FAIR RETRY: on its schedule, stays nominated
+      cache.delete(id);
+      rep.dialed++; st.dialed++;
+      try { await this._considerCandidate(id, 'fill'); } catch { /* verified-connect is best-effort */ }
+    }
+    rep.cache = cache.size;
+    if (rep.dialed > 0) rep.state = 'filling';
+    else if (rep.deferred > 0) rep.state = 'deferred';
+    else if (cache.size === 0) rep.state = (rep.directory.held && rep.directory.ok === false) ? 'fill-stalled:rendezvous' : 'fill-stalled:supply';
+    else if (rep.refused > 0 && rep.refused + rep.ineligible >= ordered.length) rep.state = 'fill-stalled:fair-retry';
+    else rep.state = 'fill-unknown';
+    if (rep.dialed || rep.deferred) this._emitLog?.('info', 'synaptome-fill', { ...rep, directory: rep.directory.held ? (rep.directory.asked ? (rep.directory.ok ? 'asked' : 'unavailable') : 'held') : 'none' });
+    this._fillReport(rep);
+    if (this._deficitBackoff) {
+      if (rep.dialed === 0 && rep.deferred === 0) this._deficitBackoff.onEmpty();
+      else this._deficitBackoff.reset();
+    }
+    return rep.dialed;
   }
 
   /**
@@ -1735,6 +1936,10 @@ export class AxonaPeer extends DHT {
     if (this._onPeerBoundUnsub) {
       try { this._onPeerBoundUnsub(); } catch { /* swallow */ }
       this._onPeerBoundUnsub = null;
+    }
+    if (this._onPeerListUnsub) {
+      try { this._onPeerListUnsub(); } catch { /* swallow */ }
+      this._onPeerListUnsub = null;
     }
     if (this._onPeerDiedUnsub) {
       try { this._onPeerDiedUnsub(); } catch { /* swallow */ }
@@ -4321,6 +4526,7 @@ export class AxonaPeer extends DHT {
         secondLat  = 0;
       } else {
         twoHopDist = r.value.peerId ^ targetKey;
+        this._nominateCandidate(r.value.peerId, 'lookahead');   // row 12: NEIGHBOURS source (inert unless the fill is armed)
         secondLat  = r.value.latency;
       }
 
@@ -5172,7 +5378,7 @@ export class AxonaPeer extends DHT {
         );
         for (const r of settled) {
           if (r.status !== 'fulfilled' || !Array.isArray(r.value)) continue;
-          for (const peerId of r.value) addCandidate(peerId);
+          for (const peerId of r.value) { addCandidate(peerId); this._nominateCandidate(peerId, 'closest-set'); }   // row 12: NEIGHBOURS source (inert unless the fill is armed)
         }
         if (_rt) { _rt.probes += probes.length; for (const r of settled) { if (r.status === 'fulfilled') _rt.fulfilled++; else _rt.rejected++; } }
       }
