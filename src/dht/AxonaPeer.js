@@ -622,7 +622,24 @@ export class AxonaPeer extends DHT {
         // bind on another incarnation than the one the attempt started is
         // ignored too (R8-2). Transports that cannot name the incarnation
         // pass none and the token ends by identity alone.
-        try { this._attemptGuard?.end(peerBig, true, Date.now(), undefined, inc ?? undefined); } catch { /* bookkeeping only */ }
+        const g = this._attemptGuard;
+        if (g) {
+          let ended = false;
+          try { ended = g.end(peerBig, true, Date.now(), undefined, inc ?? undefined) === true; } catch { ended = false; }
+          // R8-2 residual (Aster 20904613): when the guard rejected the event
+          // and an attempt to this identity is still live, this bind is the
+          // OLD channel's. It ends nothing, and it also deletes no mark and
+          // admits nothing here: the identity's record stays with the live
+          // attempt, whose own bind or deadline resolves it; if the old
+          // channel survives beside it, the duplicate rule and row 7's
+          // reconcile take it. `false` tells the composite's dedup that this
+          // peer was not seen bound, so the current channel's bind still fires.
+          if (!ended && g.inflightOf?.(peerBig)) {
+            this._peerBoundStaleInc = (this._peerBoundStaleInc ?? 0) + 1;
+            this._emitLog?.('info', 'peer-bound-stale-incarnation', { inc: inc ?? null });
+            return false;
+          }
+        }
         // A (re)bound peer is alive — clear any dead-mark from a prior drop,
         // or it would stay shadow-banned: routing skips _deadPeers, and the
         // synaptome-seed below would re-add a synapse the router then ignores.
@@ -634,6 +651,7 @@ export class AxonaPeer extends DHT {
             console.warn('AxonaPeer.onPeerBound: admission failed', err);
           }
         }
+        return true;
       });
     }
 

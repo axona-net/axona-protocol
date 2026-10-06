@@ -236,6 +236,83 @@ const J = (v) => JSON.stringify(v, (k, x) => (typeof x === 'bigint' ? x.toString
       check('B13 fresh record then BIND: bind ends the kept token', g.inflightOf(S13) && (ctl.boundCb(S13, 'm', null), !g.inflightOf(S13) && g.attemptsOf(S13) === 0));
     }
 
+    // B14–B17 (Aster 20904613, R8-2 residuals): a stale channel's BIND must fence its side effects
+    // (no mark deletion, no admission) as well as the token, and the REAL composite adapter must carry
+    // the incarnation through and not let a rejected stale event swallow the current channel's bind.
+    // Admission is observed through a recording stub on _seedSynaptomeWithSponsor: invocation only.
+    {
+      const marks = node._deadPeers;
+      const seedCalls = []; const origSeed = peer._seedSynaptomeWithSponsor;
+      peer._seedSynaptomeWithSponsor = (id) => { seedCalls.push(id); };
+      const seedsFor = (id) => seedCalls.filter(x => x === id).length;
+
+      // B14 direct installed-handler path
+      const S14 = stranger(big, 224);
+      ctl.relayReturn = 'inc-new';
+      await peer._considerCandidate(S14, 'triadic');
+      marks.fail(S14, 'later-loss');                         // a newer mark beside the live attempt
+      check('B14 setup: token held on inc-new, mark present', g.inflightOf(S14) && marks.has(S14));
+      const stale14 = g.staleIncEnds ?? 0; const logs14 = logs.length;
+      const r14 = ctl.boundCb(S14, 'm', 'inc-old');
+      check('B14 STALE bind via the installed handler: token held, mark RETAINED, NO seed, staleIncEnds +1, rejected (false), logged',
+        r14 === false && g.inflightOf(S14) && marks.has(S14) && seedsFor(S14) === 0 && (g.staleIncEnds ?? 0) === stale14 + 1
+          && logs.slice(logs14).some(([m]) => m === 'peer-bound-stale-incarnation'),
+        `r=${r14} inflight=${g.inflightOf(S14)} mark=${marks.has(S14)} seeds=${seedsFor(S14)} stale=${g.staleIncEnds}`);
+      const r14b = ctl.boundCb(S14, 'm', 'inc-new');
+      check('B14 the CURRENT bind afterwards: token ended as bind, mark deleted, seed once, accepted (true)',
+        r14b === true && !g.inflightOf(S14) && g.attemptsOf(S14) === 0 && !marks.has(S14) && seedsFor(S14) === 1,
+        `r=${r14b} inflight=${g.inflightOf(S14)} mark=${marks.has(S14)} seeds=${seedsFor(S14)}`);
+
+      // B15 the REAL CompositeTransport adapter, fan-out to the installed kernel handler
+      const { CompositeTransport } = await import('../src/transport/web/composite.js');
+      const comp = new CompositeTransport({ localNodeId: big, log: () => {} });
+      const fakeSub = () => { const s = { h: null, onPeerBound(h) { s.h = h; return () => { s.h = null; }; }, onPeerDied() { return () => {}; }, isConnected() { return false; }, async start() {}, async stop() {} }; return s; };
+      const subA = fakeSub(); comp.addSubtransport(subA);
+      const unsubComp = comp.onPeerBound(ctl.boundCb);
+      check('B15 setup: the composite wired the sub (handler installed on it)', typeof subA.h === 'function');
+      const S15 = stranger(big, 225);
+      await peer._considerCandidate(S15, 'triadic');
+      marks.fail(S15, 'later-loss');
+      check('B15 setup: held on inc-new, mark present', g.inflightOf(S15) && marks.has(S15));
+      const stale15 = g.staleIncEnds ?? 0;
+      subA.h(S15, 'm', 'inc-old');
+      check('B15 STALE bind through the composite: incarnation delivered (staleIncEnds +1), token held, mark retained, no seed',
+        (g.staleIncEnds ?? 0) === stale15 + 1 && g.inflightOf(S15) && marks.has(S15) && seedsFor(S15) === 0,
+        `stale=${g.staleIncEnds} inflight=${g.inflightOf(S15)} mark=${marks.has(S15)} seeds=${seedsFor(S15)}`);
+      subA.h(S15, 'm', 'inc-new');
+      check('B15 then the CURRENT bind through the composite is NOT swallowed by the dedup: token ended, mark deleted, seed once',
+        !g.inflightOf(S15) && g.attemptsOf(S15) === 0 && !marks.has(S15) && seedsFor(S15) === 1,
+        `inflight=${g.inflightOf(S15)} mark=${marks.has(S15)} seeds=${seedsFor(S15)}`);
+      subA.h(S15, 'm', 'inc-new');
+      check('B15 a repeated bind of a seen peer is deduplicated (seed count unchanged)', seedsFor(S15) === 1);
+
+      // B16 a LATE-ADDED sub inherits the adapter with the incarnation
+      const subB = fakeSub(); comp.addSubtransport(subB);
+      check('B16 setup: late sub wired', typeof subB.h === 'function');
+      const S16 = stranger(big, 226);
+      await peer._considerCandidate(S16, 'triadic');
+      subB.h(S16, 'm', 'inc-old');
+      check('B16 late sub, STALE bind: token held, no seed', g.inflightOf(S16) && seedsFor(S16) === 0);
+      subB.h(S16, 'm', 'inc-new');
+      check('B16 late sub, CURRENT bind: token ended, seed once', !g.inflightOf(S16) && g.attemptsOf(S16) === 0 && seedsFor(S16) === 1);
+
+      // B17 LEGACY explicit: a sub that names no incarnation (the bridge) ends by identity; an identity
+      // never dialed binds and admits as before; cross-sub dedup still holds.
+      const S17 = stranger(big, 227);
+      await peer._considerCandidate(S17, 'triadic');
+      check('B17 setup: held on inc-new', g.inflightOf(S17));
+      subA.h(S17);
+      check('B17 no-incarnation bind (legacy sub): ends by identity, seed once', !g.inflightOf(S17) && g.attemptsOf(S17) === 0 && seedsFor(S17) === 1);
+      subB.h(S17);
+      check('B17 the same peer bound on a second sub fires once (dedup across subs)', seedsFor(S17) === 1);
+      const S18 = stranger(big, 228);
+      subA.h(S18, 'm', 'inc-x');
+      check('B17 an identity the guard never dialed: bind admits (seed once), guard untouched', seedsFor(S18) === 1 && !g.inflightOf(S18) && g.attemptsOf(S18) === 0);
+
+      unsubComp(); ctl.relayReturn = true;
+      peer._seedSynaptomeWithSponsor = origSeed;
+    }
+
     // B7 _selfIntegrate: same discipline
     const S8 = stranger(big, 217);
     peer.findKClosest = async () => [S8];
@@ -266,6 +343,11 @@ const J = (v) => JSON.stringify(v, (k, x) => (typeof x === 'bigint' ? x.toString
     check('G the issued relay dial attaches the incarnation and returns with the token held', /if \(issued\) \{[\s\S]*?attach\?\.\(peerId, k, inc\);[\s\S]*?return;[^\n]*\n\s*\}/.test(body));
     const gsrc = readFileSync(new URL('../src/dht/attemptGuard.js', import.meta.url), 'utf8');
     check('G guard.end ignores a non-live or stale token', /if \(!s \|\| !s\.inflight \|\| \(k !== undefined && k !== s\.k\)\)/.test(gsrc));
+    const csrc = readFileSync(new URL('../src/transport/web/composite.js', import.meta.url), 'utf8');
+    check('G composite.onPeerBound passes (nodeIdBig, meshId, inc) through and un-sees a rejected event', /handler\(nodeIdBig, meshId, inc\)/.test(csrc) && /if \(r === false\) seen\.delete\(nodeIdBig\)/.test(csrc));
+    const bs = src.indexOf('transport.onPeerBound((peerBig, _meshId, inc)'); const be = src.indexOf('\n      });\n', bs);
+    const bind = src.slice(bs, be);
+    check('G the bind handler returns false on a stale incarnation BEFORE the mark deletion and the seed', bind.indexOf('return false;') > 0 && bind.indexOf('return false;') < bind.indexOf('_deadPeers?.delete(peerBig)') && bind.indexOf('_deadPeers?.delete(peerBig)') < bind.indexOf('_seedSynaptomeWithSponsor(peerBig)'));
   }
 
   console.log(`\n${passed} passed, ${failed} failed`);
