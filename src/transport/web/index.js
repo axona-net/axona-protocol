@@ -1293,7 +1293,7 @@ export function webTransport({
     const pending = mesh.pendingNegotiations();
     if (pending >= MAX_PENDING_RELAY_NEGOTIATIONS) {
       log('relay-connect-throttled', { to: toHex, pending });
-      return false;
+      return null;   // row 12 (R12-2): capacity refused, nothing started — the dialer defers, consuming nothing
     }
     log('relay-connect-initiate', { to: toHex });
     mesh._initiateTo(toHex);
@@ -1302,9 +1302,25 @@ export function webTransport({
     // correlate the channel's terminal event with its guard token. `true`
     // when the mesh cannot say (a refused allocation returns false below).
     const inc = (typeof mesh.incFor === 'function') ? mesh.incFor(toHex) : null;
-    if (inc == null && !mesh.hasPeer(toHex)) return false;   // the ledger refused the allocation; nothing was started
+    if (inc == null && !mesh.hasPeer(toHex)) {
+      // Nothing was started. Row 12 (R12-2): when the LEDGER refused the
+      // allocation this is a capacity refusal at the allocation boundary —
+      // `null`, so the dialer defers the candidate in place, consumes no
+      // attempt and no mark, and reports no dial. Any other reason is `false`.
+      return (typeof mesh.allocRefusedFor === 'function' && mesh.allocRefusedFor(toHex)) ? null : false;
+    }
     return inc ?? true;
   };
+  // connectViaRelay's answer, the contract the kernel's dialers read:
+  //   string  — issued; the incarnation of the negotiation just started
+  //   true    — issued; the mesh cannot name the incarnation
+  //   false   — NOT issued: relay disabled, bad or own id, a channel or
+  //             negotiation to this peer already exists (the dialer ends its
+  //             token as a cancel)
+  //   null    — NOT issued: CAPACITY refused (the relay negotiation throttle,
+  //             or the ledger at allocation); nothing started, nothing to
+  //             end; the dialer releases its token, consumes nothing and
+  //             defers the candidate (row 12, case 45)
   // Advisory capability surface (forward-compat; functional gate is the flag).
   composite.capabilities = () => (meshRelay ? ['mesh-relay'] : []);
   composite.hasCapability = (cap) => composite.capabilities().includes(cap);

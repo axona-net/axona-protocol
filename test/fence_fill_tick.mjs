@@ -51,11 +51,11 @@ const ARMED = { synaptomeMaintain: { kNear: 5, maxPerTick: 3, kCache: 8, pPendin
  * for the web transport's surfaces: connectViaRelay (held tokens), an
  * openConnection override, requestPeerIntroductions, onPeerList, mayDial, send.
  */
-async function makePeer(net, domain, lat, lng, opts = {}, wrap = false) {
+async function makePeer(net, domain, lat, lng, opts = {}, wrap = false, pre = {}) {
   const id = await createNodeIdentity({ lat, lng });
   const sim = simTransport({ network: net, identity: id, heartbeatMs: 0 });
   await sim.start(id.id);
-  const ctl = { boundCb: null, negCb: null, connected: null, relay: [], relayReturn: null, openOverride: null, opens: [], introductions: null, peerListCb: null, wantPeerList: false, mayDial: null, sendOverride: null };
+  const ctl = { boundCb: null, negCb: null, connected: null, relay: [], relayReturn: null, openOverride: null, opens: [], introductions: null, peerListCb: null, wantPeerList: false, mayDial: null, sendOverride: null, ...pre };
   const transport = !wrap ? sim : new Proxy(sim, {
     get(target, prop, recv) {
       if (prop === 'onPeerBound') return (h) => { ctl.boundCb = h; return target.onPeerBound(h); };
@@ -261,12 +261,71 @@ const tick = async (rec) => { rec.peer._deficitBackoff?.reset(); return rec.peer
     check('E3 the ledger refuses an outbound channel: deferred without a dial, logged channel:false', r3 === 0 && w.peer._fillLast.deferred === 1 && w.peer._fillLast.dialed === 0 && w.logs.some(([m, c]) => m === 'dial-deferred' && c.channel === false), J(w.peer._fillLast));
     w.ctl.mayDial = null;
     await w.peer.stop().catch(() => {});
+
+    // E4 (Aster a2106a2a R12-2): the preflight passes, then the ALLOCATION boundary refuses — the
+    // transport's relay dial answers null (capacity refused, nothing started). The candidate stays
+    // nominated, the token is released (attempts 0), nothing is consumed (no mark window moved),
+    // no dial is reported; the next tick, with capacity back, dials it.
+    {
+      const x = await makePeer(net, domain, 5, 6, ARMED, true);
+      x.node._maxSynaptome = 20; x.peer.findKClosest = async () => [x.big];
+      const gx = x.peer._attemptGuard; const marks = x.node._deadPeers;
+      x.ctl.mayDial = true;                       // the preflight says yes
+      x.ctl.openOverride = async () => false;     // bound-only open: no binding (awaited)
+      x.ctl.relayReturn = () => null;             // ...and at the issue the ledger refuses
+      const C = stranger(x.big, 160);
+      x.peer._nominateCandidate(C, 'near');
+      const r = await tick(x);
+      const rep = x.peer._fillLast;
+      check('E4 capacity refused AT THE ISSUE: deferred (at issue), not dialed; return 0; candidate still NOMINATED', r === 0 && rep.deferred === 1 && rep.deferredAt === 'issue' && rep.dialed === 0 && rep.cancelled === 0 && rep.state === 'deferred' && x.peer._fillCache.has(C) && x.ctl.relay.length === 1, J({ r, rep, cache: x.peer._fillCache.has(C), relay: x.ctl.relay.length }));
+      check('E4 the token was RELEASED and nothing consumed: not in flight, attempts 0, no mark written or moved, counted at issue', !gx.inflightOf(C) && gx.attemptsOf(C) === 0 && (gx.released ?? 0) >= 1 && marks.get(C) == null && (x.peer._dialDeferredAtIssue ?? 0) === 1 && x.logs.some(([m, c]) => m === 'dial-deferred' && c.at === 'issue'), J({ inflight: gx.inflightOf(C), attempts: gx.attemptsOf(C), released: gx.released, mark: marks.get(C) }));
+      x.ctl.relayReturn = 'inc-cap-back';          // capacity returns
+      const r2 = await tick(x);
+      check('E4 with capacity back the next tick dials it (held), consuming then', r2 === 1 && x.peer._fillLast.dialed === 1 && gx.inflightOf(C) && !x.peer._fillCache.has(C), J(x.peer._fillLast));
+      // the exception path: a throwing relay dial is a cancel (counted), never a deferral
+      const D = stranger(x.big, 161); x.peer._nominateCandidate(D, 'near');
+      x.ctl.relayReturn = () => { throw new Error('relay threw'); };
+      const r3 = await tick(x);
+      check('E4 a THROWING relay dial is a cancel: attempt counted, candidate dropped, not deferred', r3 === 1 && x.peer._fillLast.cancelled === 1 && x.peer._fillLast.deferred === 0 && gx.attemptsOf(D) === 1 && !x.peer._fillCache.has(D), J(x.peer._fillLast));
+      await x.peer.stop().catch(() => {});
+      // the transport's half of the contract: the mesh records the ledger's refusal for its synchronous caller, read-once
+      const { MeshManager } = await import('../src/transport/web/mesh.js');
+      const mesh = new MeshManager({ sendSignal() {}, log() {}, ledger: { enforce: true, pPending: 1 } });   // the ledger's floor for P_pending is 1
+      mesh._ledger.allocate('t-pre', 'pre', 'out');   // one outbound attempt already pending: the bound is reached
+      const hex = 'ab'.repeat(33);
+      const rejections = []; const onRej = (e) => rejections.push(String(e?.message ?? e)); process.on('unhandledRejection', onRej);
+      mesh._initiateTo(hex);                      // refused synchronously at the bound: no state built, no PC
+      await wait(0);
+      check('E4 mesh: a ledger-refused initiation builds no state and is readable ONCE as a capacity refusal', !mesh.hasPeer(hex) && mesh.allocRefusedFor(hex) === true && mesh.allocRefusedFor(hex) === false && mesh.allocRefusedFor('cd'.repeat(33)) === false && rejections.length === 0, J({ has: mesh.hasPeer(hex), rejections }));
+      process.off('unhandledRejection', onRej);
+      mesh.dispose?.();
+    }
+
+    // E5 (R12-1): every pending slot held by an attempt whose terminal signal never came. The fill's
+    // own sweep at the tick boundary ends them by age; the capacity check then passes and the
+    // candidate is dialed — without any callback and without any unrelated nomination.
+    {
+      const y = await makePeer(net, domain, 5, 7, ARMED, true);
+      y.node._maxSynaptome = 20; y.peer.findKClosest = async () => [y.big];
+      const gy = y.peer._attemptGuard;
+      let n = 0; y.ctl.relayReturn = () => `inc-${++n}`; y.ctl.openOverride = async () => false;
+      const H1 = stranger(y.big, 170), H2 = stranger(y.big, 171), C3 = stranger(y.big, 172);
+      y.peer._nominateCandidate(H1, 'near'); y.peer._nominateCandidate(H2, 'near');
+      await tick(y);
+      check('E5 setup: both pending slots held (P_pending 2)', gy.inflightCount() === 2 && gy.inflightOf(H1) && gy.inflightOf(H2));
+      gy.inflightMaxMs = 1; await wait(5);        // both overdue; no terminal signal will come
+      y.peer._nominateCandidate(C3, 'near');
+      const r = await tick(y);
+      check('E5 the tick\'s own sweep ended the two overdue attempts (staleEnded 2, attempts 1 each) and the candidate was DIALED', (gy.staleEnded ?? 0) === 2 && gy.attemptsOf(H1) === 1 && gy.attemptsOf(H2) === 1 && r === 1 && y.peer._fillLast.dialed === 1 && gy.inflightOf(C3) && y.peer._fillLast.deferred === 0, J({ stale: gy.staleEnded, r, rep: y.peer._fillLast }));
+      gy.inflightMaxMs = 45000;
+      await y.peer.stop().catch(() => {});
+    }
   }
 
   // ── F. liveness ────────────────────────────────────────────────────────
   {
     const net = new SimNetwork();
-    // F1 case 7, no overlap: the directory is held and does not answer
+    // F1 case 7, no overlap: the directory is held and the request CANNOT be sent (unavailable)
     const r = await makePeer(net, domain, 6, 6, ARMED, true);
     r.node._maxSynaptome = 20;
     r.peer.findKClosest = async () => [r.big];
@@ -274,20 +333,35 @@ const tick = async (rec) => { rec.peer._deficitBackoff?.reset(); return rec.peer
     const t0 = Date.now();
     const r1 = await tick(r);
     const rep = r.peer._fillLast;
-    check('F1 no answer from the directory it holds, empty cache: fill-stalled: rendezvous, logged with the condition', r1 === 0 && asked === 1 && rep.directory.held && rep.directory.asked && rep.directory.ok === false && rep.state === 'fill-stalled:rendezvous' && r.logs.some(([m, c]) => m === 'fill-stalled' && c.condition === 'rendezvous'), J(rep));
+    check('F1 the directory it holds is UNAVAILABLE (nothing sent), empty cache: fill-stalled: rendezvous, logged with the condition', r1 === 0 && asked === 1 && rep.directory.held && rep.directory.asked && rep.directory.state === 'unavailable' && rep.state === 'fill-stalled:rendezvous' && r.logs.some(([m, c]) => m === 'fill-stalled' && c.condition === 'rendezvous'), J(rep));
     check('F1 nothing inferred from it: no guard attempt, no mark', r.peer._attemptGuard._state.size === 0 && r.node._deadPeers.size === 0 && r.peer._fillStats.directoryUnavailable === 1);
     const dt = r.peer._fillDirectoryNextAt - t0;
     check('F1 the re-contact timer drew in [T/2, 3T/2] (T 1000 ms)', dt >= 500 && dt <= 1500 + 50, String(dt));
     await tick(r);
     check('F1 before the timer is due a second tick does not re-ask; the state is unchanged and not re-logged', asked === 1 && logCount(r.logs, 'fill-stalled') === 1);
-    // F2 case 7, overlap: the re-contact is answered with a sample; the same tick dials and binds it
+    await r.peer.stop().catch(() => {});
+
+    // F2 (R12-3) the REAL directory handler: the request is SENT and the answer arrives later, or never, or empty.
     const q = await makePeer(net, domain, 60, 60, {});
-    // this transport exposed no onPeerList at start; the bridge's answer is emulated at the
-    // kernel's directory handler shape — the sample nominated as the transport would deliver it
-    r.ctl.introductions = () => { asked++; r.peer._nominateCandidate(q.big, 'directory'); return true; };
-    r.peer._fillDirectoryNextAt = 0;   // the timer is due
-    const r2 = await tick(r); await wait(40);
-    check('F2 the answered re-contact nominates the sample and the SAME tick dials it: one introduction, one bind, admitted', asked === 2 && r2 === 1 && r.peer._fillLast.state === 'filling' && r.node.synaptome.has(q.big) && r.transport.isConnected(q.hex), J({ asked, r2, rep: r.peer._fillLast, has: r.node.synaptome.has(q.big) }));
+    const s = await makePeer(net, domain, 6, 7, ARMED, true, { wantPeerList: true });
+    s.node._maxSynaptome = 20; s.peer.findKClosest = async () => [s.big];
+    let sent = 0; s.ctl.introductions = () => { sent++; return true; };   // sent on the socket; the bridge answers (or not) LATER
+    check('F2 setup: the kernel installed its onPeerList handler on this transport', typeof s.ctl.peerListCb === 'function' && s.peer._fillDirectory.state === 'none');
+    const s1 = await tick(s);
+    check('F2 SENT and no answer yet, empty cache: fill-unknown (silence is not an outage), nothing dialed, state sent', s1 === 0 && sent === 1 && s.peer._fillDirectory.state === 'sent' && s.peer._fillLast.state === 'fill-unknown' && s.logs.some(([m]) => m === 'fill-unknown') && !s.logs.some(([m]) => m === 'fill-stalled'), J(s.peer._fillLast));
+    await tick(s);
+    check('F2 still silent: still unknown, not re-logged, not re-asked before the timer', s.peer._fillLast.state === 'fill-unknown' && logCount(s.logs, 'fill-unknown') === 1 && sent === 1);
+    // the answer arrives asynchronously, through the installed handler, between ticks
+    s.ctl.peerListCb([q.hex]);
+    check('F2 the delayed answer is recorded by the handler (answered, offered 1) and nominated as directory', s.peer._fillDirectory.state === 'answered' && s.peer._fillDirectory.offered === 1 && s.peer._fillCache.get(q.big)?.src === 'directory');
+    const s2 = await tick(s); await wait(40);
+    check('F2 the next tick dials the sample: one introduction, one bind, admitted (case 7 with overlap, on the web shape: the tick AFTER the answer)', s2 === 1 && s.peer._fillLast.state === 'filling' && s.node.synaptome.has(q.big) && s.transport.isConnected(q.hex), J({ s2, rep: s.peer._fillLast, has: s.node.synaptome.has(q.big) }));
+    // an EMPTY answer is an answer: supply, not rendezvous and not unknown
+    s.peer._fillDirectoryNextAt = 0; s.ctl.introductions = () => { sent++; queueMicrotask(() => s.ctl.peerListCb([])); return true; };
+    const s3 = await tick(s); await wait(0); await tick(s);
+    check('F2 an EMPTY answer: answered with offered 0; empty cache → fill-stalled: supply (not rendezvous, not unknown)', s3 === 0 && s.peer._fillDirectory.state === 'answered' && s.peer._fillDirectory.offered === 0 && s.peer._fillLast.state === 'fill-stalled:supply', J({ dir: s.peer._fillDirectory, rep: s.peer._fillLast }));
+    await s.peer.stop().catch(() => {}); await q.peer.stop().catch(() => {});
+
     // F3 fair retry: every candidate on its backoff schedule
     const f = await makePeer(net, domain, 7, 7, ARMED, true);
     f.node._maxSynaptome = 20;
@@ -298,7 +372,7 @@ const tick = async (rec) => { rec.peer._deficitBackoff?.reset(); return rec.peer
     check('F3 setup: two nominated, both refused by the guard\'s backoff', f.peer._fillCache.size === 2 && cs.every(c => gf.allow(c) === false));
     const r3 = await tick(f);
     check('F3 all candidates on their schedule: fill-stalled: fair-retry, nothing dialed, both KEPT nominated', r3 === 0 && f.peer._fillLast.state === 'fill-stalled:fair-retry' && f.peer._fillLast.refused === 2 && f.peer._fillCache.size === 2 && f.ctl.opens.length === 0, J(f.peer._fillLast));
-    for (const x of [r, q, f]) await x.peer.stop().catch(() => {});
+    await f.peer.stop().catch(() => {});
   }
 
   // ── G. static ──────────────────────────────────────────────────────────
@@ -320,6 +394,14 @@ const tick = async (rec) => { rec.peer._deficitBackoff?.reset(); return rec.peer
     const lsrc = readFileSync(new URL('../src/transport/web/channel_ledger.js', import.meta.url), 'utf8');
     const c0 = lsrc.indexOf('  canAllocate(dir) {'); const cb = lsrc.slice(c0, lsrc.indexOf('\n  }\n', c0));
     check('G ledger.canAllocate counts nothing and logs nothing', c0 > 0 && !/_stats|_log\(/.test(cb));
+    // successor (Aster a2106a2a)
+    check('G R12-1: the fill tick sweeps the guard at its own boundary BEFORE the capacity check', i('guard.sweep?.()') > 0 && i('guard.sweep?.()') < i('inflightCount()'));
+    const cc = src.indexOf('  async _considerCandidate('); const ccb = src.slice(cc, src.indexOf('\n  }\n', cc));
+    check('G R12-2: the dial reads null as a capacity refusal, releases the token and returns deferred; CONSUME only for an issued dial', /if \(r === null\) deferred = true;/.test(ccb) && /if \(issued\) \{ try \{ this\._node\?\._deadPeers\?\.consume\?\.\(peerId\);/.test(ccb) && /if \(deferred\) \{[\s\S]*?release\?\.\(peerId, k\);[\s\S]*?return 'deferred';/.test(ccb) && ccb.lastIndexOf('consume?.(peerId)') > ccb.indexOf('t.connectViaRelay(toHex(peerId))'));   // the earlier consume is the sim's open-is-the-dial branch (row 10)
+    check('G R12-2: the tick keeps a deferred candidate nominated and reports it deferred, not dialed', /if \(out === 'deferred'\) \{[\s\S]*?rep\.deferred\+\+;[\s\S]*?break;/.test(body) && body.indexOf("out === 'deferred'") < body.indexOf('cache.delete(id);\n      if (out'));
+    const msrc = readFileSync(new URL('../src/transport/web/mesh.js', import.meta.url), 'utf8');
+    check('G R12-2: the web transport answers null for the relay throttle and for a ledger-refused allocation', /relay-connect-throttled[\s\S]*?return null;/.test(isrc) && /mesh\.allocRefusedFor\(toHex\)\) \? null : false/.test(isrc) && /_lastAllocRefusal = \{ peerId, why: may\.why \}/.test(msrc));
+    check('G R12-3: the directory step records sent/unavailable only; the onPeerList handler records the answer; rendezvous needs unavailable, silence is unknown', /d\.state = sent \? 'sent' : 'unavailable'/.test(src) && /d\.state = 'answered'; d\.answeredAt = Date\.now\(\); d\.offered = peers\.length;/.test(src) && /d\.state === 'unavailable'\) rep\.state = 'fill-stalled:rendezvous'/.test(body) && /d\.state === 'sent'\) rep\.state = 'fill-unknown'/.test(body));
   }
 
   console.log(`\n${passed} passed, ${failed} failed`);

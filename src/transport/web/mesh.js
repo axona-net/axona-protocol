@@ -723,6 +723,17 @@ export class MeshManager {
   canAllocate(dir = 'out') {
     return this._ledger ? this._ledger.canAllocate(dir).ok : true;
   }
+  /**
+   * Row 12 (R12-2): did the ledger refuse the allocation for `peerId` on the
+   * initiation just attempted? Read-once: the answer belongs to the one
+   * synchronous caller that asked for the initiation.
+   */
+  allocRefusedFor(peerId) {
+    const r = this._lastAllocRefusal;
+    if (!r || r.peerId !== peerId) return false;
+    this._lastAllocRefusal = null;
+    return true;
+  }
   /** Row 3: the handshake bound `nodeIdHex` on the channel serving `meshId`. */
   ledgerBind(meshId, nodeIdHex) { this._ledger?.bind(meshId, nodeIdHex); }
   /** Row 3: the binding for `meshId` was dropped. */
@@ -970,9 +981,16 @@ export class MeshManager {
   async _initiateTo(peerId) {
     // Row 3: ask the ledger BEFORE the PC exists. With enforce off (the
     // default) this only counts; with enforce on a refusal builds nothing.
-    if (this._ledger && !this._ledger.mayAllocate('out').ok) {
-      this._log('initiate-refused', { peerId, ledger: this._ledger.stats() });
-      return;
+    if (this._ledger) {
+      const may = this._ledger.mayAllocate('out');
+      if (!may.ok) {
+        this._log('initiate-refused', { peerId, why: may.why, ledger: this._ledger.stats() });
+        // Row 12 (R12-2): the refusal is readable by the synchronous caller
+        // (connectViaRelay), which answers its dialer "capacity refused,
+        // nothing started" instead of "not issued".
+        this._lastAllocRefusal = { peerId, why: may.why };
+        return;
+      }
     }
     this._log('initiate', { peerId });
     const state = this._newPeerState(peerId, 'offerer');

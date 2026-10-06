@@ -274,7 +274,9 @@ export class AxonaPeer extends DHT {
     this._fillLast = null;             // the last tick's report
     this._fillState = null;            // the last REPORTED liveness state (logged on change only)
     this._fillDirectoryNextAt = 0;     // the re-contact timer
-    this._fillDirectoryLastOk = null;  // the last directory request's outcome (null: never asked)
+    /** Row 12 (R12-3): the directory's observed state — 'none' (never asked), 'unavailable' (the request could not be sent),
+     *  'sent' (sent, no answer observed yet), 'answered' (a peer-list arrived after the request; `offered` may be 0). */
+    this._fillDirectory = { state: 'none', askedAt: 0, answeredAt: 0, offered: 0 };
     this._fillDisarmedLogged = false;
     // Hold-or-improve admission gate (Connection-Quality definition v0.6,
     // axona-docs 0e4d75a; council-closed 2026-08-24). Governs the binding-
@@ -677,6 +679,11 @@ export class AxonaPeer extends DHT {
     if (transport && typeof transport.onPeerList === 'function') {
       this._onPeerListUnsub = transport.onPeerList((peers) => {
         if (!Array.isArray(peers) || !this._fillArmed()) return;
+        // R12-3: the ANSWER is recorded here, by the handler that receives it
+        // — an empty list is an answer too. The request step records only
+        // that it sent; silence after a sent request stays 'sent'.
+        const d = this._fillDirectory;
+        d.state = 'answered'; d.answeredAt = Date.now(); d.offered = peers.length;
         let nominated = 0;
         for (const p of peers) {
           let big = null;
@@ -1418,7 +1425,7 @@ export class AxonaPeer extends DHT {
     // Row 10 (Hold-and-Fill v0.7 "Marks"): a dial site consults ELIGIBILITY,
     // not membership; a marked neighbour whose refill is not due is skipped.
     const t = node.transport;
-    const stats = { targets: 0, ineligible: 0, ineligibleAfterOpen: 0, guardRefused: 0, opened: 0, relayed: 0, relayUnavailable: 0, guarded: false };
+    const stats = { targets: 0, ineligible: 0, ineligibleAfterOpen: 0, guardRefused: 0, opened: 0, relayed: 0, relayUnavailable: 0, relayDeferred: 0, guarded: false };
     this._selfIntegrateLast = stats;
     const targets = [];
     for (const id of closest) {
@@ -1466,9 +1473,15 @@ export class AxonaPeer extends DHT {
       // so the token is RELEASED, not ended — no attempt is counted.
       if (!this._isEligibleCandidate(id)) { stats.ineligibleAfterOpen++; guard?.release?.(id, k); return false; }
       if (guard && typeof t.connectViaRelay === 'function') {
-        try { node._deadPeers?.consume?.(id); } catch { /* bookkeeping only */ }
-        let issued = false, inc = null;
-        try { const r = t.connectViaRelay(toHex(id)); issued = r !== false && r != null; inc = (typeof r === 'string') ? r : null; } catch { issued = false; }
+        let r = false;
+        try { r = t.connectViaRelay(toHex(id)); } catch { r = false; }
+        // Row 12 (R12-2): `null` is a capacity refusal at the allocation
+        // boundary — nothing started, so the token is RELEASED (no attempt
+        // counted) and nothing is consumed; the next pass may dial again.
+        if (r === null) { guard.release?.(id, k); stats.relayDeferred++; return false; }
+        const issued = r !== false && r != null; const inc = (typeof r === 'string') ? r : null;
+        // Row 10: CONSUME at ISSUE, only for a dial that went out, in the same synchronous step.
+        if (issued) { try { node._deadPeers?.consume?.(id); } catch { /* bookkeeping only */ } }
         // Row 8: an issued relay dial keeps its token until bind, deadline or
         // the sweep, correlated with the channel it started; one that could
         // not be issued ends it here as a failure.
@@ -1639,19 +1652,22 @@ export class AxonaPeer extends DHT {
    */
   _fillDirectoryStep() {
     const t = this._node?.transport;
-    if (typeof t?.requestPeerIntroductions !== 'function') return { held: false, asked: false, ok: null };
+    const d = this._fillDirectory;
+    if (typeof t?.requestPeerIntroductions !== 'function') return { held: false, asked: false, state: 'none' };
     const now = Date.now();
-    if (now < this._fillDirectoryNextAt) return { held: true, asked: false, ok: this._fillDirectoryLastOk };
-    let ok = false;
-    try { ok = t.requestPeerIntroductions() !== false; } catch { ok = false; }
+    if (now < this._fillDirectoryNextAt) return { held: true, asked: false, state: d.state };
+    let sent = false;
+    try { sent = t.requestPeerIntroductions() !== false; } catch { sent = false; }
     this._fillStats.directoryRequests++;
-    if (!ok) this._fillStats.directoryUnavailable++;
-    this._fillDirectoryLastOk = ok;
+    if (!sent) this._fillStats.directoryUnavailable++;
+    // R12-3: sendability is recorded as 'sent', never as an answer; the
+    // answer is recorded by the onPeerList handler when a peer-list arrives.
+    d.state = sent ? 'sent' : 'unavailable'; d.askedAt = now;
     const T = this._maintainCfg.directoryMs;
     const nextInMs = Math.round(T * (0.5 + Math.random()));          // U[T/2, 3T/2]
     this._fillDirectoryNextAt = now + nextInMs;
-    this._emitLog?.('info', 'fill-directory', { ok, nextInMs });
-    return { held: true, asked: true, ok };
+    this._emitLog?.('info', 'fill-directory', { sent, nextInMs });
+    return { held: true, asked: true, state: d.state };
   }
 
   /** Report the tick's liveness state when it changes; never on every tick. */
@@ -1675,9 +1691,17 @@ export class AxonaPeer extends DHT {
   async _fillTick(self) {
     const cfg = this._maintainCfg; const node = this._node; const guard = this._attemptGuard;
     const st = this._fillStats; st.ticks++;
+    // R12-1 (Aster a2106a2a): the guard's fail-safe sweep runs at the TICK's
+    // own boundary, before the capacity check below, so attempts whose
+    // terminal signal never came are ended here even when every pending
+    // slot is held by one — the only other sweep sits inside the dial, which
+    // a full pending set never reaches. Incarnation-fenced completion is
+    // unchanged: the sweep ends by age, a late signal for a swept token is
+    // ignored by the guard as before.
+    try { guard.sweep?.(); } catch { /* bookkeeping only */ }
     const cap = node._maxSynaptome ?? this._domain.MAX_SYNAPTOME;
     const admitted = node.synaptome.size;
-    const rep = { cap, admitted, deficit: cap - admitted, near: 0, directory: null, cache: this._fillCache.size, dialed: 0, deferred: 0, refused: 0, ineligible: 0, state: null };
+    const rep = { cap, admitted, deficit: cap - admitted, near: 0, directory: null, cache: this._fillCache.size, dialed: 0, cancelled: 0, deferred: 0, deferredAt: null, refused: 0, ineligible: 0, state: null };
     if (rep.deficit <= 0) {                                          // Rule 2: stop at cap
       rep.state = 'at-cap';
       this._fillReport(rep);
@@ -1691,7 +1715,13 @@ export class AxonaPeer extends DHT {
     if (Array.isArray(nearest)) for (const id of nearest) { if (this._nominateCandidate(id, 'near')) rep.near++; }
     // 3. DIRECTORY
     rep.directory = this._fillDirectoryStep();
-    // 4. DIAL — nearest-first out of the cache, each under the reservation
+    // 4. DIAL — nearest-first out of the cache, each under the reservation.
+    //    The PREFLIGHT here (pending slots, the ledger's predicate) is a
+    //    capacity observation; the reservation that holds is made at the
+    //    allocation boundary itself, inside the dial: a dial the transport
+    //    answers "capacity refused" comes back 'deferred' with its token
+    //    released and nothing consumed, and the candidate stays nominated
+    //    (R12-2). Either refusal stops the dial phase for this tick.
     const cache = this._fillCache;
     const ordered = [...cache.keys()].sort((a, b) => ((a ^ self) < (b ^ self) ? -1 : 1));
     for (const id of ordered) {
@@ -1700,30 +1730,47 @@ export class AxonaPeer extends DHT {
       if (!this._isEligibleCandidate(id)) { cache.delete(id); rep.ineligible++; continue; }   // marked meanwhile
       const pending = guard.inflightCount();
       if (pending >= cfg.pPending || !this._transportMayDial()) {
-        // Case 45: refused at the reservation → NOMINATED stays, attempts and
-        // token unchanged, counted dial-deferred, and the dial phase stops here.
-        rep.deferred++; st.dialDeferred++;
-        this._emitLog?.('info', 'dial-deferred', { pending, pPending: cfg.pPending, channel: this._transportMayDial() });
+        // Case 45 at the preflight: NOMINATED stays, attempts and token
+        // unchanged, counted dial-deferred, and the dial phase stops here.
+        rep.deferred++; rep.deferredAt = 'preflight'; st.dialDeferred++;
+        this._emitLog?.('info', 'dial-deferred', { at: 'preflight', pending, pPending: cfg.pPending, channel: this._transportMayDial() });
         break;
       }
       if (!guard.allow(id)) { rep.refused++; continue; }            // FAIR RETRY: on its schedule, stays nominated
+      let out = 'failed';
+      try { out = await this._considerCandidate(id, 'fill'); } catch { out = 'failed'; }
+      if (out === 'deferred') {
+        // Case 45 at the allocation boundary: the dial released its token and
+        // consumed nothing; the candidate stays nominated for a later tick.
+        rep.deferred++; rep.deferredAt = 'issue'; st.dialDeferred++;
+        this._emitLog?.('info', 'dial-deferred', { at: 'issue', pending: guard.inflightCount(), pPending: cfg.pPending });
+        break;
+      }
       cache.delete(id);
-      rep.dialed++; st.dialed++;
-      try { await this._considerCandidate(id, 'fill'); } catch { /* verified-connect is best-effort */ }
+      if (out === 'held' || out === 'bound' || out === 'added') { rep.dialed++; st.dialed++; }
+      else if (out === 'failed') rep.cancelled++;                    // nothing went out; the guard counted the cancel
+      // 'skip': held or marked meanwhile, or the guard refused inside — dropped from the cache, nothing counted here
     }
     rep.cache = cache.size;
+    const d = rep.directory;
     if (rep.dialed > 0) rep.state = 'filling';
     else if (rep.deferred > 0) rep.state = 'deferred';
-    else if (cache.size === 0) rep.state = (rep.directory.held && rep.directory.ok === false) ? 'fill-stalled:rendezvous' : 'fill-stalled:supply';
+    else if (cache.size === 0) {
+      // R12-3: an outage is reported only from a request that could not be
+      // sent; silence after a sent request is 'unknown', never inferred.
+      if (d.held && d.state === 'unavailable') rep.state = 'fill-stalled:rendezvous';
+      else if (d.held && d.state === 'sent') rep.state = 'fill-unknown';
+      else rep.state = 'fill-stalled:supply';
+    }
     else if (rep.refused > 0 && rep.refused + rep.ineligible >= ordered.length) rep.state = 'fill-stalled:fair-retry';
     else rep.state = 'fill-unknown';
-    if (rep.dialed || rep.deferred) this._emitLog?.('info', 'synaptome-fill', { ...rep, directory: rep.directory.held ? (rep.directory.asked ? (rep.directory.ok ? 'asked' : 'unavailable') : 'held') : 'none' });
+    if (rep.dialed || rep.deferred || rep.cancelled) this._emitLog?.('info', 'synaptome-fill', { ...rep, directory: d.held ? d.state : 'none' });
     this._fillReport(rep);
     if (this._deficitBackoff) {
       if (rep.dialed === 0 && rep.deferred === 0) this._deficitBackoff.onEmpty();
       else this._deficitBackoff.reset();
     }
-    return rep.dialed;
+    return rep.dialed + rep.cancelled;                               // attempts made (dials out + cancels); deferrals and skips are not attempts
   }
 
   /**
@@ -4984,11 +5031,18 @@ export class AxonaPeer extends DHT {
 
   async _considerCandidate(peerId, source) {
     const node = this._node;
-    if (!node?.synaptome || typeof peerId !== 'bigint') return;
-    if (peerId === node.id || node.synaptome.has(peerId)) return;
+    // Row 12: the outcome is returned for the fill's bookkeeping —
+    //   'skip'     nothing to do (held already, ineligible, guard refused, probe cap)
+    //   'bound'    bound and admitted (already bound, or the bound-only open succeeded)
+    //   'held'     a relay dial went out; the token is held until bind / deadline / sweep
+    //   'deferred' capacity refused at the allocation boundary; nothing consumed (case 45)
+    //   'failed'   no dial could be issued; the token ended as a cancel (counted)
+    //   'added'    non-binding transport: the legacy vitality insert
+    if (!node?.synaptome || typeof peerId !== 'bigint') return 'skip';
+    if (peerId === node.id || node.synaptome.has(peerId)) return 'skip';
     // Row 10: a marked identity is dialed on its schedule only; an unmarked
     // one is not dialed while a full state holds.
-    if (!this._isEligibleCandidate(peerId)) { this._dialIneligible = (this._dialIneligible || 0) + 1; return; }
+    if (!this._isEligibleCandidate(peerId)) { this._dialIneligible = (this._dialIneligible || 0) + 1; return 'skip'; }
     const t = node.transport;
     const bindingCapable = t
       && typeof t.onPeerBound   === 'function'
@@ -4999,17 +5053,17 @@ export class AxonaPeer extends DHT {
       // Already authenticated? admit through the verified path immediately.
       let bound = false;
       try { bound = t.boundPeers().some(p => p === peerId); } catch { /* ignore */ }
-      if (bound) { this._seedSynaptomeWithSponsor(peerId); return; }
+      if (bound) { this._seedSynaptomeWithSponsor(peerId); return 'bound'; }
       // Budgeted probe: trigger a connection; the handshake binds identity
       // and onPeerBound admits on success. Never binds ⇒ never admitted.
-      if ((this._verifyProbes ?? 0) >= MAX_VERIFY_PROBES) return;
+      if ((this._verifyProbes ?? 0) >= MAX_VERIFY_PROBES) return 'skip';
       // Slice 3: the attempt guard (opt-in). Without it, a never-binding
       // candidate is re-probed on every nomination forever — the c16d12b
       // storm. With it: in-flight dedup, bounded retry with backoff, expiry
       // on exhaustion; the dht:presence record is the release valve.
       // Row 8: the fail-safe deadline for attempts whose signal never came.
       this._attemptGuard?.sweep?.();
-      if (this._attemptGuard && !this._attemptGuard.allow(peerId)) return;
+      if (this._attemptGuard && !this._attemptGuard.allow(peerId)) return 'skip';
       this._verifyProbes = (this._verifyProbes ?? 0) + 1;
       const k = this._attemptGuard?.begin(peerId);
       // Row 10's CONSUME at ISSUE sits where the dial actually goes out
@@ -5039,12 +5093,12 @@ export class AxonaPeer extends DHT {
       // which is what the guard counted before (its brake on a never-binding
       // candidate when relay is disabled). Deferring without a count when the
       // relay is merely throttled is row 12's reservation step.
-      if (opened) { this._attemptGuard?.end(peerId, true, Date.now(), k); return; }
+      if (opened) { this._attemptGuard?.end(peerId, true, Date.now(), k); return 'bound'; }
       // R11-1 (Aster d787d245), the same boundary here: the open was awaited
       // and a loss may have marked the identity meanwhile; re-read
       // eligibility before any effect. Nothing went out: the token is
       // RELEASED without counting an attempt.
-      if (!this._isEligibleCandidate(peerId)) { this._dialIneligibleAfterOpen = (this._dialIneligibleAfterOpen ?? 0) + 1; this._attemptGuard?.release?.(peerId, k); return; }
+      if (!this._isEligibleCandidate(peerId)) { this._dialIneligibleAfterOpen = (this._dialIneligibleAfterOpen ?? 0) + 1; this._attemptGuard?.release?.(peerId, k); return 'skip'; }
       // AUTONOMOUS BRIDGELESS CONNECT.  openConnection only succeeds for a
       // peer the transport already has a (bridge-assigned) binding for; a peer
       // discovered purely peer-to-peer (triadic_introduce / hop_cache /
@@ -5058,23 +5112,33 @@ export class AxonaPeer extends DHT {
       // state; connectViaRelay itself no-ops when meshRelay is disabled, when
       // we're not yet meshed (cold bootstrap still needs the rendezvous), or
       // when a channel/binding to the peer already exists.
-      let issued = false, inc = null;
+      let issued = false, inc = null, deferred = false;
       if (typeof t.connectViaRelay === 'function') {
-        // Row 10: CONSUME at ISSUE, immediately before the dial goes out.
-        try { this._node?._deadPeers?.consume?.(peerId); } catch { /* bookkeeping only */ }
-        try {
-          const r = t.connectViaRelay(toHex(peerId));
-          issued = r !== false && r != null;
-          inc = (typeof r === 'string') ? r : null;   // row 8: the started negotiation's incarnation
-        } catch { issued = false; /* best-effort; falls back to bridge if relay can't route */ }
+        let r = false;
+        try { r = t.connectViaRelay(toHex(peerId)); }
+        catch { r = false; /* best-effort; falls back to bridge if relay can't route */ }
+        if (r === null) deferred = true;                       // row 12 (R12-2): capacity refused at the allocation boundary; nothing started
+        else { issued = r !== false && r != null; inc = (typeof r === 'string') ? r : null; }   // row 8: the started negotiation's incarnation
+        // Row 10: CONSUME at ISSUE — in the same synchronous step as the
+        // issue, and only for a dial that went out (R12-2): a capacity
+        // refusal consumes no attempt and moves no mark window.
+        if (issued) { try { this._node?._deadPeers?.consume?.(peerId); } catch { /* bookkeeping only */ } }
       }
       if (issued) {
         this._attemptGuard?.attach?.(peerId, k, inc);                                     // correlate the token with THIS channel
         this._guardTokensHeld = (this._guardTokensHeld ?? 0) + 1;
-        return;                                                                           // token lives: bind / deadline / sweep
+        return 'held';                                                                    // token lives: bind / deadline / sweep
+      }
+      if (deferred) {
+        // Case 45 at the allocation boundary: the token is RELEASED (no
+        // attempt counted), the mark is untouched, and the caller keeps the
+        // candidate nominated for a later tick.
+        this._attemptGuard?.release?.(peerId, k);
+        this._dialDeferredAtIssue = (this._dialDeferredAtIssue ?? 0) + 1;
+        return 'deferred';
       }
       this._attemptGuard?.end(peerId, false, Date.now(), k);                              // cancel: nothing went out
-      return;
+      return 'failed';
     }
 
     // Non-binding transport: preserve prior vitality-based direct admit.
@@ -5084,6 +5148,7 @@ export class AxonaPeer extends DHT {
     syn.inertia  = this._domain.simEpoch;
     syn._addedBy = source;
     await this._addByVitality(syn);
+    return 'added';
   }
 
   /**

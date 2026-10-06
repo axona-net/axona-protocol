@@ -340,7 +340,7 @@ const J = (v) => JSON.stringify(v, (k, x) => (typeof x === 'bigint' ? x.toString
     const s = src.indexOf('async _considerCandidate('); const e = src.indexOf('\n  }\n', s);
     const body = src.slice(s, e);
     check('G _considerCandidate has no `end(peerId, opened)` in a finally', !/finally\s*\{[^}]*\.end\(peerId, opened\)/.test(body));
-    check('G the issued relay dial attaches the incarnation and returns with the token held', /if \(issued\) \{[\s\S]*?attach\?\.\(peerId, k, inc\);[\s\S]*?return;[^\n]*\n\s*\}/.test(body));
+    check('G the issued relay dial attaches the incarnation and returns with the token held', /if \(issued\) \{[\s\S]*?attach\?\.\(peerId, k, inc\);[\s\S]*?return 'held';[^\n]*\n\s*\}/.test(body));
     const gsrc = readFileSync(new URL('../src/dht/attemptGuard.js', import.meta.url), 'utf8');
     check('G guard.end ignores a non-live or stale token', /if \(!s \|\| !s\.inflight \|\| \(k !== undefined && k !== s\.k\)\)/.test(gsrc));
     const csrc = readFileSync(new URL('../src/transport/web/composite.js', import.meta.url), 'utf8');

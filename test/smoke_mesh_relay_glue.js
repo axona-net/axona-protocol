@@ -119,12 +119,15 @@ async function main() {
     for (let i = 0; i < 64; i++) tOn.mesh._peers.set('neg-' + i, { openedAt: 0 });
     check('pendingNegotiations() counts only never-opened (64, not 65)',
       tOn.mesh.pendingNegotiations() === 64);
-    // At the cap, a NEW relay connect to an unrelated peer is throttled (returns
-    // false BEFORE _initiateTo — so no RTCPeerConnection is needed in this unit
-    // env). This is the DoS bound: a flood of fabricated peerIds can't drive
-    // unbounded concurrent negotiations.
-    check('connectViaRelay throttled at the pending-negotiation cap',
-      tOn.connectViaRelay(otherHex) === false);
+    // At the cap, a NEW relay connect to an unrelated peer is throttled BEFORE
+    // _initiateTo — so no RTCPeerConnection is needed in this unit env. This is
+    // the DoS bound: a flood of fabricated peerIds can't drive unbounded
+    // concurrent negotiations. Row 12 (Hold-and-Fill v0.15, R12-2): the
+    // throttle answers `null` — CAPACITY refused, nothing started — which the
+    // kernel's dialer reads as "defer, consume nothing", distinct from `false`
+    // (not issued: disabled / own id / a channel already exists → a cancel).
+    check('connectViaRelay throttled at the pending-negotiation cap answers null (capacity refused, nothing started)',
+      tOn.connectViaRelay(otherHex) === null);
     // The watchdog reaps stuck never-opened entries; emulate one freeing → the
     // count drops below the ceiling, so a future connect would proceed again.
     tOn.mesh._peers.delete('neg-0');
