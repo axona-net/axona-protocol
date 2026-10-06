@@ -5113,11 +5113,13 @@ export class AxonaPeer extends DHT {
       // transport WITHOUT connectViaRelay (the sim, a legacy node transport)
       // the open IS the dial, so the consume stays here (row 10's fence).
       // R2-I1 (Aster 2e8142a5): under the fill, availability (cap − admitted
-      // − other attempts in flight) is read at the issue boundary, BEFORE
-      // the open — on the sim the open IS the dial — and again at the relay
-      // issue below, after the awaited open. No availability: the token is
-      // RELEASED (no count), nothing consumed, the caller keeps the
-      // nomination. Legacy (unarmed) paths are unchanged.
+      // − other attempts in flight) is read here, BEFORE the open and before
+      // anything is consumed, on both paths. On the RELAY path it is read
+      // again at the relay issue below, after the awaited open; where the
+      // open IS the dial there is no second read (Vega 7702b4de) — the
+      // consume has run and a failed open ends as a failure. No
+      // availability: the token is RELEASED (no count), nothing consumed,
+      // the caller keeps the nomination. Legacy (unarmed) paths unchanged.
       if (this._fillArmed() && this._fillAvailability(true) <= 0) {
         this._verifyProbes = Math.max(0, (this._verifyProbes ?? 1) - 1);
         this._attemptGuard?.release?.(peerId, k);
