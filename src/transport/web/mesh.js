@@ -412,6 +412,11 @@ export class MeshManager {
     return () => this._negotiationFailedListeners.delete(callback);
   }
 
+  /** Row 8: the incarnation token of the channel currently serving `peerId`,
+   *  or null. A dial site records it beside its guard token so a terminal
+   *  event from another incarnation of the same peer is told apart. */
+  incFor(peerId) { return this._peers.get(peerId)?.inc ?? null; }
+
   /**
    * v2.0.2 — Subscribe to per-frame ping/pong traffic on each peer
    * data channel.  Fires `callback(peerId, 'sent')` immediately after
@@ -1381,7 +1386,7 @@ export class MeshManager {
       // signal. 'retry' keeps the attempt alive and is excluded above by
       // notifyLost=false; dispose/reset are not failures.
       for (const cb of this._negotiationFailedListeners) {
-        try { cb(peerId, reason); }
+        try { cb(peerId, reason, state.inc ?? null); }   // row 8: the channel incarnation the event came from
         catch (err) {
           this._log('negotiation-failed-listener-threw', { peerId, err: err.message });
         }

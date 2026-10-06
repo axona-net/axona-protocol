@@ -68,6 +68,19 @@ const J = (v) => JSON.stringify(v, (k, x) => (typeof x === 'bigint' ? x.toString
     const k3 = g.begin(X, 3000);
     check('A sweep before the bound ends nothing', g.sweep(3040) === 0 && g.inflightOf(X));
     check('A sweep past the bound ends the attempt as a failure, once', g.sweep(3060) === 1 && !g.inflightOf(X) && g.attemptsOf(X) === 2 && g.staleEnded === 1 && g.sweep(3061) === 0 && k3 > k1);
+    // incarnation correlation (R8-2) and the fresh-record rule (R8-3) at the guard
+    const Z = 'ef'.repeat(33);
+    const k4 = g.begin(Z, 4000);
+    check('A attach records the dial\'s incarnation for the live token only', g.attach(Z, k4, 'inc-a') === true && g.attach(Z, k4 + 1, 'inc-b') === false);
+    check('A an end from another incarnation is ignored and counted', g.end(Z, false, 4001, undefined, 'inc-b') === false && g.inflightOf(Z) && (g.staleIncEnds ?? 0) === 1);
+    check('A an end with no incarnation (a transport that cannot say) acts by identity', g.end(Z, true, 4002) === true && !g.inflightOf(Z));
+    const k5 = g.begin(Z, 5000); g.attach(Z, k5, 'inc-c');
+    const fresh = new AttemptGuard({ maxAttempts: 3, baseMs: 100, refillWindowMs: 0 });
+    const k6 = fresh.begin(Z, 6000); fresh.end(Z, false, 6001, k6); const k7 = fresh.begin(Z, 6200);
+    check('A onFreshRecord while in flight: budget refilled (attempts 0), token kept (still in flight, allow false)', fresh.onFreshRecord(Z, 6300) === true && fresh.inflightOf(Z) && fresh.attemptsOf(Z) === 0 && fresh.allow(Z, 6300) === false && k7 > k6);
+    check('A the kept token still ends once', fresh.end(Z, false, 6400, k7) === true && !fresh.inflightOf(Z) && fresh.attemptsOf(Z) === 1);
+    check('A onFreshRecord with nothing in flight clears the entry as before', fresh.onFreshRecord(Z, 6500) === true && fresh.attemptsOf(Z) === 0 && fresh.allow(Z, 6500) === true);
+    g.end(Z, true, 5001, k5);
   }
 
   // ── Part B: the real kernel on a wrapped sim transport ──────────────
@@ -83,7 +96,7 @@ const J = (v) => JSON.stringify(v, (k, x) => (typeof x === 'bigint' ? x.toString
         if (prop === 'onPeerBound') return (h) => { ctl.boundCb = h; return target.onPeerBound(h); };
         if (prop === 'onNegotiationFailed') return (h) => { ctl.negCb = h; return () => { ctl.negCb = null; }; };
         if (prop === 'isConnected') return (x) => (ctl.connected == null ? target.isConnected(x) : ctl.connected);
-        if (prop === 'connectViaRelay') return (hex) => { ctl.relay.push(hex); return ctl.relayReturn; };
+        if (prop === 'connectViaRelay') return (hex) => { ctl.relay.push(hex); return ctl.relayReturn; };   // true | false | '<inc>' (row 8: the started negotiation's incarnation)
         if (prop === 'openConnection') return async (x) => (ctl.openOverride != null ? ctl.openOverride(x) : target.openConnection(x));
         const v = Reflect.get(target, prop, recv);
         return typeof v === 'function' ? v.bind(target) : v;
@@ -100,6 +113,7 @@ const J = (v) => JSON.stringify(v, (k, x) => (typeof x === 'bigint' ? x.toString
   {
     const { peer, node, big, ctl } = await wrappedPeer({ maxAttempts: 4, baseMs: 100, inflightMaxMs: 150 });
     const g = peer._attemptGuard;
+    const logs = []; const ol = peer._emitLog.bind(peer); peer._emitLog = (l, m, c) => { logs.push([m, c]); return ol(l, m, c); };
     ctl.openOverride = async () => false;   // every stranger: bound-only open says no binding
     check('B setup: guard installed, handlers captured', g instanceof AttemptGuard && typeof ctl.boundCb === 'function' && typeof ctl.negCb === 'function');
 
@@ -164,6 +178,64 @@ const J = (v) => JSON.stringify(v, (k, x) => (typeof x === 'bigint' ? x.toString
     check('B10 identity marked during the open: no relay dial, token RELEASED (not in flight, attempts 0, allow false only by the mark, not the guard)', ctl.relay.length === rb9 && !g.inflightOf(S9) && g.attemptsOf(S9) === 0 && (g.released ?? 0) >= 1 && (peer._dialIneligibleAfterOpen ?? 0) === 1, `relay=${ctl.relay.length - rb9} inflight=${g.inflightOf(S9)} attempts=${g.attemptsOf(S9)} released=${g.released}`);
     ctl.openOverride = async () => false;
 
+    // B11 (Aster a2c1d79f R8-1): a DUE exhausted mark must spend its window on a dial that goes out.
+    // Before: CONSUME ran before the awaited open, moved dueAt, and the post-await recheck refused the
+    // dial the mark had just permitted (released, no relay). Now CONSUME runs at the relay issue.
+    {
+      const S10 = stranger(big, 220);
+      const marks = new DeadPeers({ B: 0, A_max: 1, R_refill: 40 }); node._deadPeers = marks;
+      marks.fail(S10, 'prior-loss');                    // exhausted at once (A_max 1), refill due in 40 ms
+      await wait(60);
+      check('B11 setup: due exhausted mark, eligible', marks.eligible(S10) === true && marks.get(S10)?.attempts === 1);
+      const rb = ctl.relay.length;
+      await peer._considerCandidate(S10, 'triadic');
+      check('B11 due exhausted mark: the relay dial GOES OUT and the window is spent by it (token held, consumed)', ctl.relay.length === rb + 1 && g.inflightOf(S10) && marks.get(S10)?.token === 0 && (peer._dialIneligibleAfterOpen ?? 0) === 1, `relay=${ctl.relay.length - rb} inflight=${g.inflightOf(S10)} token=${marks.get(S10)?.token} ineligibleAfter=${peer._dialIneligibleAfterOpen}`);
+      ctl.negCb(S10, 'negotiation-timeout', null);     // close it out
+      node._deadPeers = new DeadPeers({ B: 100, A_max: 4, R_refill: 1000 });
+    }
+
+    // B12 (R8-2): correlation by channel incarnation. An old channel's terminal event after a NEWER dial
+    // to the same identity ends nothing and advances nothing.
+    {
+      const S11 = stranger(big, 221);
+      const marks = node._deadPeers;
+      const gm = g.inflightMaxMs; g.inflightMaxMs = 1;
+      ctl.relayReturn = 'inc-old';
+      await peer._considerCandidate(S11, 'triadic');
+      check('B12 setup: old dial held with its incarnation', g.inflightOf(S11) && g._state.get(S11.toString(16).padStart(66,'0').slice(2))?.inc === 'inc-old');
+      await wait(5); g.sweep();                        // the old dial's fail-safe deadline: attempts 1, backoff 100 ms
+      check('B12 sweep ended the old attempt (attempts 1)', !g.inflightOf(S11) && g.attemptsOf(S11) === 1);
+      await wait(120);
+      ctl.relayReturn = 'inc-new'; g.inflightMaxMs = gm;
+      await peer._considerCandidate(S11, 'triadic');
+      check('B12 newer dial held with the new incarnation', g.inflightOf(S11) && g.attemptsOf(S11) === 1);
+      const markBefore = marks.get(S11)?.attempts ?? 0; const stale0 = g.staleIncEnds ?? 0;
+      ctl.connected = false; ctl.negCb(S11, 'negotiation-timeout', 'inc-old');   // the OLD channel's deadline arrives late
+      check('B12 old-channel deadline: newer token still held, attempts unchanged, mark unchanged, stale-incarnation logged', g.inflightOf(S11) && g.attemptsOf(S11) === 1 && (marks.get(S11)?.attempts ?? 0) === markBefore && (g.staleIncEnds ?? 0) === stale0 + 1 && logs.some(([m]) => m === 'negotiation-failed-stale-incarnation'), `inflight=${g.inflightOf(S11)} attempts=${g.attemptsOf(S11)} stale=${g.staleIncEnds}`);
+      ctl.boundCb(S11, 'm', 'inc-old');                 // an old-channel bind: ignored too
+      check('B12 old-channel bind: ignored, newer token still held', g.inflightOf(S11));
+      ctl.negCb(S11, 'negotiation-timeout', 'inc-new');
+      check('B12 the newer channel\'s own deadline ends it once (attempts 2, mark written)', !g.inflightOf(S11) && g.attemptsOf(S11) === 2 && (marks.get(S11)?.attempts ?? 0) === markBefore + 1);
+      ctl.connected = null; ctl.relayReturn = true;
+    }
+
+    // B13 (R8-3): freshness refills the budget but does not end a live token.
+    {
+      const S12 = stranger(big, 222);
+      await peer._considerCandidate(S12, 'triadic');
+      check('B13 setup: held', g.inflightOf(S12));
+      const r1 = g.onFreshRecord(toHex(S12));
+      check('B13 onFreshRecord while held: token KEPT (in flight, allow false), refill counted', r1 === true && g.inflightOf(S12) && g.allow(S12) === false, `inflight=${g.inflightOf(S12)} allow=${g.allow(S12)}`);
+      ctl.connected = false; ctl.negCb(S12, 'negotiation-timeout', null);
+      check('B13 the deadline still ends it exactly once afterwards (attempts 1, backoff)', !g.inflightOf(S12) && g.attemptsOf(S12) === 1 && g.allow(S12) === false);
+      ctl.connected = null;
+      // interleave: dial → fresh record → bind
+      const S13 = stranger(big, 223);
+      await peer._considerCandidate(S13, 'triadic');
+      g.onFreshRecord(toHex(S13));
+      check('B13 fresh record then BIND: bind ends the kept token', g.inflightOf(S13) && (ctl.boundCb(S13, 'm', null), !g.inflightOf(S13) && g.attemptsOf(S13) === 0));
+    }
+
     // B7 _selfIntegrate: same discipline
     const S8 = stranger(big, 217);
     peer.findKClosest = async () => [S8];
@@ -191,7 +263,7 @@ const J = (v) => JSON.stringify(v, (k, x) => (typeof x === 'bigint' ? x.toString
     const s = src.indexOf('async _considerCandidate('); const e = src.indexOf('\n  }\n', s);
     const body = src.slice(s, e);
     check('G _considerCandidate has no `end(peerId, opened)` in a finally', !/finally\s*\{[^}]*\.end\(peerId, opened\)/.test(body));
-    check('G the issued relay dial returns with the token held', /if \(issued\) \{[^}]*return; \}/.test(body));
+    check('G the issued relay dial attaches the incarnation and returns with the token held', /if \(issued\) \{[\s\S]*?attach\?\.\(peerId, k, inc\);[\s\S]*?return;[^\n]*\n\s*\}/.test(body));
     const gsrc = readFileSync(new URL('../src/dht/attemptGuard.js', import.meta.url), 'utf8');
     check('G guard.end ignores a non-live or stale token', /if \(!s \|\| !s\.inflight \|\| \(k !== undefined && k !== s\.k\)\)/.test(gsrc));
   }

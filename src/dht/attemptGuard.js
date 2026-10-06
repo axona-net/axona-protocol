@@ -84,16 +84,33 @@ export class AttemptGuard {
    *  guard never dialed, a second deadline for one dial, or a stale
    *  completion after a newer attempt must not count a failure or clear a
    *  live attempt. Returns true when it acted. */
-  end(id, bound, t = Date.now(), k = undefined) {
+  end(id, bound, t = Date.now(), k = undefined, inc = undefined) {
     const key = identitySuffix(id);
     if (key === null) return false;
     const s = this._state.get(key);
     if (!s || !s.inflight || (k !== undefined && k !== s.k)) { this.ignoredEnds++; return false; }
-    s.inflight = false; s.k = 0;
+    // Row 8 (Aster a2c1d79f R8-2): a terminal event names the CHANNEL
+    // INCARNATION it came from. When the attempt recorded the incarnation of
+    // the negotiation it started (`attach`) and the event carries one, they
+    // must match: an old channel's deadline or bind after a newer dial to
+    // the same identity ends nothing and counts nothing.
+    if (inc != null && s.inc != null && inc !== s.inc) { this.ignoredEnds++; this.staleIncEnds = (this.staleIncEnds ?? 0) + 1; return false; }
+    s.inflight = false; s.k = 0; s.inc = null;
     if (bound) { this._state.delete(key); return true; }
     s.attempts++;
     if (s.attempts >= this.maxAttempts) { s.expired = true; return true; }
     s.nextAt = t + this.baseMs * Math.pow(this.factor, s.attempts - 1);
+    return true;
+  }
+
+  /** Record the channel incarnation the live attempt's dial started (row 8,
+   *  R8-2), so a terminal event from another incarnation is ignored. */
+  attach(id, k, inc) {
+    const key = identitySuffix(id);
+    if (key === null) return false;
+    const s = this._state.get(key);
+    if (!s || !s.inflight || s.k !== k) return false;
+    s.inc = (typeof inc === 'string' && inc.length) ? inc : null;
     return true;
   }
 
@@ -135,7 +152,14 @@ export class AttemptGuard {
     const last = this._lastRefillAt.get(key) ?? -Infinity;
     if (t - last < this.refillWindowMs) { this.coalesced++; return 'coalesced'; }
     this._lastRefillAt.set(key, t);
-    this._state.delete(key);                   // one fresh budget, re-eligible
+    // Row 8 (Aster a2c1d79f R8-3): freshness refills the BUDGET (attempts,
+    // expiry, backoff). It does not end an attempt: a live token keeps its
+    // in-flight state, k, incarnation and start time, so nothing becomes
+    // allowed by freshness while a dial is out; the dial's own bind,
+    // deadline or sweep ends it.
+    const s = this._state.get(key);
+    if (s && s.inflight) { s.attempts = 0; s.expired = false; s.nextAt = 0; }
+    else this._state.delete(key);              // one fresh budget, re-eligible
     this.refills++;
     return true;
   }

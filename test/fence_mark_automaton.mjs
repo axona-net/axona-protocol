@@ -336,7 +336,7 @@ async function makePeer(net, domain, lat, lng, opts = {}) {
     // C6: the real AxonaPeer.start wiring exists (static; labelled as such)
     const { readFileSync } = await import('node:fs');
     const src = readFileSync(new URL('../src/dht/AxonaPeer.js', import.meta.url), 'utf8');
-    check('C6 (static) AxonaPeer.start subscribes transport.onNegotiationFailed and checks isConnected before marking', /transport\.onNegotiationFailed\(\(peerBig, reason\)/.test(src) && /negotiation-failed-beside-live/.test(src) && /negotiation-failed-marked/.test(src));
+    check('C6 (static) AxonaPeer.start subscribes transport.onNegotiationFailed and checks isConnected before marking', /transport\.onNegotiationFailed\(\(peerBig, reason(, inc)?\)/.test(src) && /negotiation-failed-beside-live/.test(src) && /negotiation-failed-marked/.test(src));
   }
 
   console.log(`\n${passed} passed, ${failed} failed`);
