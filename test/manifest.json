@@ -1067,6 +1067,11 @@
       "note": "The ChannelLedger calls the host timers as free functions, never as its own methods: in a browser a native setTimeout stored on an instance property and called as a method runs with `this` = the ledger and Chrome throws Illegal invocation inside mesh._retire before the peer is deleted (David, 2026-10-08, axona.chat 0.81.0). The fence injects browser-strict timers that throw on a foreign `this`, through the ledger alone and through a real mesh._retire, plus a static check on the assignment."
     },
     {
+      "file": "fence_bind_deadline_all_channels.mjs",
+      "class": "default",
+      "note": "4.107.2: an open mesh channel whose peer never completes the handshake is retired at a bind deadline on EVERY channel (MeshManager bindDeadlineMs, default 30 s, 0 = off; webTransport meshBindDeadlineMs), not only a provisional one. ledgerBind stamps boundAt and clears the timer. Drives the real MeshManager with a fake RTCPeerConnection in both roles: unbound → bind-timeout + teardown + counted; bound → survives; 0 → off; late bind → no-op. Written from east's door on 2026-10-08 (sixteen 4.84.0 sockets that ping and never hello; newcomers bound one of eight)."
+    },
+    {
       "file": "fence_duty_gate.mjs",
       "class": "default",
       "note": "Hold-and-Fill v0.7 (axona-docs 95c2ff4) row 4: the duty gate. AxonaPeer.mayRetire(id) reads AxonaManager.obligationsOf(hex): installed roles (upstream, principal, replica, seated subscriber, handoff party in flight) and QUEUED ingest dependencies (a REPLICATE waiting in repairPlane's ingest queue pins its principal from enqueue through the end of fn(); REPLAY_UP declares none; an overflow drop pins nothing; every _ingestEnqueue caller declares). Consulted by the admission gate's grace close (blocked \u2192 refuse-grace-blocked, channel kept, timer re-armed), its overflow close and its swap victim (swap-blocked). Not by involuntary loss, stop() or leave(). Fails closed when the reader throws. With mayRetire or its call sites removed, parts 4 and 5 fail."
