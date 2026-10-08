@@ -298,6 +298,29 @@ const X = 0xabc1n, Y = 0xabc2n;
     check('J7 handler replay after the switch fires once for the identity and changes no route', late.length === 1 && late[0] === X && outer.routeOf(X)?.sub === inner && inner.routeOf(X)?.sub === innerMesh);
     door.die(X); innerBridge.die(X);
     check('J8 both bootstrap deaths are swallowed at their level', outer.routeOf(X)?.sub === inner && inner.routeOf(X)?.sub === innerMesh);
+    // Aster 88f4c2f7: the inner switch fired no bind upward, so the outer's
+    // admitted token for the child must FOLLOW the child's route change, and
+    // the child's death must carry that token so the outer reads it as the
+    // admitted route's death — not a stale one.
+    check('J9 the outer\'s admitted token for the child follows the inner switch (inner mesh token, not the inner socket\'s)', outer.routeOf(X)?.token === 'm-9' && (outer.routeStats.tokenFollowed ?? 0) >= 1);
+    const outerDied = []; outer.onPeerDied((n, r, tok) => outerDied.push({ n, r, tok }));
+    for (const h of innerMesh.diedH) h(X, 'pc-closed', 'm-0');       // an inner STALE death (older token)
+    check('J10 an inner stale-token death is swallowed at the inner level and never reaches the outer', outerDied.length === 0 && inner.routeOf(X)?.sub === innerMesh && outer.routeOf(X)?.sub === inner);
+    innerMesh.die(X, 'pc-closed');                                     // the admitted inner route dies
+    check('J11 the inner mesh death kills the identity at BOTH levels, carrying the inner token upward', outerDied.length === 1 && outerDied[0].tok === 'm-9' && inner.routeOf(X) === null && outer.routeOf(X) === null);
+  }
+  {
+    // Three levels: a route change announced by the grandchild reaches the grandparent.
+    const g = new CompositeTransport({ localNodeId: 1n, log: () => {} });
+    const p = new CompositeTransport({ localNodeId: 1n, log: () => {} });
+    const c = new CompositeTransport({ localNodeId: 1n, log: () => {} });
+    const cb = new Sub({ name: 'c-bridge', bootstrap: true }); const cm = new Sub({ name: 'c-mesh' });
+    c.addSubtransport(cb); c.addSubtransport(cm); p.addSubtransport(c); g.addSubtransport(p);
+    const gDied = []; g.onPeerBound(() => true); g.onPeerDied((n, r, tok) => gDied.push(tok));
+    cb.bind(X, 'bridge'); cm.bind(X, 'm-3');
+    check('J12 three levels: the grandparent\'s admitted token follows the grandchild\'s switch', g.routeOf(X)?.token === 'm-3' && p.routeOf(X)?.token === 'm-3');
+    cm.die(X, 'pc-closed');
+    check('J12b and its death reaches the grandparent with that token', gDied.length === 1 && gDied[0] === 'm-3' && g.routeOf(X) === null);
   }
 
   console.log(`\nfence_route_token: ${passed} passed, ${failed} failed`);
