@@ -322,6 +322,54 @@ const X = 0xabc1n, Y = 0xabc2n;
     cm.die(X, 'pc-closed');
     check('J12b and its death reaches the grandparent with that token', gDied.length === 1 && gDied[0] === 'm-3' && g.routeOf(X) === null);
   }
+  {
+    // Aster b4d4516c: RE-ENTRANT route change. A listener registered on the
+    // child BEFORE the child joins its parent forces, during the notification
+    // for token A, a same-sub replacement to token B. The parent must end on
+    // B, B's death must kill, and A's stale death must be swallowed.
+    const parent = new CompositeTransport({ localNodeId: 1n, log: () => {} });
+    const child = new CompositeTransport({ localNodeId: 1n, log: () => {} });
+    const cb = new Sub({ name: 'c-bridge', bootstrap: true }); const cm = new Sub({ name: 'c-mesh' });
+    child.addSubtransport(cb); child.addSubtransport(cm);
+    let forced = false;
+    child.onRouteChanged((n, tok) => {                 // registered BEFORE the parent subscribes
+      if (tok === 'A' && !forced) { forced = true; cm.bind(X, 'B'); }   // same-sub replacement mid-notification
+    });
+    parent.addSubtransport(child);
+    const policyCalls = []; parent.setBindPolicy((n, sub, tok) => { policyCalls.push(tok); return true; });
+    const pBound = []; parent.onPeerBound((n) => { pBound.push(n); return true; });
+    const pDied = []; parent.onPeerDied((n, r, tok) => pDied.push(tok));
+    cb.bind(X, 'bridge');                             // admitted via the bootstrap sub (policy consulted once)
+    cm.bind(X, 'A');                                  // switch → notification A → forced replacement to B inside it
+    check('J13 re-entrant route change: the parent ends on the child\'s CURRENT token (B), not the notified A', parent.routeOf(X)?.token === 'B' && child.routeOf(X)?.token === 'B' && cm.channelIdFor(X) === 'B');
+    check('J13b route-only changes ran no admission policy and fired no kernel bind (one of each, from the socket admission)', policyCalls.length === 1 && pBound.length === 1);
+    for (const h of cm.diedH) h(X, 'pc-closed', 'A');  // A's stale death
+    check('J13c A\'s stale death is swallowed at the child and never reaches the parent', pDied.length === 0 && parent.routeOf(X)?.token === 'B');
+    cm.die(X, 'pc-closed');                            // B's death (current token)
+    check('J13d B\'s death kills the identity at both levels, carrying B', pDied.length === 1 && pDied[0] === 'B' && parent.routeOf(X) === null && child.routeOf(X) === null);
+  }
+  {
+    // Three levels: same-child replacement, stale death swallowed, current death kills — positive controls.
+    const g = new CompositeTransport({ localNodeId: 1n, log: () => {} });
+    const p = new CompositeTransport({ localNodeId: 1n, log: () => {} });
+    const c = new CompositeTransport({ localNodeId: 1n, log: () => {} });
+    const cb = new Sub({ name: 'c-bridge', bootstrap: true }); const cm = new Sub({ name: 'c-mesh' });
+    c.addSubtransport(cb); c.addSubtransport(cm); p.addSubtransport(c); g.addSubtransport(p);
+    const gPolicy = []; g.setBindPolicy((n, s, tok) => { gPolicy.push(tok); return true; });
+    const gBound = []; g.onPeerBound((n) => { gBound.push(n); return true; });
+    const gDied = []; g.onPeerDied((n, r, tok) => gDied.push(tok));
+    cb.bind(X, 'bridge'); cm.bind(X, 'm-1'); cm.bind(X, 'm-2');       // switch, then a same-child replacement
+    check('J14 three levels: grandparent and parent follow the grandchild\'s replacement to m-2', g.routeOf(X)?.token === 'm-2' && p.routeOf(X)?.token === 'm-2' && c.routeOf(X)?.token === 'm-2');
+    check('J14b the switch and the replacement ran no admission policy and no kernel bind at the grandparent beyond the socket admission', gPolicy.length === 1 && gBound.length === 1);
+    for (const h of cm.diedH) h(X, 'pc-closed', 'm-1');                // stale
+    check('J14c the stale m-1 death is swallowed before the grandparent', gDied.length === 0 && g.routeOf(X)?.token === 'm-2');
+    cm.die(X, 'pc-closed');                                            // current
+    check('J14d the current m-2 death kills at all three levels with its token', gDied.length === 1 && gDied[0] === 'm-2' && g.routeOf(X) === null && p.routeOf(X) === null && c.routeOf(X) === null);
+    // null route-change: a notification for a child whose route is gone changes nothing
+    const before = JSON.stringify(g.routeStats);
+    c._emitRouteChanged(X, null);
+    check('J15 a route-change notification for a child with no current route changes nothing at the parent', JSON.stringify(p.routeStats) !== undefined && p.routeOf(X) === null && JSON.stringify(g.routeStats) === before);
+  }
 
   console.log(`\nfence_route_token: ${passed} passed, ${failed} failed`);
   process.exit(failed ? 1 : 0);

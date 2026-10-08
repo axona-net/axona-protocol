@@ -291,14 +291,26 @@ export class CompositeTransport extends Transport {
     }
   }
 
-  /** A child composite's route for `nodeId` changed to `token`: if that child is this identity's admitted route here, follow it. */
-  _onSubRouteChanged(t, nodeId, token) {
+  /**
+   * A child composite announced a route change for `nodeId`. If that child is
+   * this identity's admitted route here, follow the child's CURRENT token —
+   * never the notified value (Aster b4d4516c): under the synchronous listener
+   * API a listener registered on the child earlier than this parent can,
+   * during the notification for token A, cause a same-sub replacement to B
+   * whose nested notification already moved this parent to B; when A's loop
+   * resumes, copying A would write it over B. Re-reading the child's route
+   * table resolves every ordering to the child's present state. A child whose
+   * current token is null (route gone) changes nothing; its death settles it.
+   */
+  _onSubRouteChanged(t, nodeId, _notified) {
     const rec = this._routes.get(nodeId);
     if (!rec?.admitted || rec.admitted.sub !== t) return;
-    if (rec.admitted.token !== token) {
-      rec.admitted.token = token ?? null;
+    const cur = this._currentToken(t, nodeId);
+    if (cur == null) { this.routeStats.routeChangeNull = (this.routeStats.routeChangeNull ?? 0) + 1; return; }
+    if (rec.admitted.token !== cur) {
+      rec.admitted.token = cur;
       this.routeStats.tokenFollowed = (this.routeStats.tokenFollowed ?? 0) + 1;
-      this._emitRouteChanged(nodeId, token);   // and onward to our own parent, if any
+      this._emitRouteChanged(nodeId, cur);   // and onward to our own parent, if any
     }
   }
 
