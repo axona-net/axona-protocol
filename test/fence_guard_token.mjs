@@ -344,7 +344,9 @@ const J = (v) => JSON.stringify(v, (k, x) => (typeof x === 'bigint' ? x.toString
     const gsrc = readFileSync(new URL('../src/dht/attemptGuard.js', import.meta.url), 'utf8');
     check('G guard.end ignores a non-live or stale token', /if \(!s \|\| !s\.inflight \|\| \(k !== undefined && k !== s\.k\)\)/.test(gsrc));
     const csrc = readFileSync(new URL('../src/transport/web/composite.js', import.meta.url), 'utf8');
-    check('G composite.onPeerBound passes (nodeIdBig, meshId, inc) through and un-sees a rejected event', /handler\(nodeIdBig, meshId, inc\)/.test(csrc) && /if \(r === false\) seen\.delete\(nodeIdBig\)/.test(csrc));
+    // Socket-is-bootstrap v0.5: the per-handler dedup entry is `e`; the
+    // pass-through and the un-see are unchanged in substance.
+    check('G composite.onPeerBound passes (nodeIdBig, meshId, inc) through and un-sees a rejected event', /e\.handler\(nodeIdBig, meshId, inc\)/.test(csrc) && /if \(r === false\) e\.seen\.delete\(nodeIdBig\)/.test(csrc));
     const bs = src.indexOf('transport.onPeerBound((peerBig, _meshId, inc)'); const be = src.indexOf('\n      });\n', bs);
     const bind = src.slice(bs, be);
     check('G the bind handler returns false on a stale incarnation BEFORE the mark deletion and the seed', bind.indexOf('return false;') > 0 && bind.indexOf('return false;') < bind.indexOf('_deadPeers?.delete(peerBig)') && bind.indexOf('_deadPeers?.delete(peerBig)') < bind.indexOf('_seedSynaptomeWithSponsor(peerBig)'));

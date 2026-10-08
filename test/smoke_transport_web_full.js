@@ -257,9 +257,15 @@ async function testCompositeHandlerFanout() {
   check('onNotification registered on subA', subA._ntfHandlers.get('tick') === handler);
   check('onNotification registered on subB', subB._ntfHandlers.get('tick') === handler);
 
-  composite.onPeerDied(handler);
-  check('onPeerDied registered on subA', subA._diedHandlers.includes(handler));
-  check('onPeerDied registered on subB', subB._diedHandlers.includes(handler));
+  // Socket-is-bootstrap v0.5: the composite subscribes ONCE per sub (its own
+  // route-token dispatcher) at addSubtransport; the kernel's handler is an
+  // entry on the composite and is reached through that dispatcher.
+  const deaths = [];
+  composite.onPeerDied((id, reason) => deaths.push({ id, reason }));
+  check('onPeerDied: one composite dispatcher is registered on subA', subA._diedHandlers.length === 1);
+  check('onPeerDied: one composite dispatcher is registered on subB', subB._diedHandlers.length === 1);
+  for (const h of subA._diedHandlers) h(0x51n, 'test');
+  check('onPeerDied: a death on subA reaches the composite handler', deaths.length === 1 && deaths[0].id === 0x51n && deaths[0].reason === 'test');
 }
 
 async function testCompositeLateAdd() {
