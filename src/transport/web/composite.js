@@ -125,7 +125,7 @@ export class CompositeTransport extends Transport {
     for (const [type, h] of this._ntfHandlers) this._fanOutNotification(t, type, h);
     // Socket-is-bootstrap v0.5: ONE death and ONE bind subscription per sub,
     // both dispatched through the route-token rule (_onSubDeath / _onSubBound).
-    if (typeof t.onPeerDied === 'function') t.onPeerDied((id, reason) => this._onSubDeath(t, id, reason));
+    if (typeof t.onPeerDied === 'function') t.onPeerDied((id, reason, token) => this._onSubDeath(t, id, reason, token));
     if (typeof t.onPeerBound === 'function') t.onPeerBound((n, m, inc) => this._onSubBound(t, n, m, inc));
     if (typeof t.onNegotiationFailed === 'function') for (const e of (this._negotiationFailedHandlers ?? [])) e.unsubs.push(t.onNegotiationFailed(e.handler));
     for (const reg of this._peerListRegistrars ?? []) reg(t);
@@ -206,7 +206,13 @@ export class CompositeTransport extends Transport {
       this._pendingAdmit = { rec, sub: t, token: tok };
       return 'admit-new';
     }
-    if (rec.admitted.sub === t) return 'admit';            // (c): the sub's own duplicate rule, kernel handler as today
+    if (rec.admitted.sub === t) {                          // (c): the sub's own duplicate rule, kernel handler as today
+      // Step 0 proved `tok` is the sub's CURRENT token; the admitted token
+      // follows it, so a later death on an older token of this sub is stale
+      // and a death on this token is the route's.
+      if (tok != null && rec.admitted.token !== tok) rec.admitted.token = tok;
+      return 'admit';
+    }
     const oldBoot = rec.admitted.sub.isBootstrap === true;
     const newBoot = t.isBootstrap === true;
     if (oldBoot && !newBoot) {                              // (b) socket → mesh: the switch
@@ -239,25 +245,36 @@ export class CompositeTransport extends Transport {
     this._bindPolicy = fn;
   }
 
+  /**
+   * (a) ADMIT A NEW ROUTE: the ONE place a new admitted route is written, used
+   * by live delivery (_onSubBound) and by the existing-peer replay in
+   * onPeerBound alike (RT-1, Aster 3d778257: the replay must run the same
+   * admission policy as live delivery). Returns true when admitted.
+   */
+  _admitNew(t, nodeIdBig, pa) {
+    if (this._bindPolicy) {
+      let ok = true;
+      try { ok = this._bindPolicy(nodeIdBig, t, pa.token) !== false; }
+      catch (err) { ok = false; this._log('bind-policy-threw', { err: err?.message }); }
+      if (!ok) {
+        this.routeStats.policyRefused = (this.routeStats.policyRefused ?? 0) + 1;
+        this._log('bind-refused-by-policy', { nodeId: String(nodeIdBig), sub: t.constructor?.name, token: pa.token });
+        if (!pa.rec.admitted && pa.rec.superseded.size === 0) this._routes.delete(nodeIdBig);
+        return false;
+      }
+    }
+    pa.rec.admitted = { sub: t, token: pa.token };
+    this.routeStats.admitted++;
+    return true;
+  }
+
   _onSubBound(t, nodeIdBig, meshId, inc) {
     if (typeof nodeIdBig !== 'bigint') return;
     const token = typeof meshId === 'string' ? meshId : null;
     const verdict = this._routeBind(t, nodeIdBig, token);
     if (verdict === 'admit-new') {
       const pa = this._pendingAdmit; this._pendingAdmit = null;
-      if (this._bindPolicy) {
-        let ok = true;
-        try { ok = this._bindPolicy(nodeIdBig, t, pa.token) !== false; }
-        catch (err) { ok = false; this._log('bind-policy-threw', { err: err?.message }); }
-        if (!ok) {
-          this.routeStats.policyRefused = (this.routeStats.policyRefused ?? 0) + 1;
-          this._log('bind-refused-by-policy', { nodeId: String(nodeIdBig), sub: t.constructor?.name, token: pa.token });
-          if (!pa.rec.admitted && pa.rec.superseded.size === 0) this._routes.delete(nodeIdBig);
-          return false;
-        }
-      }
-      pa.rec.admitted = { sub: t, token: pa.token };
-      this.routeStats.admitted++;
+      if (!this._admitNew(t, nodeIdBig, pa)) return false;
     } else if (verdict !== 'admit') {
       return false;
     }
@@ -277,7 +294,17 @@ export class CompositeTransport extends Transport {
     if (r === false) e.seen.delete(nodeIdBig);
   }
 
-  _onSubDeath(t, id, reason) {
+  /**
+   * A death from sub `t` for identity `id`, optionally with the route token
+   * the sub reports it for (a connId, a meshId). Forwarded to the kernel ONLY
+   * when it is the ADMITTED route's death (RT-2, Aster 3d778257): a death from
+   * a superseded sub is swallowed however many times it arrives; a death from
+   * a sub that is not the identity's admitted route is swallowed; a death the
+   * admitted sub reports for an OLDER token than the admitted one is stale
+   * and swallowed. An identity this composite never saw bound forwards as
+   * before.
+   */
+  _onSubDeath(t, id, reason, token) {
     let big = null;
     if (typeof id === 'bigint') big = id;
     else if (typeof id === 'string' && /^[0-9a-f]{66}$/i.test(id)) { try { big = BigInt('0x' + id); } catch { big = null; } }
@@ -291,8 +318,24 @@ export class CompositeTransport extends Transport {
           this.routeStats.deathSwallowed++;
           this._log('death-superseded-swallowed', { nodeId: String(big), sub: t.constructor?.name, reason: reason ?? null });
         } else if (rec.admitted && rec.admitted.sub === t) {
-          rec.admitted = null;
-          this.routeStats.deathForwarded++;
+          if (token != null && rec.admitted.token != null && token !== rec.admitted.token) {
+            forward = false;
+            this.routeStats.deathStaleToken = (this.routeStats.deathStaleToken ?? 0) + 1;
+            this._log('death-stale-token-swallowed', { nodeId: String(big), sub: t.constructor?.name, token, admitted: rec.admitted.token });
+          } else {
+            rec.admitted = null;
+            this.routeStats.deathForwarded++;
+          }
+        } else if (rec.admitted && (t.isBootstrap === true || rec.admitted.sub.isBootstrap === true)) {
+          // Where a bootstrap route is involved, a sub that is neither the
+          // admitted route nor (any longer) a superseded one cannot kill the
+          // identity: a REPEATED death from a retired socket (RT-2). A
+          // composite with no bootstrap sub keeps its pre-rule behaviour here
+          // (every sub's death forwards), byte-identical for the sim and
+          // every legacy two-mesh composite.
+          forward = false;
+          this.routeStats.deathSwallowed++;
+          this._log('death-non-owner-swallowed', { nodeId: String(big), sub: t.constructor?.name, reason: reason ?? null });
         }
         if (!rec.admitted && rec.superseded.size === 0) this._routes.delete(big);
       }
@@ -473,9 +516,7 @@ export class CompositeTransport extends Transport {
         const verdict = this._routeBind(t, id, token ?? null);
         if (verdict === 'admit-new') {
           const pa = this._pendingAdmit; this._pendingAdmit = null;
-          pa.rec.admitted = { sub: t, token: pa.token };
-          this.routeStats.admitted++;
-          this._fireBound(entry, id, token ?? undefined, null);
+          if (this._admitNew(t, id, pa)) this._fireBound(entry, id, token ?? undefined, null);   // RT-1: same policy as live delivery
         } else if (verdict === 'admit') {
           this._fireBound(entry, id, token ?? undefined, null);
         }
@@ -618,16 +659,28 @@ export class CompositeTransport extends Transport {
   /** Forward-lookup the channel id (meshId or 'bridge') for a BigInt nodeId.
    *  @param {bigint} nodeId */
   channelIdFor(nodeId) {
-    for (const t of this._subs) {
-      if (typeof t.meshIdFor === 'function') {
-        const id = t.meshIdFor(nodeId);
-        if (id != null) return id;
-      }
-      if (typeof t.connIdFor === 'function') {
-        const id = t.connIdFor(nodeId);
-        if (id != null) return id;
-      }
+    // Socket-is-bootstrap v0.5 (Aster 3d778257): the ADMITTED route's token
+    // first; then the subs in order, skipping a sub superseded for this
+    // identity, and recursing into a nested composite's own channelIdFor.
+    const adm = this._routes.get(nodeId)?.admitted;
+    if (adm) {
+      const id = this._tokenFrom(adm.sub, nodeId);
+      if (id != null) return id;
     }
+    for (const t of this._subs) {
+      if (this._isSuperseded(t, nodeId)) continue;
+      const id = this._tokenFrom(t, nodeId);
+      if (id != null) return id;
+    }
+    return null;
+  }
+
+  _tokenFrom(t, nodeId) {
+    try {
+      if (typeof t.channelIdFor === 'function') { const id = t.channelIdFor(nodeId); if (id != null) return id; }
+      if (typeof t.meshIdFor === 'function')    { const id = t.meshIdFor(nodeId);    if (id != null) return id; }
+      if (typeof t.connIdFor === 'function')    { const id = t.connIdFor(nodeId);    if (id != null) return id; }
+    } catch { /* a sub that cannot answer names no token */ }
     return null;
   }
 }

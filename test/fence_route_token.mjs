@@ -253,6 +253,53 @@ const X = 0xabc1n, Y = 0xabc2n;
     check('I4 _gateDecision performs no insert, delete or close', !/_seedInsert|syn\.delete|closeConnection|_laneSeen\.set|_laneLastAt =/.test(gd));
   }
 
+  // ── J. Aster 3d778257 / 8fb51cdb: replay admission, repeated and stale deaths, nested tokens ──
+  {
+    // RT-1: the existing-peer REPLAY in onPeerBound runs the same bind policy as live delivery.
+    const { comp, door, bound } = mk();
+    comp.setBindPolicy((n) => n !== Y);
+    door.bind(Y, 'c1');                                   // refused live; the sub still reports Y bound (cleanup is the policy owner's)
+    const late = [];
+    comp.onPeerBound((n) => { late.push(n); return true; });
+    check('J1 RT-1: a handler registered after a refused bind does not admit the refused identity on replay', !late.includes(Y) && comp.routeOf(Y) === null && bound.length === 0 && comp.routeStats.policyRefused === 2);
+    comp.setBindPolicy(null);
+    door.bind(X, 'c2');
+    const late2 = []; comp.onPeerBound((n) => { late2.push(n); return true; });
+    check('J1b with no policy the replay admits a bound identity (as before)', late2.includes(X) && comp.routeOf(X)?.sub === door);
+  }
+  {
+    // RT-2: repeated death from a superseded sub; death from a non-owner; same-sub stale token.
+    const { comp, door, mesh, died } = mk();
+    door.bind(X, 'c7'); mesh.bind(X, 'm-1');              // switch: door superseded
+    door.die(X); door.die(X); door.die(X);                // the socket's death arrives three times
+    check('J2 RT-2: a REPEATED death from the superseded sub never reaches the kernel', died.length === 0 && comp.routeOf(X)?.sub === mesh && comp.routeStats.deathSwallowed >= 2);
+    // a same-sub stale death: the mesh reports a death for an OLDER token than the admitted one
+    for (const h of mesh.diedH) h(X, 'pc-closed', 'm-0');
+    check('J3 a death the admitted sub reports for an older token is swallowed', died.length === 0 && comp.routeOf(X)?.sub === mesh && comp.routeStats.deathStaleToken === 1);
+    for (const h of mesh.diedH) h(X, 'pc-closed', 'm-1');
+    check('J3b the admitted token\'s death kills the identity', died.length === 1 && comp.routeOf(X) === null);
+  }
+  {
+    // channelIdFor: the admitted route's token first, superseded subs skipped, nested composites recursed.
+    const outer = new CompositeTransport({ localNodeId: 1n, log: () => {} });
+    const door = new Sub({ name: 'door', bootstrap: true });
+    const inner = new CompositeTransport({ localNodeId: 1n, log: () => {} });
+    const innerBridge = new Sub({ name: 'inner-bridge', bootstrap: true });
+    const innerMesh = new Sub({ name: 'inner-mesh' });
+    inner.addSubtransport(innerBridge); inner.addSubtransport(innerMesh);
+    outer.addSubtransport(door); outer.addSubtransport(inner);
+    const outerBound = []; outer.onPeerBound((n) => { outerBound.push(n); return true; });
+    door.bind(X, 'c7');
+    innerBridge.bind(X, 'bridge'); innerMesh.bind(X, 'm-9');   // inside the nested composite: bridge sub then mesh → inner switch
+    check('J4 nested: the inner composite switched to its mesh; the outer switched door → inner', inner.routeOf(X)?.sub === innerMesh && outer.routeOf(X)?.sub === inner && outerBound.length === 1);
+    check('J5 channelIdFor names the admitted route\'s token through the nesting, not the superseded door\'s or the inner bridge\'s', outer.channelIdFor(X) === 'm-9' && inner.channelIdFor(X) === 'm-9');
+    check('J6 both retained bootstrap bindings are superseded and routing reaches the inner mesh', door.ownsPeer(X) && innerBridge.ownsPeer(X) && outer._routeFor(X) === inner && inner._routeFor(X) === innerMesh);
+    const late = []; outer.onPeerBound((n) => { late.push(n); return true; });
+    check('J7 handler replay after the switch fires once for the identity and changes no route', late.length === 1 && late[0] === X && outer.routeOf(X)?.sub === inner && inner.routeOf(X)?.sub === innerMesh);
+    door.die(X); innerBridge.die(X);
+    check('J8 both bootstrap deaths are swallowed at their level', outer.routeOf(X)?.sub === inner && inner.routeOf(X)?.sub === innerMesh);
+  }
+
   console.log(`\nfence_route_token: ${passed} passed, ${failed} failed`);
   process.exit(failed ? 1 : 0);
 })().catch((e) => { console.error(e); process.exit(1); });

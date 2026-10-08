@@ -415,7 +415,7 @@ export class BridgeTransport extends Transport {
   handleConnClosed() {
     const reported = this._bridgeNodeId ?? BRIDGE_CONN_ID;
     for (const h of this._peerDiedHandlers) {
-      try { h(reported, 'bridge-closed'); }
+      try { h(reported, 'bridge-closed', BRIDGE_CONN_ID); }   // socket-is-bootstrap v0.5: the route token rides along
       catch (err) { this._log('peer-died-handler-threw', { err: err.message }); }
     }
     for (const [id, p] of this._pending.entries()) {
