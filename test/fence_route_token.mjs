@@ -365,10 +365,28 @@ const X = 0xabc1n, Y = 0xabc2n;
     check('J14c the stale m-1 death is swallowed before the grandparent', gDied.length === 0 && g.routeOf(X)?.token === 'm-2');
     cm.die(X, 'pc-closed');                                            // current
     check('J14d the current m-2 death kills at all three levels with its token', gDied.length === 1 && gDied[0] === 'm-2' && g.routeOf(X) === null && p.routeOf(X) === null && c.routeOf(X) === null);
-    // null route-change: a notification for a child whose route is gone changes nothing
-    const before = JSON.stringify(g.routeStats);
-    c._emitRouteChanged(X, null);
-    check('J15 a route-change notification for a child with no current route changes nothing at the parent', JSON.stringify(p.routeStats) !== undefined && p.routeOf(X) === null && JSON.stringify(g.routeStats) === before);
+  }
+  {
+    // Aster 6a8d4ab9: the NULL branch, reached for real. The parent still
+    // holds the child as the identity's admitted route while the child's
+    // AUTHORITATIVE admission is gone and the child's sub still reports the
+    // identity bound (channelIdFor would fall back to that mapping; the
+    // route-change path must not).
+    const parent = new CompositeTransport({ localNodeId: 1n, log: () => {} });
+    const child = new CompositeTransport({ localNodeId: 1n, log: () => {} });
+    const cb = new Sub({ name: 'c-bridge', bootstrap: true }); const cm = new Sub({ name: 'c-mesh' });
+    child.addSubtransport(cb); child.addSubtransport(cm); parent.addSubtransport(child);
+    parent.onPeerBound(() => true);
+    const pDied = []; parent.onPeerDied((n, r, tok) => pDied.push(tok));
+    cb.bind(X, 'bridge'); cm.bind(X, 'm-9');                           // switch; parent follows to m-9
+    check('J15 setup: parent admitted to the child on m-9', parent.routeOf(X)?.token === 'm-9' && child.admittedTokenOf(X) === 'm-9');
+    await child.closeConnection(X);                                    // a voluntary close ends the child's admission; the stub sub keeps its mapping
+    check('J15a the child has no admitted route while its sub still maps the identity (the lookup would still answer)', child.admittedTokenOf(X) === null && cm.channelIdFor(X) === 'm-9' && child.channelIdFor(X) === 'm-9' && parent.routeOf(X)?.token === 'm-9');
+    const nullBefore = parent.routeStats.routeChangeNull ?? 0, followedBefore = parent.routeStats.tokenFollowed ?? 0;
+    child._emitRouteChanged(X, 'm-9');                                 // a notification arrives for a child with no authoritative admission
+    check('J15b the null branch is reached and changes nothing: counter +1, token unchanged, nothing followed', (parent.routeStats.routeChangeNull ?? 0) === nullBefore + 1 && (parent.routeStats.tokenFollowed ?? 0) === followedBefore && parent.routeOf(X)?.token === 'm-9');
+    cm.die(X, 'pc-closed');                                            // the terminal death settles it
+    check('J15c the terminal death clears the parent', pDied.length === 1 && parent.routeOf(X) === null);
   }
 
   console.log(`\nfence_route_token: ${passed} passed, ${failed} failed`);
