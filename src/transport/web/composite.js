@@ -302,10 +302,16 @@ export class CompositeTransport extends Transport {
    * table resolves every ordering to the child's present state. A child whose
    * current token is null (route gone) changes nothing; its death settles it.
    */
+  /** The identity's ADMITTED route token from this composite's route table, or null. No fallback to a sub's bound mapping (Aster 6a8d4ab9). */
+  admittedTokenOf(nodeId) { return this._routes.get(nodeId)?.admitted?.token ?? null; }
+
   _onSubRouteChanged(t, nodeId, _notified) {
     const rec = this._routes.get(nodeId);
     if (!rec?.admitted || rec.admitted.sub !== t) return;
-    const cur = this._currentToken(t, nodeId);
+    // Authoritative admission, not lookup: a child's channelIdFor falls back
+    // to a sub's bound mapping when the child has no admitted route, which is
+    // exactly the state (still bound, no longer admitted) this must not follow.
+    const cur = (typeof t.admittedTokenOf === 'function') ? t.admittedTokenOf(nodeId) : this._currentToken(t, nodeId);
     if (cur == null) { this.routeStats.routeChangeNull = (this.routeStats.routeChangeNull ?? 0) + 1; return; }
     if (rec.admitted.token !== cur) {
       rec.admitted.token = cur;
