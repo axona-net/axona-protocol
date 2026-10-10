@@ -44,7 +44,7 @@ function fakeState(over = {}) {
   };
 }
 
-function main() {
+async function main() {
   console.log('MeshManager onPeerLeft — bridge roster must not kill a live channel (#374)\n');
 
   // ── OPEN channel + peer-left → IGNORED, channel survives ────────────
@@ -72,6 +72,8 @@ function main() {
     mesh._peers.set(PEER, st);
     mesh.onPeerLeft(PEER);
     check(`state='${deadState}': peer-left retires the entry`, !mesh._peers.has(PEER));
+    // 4.108.0: the native close is deferred one macrotask (fence_retire_deferred_close).
+    await new Promise(r => setImmediate(r));
     check(`state='${deadState}': underlying pc/dc closed`,     st._closed === true);
   }
 

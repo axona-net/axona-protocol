@@ -1072,6 +1072,16 @@
       "note": "4.107.2: an open mesh channel whose peer never completes the handshake is retired at a bind deadline on EVERY channel (MeshManager bindDeadlineMs, default 30 s, 0 = off; webTransport meshBindDeadlineMs), not only a provisional one. ledgerBind stamps boundAt and clears the timer. Drives the real MeshManager with a fake RTCPeerConnection in both roles: unbound → bind-timeout + teardown + counted; bound → survives; 0 → off; late bind → no-op. Written from east's door on 2026-10-08 (sixteen 4.84.0 sockets that ping and never hello; newcomers bound one of eight)."
     },
     {
+      "file": "fence_retire_deferred_close.mjs",
+      "class": "default",
+      "note": "4.108.0: MeshManager._retire does its bookkeeping (teardown log, map delete, ledger CLOSING) synchronously and closes the native dc/pc on the NEXT MACROTASK, never on the stack that retired the channel; dispose() keeps the immediate close. Written from the 2026-10-09 Windows relay freeze: the hello arrives on a new channel, bindPeer dedups it against an older channel to the same identity, and the loser was closed inside its own data-channel callback (libdatachannel close-in-callback deadlock). Drives the real MeshManager with a fake RTCPeerConnection; the mutant (synchronous close) fails A1/A2/A5."
+    },
+    {
+      "file": "fence_turn_refresh_graduated.mjs",
+      "class": "default",
+      "note": "4.108.0: a GRADUATED node whose TURN credential is about to lapse re-dials for the credential ONLY — client-hello `intent: 'turn-refresh'`, an old bridge's peer-list ignored (no dial), the socket released by the node itself with 4200 once the welcome's credential is installed, graduated again with a new refresh scheduled; a graduate below the mesh floor still re-bootstraps in full (no intent, dials the list). Scripted fake bridge over a fake WebSocket; mutants (intent dropped / peer-list guard dropped / self-close dropped) each fail one or two checks."
+    },
+    {
       "file": "fence_duty_gate.mjs",
       "class": "default",
       "note": "Hold-and-Fill v0.7 (axona-docs 95c2ff4) row 4: the duty gate. AxonaPeer.mayRetire(id) reads AxonaManager.obligationsOf(hex): installed roles (upstream, principal, replica, seated subscriber, handoff party in flight) and QUEUED ingest dependencies (a REPLICATE waiting in repairPlane's ingest queue pins its principal from enqueue through the end of fn(); REPLAY_UP declares none; an overflow drop pins nothing; every _ingestEnqueue caller declares). Consulted by the admission gate's grace close (blocked \u2192 refuse-grace-blocked, channel kept, timer re-armed), its overflow close and its swap victim (swap-blocked). Not by involuntary loss, stop() or leave(). Fails closed when the reader throws. With mayRetire or its call sites removed, parts 4 and 5 fail."

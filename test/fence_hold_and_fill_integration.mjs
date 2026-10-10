@@ -211,6 +211,7 @@ globalThis.RTCPeerConnection = FakePC;
     const s0 = mesh.ledgerStats();
     check('B1 setup: OPEN, bound, chanAll 1, boundPeers 1', s0.byState.OPEN === 1 && s0.boundPeers === 1 && s0.all === 1 && t.ownsPeer(NID), J(s0));
     await t.closeConnection(NID);
+    await new Promise(r => setImmediate(r));   // 4.108.0: the native close is deferred one macrotask
     const s1 = mesh.ledgerStats();
     check('B1 after closeConnection: identity unbound (peer record gone) BEFORE the channel is', !t.ownsPeer(NID) && s1.boundPeers === 0);
     check('B1 channel CLOSING and still CHARGED: chanAll 1, pc.close() called once', s1.byState.CLOSING === 1 && s1.all === 1 && pc.closeCalls === 1, J(s1));
