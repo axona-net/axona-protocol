@@ -95,17 +95,22 @@ console.log('— incomingCouldAnswer is independent of what the probes did —')
   const self = mkSelf(stub);
   const got = await call(self, TARGET);
   const s = stats(self);
-  check('1. the incoming link wins the final answer', got === R(0x0010), `got ${got}`);
+  // R2 (Routed-Walk-Terminals v0.5): the free pass runs FIRST; when an incoming
+  // link is closer than self it answers and NO probe is sent. The answer is
+  // { first, via }.
+  check('1. the incoming link wins the final answer', got?.first === R(0x0010) && got?.via === null, `got ${JSON.stringify(got, (k, v) => typeof v === 'bigint' ? String(v) : v)}`);
   check('2. the CALL is recorded as answerable for free, though probes also found one',
         s.incomingCouldAnswerCalls === 1, `got ${s.incomingCouldAnswerCalls}`);
   check('3. and as having beaten the probes', s.incomingWonFinalCalls === 1,
         `got ${s.incomingWonFinalCalls}`);
-  check('4. the call still counts as answeredByProbe — that field is unchanged',
-        s.answeredByProbe === 1, `got ${s.answeredByProbe}`);
-  check('5. THE OLD READING: answeredByIncoming is 0 here, and that 0 must NOT '
-        + 'be read as "incoming could not have answered"',
-        s.answeredByIncoming === 0 && s.incomingCouldAnswerCalls === 1,
-        JSON.stringify({ old: s.answeredByIncoming, corrected: s.incomingCouldAnswerCalls }));
+  check('4. no probe was sent and the call is not answeredByProbe (R2: free pass first)',
+        s.answeredByProbe === 0 && s.probesEmitted === 0 && stub.sent.length === 0, `byProbe=${s.answeredByProbe} emitted=${s.probesEmitted}`);
+  // The old reading (answeredByIncoming 0 while incoming could have answered)
+  // is gone with the ordering: incoming now answers whenever it is closer, so
+  // answeredByIncoming and incomingCouldAnswerCalls agree.
+  check('5. answeredByIncoming and incomingCouldAnswerCalls agree (both 1)',
+        s.answeredByIncoming === 1 && s.incomingCouldAnswerCalls === 1,
+        JSON.stringify({ answered: s.answeredByIncoming, could: s.incomingCouldAnswerCalls }));
 }
 
 // ── 1b. LINKS and CALLS are different units ──────────────────────────
@@ -187,8 +192,11 @@ console.log('\n— topK counts calls kept, not replies discarded —');
         k[1].answered === 0 && k[2].answered === 0, JSON.stringify([k[1], k[2]]));
   check('13. K=4 KEEPS the call although it discards the rank-7 reply',
         k[4].answered === 1 && k[4].retained === 1, JSON.stringify(k[4]));
-  check('14. two closer replies, one call — the ratio the old figure used',
-        s.probesCloserThanMe === 2 && s.callsWithAnyCloser === 1,
+  // R2 (Routed-Walk-Terminals v0.5): the round locks on the FIRST closer reply
+  // (rank 2 here) and stops counting, so a call now records at most one closer
+  // reply. The old ratio (replies / calls) is 1 by construction from here on.
+  check('14. one closer reply counted per call — the round locked at rank 2',
+        s.probesCloserThanMe === 1 && s.callsWithAnyCloser === 1,
         JSON.stringify({ replies: s.probesCloserThanMe, calls: s.callsWithAnyCloser }));
 }
 

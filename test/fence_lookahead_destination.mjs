@@ -104,7 +104,8 @@ console.log('\n— the genuine local minimum still probes (this is what lookahea
   const NEAR2HOP = (0x89n << 248n) | 0xf001n;      // 2-hop node very close to FAR
   const stub = mkNode(SELF, PEERS, { reply: (p) => (p === PEERS[1] ? { peerId: NEAR2HOP } : null) });
   const got = await call(stub, FAR);
-  check('6. returns the FIRST HOP, not the 2-hop node', got === PEERS[1], `got ${got}`);
+  // R2 (v0.5): the answer is { first, via } — the adjacent first hop and the two-hop node it named.
+  check('6. returns the FIRST HOP, not the 2-hop node', got?.first === PEERS[1] && got?.via === NEAR2HOP, `got ${JSON.stringify(got, (k, v) => typeof v === 'bigint' ? String(v) : v)}`);
 }
 {
   // A terminal answer must not be scored.
@@ -117,8 +118,9 @@ console.log('\n— the genuine local minimum still probes (this is what lookahea
   const FAR  = (0x89n << 248n) | 0xf000n;
   const BACK = (0x89n << 248n) | 0xf00fn;   // closer to FAR than SELF is
   const stub = mkNode(SELF, [], { incoming: [BACK] });
+  // R2 (v0.5): the free pass runs FIRST and answers with { first: BACK, via: null }.
   check('8. incomingSynapses still supply a next hop when closer',
-    await call(stub, FAR) === BACK);
+    (await call(stub, FAR))?.first === BACK);
 }
 
 console.log(`\nResult: ${passed} passed, ${failed} failed`);

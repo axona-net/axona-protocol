@@ -83,9 +83,14 @@ console.log('— rank is by distance, not by the order peers happen to sit in �
   // Every reply here names a node closer than SELF (all are nearer TARGET),
   // so each rank should show one closer reply — which also proves the reply was
   // attributed to the RIGHT rank rather than to its array position.
-  check('4. the closest peer scores in rank 0, not in rank 3',
-        byRank['0']?.closer === 1 && byRank['0']?.rate === 1,
-        JSON.stringify(byRank['0']));
+  // R2 (Routed-Walk-Terminals v0.5): the round LOCKS on the first closer reply
+  // and counts no later one. Every reply here names a closer node and the
+  // probes resolve in array order, so the FIRST array entry — rank 3 — is the
+  // one closer reply counted. That still proves attribution by distance rank
+  // rather than by array position: the count lands in rank 3, not rank 0.
+  check('4. the locked reply is attributed to its XOR rank (3), not to array position 0',
+        byRank['3']?.closer === 1 && byRank['0']?.closer === 0,
+        JSON.stringify({ r0: byRank['0'], r3: byRank['3'] }));
 }
 
 // ── 2. bucket boundaries ─────────────────────────────────────────────
