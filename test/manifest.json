@@ -1155,6 +1155,11 @@
       "file": "fence_route_path_memory.mjs",
       "class": "default",
       "note": "Routed-Walk-Terminals v0.5 R3 + R2 via, on real AxonaPeers over the sim transport: route_msg carries `path` and no hop forwards onto it (the two-node ping-pong that ran to MAX_HOPS ends terminal in 2 hops); the lookahead reply's two-hop node travels as `via` and the receiving hop honours it when connected and off-path (viaHonoured) or counts viaUnavailable. 3 cases, 10 checks; mutant: delete the exclude.has() lines in the route_msg handler → case 1 runs to hops 39 exhausted."
+    },
+    {
+      "file": "fence_serving_capable_terminal.mjs",
+      "class": "default",
+      "note": "Routed-Walk-Terminals v0.6 R4 (axona-docs 88d6871), on real AxonaPeers over the sim transport: a node is a routing terminal, and births a root, only if transport.servingCapable() says it can serve; an incapable node forwards to the bridge's node or its closest connected off-path peer, else stops no-capable-terminal; the gate sits on _becomeRoot (sub/pub/kill/metricson/handoff-heir) and promote(); the capability test runs before the terminal verify; a transport with no predicate is the named exception (treated capable, logged once, counted). 7 cases; mutants: delete the incapable branch in route_msg (case 1 ends at the incapable node), delete the _becomeRoot gate (case 3 births roots)."
     }
   ]
 }
