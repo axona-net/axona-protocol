@@ -1160,6 +1160,11 @@
       "file": "fence_serving_capable_terminal.mjs",
       "class": "default",
       "note": "Routed-Walk-Terminals v0.6 R4 (axona-docs 88d6871), on real AxonaPeers over the sim transport: a node is a routing terminal, and births a root, only if transport.servingCapable() says it can serve; an incapable node forwards to the bridge's node or its closest connected off-path peer, else stops no-capable-terminal; the gate sits on _becomeRoot (sub/pub/kill/metricson/handoff-heir) and promote(); the capability test runs before the terminal verify; a transport with no predicate is the named exception (treated capable, logged once, counted). 7 cases; mutants: delete the incapable branch in route_msg (case 1 ends at the incapable node), delete the _becomeRoot gate (case 3 births roots)."
+    },
+    {
+      "file": "fence_mesh_rewarm_backoff.mjs",
+      "class": "default",
+      "note": "Routed-Walk-Terminals v0.6 R5 (axona-docs 88d6871), kernel half, on a bare AxonaManager with an injected clock: the mesh re-warm ask backs off — the gap doubles after every ask that found the mesh still starved (120, 240, 480 s …) up to MESH_REWARM_BACKOFF_MAX_MS 600 s — and resets to the cooldown on any bound channel or a mesh at the floor; inspectRewarm() surfaces asks and the live backoff. Mutant: delete the doubling → gaps read 60 s throughout."
     }
   ]
 }

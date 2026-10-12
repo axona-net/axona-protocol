@@ -74,8 +74,8 @@
       "rowType": "direct:axona-direct-notify"
     },
     {
-      "identity": "dht/AxonaPeer.js:4412|__tunneled_direct__|routed|peer._b6door",
-      "callSite": "dht/AxonaPeer.js:4412",
+      "identity": "dht/AxonaPeer.js:4415|__tunneled_direct__|routed|peer._b6door",
+      "callSite": "dht/AxonaPeer.js:4415",
       "primitive": "registerFrame",
       "receiver": "peer._b6door",
       "wire": "__tunneled_direct__",
