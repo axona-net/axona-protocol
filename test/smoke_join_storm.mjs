@@ -144,11 +144,17 @@ console.log('join-storm (I-11) — sender budget, receiver slicing, mesh re-warm
   ok('rewarm fires after MESH_REWARM_TICKS starved ticks', calls === 1);
   for (let i = 0; i < 4; i++) { clock.t += 5_000; await am.refreshTick(); }
   ok('cooldown suppresses immediate re-fire', calls === 1);
+  // R5 (Routed-Walk-Terminals v0.6, 4.111.0): the gap DOUBLES after an ask
+  // that found the mesh still starved. One cooldown is no longer enough; two
+  // cooldowns is. fence_mesh_rewarm_backoff carries the full ladder.
   clock.t += MESH_REWARM_COOLDOWN_MS + 1_000;
   for (let i = 0; i < MESH_REWARM_TICKS; i++) { await am.refreshTick(); clock.t += 5_000; }
-  ok('still-starved mesh re-fires after the cooldown', calls === 2);
+  ok('one cooldown no longer re-fires a still-starved mesh (R5 backoff)', calls === 1);
+  clock.t += MESH_REWARM_COOLDOWN_MS;
+  for (let i = 0; i < MESH_REWARM_TICKS; i++) { await am.refreshTick(); clock.t += 5_000; }
+  ok('still-starved mesh re-fires after the doubled gap', calls === 2);
   meshPeers = [NEWCOMER, REG | 0x300n, REG | 0x400n];
-  clock.t += MESH_REWARM_COOLDOWN_MS + 1_000;
+  clock.t += MESH_REWARM_COOLDOWN_MS * 4 + 1_000;
   for (let i = 0; i < MESH_REWARM_TICKS + 1; i++) { await am.refreshTick(); clock.t += 5_000; }
   ok('healthy mesh never triggers rewarm', calls === 2);
 }
