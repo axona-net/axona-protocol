@@ -1165,6 +1165,31 @@
       "file": "fence_mesh_rewarm_backoff.mjs",
       "class": "default",
       "note": "Routed-Walk-Terminals v0.6 R5 (axona-docs 88d6871), kernel half, on a bare AxonaManager with an injected clock: the mesh re-warm ask backs off — the gap doubles after every ask that found the mesh still starved (120, 240, 480 s …) up to MESH_REWARM_BACKOFF_MAX_MS 600 s — and resets to the cooldown on any bound channel or a mesh at the floor; inspectRewarm() surfaces asks and the live backoff. Mutant: delete the doubling → gaps read 60 s throughout."
+    },
+    {
+      "file": "fence_retention_policy.mjs",
+      "class": "default",
+      "note": "Perimeter v0.1 §2 / v0.2 §B,E / v0.3 §2 (Aster 388fda2d, 541a178f, fd1ff07b; design-accepted 2026-10-12): ONE retention policy re-derived at every ask on real AxonaPeers over sim — NEAR (kNear nearest non-stale), BAND (≤ sparseFloor in its distance band), SERVICE (the bridge node), DUTY (obligationsOf); SUSPECT (transport.isStale) drops NEAR only and closes nothing; protectedPeers() is the union and is what the transport's setObligedPeers reader returns (the mesh's degree-cap/make-room read it); a throwing obligations reader reads DUTY; gate kNear ≠ maintain kNear is refused at construction; health().perimeter. Mutants: protectedPeers → duties only (6 fails); delete the K assertion (8 fails); drop the stale exclusion (5 fails)."
+    },
+    {
+      "file": "fence_near_displacement.mjs",
+      "class": "default",
+      "note": "Perimeter v0.1 §6 / v0.3 §4,§8: at cap, a candidate STRICTLY CLOSER than the kNear-th nearest held is admitted by gate-swap with near:true, the victim the lowest-vitality unprotected edge (never near/band/service), the displaced near peer still held with near:false; a not-closer candidate in the dense band is refused no-swap under the margin as before; successively closer candidates each admitted with the kNear-th distance strictly falling; all-duty victims → swap-blocked with the duty named; all protected → no-swap-near, counted; a stale nearest sets the ceiling at the kNear-th NON-stale distance and is not what the swap closes. Mutant: nearImprove=false (1, 4 fail)."
+    },
+    {
+      "file": "fence_near_improve_dial.mjs",
+      "class": "default",
+      "note": "Perimeter v0.1 §5–§6: at cap the fill tick runs the near-improvement step — one bounded search, at most ONE dial, only for a candidate the gate predicts it admits by near displacement; the dial is covered (R2-I1's deficit deferral bypassed only for that prediction); real Y over sim is bound and admitted, a crafted entry the victim, still at cap, near-improve-dial/near-improve logged, counters moved; a second tick finds nothing; a not-closer candidate is never dialed at cap; the guard's backoff is respected; unarmed → inert. Mutant: delete the !_improveAdmits clause from the dial's first deficit check (1 fails)."
+    },
+    {
+      "file": "fence_band_discovery.mjs",
+      "class": "default",
+      "note": "Perimeter v0.1 §5 / v0.3 §F: one probe per tick toward the sparsest band INSIDE the held span (STRATA_GROUPS 4: clz264>>>2 capped at 3), target in that band, answers IN the band nominated as 'band' and others dropped, the same band skipped for four ticks, the other sparse band next; dial order alternates near-first on even ticks and band-first on odd (the transport's opens record it); at cap the step is not reached. Mutants: bandFirst always false (4 fails); delete the groupOf filter (2 fails)."
+    },
+    {
+      "file": "fence_close_class_matrix.mjs",
+      "class": "default",
+      "note": "Perimeter v0.2 §E / v0.3 §4: the close-class matrix — the mesh's degree-cap and make-room ask isProtected for every open candidate and never retire a protected peer; reset() and dispose() retire without asking; mayRetire is called at exactly three peer sites (refuse-grace, grace pick, swap victim); the transport's obliged-peers reader returns protectedPeers() not obligedPeers(); the gate's protection is the policy with the sponsor ranked in. Mutants: _degreeProtected always false (A fails); install obligedPeers() (B2 fails)."
     }
   ]
 }

@@ -170,11 +170,22 @@ const fillReal = (node) => fillToCap(node, 8);
 // band than synthetic group-0 fill — it would be legitimately swap-ADMITTED
 // (measured). Filling with ids in the COUNTERPART'S band makes the
 // candidate's own band the densest (candCount 8, margin needs 10) → refuse.
-const fillNear = (node, otherBig) => {
+// 4.112.0 (Perimeter v0.1 §6): a candidate STRICTLY CLOSER than the kNear-th
+// nearest held peer is admitted by near displacement, margin or no margin, so
+// a deterministic refusal must also hold a peer at distance 1 from self —
+// nothing can be closer than that, and the near rule never fires. The band
+// margin then decides, exactly as before. (That entry sits alone in the
+// nearest band, so it is band-protected and never the victim.)
+const holdNearest = (node, selfBig) => {
+  const e = selfBig ^ 1n;
+  node.synaptome.set(e, { peerId: e, weight: 0.9, stratum: 1 });
+};
+const fillNear = (node, otherBig, selfBig) => {
   for (let i = 1; i <= 8; i++) {
     const e = otherBig ^ BigInt(i * 2 + 1);
     node.synaptome.set(e, { peerId: e, weight: 0.9, stratum: 1 });
   }
+  if (selfBig !== undefined) holdNearest(node, selfBig);
 };
 
 // ── 7. lifecycle: stop()/leave() clear grace timers ──────────────────
@@ -182,14 +193,14 @@ const fillNear = (node, otherBig) => {
   const net = new SimNetwork();
   const domain = new AxonaDomain({ k: 20 });
   const a = await makeRealPeer(net, domain, 10, 10, { graceMs: 60000 });
-  fillReal(a.node);
+  fillReal(a.node); holdNearest(a.node, a.big);   // 4.112.0: see holdNearest
   await a.peer._seedSynaptomeWithSponsor(0x89_6000_0001n);
   check('7 pending before stop()', a.peer._gracePending.size === 1);
   await a.peer.stop();
   check('7 stop() drains grace map', a.peer._gracePending.size === 0);
 
   const b = await makeRealPeer(net, domain, 20, 20, { graceMs: 60000 });
-  fillReal(b.node);
+  fillReal(b.node); holdNearest(b.node, b.big);   // 4.112.0: see holdNearest
   await b.peer._seedSynaptomeWithSponsor(0x89_6000_0002n);
   check('7 pending before leave()', b.peer._gracePending.size === 1);
   await b.peer.leave({ timeoutMs: 100 });
@@ -204,7 +215,7 @@ const fillNear = (node, otherBig) => {
   // (a) both armed + rescued: channel survives the window on both ends.
   const A = await makeRealPeer(net, domain, 30, 30, { graceMs: 400 });
   const B = await makeRealPeer(net, domain, 31, 31, { graceMs: 400 });
-  fillNear(A.node, B.big); fillNear(B.node, A.big);
+  fillNear(A.node, B.big, A.big); fillNear(B.node, A.big, B.big);
   await A.transport.openConnection(B.hex);
   await wait(50);   // let both _fireBound admissions run
   const aDeferred = A.peer._gracePending.has(B.big);
@@ -224,7 +235,7 @@ const fillNear = (node, otherBig) => {
   //     late expiry fires against the closed channel without error.
   const C = await makeRealPeer(net, domain, 40, 40, { graceMs: 300 });
   const D = await makeRealPeer(net, domain, 41, 41, { graceMs: 0 });
-  fillNear(C.node, D.big); fillNear(D.node, C.big);
+  fillNear(C.node, D.big, C.big); fillNear(D.node, C.big, D.big);
   await C.transport.openConnection(D.hex);
   await wait(50);
   check('8b armed end deferred', C.peer._gracePending.has(D.big));
@@ -236,7 +247,7 @@ const fillNear = (node, otherBig) => {
   // (c) simultaneous expiry, no rescue: both close clean.
   const E = await makeRealPeer(net, domain, 50, 50, { graceMs: 200 });
   const F = await makeRealPeer(net, domain, 51, 51, { graceMs: 200 });
-  fillNear(E.node, F.big); fillNear(F.node, E.big);
+  fillNear(E.node, F.big, E.big); fillNear(F.node, E.big, F.big);
   await E.transport.openConnection(F.hex);
   await wait(50);
   await wait(450);  // both windows expire together
