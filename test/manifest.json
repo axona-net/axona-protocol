@@ -1187,6 +1187,11 @@
       "note": "Perimeter v0.1 §5 / v0.3 §F: one probe per tick toward the sparsest band INSIDE the held span (STRATA_GROUPS 4: clz264>>>2 capped at 3), target in that band, answers IN the band nominated as 'band' and others dropped, the same band skipped for four ticks, the other sparse band next; dial order alternates near-first on even ticks and band-first on odd (the transport's opens record it); at cap the step is not reached. Mutants: bandFirst always false (4 fails); delete the groupOf filter (2 fails)."
     },
     {
+      "file": "fence_root_obligation_deadline.mjs",
+      "class": "default",
+      "note": "4.113.0 (council 11a8c5d5): OBLIGATIONS.ROOT.deadline is THREE push periods (ROOT_FULL_DEADLINE_MS = 3 x ROOT_REPLICATE_FULL_MS), not the period itself. Until 4.112.0 deadline == period, so a root serviced ON SCHEDULE swept servicePressure 0 -> 1.0 every minute, read saturated (>= 0.6) for the last 24 s of each, soft-refused roles and HANDOFF, and the bridges' healthz reported degraded (prod 2026-10-13 east 0.874 / west 0.589). A: table ratio 3:1 as the renewal rows. B: a root with state driven through refreshTick at 5 s for 30 simulated minutes with a consuming cohort: 30 pushes, max gap 60 s, peak pressure 0.306, never saturated, overdue 0. C: ticks suspended: saturates at 108 s (push 48 s late), overdue past 180 s, one resumed tick discharges ROOT; the 186 s tick gap then reads as helloPressure for TICK_LAG_WINDOW ticks, correctly. D: worst on-schedule phase (65 s - 1 ms) reads 0.361; the old table read 1.08. Mutant: deadline back to ROOT_REPLICATE_FULL_MS -> 10 checks fail here + 3 in fence_service_pressure."
+    },
+    {
       "file": "fence_close_class_matrix.mjs",
       "class": "default",
       "note": "Perimeter v0.2 §E / v0.3 §4: the close-class matrix — the mesh's degree-cap and make-room ask isProtected for every open candidate and never retire a protected peer; reset() and dispose() retire without asking; mayRetire is called at exactly three peer sites (refuse-grace, grace pick, swap victim); the transport's obliged-peers reader returns protectedPeers() not obligedPeers(); the gate's protection is the policy with the sponsor ranked in. Mutants: _degreeProtected always false (A fails); install obligedPeers() (B2 fails)."

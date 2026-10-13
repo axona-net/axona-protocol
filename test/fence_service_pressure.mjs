@@ -33,7 +33,7 @@ import { AxonaManager } from '../src/pubsub/AxonaManager.js';
 import { makeRole } from '../src/pubsub/rootClaim.js';
 import {
   OBLIGATIONS, DROP_MS, SATURATION_PRESSURE, HELLO_DEADLINE_MS,
-  ROOT_REPLICATE_FULL_MS,
+  ROOT_REPLICATE_FULL_MS, ROOT_FULL_DEADLINE_MS,
 } from '../src/pubsub/constants.js';
 import { sealTestDht } from './lib/testCapability.mjs';
 
@@ -74,8 +74,16 @@ console.log('service pressure — the capacity metric can report its own failure
     ['ROOT', 'CHILD', 'BACKUP', 'HOLDER', 'APP_SUB'].every(k => k in OBLIGATIONS));
   ok('every row carries what / stamp / deadline / why',
     rows.every(([, v]) => v.what && v.stamp && Number.isFinite(v.deadline) && v.why));
-  ok('ROOT is measured against its OWN deadline, not DROP_MS',
-    OBLIGATIONS.ROOT.deadline === ROOT_REPLICATE_FULL_MS && OBLIGATIONS.ROOT.deadline !== DROP_MS,
+  // 4.113.0: ROOT's deadline is derived from ITS OWN cadence (three push
+  // periods), not from DROP_MS. It happens to equal DROP_MS today because both
+  // cadences are 60 s at 3:1; the row must still read the ROOT constant so the
+  // two can move apart. Until 4.112.0 the deadline WAS the period, which put a
+  // root serviced on schedule at pressure 1.0 every minute (council 11a8c5d5;
+  // fence_root_obligation_deadline).
+  ok('ROOT is measured against its OWN deadline (three push periods), not the period and not DROP_MS',
+    OBLIGATIONS.ROOT.deadline === ROOT_FULL_DEADLINE_MS
+      && ROOT_FULL_DEADLINE_MS === 3 * ROOT_REPLICATE_FULL_MS
+      && OBLIGATIONS.ROOT.deadline !== ROOT_REPLICATE_FULL_MS,
     `got ${OBLIGATIONS.ROOT.deadline}`);
   ok('renewal obligations are measured against DROP_MS (when the upstream evicts us)',
     ['CHILD', 'BACKUP', 'HOLDER', 'APP_SUB'].every(k => OBLIGATIONS[k].deadline === DROP_MS));
@@ -85,16 +93,21 @@ console.log('service pressure — the capacity metric can report its own failure
 
 // ── 2. DOMINATION: servicePressure must not be strictly dominated ──────────
 // The pre-D0 arithmetic: service needed SATURATION*DROP_MS of staleness while
-// hello needed SATURATION*HELLO_DEADLINE_MS + one tick. Now that ROOT is
-// measured against its own 60s deadline, the root obligation trips FIRST.
+// hello needed SATURATION*HELLO_DEADLINE_MS + one tick. D0 made ROOT a measured
+// obligation at all; 4.113.0 set its deadline to three push periods. What the
+// section pins now: the root obligation reaches SATURATION before a SECOND
+// push is missed (gap < 2 periods), so a root that misses one push is seen
+// while the miss is still one; and a push ON SCHEDULE never reaches it.
 {
   const serviceGapRoot = SATURATION_PRESSURE * OBLIGATIONS.ROOT.deadline;
   const helloGap = SATURATION_PRESSURE * HELLO_DEADLINE_MS + TICK;
-  const oldServiceGap = SATURATION_PRESSURE * DROP_MS;   // what it used to require
-  ok('root-replication pressure trips sooner than it did pre-D0',
-    serviceGapRoot < oldServiceGap, `${serviceGapRoot} vs ${oldServiceGap}`);
-  console.log(`     root obligation reaches ${SATURATION_PRESSURE} at ${serviceGapRoot}ms of debt`);
-  console.log(`     (pre-D0 the same signal needed ${oldServiceGap}ms; hello needs ${helloGap}ms)`);
+  ok('root-replication pressure saturates before a second push is missed',
+    serviceGapRoot > ROOT_REPLICATE_FULL_MS && serviceGapRoot < 2 * ROOT_REPLICATE_FULL_MS,
+    `${serviceGapRoot} vs period ${ROOT_REPLICATE_FULL_MS}`);
+  ok('a push on schedule plus one tick stays under SATURATION',
+    (ROOT_REPLICATE_FULL_MS + TICK) / OBLIGATIONS.ROOT.deadline < SATURATION_PRESSURE);
+  console.log(`     root obligation reaches ${SATURATION_PRESSURE} at ${serviceGapRoot}ms of debt (push ${serviceGapRoot - ROOT_REPLICATE_FULL_MS}ms late)`);
+  console.log(`     (hello needs ${helloGap}ms)`);
 }
 
 // ── 3. STARVATION IS VISIBLE, ADMISSION CHANGES, AND IT RECOVERS ───────────
@@ -117,11 +130,13 @@ console.log('service pressure — the capacity metric can report its own failure
   ok('an overdue root raises servicePressure above SATURATION',
     c.servicePressure >= SATURATION_PRESSURE, `got ${c.servicePressure}`);
   ok('and names WHICH obligation is worst', c.worstObligation === 'ROOT', String(c.worstObligation));
-  ok('and counts it overdue once past its own deadline',
-    clock.t - role.sync.lastFullAt > ROOT_REPLICATE_FULL_MS ? c.overdue >= 1 : true);
   ok('saturated() now reports true', am.saturated() === true);
   ok('ADMISSION CHANGES — a starving node refuses new pushed roles',
     am.admitPushedRole(REG | 0x9998n) === false);
+  ok('not yet overdue: saturation comes before the deadline', c.overdue === 0, `overdue=${c.overdue}`);
+  clock.t = role.sync.lastFullAt + OBLIGATIONS.ROOT.deadline + 1_000;
+  c = am.inspectCapacity();
+  ok('and counts it overdue once past its own deadline', c.overdue >= 1, `overdue=${c.overdue}`);
 
   // RECOVERY: discharge the obligation and the node must become admissible again.
   role.sync.lastFullAt = clock.t;
