@@ -220,6 +220,26 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     check('I4 on the web transport openConnection is BOUND-ONLY (no PeerConnection, so no allocation can start from these paths or from the route_msg lazy open)', /async openConnection\(nodeId\) \{\n    const meshId = this\._meshIdByNodeId\.get\(nodeId\);\n    if \(!meshId\) return false;/.test(readFileSync(new URL('../src/transport/web/webrtc.js', import.meta.url), 'utf8')));
     await X.peer.stop().catch(() => {});
   }
+  // ── K. gate OFF, pools armed: the seed is a legacy insert too (4.114.1) ──
+  {
+    const ctl = mkCtl(makePoolProfile({ M: 3, I: 3, H: 6, pPending: 2, cInbound: 2 }));
+    const X = await makePeer(net, domain, ctl, { admissionGate: null });
+    check('K setup: no gate, pools armed', !X.peer._gateCfg && X.peer._poolProfile() !== null);
+    const inc = X.big ^ (1n << 200n);
+    ctl.bound.add(inc); ctl.cls.set(inc, 'I');
+    X.peer._seedSynaptomeWithSponsor(inc);
+    check('K1 an accepted (I-class) channel offered to a gate-off table is reclassed to M before its entry lands; promoted counted', X.node.synaptome.has(inc) && ctl.cls.get(inc) === 'M' && X.peer._poolStats.promoted === 1 && X.peer.health().degree.I === 0, J({ cls: ctl.cls.get(inc), stats: X.peer._poolStats }));
+    const inc2 = X.big ^ (1n << 201n);
+    ctl.bound.add(inc2); ctl.cls.set(inc2, 'I'); ctl.reclassRefuse = true;
+    X.peer._seedSynaptomeWithSponsor(inc2);
+    check('K2 a refused reclass keeps the entry out of the table; the channel stays I, open, and counts in degree.I', !X.node.synaptome.has(inc2) && ctl.cls.get(inc2) === 'I' && ctl.closed.length === 0 && X.peer.health().degree.I === 1 && X.peer._poolStats.promotionDeficit === 1);
+    ctl.reclassRefuse = false;
+    const m = X.big ^ (1n << 202n);
+    ctl.bound.add(m); ctl.cls.set(m, 'M');
+    X.peer._seedSynaptomeWithSponsor(m);
+    check('K3 a managed (M-class) channel seats as before, no reclass asked', X.node.synaptome.has(m) && ctl.reclassCalls.filter((c) => c[0] === m).length === 0);
+    await X.peer.stop().catch(() => {});
+  }
   // ── H. unarmed: byte-identical grace path ────────────────────────────
   {
     const ctl = mkCtl(null);
