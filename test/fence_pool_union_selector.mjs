@@ -113,11 +113,15 @@ function craft(rec, dist) {
     const LS = X.peer.lookaheadStats?.() ?? X.peer._lookaheadStats;
     check('5b the census records it as answered by incoming', (LS?.answeredByIncoming ?? 0) >= 1);
 
-    // 5c. with the I peer excluded (on the path) the probes go to the usable M set only
+    // 5c. with the near I peer excluded (on the path) the probes go to the FULL usable union:
+    //     the usable M set plus every usable I peer that is not itself closer (Aster b583c31c P1),
+    //     never the suspect or dead I peers
+    const iFar = X.big ^ (1n << 261n);                     // an I peer farther than self from the target: not an answer, still a probe
+    ctl.bound.add(iFar); ctl.cls.set(iFar, 'I');
     ctl.sent.length = 0;
     await X.peer._findCloserInTwoHops(target, { exclude: new Set([iNear]) });
     const probed = new Set(ctl.sent.filter((s) => s.type === 'lookahead_probe').map((s) => s.peerId));
-    check('5c with the I peer on the path, the probe set is the usable M set (4), never the suspect or dead I peers', probed.size === 4 && [...probed].every((p) => X.node.synaptome.has(p)) && !probed.has(iStale) && !probed.has(iDead), J({ probed: probed.size }));
+    check('5c with the near I peer on the path, the probe set is the usable union: 4 M + the far I peer, never the suspect or dead I peers', probed.size === 5 && probed.has(iFar) && !probed.has(iStale) && !probed.has(iDead) && !probed.has(iNear), J({ probed: probed.size, hasFar: probed.has(iFar) }));
 
     // 6. the route_msg handler's greedy is the same iterator: read in source
     {

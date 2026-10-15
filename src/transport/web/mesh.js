@@ -1162,11 +1162,19 @@ export class MeshManager {
   /** The class the channel serving `meshId` was reserved in: 'M' | 'I' | null. */
   classOf(meshId) { return this._ledger ? this._ledger.classOf(meshId) : null; }
   /** G6: move the live channel serving `meshId` to class `cls`; the ledger's answer. */
-  reclass(meshId, cls) {
-    if (!this._ledger) return { ok: false, why: 'no-ledger', prev: null };
+  reclass(meshId, cls, { afterMeshId = null } = {}) {
+    if (!this._ledger) return { ok: false, why: 'no-ledger', prev: null, deferred: false };
     const t = this._ledger.tokenFor(meshId);
-    if (!t) return { ok: false, why: 'no-channel', prev: null };
-    const r = this._ledger.reclass(t, cls);
+    if (!t) return { ok: false, why: 'no-channel', prev: null, deferred: false };
+    // G6 capacity transfer: the channel being replaced may already be
+    // CLOSING (its token retired from the current map), so it is found
+    // across live records by meshId.
+    let after = null;
+    if (afterMeshId != null) {
+      after = this._ledger.tokenFor(afterMeshId);
+      if (!after) for (const c of this._ledger._chan.values()) if (c.meshId === afterMeshId) { after = c.t; break; }
+    }
+    const r = this._ledger.reclass(t, cls, { after });
     const st = this._peers.get(meshId);
     if (r.ok && st) st.cls = cls;
     return r;
@@ -1277,6 +1285,14 @@ export class MeshManager {
 
   /** Build a PC for either role and wire its common event handlers. */
   _attachPc(state) {
+    // ARMED ALLOCATION FAILS CLOSED (Aster b583c31c P1): with the pools
+    // armed no PeerConnection is built for a state that holds no
+    // reservation. The state is retired and nothing physical exists.
+    if (this._ledger?.armed && state.reservation == null) {
+      this._log('attach-unreserved-refused', { peerId: state.peerId, role: state.role });
+      this._retire(state.peerId, 'attach-unreserved', { notifyLost: false });
+      return;
+    }
     const pc = new RTCPeerConnection(this._iceConfig());
     state.pc = pc;
     state.inc = `${this._incRun}.${++this._incSeq}`;

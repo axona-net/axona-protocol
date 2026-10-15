@@ -1630,7 +1630,7 @@ export function webTransport({
   // G1/G6: the pool surfaces the kernel reads (null / absent when unarmed).
   composite.poolProfile = () => poolProfile;
   composite.classOf = (nodeId) => { try { return webrtc.classOf(nodeId); } catch { return null; } };
-  composite.reclass = (nodeId, cls) => { try { return webrtc.reclass(nodeId, cls); } catch (err) { return { ok: false, why: `threw:${err?.message}`, prev: null }; } };
+  composite.reclass = (nodeId, cls, opts) => { try { return webrtc.reclass(nodeId, cls, opts); } catch (err) { return { ok: false, why: `threw:${err?.message}`, prev: null, deferred: false }; } };
   // G5: the reason the far end refused our last offer to `nodeId`, read once.
   composite.lastRejectFor = (nodeId) => {
     try { const hex = (typeof nodeId === 'bigint') ? toHex(nodeId) : String(nodeId); return mesh.lastRejectFor(hex); } catch { return null; }

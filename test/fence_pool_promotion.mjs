@@ -55,16 +55,17 @@ async function makePeer(net, domain, ctl, opts = {}) {
       if (prop === 'isStale')     return (x) => ctl.stale.has(asBig(x));
       if (prop === 'poolProfile') return () => ctl.profile;
       if (prop === 'classOf')     return (x) => ctl.cls.get(asBig(x)) ?? null;
-      if (prop === 'reclass')     return (x, cls) => { ctl.reclassCalls.push([asBig(x), cls]); if (ctl.reclassRefuse) return { ok: false, why: 'pool-M', prev: 'I' }; const prev = ctl.cls.get(asBig(x)) ?? null; ctl.cls.set(asBig(x), cls); return { ok: true, why: null, prev }; };
+      if (prop === 'reclass')     return (x, cls, opts = {}) => { ctl.reclassCalls.push([asBig(x), cls, opts.after ?? null, X_tableHas(ctl, asBig(x))]); if (ctl.reclassRefuse) return { ok: false, why: 'pool-M', prev: 'I', deferred: false }; if (ctl.reclassDefer) return { ok: false, why: 'pool-M', prev: 'I', deferred: true }; const prev = ctl.cls.get(asBig(x)) ?? null; ctl.cls.set(asBig(x), cls); return { ok: true, why: null, prev, deferred: false }; };
       if (prop === 'boundPeers')  return () => [...target.boundPeers(), ...ctl.bound];
       if (prop === 'isConnected') return (x) => ctl.bound.has(asBig(x)) || ctl.conn.has(asBig(x)) || target.isConnected(x);
+      if (prop === 'openConnection') return async (x) => (ctl.bound.has(asBig(x)) ? true : target.openConnection(x));   // bound-only, as the web transport
       if (prop === 'closeConnection') return async (x) => { ctl.closed.push(asBig(x)); return target.closeConnection(x); };
       const v = Reflect.get(target, prop, recv);
       return typeof v === 'function' ? v.bind(target) : v;
     },
   });
   const node = new NeuronNode({ id: fromHex(id.id), lat: 40, lng: -74 });
-  node.transport = transport;
+  node.transport = transport; ctl.node = node;
   const peer = new AxonaPeer({ domain, node, nodeIdentity: id, transport, admissionGate: { kNear: 2, sparseFloor: 1, closeGraceMs: 20 }, ...opts });
   peer._requireAxonaManager('fence');
   await peer.start();
@@ -72,7 +73,9 @@ async function makePeer(net, domain, ctl, opts = {}) {
   const logs = []; const ol = peer._emitLog.bind(peer); peer._emitLog = (l, m, c) => { logs.push([m, c]); return ol(l, m, c); };
   return { peer, node, transport, big: fromHex(id.id), logs };
 }
-const mkCtl = (profile) => ({ profile, cls: new Map(), bound: new Set(), conn: new Set(), stale: new Set(), closed: [], reclassCalls: [], reclassRefuse: false });
+const mkCtl = (profile) => ({ profile, cls: new Map(), bound: new Set(), conn: new Set(), stale: new Set(), closed: [], reclassCalls: [], reclassRefuse: false, reclassDefer: false, node: null });
+/** Was `id` already in the table when reclass was asked? (records the commit/reclass ORDER) */
+const X_tableHas = (ctl, id) => !!ctl.node?.synaptome?.has(id);
 function craft(rec, dist, weight = 0.5) {
   const id = rec.big ^ dist;
   const syn = new Synapse({ peerId: id, latencyMs: 20, stratum: clz264(rec.big ^ id) });
@@ -180,6 +183,42 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     check('F2 with no class on any candidate the order is the pre-pool one: oldest open channel in the densest region', pick2?.id === 'm-old', J(pick2));
     const protectedI = cands.map((c) => (c.id === 'i-new' ? { ...c, isProtected: true } : c));
     check('F3 a protected (PROMOTION_PENDING or duty) I channel is never chosen', selectMeshRetire(protectedI, { now, minUptimeMs: 30_000 })?.id !== 'i-new');
+  }
+  // ── J. a lawful replacement at M full: commit first, then the capacity transfer (Aster b583c31c P2) ──
+  {
+    const ctl = mkCtl(makePoolProfile({ M: 3, I: 3, H: 6, pPending: 2, cInbound: 2 }));
+    const X = await makePeer(net, domain, ctl);
+    const held = [craft(X, 1n << 258n), craft(X, 1n << 259n), craft(X, 1n << 260n)];   // M full, no duties
+    for (const h of held) { ctl.conn.add(h); ctl.cls.set(h, 'M'); }
+    const inc = X.big ^ (1n << 200n);                      // strictly nearer than every held peer: a near displacement
+    ctl.bound.add(inc); ctl.cls.set(inc, 'I');
+    ctl.reclassDefer = true;                                // the ledger: M is full by the CLOSING victim → deferred
+    const ok = X.peer._promote(inc);
+    const call = ctl.reclassCalls[0];
+    check('J1 at M full with a lawful victim the COMMIT runs first (victim out of the table, its close issued) and the reclass is asked AFTER it, naming the victim', ok === true && X.node.synaptome.has(inc) && X.node.synaptome.size === 3 && ctl.closed.length === 1 && call && call[1] === 'M' && call[2] === ctl.closed[0] && call[3] === true, J({ ok, call, closed: ctl.closed }));
+    check('J2 a DEFERRED transfer counts as promoted-with-transfer-pending, not a deficit; the sponsor\'s class is still I until the victim\'s close is confirmed', X.peer._poolStats.promoted === 1 && X.peer._poolStats.transfersDeferred === 1 && X.peer._poolStats.promotionDeficit === 0 && ctl.cls.get(inc) === 'I' && X.logs.some(([m]) => m === 'promotion-transfer-deferred'));
+    await X.peer.stop().catch(() => {});
+  }
+  // ── I. the legacy table inserts (inventory A9) ───────────────────────
+  {
+    const ctl = mkCtl(makePoolProfile({ M: 3, I: 3, H: 6, pPending: 2, cInbound: 2 }));
+    const X = await makePeer(net, domain, ctl);
+    const inc = X.big ^ (1n << 200n);
+    ctl.bound.add(inc); ctl.cls.set(inc, 'I');
+    const synI = new Synapse({ peerId: inc, latencyMs: 20, stratum: clz264(X.big ^ inc) }); synI._addedBy = 'fence';
+    const ok = await X.peer._addByVitality(synI);
+    check('I1 _addByVitality on an I-class bound channel reclasses it to M before the table entry lands (promoted counted)', ok === true && X.node.synaptome.has(inc) && ctl.cls.get(inc) === 'M' && X.peer._poolStats.promoted === 1, J({ ok, cls: ctl.cls.get(inc) }));
+    const inc2 = X.big ^ (1n << 201n);
+    ctl.bound.add(inc2); ctl.cls.set(inc2, 'I'); ctl.reclassRefuse = true;
+    const synI2 = new Synapse({ peerId: inc2, latencyMs: 20, stratum: clz264(X.big ^ inc2) }); synI2._addedBy = 'fence';
+    const ok2 = await X.peer._addByVitality(synI2);
+    check('I2 a refused reclass keeps the entry OUT of the table (deficit counted), the channel stays I and open', ok2 === false && !X.node.synaptome.has(inc2) && ctl.cls.get(inc2) === 'I' && X.peer._poolStats.promotionDeficit === 1 && ctl.closed.length === 0);
+    const { readFileSync } = await import('node:fs');
+    const src = readFileSync(new URL('../src/dht/AxonaPeer.js', import.meta.url), 'utf8');
+    const e0 = src.indexOf('  async _evictAndReplace('); const eb = src.slice(e0, src.indexOf('\n  }\n', e0));
+    check('I3 _evictAndReplace asks the same guard after its open and before node.addSynapse', /_legacyInsertAllowed\(candidate\.id, 'evictReplace'\)/.test(eb) && eb.indexOf('_legacyInsertAllowed') < eb.indexOf('node.addSynapse(syn)'));
+    check('I4 on the web transport openConnection is BOUND-ONLY (no PeerConnection, so no allocation can start from these paths or from the route_msg lazy open)', /async openConnection\(nodeId\) \{\n    const meshId = this\._meshIdByNodeId\.get\(nodeId\);\n    if \(!meshId\) return false;/.test(readFileSync(new URL('../src/transport/web/webrtc.js', import.meta.url), 'utf8')));
+    await X.peer.stop().catch(() => {});
   }
   // ── H. unarmed: byte-identical grace path ────────────────────────────
   {

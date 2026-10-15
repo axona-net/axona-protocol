@@ -100,6 +100,28 @@ console.log('fence_pool_reservation: G1 — reserve before anything physical; on
   const recU = U.allocate('u1', 'c1', 'out', u1.token);
   check('A10 unarmed: no class on any record, no pool bound; the direction-only rows (pending here) refuse as 4.113.0 did', !U.armed && recU.cls === null && u1.ok && !u2.ok && u2.why === 'pending' && U.stats().pools === null && U.stats().byClass.none.charged === 1);
   check('A11 the defaults are unarmed', LEDGER_DEFAULTS.pools === null && new ChannelLedger().armed === false);
+
+  // Aster b583c31c P1: armed allocation FAILS CLOSED
+  const F = new ChannelLedger({ pools: makePoolProfile({ M: 2, I: 2, H: 4 }), enforce: true, closeEscalateMs: 0 });
+  const bare = F.allocate('x1', 'c1', 'out');
+  const stale = F.allocate('x2', 'c2', 'out', 'r-never-issued');
+  check('A12 armed: allocate with no reservation, or a stale one, records NOTHING (null, no charge, counted), never an unclassified charge', bare === null && stale === null && F.chanAll() === 0 && F.stats().allocUnreserved === 2 && F.stats().byClass.none.charged === 0);
+  const okTok = F.reserve({ cls: 'M', dir: 'out' }).token;
+  check('A12b and with a consumed reservation it records the class as before', F.allocate('x3', 'c3', 'out', okTok)?.cls === 'M');
+
+  // Aster b583c31c P2: the capacity transfer at a full class
+  const T = new ChannelLedger({ pools: makePoolProfile({ M: 1, I: 2, H: 3 }), enforce: true, closeEscalateMs: 0 });
+  T.allocate('v', 'cv', 'out', T.reserve({ cls: 'M', dir: 'out' }).token);     // the victim fills M
+  T.allocate('s', 'cs', 'in',  T.reserve({ cls: 'I', dir: 'in'  }).token);     // the sponsor, class I
+  T.closing('v', 'swap');                                                        // the victim's close is issued, charge retained
+  const tr1 = T.reclass('s', 'M', { after: 'v' });
+  check('A13 at M full by a CLOSING victim, reclass(after: victim) is DEFERRED: the sponsor stays I, nothing charged twice, the transfer pending', tr1.ok === false && tr1.deferred === true && T.record('s').cls === 'I' && T.chargedOf(CLS.M) === 1 && T.stats().reclassPending === 1 && T.pendingReclass('s')?.after === 'v', J(tr1));
+  const tr0 = T.reclass('s', 'M');
+  check('A13b the same reclass with NO victim named is refused outright (no transfer to wait for)', tr0.ok === false && tr0.deferred === false && tr0.why === 'pool-M');
+  T.gone('v');
+  check('A13c the victim\'s confirmed close APPLIES the transfer: the sponsor is M, M charged 1, pending 0, applied counted', T.record('s').cls === 'M' && T.chargedOf(CLS.M) === 1 && T.chargedOf(CLS.I) === 0 && T.stats().reclassPending === 0 && T.stats().reclassApplied === 1);
+  const tr2 = T.reclass('x-none', 'M', { after: 'v' });
+  check('A13d a transfer naming a channel already gone is refused, not deferred', tr2.ok === false && tr2.deferred === false);
 }
 
 // ── Part B: the real MeshManager ──────────────────────────────────────
@@ -164,6 +186,15 @@ globalThis.RTCPeerConnection = FakePC;
     check('B3b a dial that names class I is bounded by I (full): refused', !mesh._peers.has('d1'));
     await mesh._initiateTo('d2'); await tick();
     check('B3c a dial with no class named is M', mesh.classOf('d2') === 'M');
+    mesh.dispose();
+  }
+  // B5 (Aster b583c31c P1): under an armed ledger a state with no reservation builds NO PeerConnection
+  {
+    const { mesh } = mk(makePoolProfile({ M: 2, I: 2, H: 4 }));
+    FakePC.instances.length = 0;
+    const st = mesh._newPeerState('bare', 'offerer'); mesh._peers.set('bare', st);
+    mesh._attachPc(st);
+    check('B5 armed: _attachPc on a state holding no reservation builds no PC, retires the state, charges nothing', FakePC.instances.length === 0 && !mesh._peers.has('bare') && mesh.ledgerStats().all === 0);
     mesh.dispose();
   }
   // B4: unarmed mesh is byte-identical: no class, no reject frame, the 4.113.0 refusal rows

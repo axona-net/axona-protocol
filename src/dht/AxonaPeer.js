@@ -387,7 +387,7 @@ export class AxonaPeer extends DHT {
     // bound is dropped on the next read as a deficit. Counters surface in
     // health().degree.
     this._promotionPending = new Map();
-    this._poolStats = { promoted: 0, promotionDeficit: 0, promotionExpired: 0, incomingKept: 0, rejectsDeferred: 0 };
+    this._poolStats = { promoted: 0, promotionDeficit: 0, promotionExpired: 0, incomingKept: 0, rejectsDeferred: 0, transfersDeferred: 0, promotionInconsistent: 0 };
     this._attemptGuard = attemptGuard
       ? new AttemptGuard(typeof attemptGuard === 'object' ? attemptGuard : {})
       : null;
@@ -1816,18 +1816,48 @@ export class AxonaPeer extends DHT {
         this._emitLog?.('info', 'promotion-deficit', { peer: toHex(sponsor), why: d.why, duty: d.duty ?? null });
         return false;
       }
-      // The reclass is asked BEFORE the table commits, so a refused reclass
-      // leaves the table and the victim untouched.
-      let rc = { ok: true };
-      if (typeof t?.reclass === 'function') { try { rc = t.reclass(sponsor, 'M') ?? rc; } catch (err) { rc = { ok: false, why: `threw:${err?.message}` }; } }
-      if (rc.ok === false) {
-        this._poolStats.promotionDeficit++;
-        this._emitLog?.('info', 'promotion-deficit', { peer: toHex(sponsor), why: rc.why ?? 'reclass-refused' });
-        return false;
+      const ask = (opts) => { let rc = { ok: true, deferred: false }; if (typeof t?.reclass === 'function') { try { rc = t.reclass(sponsor, 'M', opts) ?? rc; } catch (err) { rc = { ok: false, deferred: false, why: `threw:${err?.message}` }; } } return rc; };
+      if (d.how !== 'gate-swap') {
+        // Room in M: the reclass is asked BEFORE the table commits, so a
+        // refused reclass leaves the table untouched.
+        const rc = ask({});
+        if (rc.ok === false) {
+          this._poolStats.promotionDeficit++;
+          this._emitLog?.('info', 'promotion-deficit', { peer: toHex(sponsor), why: rc.why ?? 'reclass-refused' });
+          return false;
+        }
+        const ok = this._gateCommit(sponsor, d);
+        if (ok) { this._poolStats.promoted++; this._emitLog?.('info', 'promoted', { peer: toHex(sponsor), how: d.how, victim: null }); }
+        return ok;
       }
+      // A LAWFUL REPLACEMENT at M full (Aster b583c31c P2): M is full BY the
+      // victim, so a reclass asked first can only refuse. The commit runs
+      // first — the victim leaves the table and its close is issued — and
+      // the reclass is asked as a CAPACITY TRANSFER naming the victim: the
+      // ledger moves the class now if M has room, or DEFERS the move to the
+      // victim's confirmed close and applies it there. Nothing is charged
+      // twice: the victim keeps its M charge until the transport confirms,
+      // and the sponsor stays charged as I until the transfer lands.
+      const victim = d.victimKey;
       const ok = this._gateCommit(sponsor, d);
-      if (ok) { this._poolStats.promoted++; this._emitLog?.('info', 'promoted', { peer: toHex(sponsor), how: d.how, victim: d.victimKey != null ? toHex(d.victimKey) : null }); }
-      return ok;
+      if (!ok) { this._poolStats.promotionDeficit++; return false; }
+      const victimBig = (typeof victim === 'bigint') ? victim : (isHexId(victim) ? fromHex(victim) : null);
+      const rc = ask({ after: victimBig });
+      if (rc.ok === true) {
+        this._poolStats.promoted++;
+        this._emitLog?.('info', 'promoted', { peer: toHex(sponsor), how: d.how, victim: toHex(victimBig) });
+      } else if (rc.deferred === true) {
+        this._poolStats.promoted++; this._poolStats.transfersDeferred++;
+        this._emitLog?.('info', 'promotion-transfer-deferred', { peer: toHex(sponsor), victim: toHex(victimBig) });
+      } else {
+        // The table holds the entry and the ledger refused the move with no
+        // close to wait for: an inconsistency, counted and logged, never
+        // hidden. (A victim whose channel carries no class — armed mid-life —
+        // is the case that reaches here.)
+        this._poolStats.promotionInconsistent++;
+        this._emitLog?.('warn', 'promotion-reclass-refused-after-commit', { peer: toHex(sponsor), victim: toHex(victimBig), why: rc.why ?? null });
+      }
+      return true;
     } finally {
       this._promotionPending.delete(sponsor);
     }
@@ -1876,6 +1906,30 @@ export class AxonaPeer extends DHT {
       }
     }
     return out;
+  }
+  /**
+   * G6, the legacy table inserts (packet inventory A9: _addByVitality and
+   * _evictAndReplace). On the web transport their openConnection is
+   * BOUND-ONLY — it builds no PeerConnection, so no allocation can happen
+   * there; the channel already exists and is charged in its class. What CAN
+   * happen is a TABLE entry for a channel of class I without a reclass, so
+   * the table and the ledger would disagree. Armed, an I-class channel must
+   * be reclassed to M before the entry lands; a refused reclass is a
+   * promotion deficit and the entry does not land. Unarmed: always allowed.
+   */
+  _legacyInsertAllowed(id, source) {
+    if (this._poolProfile() === null || this._classOf(id) !== 'I') return true;
+    const t = this._node?.transport;
+    let rc = { ok: false, why: 'no-reclass' };
+    if (typeof t?.reclass === 'function') { try { rc = t.reclass(id, 'M') ?? rc; } catch (err) { rc = { ok: false, why: `threw:${err?.message}` }; } }
+    if (rc.ok === false) {
+      this._poolStats.promotionDeficit++;
+      this._emitLog?.('info', 'promotion-deficit', { peer: toHex(id), why: rc.why ?? 'reclass-refused', source });
+      return false;
+    }
+    this._poolStats.promoted++;
+    this._emitLog?.('info', 'promoted', { peer: toHex(id), how: source });
+    return true;
   }
   /** G3: degree as the selectors see it, for health(). */
   _degreeReport() {
@@ -5328,8 +5382,11 @@ export class AxonaPeer extends DHT {
     }
 
     // 2. Filter parity with greedy (route_msg handler and _greedyNextHopToward):
-    //    the probe set is the usable M set (the same iterator), with the
-    //    skip counters kept for the census.
+    //    the probe set is the FULL usable union — the usable M set (the same
+    //    iterator; skip counters kept for the census) plus every usable I
+    //    peer (Aster b583c31c P1: an incoming peer that is not itself closer
+    //    can still name a closer second hop, so it is probed like any other
+    //    adjacent peer).
     const usableM = usable ? new Set(usable.filter((u) => u.cls === 'M').map((u) => u.id)) : null;
     const probeTargets = [];
     for (const syn of node.synaptome.values()) {
@@ -5340,6 +5397,7 @@ export class AxonaPeer extends DHT {
       if (usableM && !usableM.has(id)) { LS.probesSkippedUnconnected++; continue; }   // SUSPECT under armed pools
       probeTargets.push(id);
     }
+    if (usable) for (const u of usable) if (u.cls === 'I') probeTargets.push(u.id);
     if (probeTargets.length === 0) { LS.answeredNull++; return null; }
     LS.probingCalls++;
     LS.probesEmitted += probeTargets.length;
@@ -5846,6 +5904,7 @@ export class AxonaPeer extends DHT {
 
     const opened = await node.transport.openConnection(newSyn.peerId);
     if (!opened) return false;
+    if (!this._legacyInsertAllowed(newSyn.peerId, 'vitality')) return false;   // G6: an I channel enters the table only by reclass
 
     const measuredLat = node.transport.getLatency(newSyn.peerId);
     newSyn.latency = (measuredLat >= 0) ? measuredLat : 200;
@@ -5960,6 +6019,7 @@ export class AxonaPeer extends DHT {
 
     const opened = await node.transport.openConnection(candidate.id);
     if (!opened) return null;
+    if (!this._legacyInsertAllowed(candidate.id, 'evictReplace')) return null;   // G6
 
     const weights = [];
     for (const s of node.synaptome.values()) weights.push(s.weight);
