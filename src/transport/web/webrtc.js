@@ -337,6 +337,26 @@ export class WebRTCTransport extends Transport {
     return this._meshIdByNodeId.has(nodeId);
   }
 
+  // ─── G1/G6: pool classes, by bound identity ─────────────────────────
+
+  /** The class the bound peer's channel was reserved in: 'M' | 'I' | null. */
+  classOf(nodeId) {
+    const meshId = this._meshIdByNodeId.get(nodeId);
+    if (!meshId || typeof this._mesh?.classOf !== 'function') return null;
+    try { return this._mesh.classOf(meshId); } catch { return null; }
+  }
+  /** G6: move the bound peer's channel to class `cls` (promotion I→M, demotion M→I). */
+  reclass(nodeId, cls) {
+    const meshId = this._meshIdByNodeId.get(nodeId);
+    if (!meshId) return { ok: false, why: 'unbound', prev: null };
+    if (typeof this._mesh?.reclass !== 'function') return { ok: false, why: 'no-mesh', prev: null };
+    try { return this._mesh.reclass(meshId, cls); } catch (err) { return { ok: false, why: `threw:${err?.message}`, prev: null }; }
+  }
+  /** The two-pool profile the mesh is armed with, or null. */
+  poolProfile() {
+    try { return this._mesh?.poolProfile?.() ?? null; } catch { return null; }
+  }
+
   // ─── Channel pool ────────────────────────────────────────────────────
 
   async openConnection(nodeId) {

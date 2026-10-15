@@ -1195,6 +1195,36 @@
       "file": "fence_close_class_matrix.mjs",
       "class": "default",
       "note": "Perimeter v0.2 §E / v0.3 §4: the close-class matrix — the mesh's degree-cap and make-room ask isProtected for every open candidate and never retire a protected peer; reset() and dispose() retire without asking; mayRetire is called at exactly three peer sites (refuse-grace, grace pick, swap victim); the transport's obliged-peers reader returns protectedPeers() not obligedPeers(); the gate's protection is the policy with the sponsor ranked in. Mutants: _degreeProtected always false (A fails); install obligedPeers() (B2 fails)."
+    },
+    {
+      "file": "fence_pool_profile.mjs",
+      "class": "default",
+      "note": "4.114.0, two-pool packet G4 (axona-docs ca52384; Aster bc4fe433 s2, b395fe8f G4): the pool profile {M, I, H, pPending, cInbound, serveFloor, promoteMs, hostBudget} is validated at construction and REFUSED (PoolProfileError naming the field) on any overcommit — M+I>H, pPending>M, cInbound>I, serveFloor>M, hostBudget<H+doorSockets — never trimmed or borrowed; the review rows (relay M50/I50/H100, leaf M6/I6/H12) are feasible examples, none adopted; webTransport({meshPools}) refuses before building the mesh, and pools without the ledger are refused. Mutant: delete the M+I>H check -> check 1 fails."
+    },
+    {
+      "file": "fence_pool_reservation.mjs",
+      "class": "default",
+      "note": "4.114.0, two-pool packet G1: a RESERVATION in a class precedes every allocation; charged+reserved is bounded per class (pool-M / pool-I) and in total (phys = H); allocate() consumes the token and the channel takes its class; release() frees an unconsumed token; a token older than reserveTtlMs expires; CLOSING keeps its class charge until gone() for the SAME incarnation; reclass moves a live channel's class and is refused into a full class; enforce off counts by class; an UNARMED ledger records no class and refuses by the 4.113.0 direction rows. Part B, the real mesh: M50/I0 enforcing + 40 unsolicited offers builds ZERO PCs and answers each with sdp-reject (v1.2 G1 oracle); an outbound dial is charged M and released only at the transport's closed. Mutants: charge without consuming -> A3; release in closing() -> A6; drop the class bound -> B1."
+    },
+    {
+      "file": "fence_pool_attempt_fence.mjs",
+      "class": "default",
+      "note": "4.114.0, two-pool packet G2: RESERVE BEFORE RETIRE — a replacement attempt for an unbound key reserves first; refused at cap the OLD attempt stays and the new one is rejected on the wire (the a1bc5e0b ordering: the key never ends with neither); under room the old attempt retires and exactly one charge remains after its close; a delayed frame from the retired attempt is stale; an OPEN channel is never replaced; past ATTEMPT_REPLACE_MAX (3) the key SHEDS; the retry takes a fresh reservation (two incarnations charged while the old PC closes, v1.1 s2), a refused retry ends as retry-refused; the dedup loser's pointer and class move to the winner and its charge leaves at its close. Mutants: retire-then-reserve order -> A2; drop the shed bound -> D."
+    },
+    {
+      "file": "fence_pool_reject_frame.mjs",
+      "class": "default",
+      "note": "4.114.0, two-pool packet G5: a refused offer is ANSWERED with sdp-reject {v, attempt, generation, reason}; at the offerer it ends only the current never-opened attempt it names (reason 'rejected' through onNegotiationFailed; lastRejectFor read-once); a reject for another attempt, an unknown key, an open channel or a responder row is dropped and counted; a legacy offer gets no frame and ends at the negotiation deadline; the oracle: eight saturated responders cannot hold a dialer's pending work — pending falls to zero as the rejects arrive. Mutants: apply a reject regardless of attempt -> B; drop _sendReject -> A."
+    },
+    {
+      "file": "fence_pool_promotion.mjs",
+      "class": "default",
+      "note": "4.114.0, two-pool packet G6: promotion I->M is one transaction (gate decides, ledger reclasses, table commits); at M full and duty-saturated it ends in DEFICIT with the I channel KEPT (no close, no grace); the reclass is asked before the table commits; the identity is PROMOTION_PENDING and protected only WHILE the transaction runs, and an entry past promoteMs is dropped as expired; the fill nominates a bound I peer (its dial is a promotion) and never a bound M peer; selectMeshRetire releases I before M when classes are carried and keeps the pre-pool order otherwise; mayRetire refuses an I peer holding a duty; UNARMED a refused unclassified bound peer takes the 4.113.0 grace path byte-identically. Mutants: immunity outliving the transaction -> D2; close on refused promotion -> B."
+    },
+    {
+      "file": "fence_pool_union_selector.mjs",
+      "class": "default",
+      "note": "4.114.0, two-pool packet G3: ONE iterator (_usablePeers: M union I-bound, deduplicated; not dead, connected, not SUSPECT) read by greedy, the two-hop free pass and probe set, the fallback hop, the route_msg handler and health().degree — a SUSPECT I peer is neither selected nor counted (the green-badge counterexample), a closer I peer is the greedy hop, a dead I peer is skipped, a peer in both classes counts once as M, the free pass answers from I with no probe; UNARMED no I set exists and a suspect M peer routes as 4.113.0 did. Mutant: count I in degree.usable without the SUSPECT filter -> 1 fails."
     }
   ]
 }
