@@ -1197,6 +1197,11 @@
       "note": "Perimeter v0.2 §E / v0.3 §4: the close-class matrix — the mesh's degree-cap and make-room ask isProtected for every open candidate and never retire a protected peer; reset() and dispose() retire without asking; mayRetire is called at exactly three peer sites (refuse-grace, grace pick, swap victim); the transport's obliged-peers reader returns protectedPeers() not obligedPeers(); the gate's protection is the policy with the sponsor ranked in. Mutants: _degreeProtected always false (A fails); install obligedPeers() (B2 fails)."
     },
     {
+      "file": "fence_verify_closest_visited.mjs",
+      "class": "default",
+      "note": "dual-root packet (b) (axona-docs 14a6bd8; David build 2026-10-17): the root self-verify reads the CLOSEST node the lookup walk visited, not the walk's last hop — a greedy walk bounces to its hop cap and the 2026-10-17 #council seat walked through the true root at hop 9 of 41 for nine hours while _verifyRoots read hop 41; a closer mid-path node demotes, a closer last hop still demotes, no closer node keeps the claim, self alone keeps it, the demotion pairs with the confirming SUB, a role already demoted is left alone. Mutant: restore r.path[r.path.length-1] as the terminus -> A fails."
+    },
+    {
       "file": "fence_pool_profile.mjs",
       "class": "default",
       "note": "4.114.0, two-pool packet G4 (axona-docs ca52384; Aster bc4fe433 s2, b395fe8f G4): the pool profile {M, I, H, pPending, cInbound, serveFloor, promoteMs, hostBudget} is validated at construction and REFUSED (PoolProfileError naming the field) on any overcommit — M+I>H, pPending>M, cInbound>I, serveFloor>M, hostBudget<H+doorSockets — never trimmed or borrowed; the review rows (relay M50/I50/H100, leaf M6/I6/H12) are feasible examples, none adopted; webTransport({meshPools}) refuses before building the mesh, and pools without the ledger are refused. Mutant: delete the M+I>H check -> check 1 fails."

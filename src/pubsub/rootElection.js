@@ -351,20 +351,42 @@ export const rootElectionMethods = {
         .then(() => this.dht.lookup(t))
         .then((r) => {
           this._verifyInflight.delete(t);
-          const id = (r && Array.isArray(r.path) && r.path.length) ? r.path[r.path.length - 1] : null;
-          if (id == null) return;
-          let cBig; try { cBig = idBig(id); } catch { return; }
-          if (cBig === this.nodeId) return;                       // confirmed: I am the terminus
-          if ((cBig ^ t) >= (this.nodeId ^ t)) return;            // not strictly closer → keep the claim
+          // THE TERMINUS IS THE CLOSEST NODE THE WALK VISITED, NOT ITS LAST HOP
+          // (dual-root packet (b), axona-docs 14a6bd8). The walk is greedy with no
+          // memory across hops: two nodes that are each other's closest-known trade
+          // the query to the hop cap, and the last hop is then an arbitrary node.
+          // On 2026-10-17 a seat holding a spurious #council root walked THROUGH
+          // the true root at hop 9 of 41 every 45 s for nine hours and this line
+          // read hop 41, which was farther than self, so the claim stood. Reading
+          // the closest visited node ends that split on the first verify.
+          const path = (r && Array.isArray(r.path)) ? r.path : [];
+          let cBig = null, cD = null;
+          for (const id of path) {
+            let b; try { b = idBig(id); } catch { continue; }
+            if (b === this.nodeId) continue;
+            const d = b ^ t;
+            if (cD === null || d < cD) { cD = d; cBig = b; }
+          }
+          if (cBig === null) return;                              // nobody but self was visited: confirmed
+          if (cD >= (this.nodeId ^ t)) return;                    // nothing strictly closer visited → keep the claim
           const live = this.axonRoles.get(t);
           if (!live || !live.isRoot) return;                      // already demoted meanwhile
           const hex = lc(idHex(cBig));
           this._rootBeacons.set(t, { root: hex, at: this._now(), exp: this._now() + 2 * ROOT_VERIFY_MS, verified: true });
-          this._rootClaim.demote(t, hex, 'verify-closer');
-          this._log('info', 'root-verify-demote', { topic: idHex(t).slice(0, 12), to: hex.slice(0, 10) });
+          this._rootVerifyCandidate(t, hex);
         })
         .catch(() => this._verifyInflight.delete(t));
     }
+  },
+
+  // What the verify does with a strictly-closer visited node. Today: yield the
+  // claim (the 4.102.0 path, hold + confirming SUB). The dual-root machine
+  // (packet 4(d)) replaces this body for a root WITH custody — the candidate is
+  // handed to the merge and demote() is reached only from its step 5 — and
+  // leaves it for a root that holds nothing. One method so the swap is one site.
+  _rootVerifyCandidate(t, hex) {
+    this._rootClaim.demote(t, hex, 'verify-closer');
+    this._log('info', 'root-verify-demote', { topic: idHex(t).slice(0, 12), to: hex.slice(0, 10) });
   },
 
 };
