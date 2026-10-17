@@ -1197,6 +1197,16 @@
       "note": "Perimeter v0.2 §E / v0.3 §4: the close-class matrix — the mesh's degree-cap and make-room ask isProtected for every open candidate and never retire a protected peer; reset() and dispose() retire without asking; mayRetire is called at exactly three peer sites (refuse-grace, grace pick, swap victim); the transport's obliged-peers reader returns protectedPeers() not obligedPeers(); the gate's protection is the policy with the sponsor ranked in. Mutants: _degreeProtected always false (A fails); install obligedPeers() (B2 fails)."
     },
     {
+      "file": "fence_probe_verdicts_awaited.mjs",
+      "class": "default",
+      "note": "dual-root packet (a), first half (axona-docs 14a6bd8; David build 2026-10-17): _syncPull returns the route's promise and _emptyRootProbe awaits the fanout's verdicts (allSettled) — a try whose every pull resolved consumed:false or threw is DEFERRED (not counted, targets stay eligible, logged empty-root-probe-deferred), a try with one consumed:true counts and records its targets, an adapter declaring no verdicts counts as before, one try in flight at a time. The 2026-10-16 Windows relay spent all three tries inside the 20 s after its restart while its routed sends failed 6–12 per tick. Mutant: count the try at the top as before -> checks 1 and 2 fail."
+    },
+    {
+      "file": "fence_probe_rearm_after_routable.mjs",
+      "class": "default",
+      "note": "dual-root packet (a), second half: the refreshTick sweep re-runs a DEFERRED try once the node can route (servingCapable) or after 4 × EMPTY_ROOT_PROBE_INTERVAL_MS, at most EMPTY_ROOT_PROBE_MAX deferrals, after which the probe stops and the 45 s self-verify remains; a counted try keeps the old interval. Mutant: count the try at the top as before -> three failing tries exhaust the budget and check 4 (re-run once routable, fills) fails."
+    },
+    {
       "file": "fence_lookup_no_revisit.mjs",
       "class": "default",
       "note": "dual-root packet (c) (axona-docs 14a6bd8; David build 2026-10-17): the lookup walk never visits a node twice — every candidate source excludes ctx.queried, not only the fallback — and a node with no unvisited candidate returns an explicit stalled outcome with the closest visited id instead of running to MAX_HOPS; on a seven-peer sim ring (S closest, S's fresh neighbours knowing only S) the walk is A, Y1, S, Y2, stalled with S once, where 2026-10-17's #council walks visited S sixteen times in 41 hops. Mutant: delete the queried exclusions in the main loops -> checks 1 and 2 fail."

@@ -604,8 +604,18 @@ export const repairPlaneMethods = {
   _emptyRootProbeSweep(now) {
     for (const [t, role] of this.axonRoles) {
       if (!role.isRoot || role.cache.length) continue;
+      if (role.sync.probeInflight) continue;
       if (role.sync.probeTries >= EMPTY_ROOT_PROBE_MAX) continue;
-      if (now - role.sync.probeAt < EMPTY_ROOT_PROBE_INTERVAL_MS) continue;
+      if (role.sync.probeDeferred) {
+        // RE-ARM (dual-root packet (a)): a deferred try re-runs once the node can
+        // route (servingCapable is the kernel's word for it) or after
+        // 4 × EMPTY_ROOT_PROBE_INTERVAL_MS, and at most EMPTY_ROOT_PROBE_MAX times;
+        // past that the probe stops and the 45 s self-verify is what remains.
+        if ((role.sync.probeDeferrals | 0) >= EMPTY_ROOT_PROBE_MAX) continue;
+        let routable = false;
+        try { routable = (typeof this.dht?.servingCapable === 'function') ? !!this.dht.servingCapable() : false; } catch { routable = false; }
+        if (!routable && now - role.sync.probeDeferredAt < 4 * EMPTY_ROOT_PROBE_INTERVAL_MS) continue;
+      } else if (now - role.sync.probeAt < EMPTY_ROOT_PROBE_INTERVAL_MS) continue;
       this._emptyRootProbe(t).catch(() => {});
     }
   },
@@ -635,7 +645,21 @@ export const repairPlaneMethods = {
     const pre = this.axonRoles.get(topicBig);
     if (!pre || !pre.isRoot || pre.cache.length) return;      // filled meanwhile / demoted / gone
     if (pre.sync.probeTries >= EMPTY_ROOT_PROBE_MAX) return;
-    pre.sync.probeTries++; pre.sync.probeAt = this._now();
+    if (pre.sync.probeInflight) return;                        // (a): one try at a time; its verdicts decide whether it counted
+    pre.sync.probeInflight = true; pre.sync.probeAt = this._now();
+    try { await this._emptyRootProbeTry(topicBig); }
+    finally { const r = this.axonRoles.get(topicBig); if (r) r.sync.probeInflight = false; }
+  },
+
+  // One try. COUNTED only when at least one pull resolved consumed:true, or when
+  // the adapter declares no verdicts (no evidence either way → counted as the
+  // pre-(a) kernel did). A try whose every pull resolved consumed:false or a
+  // transport error is DEFERRED: not counted, its targets stay eligible, and
+  // the sweep re-arms it once the node can route or after a wait — the Windows
+  // relay of 2026-10-17 fired all three tries inside the window where its
+  // routed sends were failing 6–12 per tick and never probed again.
+  async _emptyRootProbeTry(topicBig) {
+    const pre = this.axonRoles.get(topicBig);
     // Candidates — two complementary views, both excluding self:
     //  · local findKClosest: cheap, but a cold node's thin table may know nobody
     //  · iterative lookup PATH: the traversal's hops; its tail is the closest
@@ -676,16 +700,41 @@ export const repairPlaneMethods = {
     const ordered = [...cand].sort((a, b) => (reach(b) ? 1 : 0) - (reach(a) ? 1 : 0));
     const fresh = ordered.filter((b) => !role.sync.probed.has(b));
     const targets = (fresh.length ? fresh : ordered).slice(0, EMPTY_ROOT_PROBE_FANOUT);
-    let n = 0;
+    const sends = [];
     for (const b of targets) {
-      try {
-        this._syncPull(b, topicBig, 'EMPTY_ROOT_PROBE', { sinceHw: 0 });
-        role.sync.probed.add(b);
-        n++;
-      } catch { /* best-effort */ }
+      try { sends.push({ b, p: Promise.resolve(this._syncPull(b, topicBig, 'EMPTY_ROOT_PROBE', { sinceHw: 0 })) }); }
+      catch { /* best-effort */ }
     }
-    if (n) this._log('info', 'empty-root-probe',
-      { topic: idHex(topicBig).slice(0, 12), fanout: n, tries: role.sync.probeTries });
+    const n = sends.length;
+    if (!n) return;
+    // AWAIT THE VERDICTS (dual-root packet (a)). _route resolves every send to
+    // routing's own verdict and never rejects; allSettled is belt and braces.
+    // A try counts when at least one pull was consumed somewhere, or when the
+    // adapter declares no verdicts at all (silence is not evidence of failure).
+    const declares = this.dht?.verdictsSupported === true;
+    const results = await Promise.allSettled(sends.map((x) => x.p));
+    let reached = 0;
+    for (const r of results) {
+      const v = (r.status === 'fulfilled') ? r.value : null;
+      if (v && typeof v === 'object' && v.consumed === true) reached++;
+    }
+    const live = this.axonRoles.get(topicBig);
+    if (!live || !live.isRoot) return;                      // demoted or gone while the pulls were out
+    if (declares && reached === 0) {
+      // DEFERRED: not counted against EMPTY_ROOT_PROBE_MAX, targets stay eligible,
+      // the sweep re-arms it once the node can route or after a wait.
+      live.sync.probeDeferred = true;
+      live.sync.probeDeferrals = (live.sync.probeDeferrals | 0) + 1;
+      live.sync.probeDeferredAt = this._now();
+      this._log('info', 'empty-root-probe-deferred',
+        { topic: idHex(topicBig).slice(0, 12), fanout: n, deferrals: live.sync.probeDeferrals });
+      return;
+    }
+    live.sync.probeTries++;
+    live.sync.probeDeferred = false;
+    for (const x of sends) live.sync.probed.add(x.b);
+    this._log('info', 'empty-root-probe',
+      { topic: idHex(topicBig).slice(0, 12), fanout: n, tries: live.sync.probeTries, reached: declares ? reached : null });
   },
 
   // ── stuck-subscriber cohort read-repair (#364 part 2) ─────────────────────

@@ -110,6 +110,16 @@ export function makeRole(topicId, isRoot, createdAt = null) {
                                      // accidentally missing. See OBLIGATIONS in constants.js.
       probeTries: 0,                 // empty-self-root cohort pulls fired (4.24.0; quenches at EMPTY_ROOT_PROBE_MAX)
       probeAt: 0,                    // _now() of the last cohort pull (rate-limits the refreshTick re-probe)
+      // dual-root packet (a) (axona-docs 14a6bd8): a try whose every pull resolved
+      // consumed:false is DEFERRED, not counted — the 2026-10-17 Windows relay spent
+      // its three tries inside the 20 s after its restart while its routed sends
+      // were failing 6–12 per tick, then never probed again. Deferred tries re-arm
+      // from the sweep once the node can route (servingCapable) or after
+      // 4 × EMPTY_ROOT_PROBE_INTERVAL_MS, at most EMPTY_ROOT_PROBE_MAX deferrals.
+      probeDeferred: false,          // the last try reached nobody; the sweep re-arms it
+      probeDeferrals: 0,             // deferred tries so far (bounded by EMPTY_ROOT_PROBE_MAX)
+      probeDeferredAt: 0,            // _now() of the last deferral
+      probeInflight: false,          // a try is awaiting its verdicts; the sweep does not stack another
       pulledLw: new Map(),           // subHex -> lowest lw already PULLUP'd from that child (4.22.1:
                                      // a refused pull — e.g. the child's oldest is tombstoned here —
                                      // must not re-fire on every renewal; re-arm only if lw DECREASES)

@@ -124,8 +124,12 @@ export const syncEngineMethods = {
       if (!(prev === undefined || lw < prev)) return false;
       role.sync.pulledLw.set(peerHex, lw);
     }
-    this._route(targetBig, T.PULLUP, { topicId: idHex(topicBig), sinceHw, parentId: idHex(this.nodeId) });
-    return true;
+    // Returns the ROUTE'S PROMISE (dual-root packet (a)): it resolves to the
+    // verdict routing already produces ({consumed, …}, or undefined from a
+    // non-reporting adapter) and never rejects (_route contains that). Every
+    // caller that used the old `true` may ignore it; the empty-root probe
+    // awaits it so a try that reached nobody is not counted as a try.
+    return this._route(targetBig, T.PULLUP, { topicId: idHex(topicBig), sinceHw, parentId: idHex(this.nodeId) });
   },
 
   // Answer a PULLUP: replay my cache delta (and active tombstones) UP to the
