@@ -1197,6 +1197,11 @@
       "note": "Perimeter v0.2 §E / v0.3 §4: the close-class matrix — the mesh's degree-cap and make-room ask isProtected for every open candidate and never retire a protected peer; reset() and dispose() retire without asking; mayRetire is called at exactly three peer sites (refuse-grace, grace pick, swap victim); the transport's obliged-peers reader returns protectedPeers() not obligedPeers(); the gate's protection is the policy with the sponsor ranked in. Mutants: _degreeProtected always false (A fails); install obligedPeers() (B2 fails)."
     },
     {
+      "file": "fence_merge_carrier_named.mjs",
+      "class": "default",
+      "note": "dual-root packet Part 2b / 5.1 (axona-docs 14a6bd8; David build 2026-10-17): a history that crosses into a root leaves an INFO record naming its carrier — handoff-ingested {policy:'HANDOFF', from, sent, held, dels} at the heir (it was debug unless a reject, and absent from every relay log when eleven #council entries arrived at the Windows relay on 2026-10-17 03:04Z), and split-union-pull {policy:'SPLIT_UNION', from, lw, myLw} on the SUB low-water pull (it logged nothing); both paths run on the manager fabric and each leaves its own line and not the other's. Mutant: handoff-ingested back at debug without policy -> A fails; delete the split-union line -> B fails."
+    },
+    {
       "file": "fence_probe_verdicts_awaited.mjs",
       "class": "default",
       "note": "dual-root packet (a), first half (axona-docs 14a6bd8; David build 2026-10-17): _syncPull returns the route's promise and _emptyRootProbe awaits the fanout's verdicts (allSettled) — a try whose every pull resolved consumed:false or threw is DEFERRED (not counted, targets stay eligible, logged empty-root-probe-deferred), a try with one consumed:true counts and records its targets, an adapter declaring no verdicts counts as before, one try in flight at a time. The 2026-10-16 Windows relay spent all three tries inside the 20 s after its restart while its routed sends failed 6–12 per tick. Mutant: count the try at the top as before -> checks 1 and 2 fail."

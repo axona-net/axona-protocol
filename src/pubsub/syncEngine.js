@@ -223,9 +223,16 @@ export const syncEngineMethods = {
             { topicId: payload.topicId, held: tally.held, sent: tally.sent });
         } catch { /* best-effort */ }
       }
-      // Diagnostic (#362, #402): ingest + ack confirmation for the leaver's retry loop.
-      this._log(tally.rejected ? 'warn' : 'debug', 'handoff-ingested',
-        { topic: String(payload.topicId).slice(0, 12), sent: tally.sent, held: tally.held, rejected: tally.rejected, acked: !!(leaver && isHexId(leaver)) });
+      // RECORD, not diagnostic (dual-root packet Part 5.1, axona-docs 14a6bd8):
+      // this line is the only record a host keeps of a handoff landing. At
+      // debug it was absent from every relay log on six hosts when eleven
+      // #council entries arrived at the Windows relay on 2026-10-17 03:04Z,
+      // and the carrier of that merge stayed a hypothesis. Info, always; the
+      // leaver is named by prefix so the carrier can be matched to its leave.
+      this._log(tally.rejected ? 'warn' : 'info', 'handoff-ingested',
+        { topic: String(payload.topicId).slice(0, 12), from: leaver ? leaver.slice(0, 12) : null, policy: 'HANDOFF',
+          sent: tally.sent, held: tally.held, rejected: tally.rejected, dels: Array.isArray(payload.dels) ? payload.dels.length : 0,
+          acked: !!(leaver && isHexId(leaver)) });
       return;
     }
 

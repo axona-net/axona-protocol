@@ -344,7 +344,11 @@ export const wireHandlersMethods = {
     if (Number.isFinite(payload.hw) && payload.hw > myHw) {
       this._syncPull(idBig(subHex), topicBig, 'REPLAY_UP', { sinceHw: myHw });
     } else if (Number.isFinite(payload.lw) && payload.lw > 0 && role.cache.length && payload.lw < this._lowWater(role)) {
-      this._syncPull(idBig(subHex), topicBig, 'SPLIT_UNION', { sinceHw: 0, lw: payload.lw, role });
+      const sent = this._syncPull(idBig(subHex), topicBig, 'SPLIT_UNION', { sinceHw: 0, lw: payload.lw, role });
+      // RECORD (dual-root packet Part 5.1): the other path by which a split
+      // history reaches a root. Named so a merge can be attributed to HANDOFF
+      // or to this pull from a log, instead of argued from the count of entries.
+      if (sent !== false) this._log('info', 'split-union-pull', { topic: idHex(topicBig).slice(0, 12), from: subHex.slice(0, 12), policy: 'SPLIT_UNION', lw: payload.lw, myLw: this._lowWater(role) });
     }
     this._accept(role, subHex, since, !!payload.latest);
     return 'consumed';
