@@ -3356,10 +3356,12 @@ export class AxonaPeer extends DHT {
     });
 
     return {
-      path:  result.path,
+      path:    result.path,
       hops,
-      time:  result.totalTimeMs,
-      found: result.found,
+      time:    result.totalTimeMs,
+      found:   result.found,
+      stalled: !!result.stalled,      // (c): no unvisited candidate remained — terminal, not the cap
+      closest: result.closest ?? null, // (c): the visited id nearest the target
     };
   }
 
@@ -6592,13 +6594,24 @@ export class AxonaPeer extends DHT {
 
     const deadSynapses = [];
     const candidates   = [];
+    // THE WALK NEVER REVISITS (dual-root packet (c), axona-docs 14a6bd8).
+    // `ctx.queried` is carried across hops and rebuilt on receipt (the
+    // lookup_step frame), but until 2026-10-17 only the fallback branch below
+    // consulted it: the main loops admitted any synapse closer than this node,
+    // so a node whose closest-known neighbour is the one that just handed it
+    // the query handed it straight back. Three fresh lookups for #council
+    // that day each ran 41 hops with one node visited sixteen times. Every
+    // candidate source now excludes queried ids; a node with nothing left to
+    // try returns an explicit STALLED outcome instead of running to the cap.
     for (const s of node.synaptome.values()) {
       if ((s.peerId ^ targetKey) >= currentDist) continue;
+      if (ctx.queried.has(s.peerId)) continue;
       if (dead.has(s.peerId)) { deadSynapses.push(s); s.weight = 0; continue; }
       candidates.push(s);
     }
     for (const s of node.incomingSynapses.values()) {
       if ((s.peerId ^ targetKey) >= currentDist) continue;
+      if (ctx.queried.has(s.peerId)) continue;
       if (dead.has(s.peerId)) continue;
       candidates.push(s);
     }
@@ -6607,6 +6620,7 @@ export class AxonaPeer extends DHT {
     for (const u of this._usablePeers()) {
       if (u.cls !== 'I') continue;
       if ((u.id ^ targetKey) >= currentDist) continue;
+      if (ctx.queried.has(u.id)) continue;
       const stratum = clz264(node.id ^ u.id);
       candidates.push({ peerId: u.id, latency: 50, weight: 0.1, stratum });
     }
@@ -6615,7 +6629,7 @@ export class AxonaPeer extends DHT {
       node.temperature = Math.max(node.temperature, domain.T_REHEAT);
       for (const syn of deadSynapses) {
         const repl = await this._evictAndReplace(syn);
-        if (repl && (repl.peerId ^ targetKey) < currentDist) candidates.push(repl);
+        if (repl && (repl.peerId ^ targetKey) < currentDist && !ctx.queried.has(repl.peerId)) candidates.push(repl);
       }
     }
 
@@ -6629,7 +6643,7 @@ export class AxonaPeer extends DHT {
       };
       for (const s of node.synaptome.values())         scan(s);
       for (const s of node.incomingSynapses.values()) scan(s);
-      if (!bestSyn) return this._lookupResult(ctx, false);
+      if (!bestSyn) return this._lookupResult(ctx, false, { stalled: true });   // nothing unvisited: terminal, not the cap
       candidates.push(bestSyn);
     }
 
@@ -6750,9 +6764,21 @@ export class AxonaPeer extends DHT {
     }
   }
 
-  _lookupResult(ctx, found) {
+  _lookupResult(ctx, found, extra = {}) {
+    // `stalled`: the walk ended because no unvisited candidate remained, not
+    // because it found the key or hit MAX_HOPS. `closest`: the visited id
+    // nearest the target (the originator excludes itself when it reads it) —
+    // what a root's self-verify compares against, never the last hop.
+    let closest = null, cd = null;
+    for (const id of (Array.isArray(ctx.path) ? ctx.path : [])) {
+      let b; try { b = (typeof id === 'bigint') ? id : BigInt('0x' + String(id)); } catch { continue; }
+      const d = b ^ ctx.targetKey;
+      if (cd === null || d < cd) { cd = d; closest = b; }
+    }
     return {
       found,
+      stalled:     !!extra.stalled,
+      closest,
       path:        ctx.path,
       trace:       ctx.trace,
       totalTimeMs: ctx.totalTimeMs,

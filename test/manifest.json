@@ -1197,6 +1197,11 @@
       "note": "Perimeter v0.2 §E / v0.3 §4: the close-class matrix — the mesh's degree-cap and make-room ask isProtected for every open candidate and never retire a protected peer; reset() and dispose() retire without asking; mayRetire is called at exactly three peer sites (refuse-grace, grace pick, swap victim); the transport's obliged-peers reader returns protectedPeers() not obligedPeers(); the gate's protection is the policy with the sponsor ranked in. Mutants: _degreeProtected always false (A fails); install obligedPeers() (B2 fails)."
     },
     {
+      "file": "fence_lookup_no_revisit.mjs",
+      "class": "default",
+      "note": "dual-root packet (c) (axona-docs 14a6bd8; David build 2026-10-17): the lookup walk never visits a node twice — every candidate source excludes ctx.queried, not only the fallback — and a node with no unvisited candidate returns an explicit stalled outcome with the closest visited id instead of running to MAX_HOPS; on a seven-peer sim ring (S closest, S's fresh neighbours knowing only S) the walk is A, Y1, S, Y2, stalled with S once, where 2026-10-17's #council walks visited S sixteen times in 41 hops. Mutant: delete the queried exclusions in the main loops -> checks 1 and 2 fail."
+    },
+    {
       "file": "fence_verify_closest_visited.mjs",
       "class": "default",
       "note": "dual-root packet (b) (axona-docs 14a6bd8; David build 2026-10-17): the root self-verify reads the CLOSEST node the lookup walk visited, not the walk's last hop — a greedy walk bounces to its hop cap and the 2026-10-17 #council seat walked through the true root at hop 9 of 41 for nine hours while _verifyRoots read hop 41; a closer mid-path node demotes, a closer last hop still demotes, no closer node keeps the claim, self alone keeps it, the demotion pairs with the confirming SUB, a role already demoted is left alone. Mutant: restore r.path[r.path.length-1] as the terminus -> A fails."
