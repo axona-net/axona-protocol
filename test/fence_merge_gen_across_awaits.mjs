@@ -16,8 +16,13 @@
 // cleared — no gate at resume. Every operation must be refused at its
 // mutation in both, and the transfer's tally must say refused.
 //
+// (C) the role is REPLACED in axonRoles while the operations await: all
+// three refused, the replacement untouched (Aster c6719863 C3, map
+// membership; a role absent from the map is not refused — fixtures and some
+// construction paths push before registering).
+//
 // Mutant (red): make _cutHolds check the gate only (ignore cut) → B's three
-// checks fail.
+// checks and C fail.
 // Run: node test/fence_merge_gen_across_awaits.mjs
 // =====================================================================
 import { realTopic, makeManagerAt, rootWithBodies, gateRoot, signedPub, signedKill, bareMeta, log, idHex } from './lib/mergeFixture.mjs';
@@ -67,6 +72,12 @@ async function scene(cutThen) {
   check('B (no gate at resume) body: refused at cachePush by the moved generation', refusedAt.includes('cachePush') && !role.cacheIds.has(body.msgId) && role.isRoot === false && role.merge.gate === null, JSON.stringify(refusedAt));
   check('B delete: refused at applyKill', refusedAt.filter((a) => a === 'applyKill').length >= 1 && !role.tombstones.has(ids[0]));
   check('B kill: refused at applyKill; the routed KILL went on to the upstream W as a forward', refusedAt.filter((a) => a === 'applyKill').length === 2 && !role.tombstones.has(ids[1]) && ctx.routed.some((r) => r.type === 'pubsub:kill' && r.payload.via?.[0] === idHex(L.near)), JSON.stringify(ctx.routed.map((r) => r.type)));
+}
+
+{ // C — the role was REPLACED in the map while the operations awaited (retired and re-admitted): refused at the mutation (Aster c6719863 C3)
+  const { ctx, role, ids, body, refusedAt } = await scene((c, r) => { c.am.axonRoles.delete(L.topicId); c.rc.become(L.topicId, 'sub-terminal'); });
+  const live = ctx.am.axonRoles.get(L.topicId);
+  check('C (role replaced in axonRoles at resume) body, delete and kill are all refused at their mutations; the live replacement is untouched', refusedAt.includes('cachePush') && refusedAt.filter((a) => a === 'applyKill').length === 2 && !role.cacheIds.has(body.msgId) && !role.tombstones.has(ids[0]) && !role.tombstones.has(ids[1]) && live !== role && live.cache.length === 0 && live.tombstones.size === 0, JSON.stringify(refusedAt));
 }
 
 console.log(`\nfence_merge_gen_across_awaits: ${passed} passed, ${failed} failed`);

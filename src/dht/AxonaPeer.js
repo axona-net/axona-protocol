@@ -213,7 +213,7 @@ export class AxonaPeer extends DHT {
    *        signed publishes (the default).  Apps that only call
    *        `peer.pub(topic, message, { sign: false })` can omit it.
    */
-  constructor({ engine = null, domain = null, node, axonaManager = null, nodeIdentity = null, transport = null, persist = null, maxPublishBytes = null, synaptomeMaintain = null, admissionGate = null, presence = null, attemptGuard = null, rootReplicas = null, frameRegistry = false, directMessageTypes = undefined, enforceDirectMessageTypes = false }) {
+  constructor({ engine = null, domain = null, node, axonaManager = null, nodeIdentity = null, transport = null, persist = null, maxPublishBytes = null, synaptomeMaintain = null, admissionGate = null, presence = null, attemptGuard = null, rootReplicas = null, frameRegistry = false, mergeCapable = null, directMessageTypes = undefined, enforceDirectMessageTypes = false }) {
     super();
     if (!node) throw new Error('AxonaPeer: node is required');
     // Singleton-root replication fan-out (kernel v4.9.2). null → kernel default (2).
@@ -238,6 +238,7 @@ export class AxonaPeer extends DHT {
     // then gates whether the wrap observes or runs the handler verbatim). The M1
     // telemetry-only canary sets this so a relay peer can report the shadow invariant.
     this._armFrameRegistry = frameRegistry === true;
+    this._mergeCapable = mergeCapable;   // dual-root reconciliation (axona-docs 14a6bd8): null = the manager reads env MERGE_CAPABLE, else MERGE_CAPABLE_DEFAULT (off)
     // REF-1.1 E2.3: the Boundary-3 door for the routed mesh:signal handler (built
     // unconditionally, same discipline as the transport's _b2door/_b3door). The B3
     // row keys mesh:signal on transportKind 'routed', so registerFrame binds it to
@@ -4923,6 +4924,7 @@ export class AxonaPeer extends DHT {
       identity: this._identity || null,   // transport keypair — signs D1 INGEST-ACK proofs
       ...(this._rootReplicas != null ? { rootReplicas: this._rootReplicas } : {}),
       ...(this._armFrameRegistry ? { frameRegistry: true } : {}),  // REF-1.1 M1 shadow (default-off)
+      ...(this._mergeCapable != null ? { mergeCapable: !!this._mergeCapable } : {}),   // dual-root 4(d), default-off
     });
     // ARM the periodic refreshTick (kernel v4.9.1). Earlier this was deliberately
     // left un-armed ("apps subscribe after the mesh stabilises"), but that left the

@@ -110,6 +110,18 @@ export const mergeMachineMethods = {
   _cutHolds(role, cut) {
     if (!role) return false;
     if (role.merge?.gate) return false;
+    // MAP MEMBERSHIP (Aster c6719863 C3): a commit resuming after its role was
+    // REPLACED in axonRoles — retired and re-admitted under a new object — is
+    // refused exactly as a moved generation is: it would write into a detached
+    // object while a live role for the topic exists. A role absent from the map
+    // altogether is not refused here: a role is pushed into before it is
+    // registered on some construction paths (fixtures build roles that way),
+    // and a detached object with no replacement is served to nobody and goes
+    // with the object. The merge never detaches a role; the reapers and any
+    // future retirement path do, and that path's own token is the stronger
+    // fence (v0.3 C3).
+    const live = this.axonRoles.get(role.topicId);
+    if (live !== undefined && live !== role) return false;
     if (!cut) return true;
     return role === cut.role0 && (role.gen | 0) === cut.gen0;
   },
@@ -357,7 +369,15 @@ export const mergeMachineMethods = {
     const loser = lc(payload.loser);
     if (!isHexId(loser) || typeof payload.corr !== 'string' || idBig(loser) === this.nodeId) return 'consumed';
     const role = this.axonRoles.get(topicBig);
-    if (!role || !role.isRoot) { this._log('info', 'merge-offer-not-root', { topic: idHex(topicBig).slice(0, 12), from: loser.slice(0, 10) }); return 'consumed'; }
+    if (!role || !role.isRoot) {
+      // NOT A ROOT HERE: answer, never stay silent. Silence reads as a legacy
+      // winner at the loser (the fallback) and would demote it toward a node
+      // that holds no claim — seen on the sim when a hand-forked root at a
+      // higher epoch had already absorbed the true root and then named it.
+      this._log('info', 'merge-offer-not-root', { topic: idHex(topicBig).slice(0, 12), from: loser.slice(0, 10) });
+      this._route(idBig(loser), T.REPLAYACK, { topicId: payload.topicId, corr: payload.corr, winner: idHex(this.nodeId), winnerEpoch: role?.epoch | 0, loser, loserEpoch: Number.isInteger(payload.loserEpoch) ? payload.loserEpoch : 0, disposition: 'not-root' });
+      return 'consumed';
+    }
     const loserEpoch = Number.isInteger(payload.loserEpoch) ? payload.loserEpoch : 0;
     // THE RELATION FIRST: W pulls only from a claim it wins over. If the
     // offered claim wins over W's own, W is the loser and offers instead.
@@ -570,14 +590,22 @@ export const mergeMachineMethods = {
     const corr = payload.corr;
     const m = role?.sync.openMerges.get(corr);
     if (!role || !m) { this._log('warn', 'merge-stale', { topic: idHex(topicBig).slice(0, 12), corr: String(corr).slice(0, 8), why: 'no-record' }); return 'consumed'; }
-    const six = lc(payload.winner) === m.winner && (payload.winnerEpoch | 0) === (m.winnerEpoch | 0) && lc(payload.loser) === lc(idHex(this.nodeId)) && (payload.loserEpoch | 0) === (m.loserEpoch | 0) && lc(payload.topicId) === idHex(topicBig);
-    if (!six) { this._log('warn', 'merge-stale', { topic: idHex(topicBig).slice(0, 12), corr: corr.slice(0, 8), why: 'fields' }); return 'consumed'; }
-    if (payload.disposition === 'refused-timing' || payload.disposition === 'refused-capacity') {
+    // A REFUSAL binds on corr, winner and loser: a refusing node may not hold
+    // the epoch the offer named (a non-root has none), so the six-field match
+    // below is for the terminal ack only.
+    const three = lc(payload.winner) === m.winner && lc(payload.loser) === lc(idHex(this.nodeId)) && lc(payload.topicId) === idHex(topicBig);
+    if (payload.disposition === 'refused-timing' || payload.disposition === 'refused-capacity' || payload.disposition === 'not-root') {
+      if (!three) { this._log('warn', 'merge-stale', { topic: idHex(topicBig).slice(0, 12), corr: corr.slice(0, 8), why: 'refusal-fields' }); return 'consumed'; }
       this._log('warn', 'merge-refused', { topic: idHex(topicBig).slice(0, 12), corr: corr.slice(0, 8), why: payload.disposition });
       this._mergeCloseCorr(role, corr);
       if (role.merge?.gate?.corr === corr) this._mergeGateClear(role, payload.disposition);
+      // A winner that holds no claim is no candidate: drop the record so the
+      // next trigger evaluates afresh instead of re-offering to a child.
+      if (payload.disposition === 'not-root' && role.merge?.candidate?.id === m.winner) role.merge.candidate = null;
       return 'consumed';
     }
+    const six = three && (payload.winnerEpoch | 0) === (m.winnerEpoch | 0) && (payload.loserEpoch | 0) === (m.loserEpoch | 0);
+    if (!six) { this._log('warn', 'merge-stale', { topic: idHex(topicBig).slice(0, 12), corr: corr.slice(0, 8), why: 'fields' }); return 'consumed'; }
     if (m.state !== 'bound') { this._log('warn', 'merge-stale', { topic: idHex(topicBig).slice(0, 12), corr: corr.slice(0, 8), why: m.state }); return 'consumed'; }
     // THE LEASE, anchored at the bind: monotonic now ≤ tB + A, and no wall-clock jump past E.
     const leaseOk = () => {
