@@ -87,6 +87,8 @@ export const repairPlaneMethods = {
       if (this._tickLagMs >= HELLO_DEADLINE_MS) this._tickStalls++;
     }
     this._tickAt = now;
+    // Pending delegations past ADOPT_ACK_MS roll back (dual-root packet 4(d)).
+    try { this._delegationSweep(now); } catch (e) { this._log('warn', 'delegation-sweep-error', { err: String(e?.message || e) }); }
 
     // REMOVED 2026-07-30 (D0 / M4). This loop stamped `lastServicedAt` on every
     // role here, at the top of the tick, before any work — and its own comment
@@ -702,7 +704,7 @@ export const repairPlaneMethods = {
     const targets = (fresh.length ? fresh : ordered).slice(0, EMPTY_ROOT_PROBE_FANOUT);
     const sends = [];
     for (const b of targets) {
-      try { sends.push({ b, p: Promise.resolve(this._syncPull(b, topicBig, 'EMPTY_ROOT_PROBE', { sinceHw: 0 })) }); }
+      try { sends.push({ b, p: Promise.resolve(this._syncPullAwait(b, topicBig, 'EMPTY_ROOT_PROBE', { sinceHw: 0 })) }); }
       catch { /* best-effort */ }
     }
     const n = sends.length;

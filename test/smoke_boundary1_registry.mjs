@@ -50,13 +50,14 @@ const check = (label, cond, extra = '') => { if (cond) { console.log(`  ✓ ${la
 const idHex = (b) => b.toString(16).padStart(66, '0');
 
 // The 19 wire types _registerHandlers registers (wireHandlers.js).
-const WIRED = [T.SUB, T.UNSUB, T.PUB, T.DELIVER, T.ADOPT, T.PULLUP, T.HANDOFFACK, T.REPLAYUP,
+const WIRED = [T.SUB, T.UNSUB, T.PUB, T.DELIVER, T.ADOPT, T.ADOPTACK, T.PULLUP, T.HANDOFFACK, T.REPLAYUP,
   T.HANDOFF, T.REPLICATE, T.KILL, T.INGESTACK, T.RECEIPTPROBE, T.RECEIPTNACK, T.TOUCH, T.PULL,
   T.PULLRESP, T.ROOTBEACON, T.METRICSON];
 
 // A schema-satisfying representative frame per wire (INGESTACK gets three).
 const CERT = {
   [T.SUB]: { topicId: 'aa', subscriberId: 'bb', since: 0 },
+  [T.ADOPTACK]: { topicId: 'aa', nonce: 'n1', accepted: [] },
   [T.UNSUB]: { topicId: 'aa', subscriberId: 'bb' },
   [T.PUB]: { topicId: 'aa', json: '{"m":1}', via: 'n0', ackTo: 'n0', attemptId: 'x1', flightNonce: 'fn' },
   [T.KILL]: { topicId: 'aa', kill: { msgId: 'm1', signerPubkey: 'pk' }, ackTo: 'n0', attemptId: 'x1', flightNonce: 'fn' },
@@ -149,9 +150,9 @@ async function main() {
 
   // ── T. TABLE ────────────────────────────────────────────────────────────────
   const rows = boundary1Rows();
-  check('T1. all 20 rows mint (19 frames; INGESTACK signed+legacy)', rows.length === 20);
+  check('T1. all 21 rows mint (20 frames; INGESTACK signed+legacy; ADOPTACK dual-root 4(d))', rows.length === 21);
   const reg = buildBoundary1Registry({ enabled: () => false });
-  check('T2. registry registers all 20 rows', reg.size() === 20);
+  check('T2. registry registers all 21 rows', reg.size() === 21);
   check('T3. wiring covers every registered handler wire type', WIRED.every((w) => reg.wiring.has(w)) && reg.wiring.size === WIRED.length,
     JSON.stringify(WIRED.filter((w) => !reg.wiring.has(w))));
   const iaw = reg.wiring.get(T.INGESTACK);
@@ -213,7 +214,7 @@ async function main() {
   check('W1. frameRegistry:false builds no registry', nOff.am.frameRegistryShadow().built === false && nOff.am.frameRegistryShadow().rows === 0);
   const fabOn = new Fabric({ frameRegistry: true }); const nOn = fabOn.addNode(nodeIds[0]);
   const sOn = nOn.am.frameRegistryShadow();
-  check('W2. frameRegistry:true builds the 20-row table', sOn.built === true && sOn.rows === 20);
+  check('W2. frameRegistry:true builds the 21-row table', sOn.built === true && sOn.rows === 21);
   check('W3. every routed handler is registered (wrapped or not)', WIRED.every((w) => typeof nOn.handlers.get(w) === 'function') && WIRED.every((w) => typeof nOff.handlers.get(w) === 'function'));
 
   // ── D. DIFFERENTIAL ──────────────────────────────────────────────────────────
@@ -303,6 +304,7 @@ async function main() {
       [T.KILL]: { topicId: T_HEX, kill: { msgId: MSG, signerPubkey: 'pk' }, ackTo: N1, attemptId: 'x1', flightNonce: 'fn' },
       [T.DELIVER]: { topicId: T_HEX, from: N2, msgs: [ev] },
       [T.ADOPT]: { topicId: T_HEX, parent: N2, subs: [] },
+      [T.ADOPTACK]: { topicId: T_HEX, nonce: 'n1', accepted: [] },
       [T.PULLUP]: { topicId: T_HEX, sinceHw: 0, parentId: N2 },
       [T.HANDOFFACK]: { topicId: T_HEX, held: 1, sent: 1 },
       [T.REPLAYUP]: { topicId: T_HEX, msgs: [], dels: [] },

@@ -155,8 +155,8 @@ const pass = (m) => console.log(`  ✓ ${m}`);
 console.log('\nREF-1.1 E0 — generated frame-registration manifest\n');
 parseErrors.length === 0 ? pass(`source coverage: all ${files.length} src files parsed`) : fail(`parse errors: ${parseErrors.join('; ')}`);
 unresolved.length === 0 ? pass('no unresolved (aliased/computed/loose-literal/escaped) sealed registration') : fail(`unresolved sites:\n     ${unresolved.join('\n     ')}`);
-b1 === 19 ? pass('B1 pub/sub migration-targets = 19 (matches the S5 fence assertion)') : fail(`B1 pub/sub = ${b1}, expected 19`);
-summary['migration-target'] === 39 ? pass('migration-target frames = 39 (38 E0 originals + dht:presence, kernel 4.66.0)') : fail(`migration-target = ${summary['migration-target']}, expected 39`);
+b1 === 20 ? pass('B1 pub/sub migration-targets = 20 (19 + ADOPTACK, dual-root 4(d); matches the S5 fence assertion)') : fail(`B1 pub/sub = ${b1}, expected 20`);
+summary['migration-target'] === 40 ? pass('migration-target frames = 40 (38 E0 originals + dht:presence, kernel 4.66.0, + pubsub:adoptack, dual-root 4(d))') : fail(`migration-target = ${summary['migration-target']}, expected 40`);
 // REF-1.1 E3a sealed the node WebSocketTransport (13 → 11). E3b.1 seals the base
 // Transport.js contract: its onRequest/onNotification throwing stubs are removed so
 // no inherited dispatch name is reachable on any subclass (Aster's absence

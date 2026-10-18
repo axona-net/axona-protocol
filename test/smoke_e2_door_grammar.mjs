@@ -260,8 +260,8 @@ for (const [name, body] of Object.entries(ctxNeg)) {
     inert.doors.length === 0, `\n   doors=${inert.doors.length}`);
   const migd = discover(files, METH);   // DEFAULT_DOOR_REGISTRIES = B1
   const b1doors = migd.doors.filter((d) => d.boundary === 'B1');
-  check('P2. MIGRATED: the default (B1) table discovers EXACTLY 19 B1 doors, all bound to wireHandlersMethods._registerHandlers',
-    b1doors.length === 19 && b1doors.every((d) => d.context === 'wireHandlersMethods._registerHandlers'),
+  check('P2. MIGRATED: the default (B1) table discovers EXACTLY 20 B1 doors (19 + ADOPTACK, dual-root 4(d)), all bound to wireHandlersMethods._registerHandlers',
+    b1doors.length === 20 && b1doors.every((d) => d.context === 'wireHandlersMethods._registerHandlers'),
     `\n   b1doors=${b1doors.length} contexts=${[...new Set(migd.doors.map((d) => d.context))].join(',')}`);
   // P2b (Vega a901bc92): the prior check filtered callee==='on(T.*)', which is trivially
   // zero once the on() helper is deleted — discover() emits that callee only for a live

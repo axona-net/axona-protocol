@@ -399,7 +399,14 @@ export const T = {
   REPLICATE: 'pubsub:replicate', // singleton-root durability: root pushes cache+tombstones to its N nearest neighbours (warm backup roots)
   METRICSON: 'pubsub:metricson', // demand-driven metrics: routed toward the topic id like SUB; marks the path + root so ANY root publishes snapshots while the lease is fresh
   HANDOFFACK: 'pubsub:handoffack', // heir confirms a HANDOFF landed (v4.24.0) — the leaver retries / cohort-sprays unacked topics instead of silently dropping the last copy
+  ADOPTACK: 'pubsub:adoptack',   // dual-root packet 4(d) (axona-docs 14a6bd8): the child answers an ADOPT — accepted ids or a refusal — so the parent releases delegated subscribers only on confirmed adoption
 };
+
+// ── Dual-root reconciliation (axona-docs 14a6bd8; David "build it" 2026-10-17) ──
+// The whole machine sits behind MERGE_CAPABLE (kernel option `mergeCapable`,
+// env MERGE_CAPABLE=1). OFF by default: an unarmed node behaves as 4.114.1.
+export const MERGE_CAPABLE_DEFAULT = 0;
+export const ADOPT_ACK_MS          = 5_000;   // a delegation not acknowledged within this is rolled back: the parent keeps serving its subscribers
 
 // ── Empty-self-root cohort pull (v4.24.0 — the alert-bot read-miss fix) ──────
 // A cold subscriber whose SUB terminates at itself becomes the topic's root with

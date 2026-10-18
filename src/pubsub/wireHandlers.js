@@ -10,7 +10,7 @@
 import {
   T, RENEW_MS, RENEW_FAST_MS, RENEW_BACKOFF, DROP_MS, ROOT_CLAIM_MS,
   ROOT_REPLICAS, BACKUP_EVICT_MS, CACHE_MAX, CACHE_BYTES, MAX_DIRECT,
-  DELEGATE_BATCH, MAX_VIA, VIA_HOP_BUDGET, TTL_MS, APP_DEDUP_MAX,
+  DELEGATE_BATCH, MAX_VIA, VIA_HOP_BUDGET, TTL_MS, APP_DEDUP_MAX, ADOPT_ACK_MS,
   PENDING_PUB_TTL_MS, PENDING_PUB_MAX_TRIES, COLD_BURST_TRIES,
   COLD_BURST_INTERVAL_MS, COLD_BURST_SLOW_TRIES, COLD_BURST_SLOW_INTERVAL_MS,
   COLD_PEER_THRESHOLD, FIRST_PUBLISH_RESEND_MS, REPLAY_CHUNK_BYTES,
@@ -28,6 +28,7 @@ const randomNonce = () => {
   return Array.from(b, (x) => x.toString(16).padStart(2, '0')).join('');
 };
 import { verifyEnvelope, checkFreshness } from './envelope.js';
+import { makeMergeState } from './rootClaim.js';
 import { verifyKill } from './kill.js';
 import { deriveTopicIdBig } from './post.js';
 import { signAckProof, verifyAckProof, PURPOSE, OP } from './ackProof.js';
@@ -55,6 +56,7 @@ export const wireHandlersMethods = {
     registerFrame(this.dht, T.PUB,          this._onPub.bind(this),          { registry: this._frameDoor });
     registerFrame(this.dht, T.DELIVER,      this._onDeliver.bind(this),      { registry: this._frameDoor });
     registerFrame(this.dht, T.ADOPT,        this._onAdopt.bind(this),        { registry: this._frameDoor });
+    registerFrame(this.dht, T.ADOPTACK,     this._onAdoptAck.bind(this),     { registry: this._frameDoor });
     registerFrame(this.dht, T.PULLUP,       this._onPullUp.bind(this),       { registry: this._frameDoor });
     registerFrame(this.dht, T.HANDOFFACK,   this._onHandoffAck.bind(this),   { registry: this._frameDoor });
     registerFrame(this.dht, T.REPLAYUP,     this._onReplayUp.bind(this),     { registry: this._frameDoor });
@@ -413,9 +415,16 @@ export const wireHandlersMethods = {
   _promoteChild(role) {
     // Any leaf may be promoted to a child relay — region is not an eligibility
     // predicate (it is only a placement hint folded into the id).
+    // A subscriber already in a PENDING delegation is not a leaf to promote or
+    // to hand off again: it is seated here only until its child's ADOPTACK.
+    // Without this exclusion the next over-capacity SUB promoted a pending
+    // subscriber as a second child and re-delegated the rest of its batch —
+    // smoke_pubsub_sweep measured a 91-wide root on the first build.
+    const pending = new Set();
+    for (const pd of role.merge?.pendingDelegation?.values() ?? []) for (const sh of pd.subs) pending.add(sh);
     const leaves = [];
     for (const s of role.subscribers.keys()) {
-      if (role.children.has(s)) continue;
+      if (role.children.has(s) || pending.has(s)) continue;
       leaves.push(s);
     }
     if (leaves.length < 2) return false;
@@ -425,29 +434,96 @@ export const wireHandlersMethods = {
     for (let i = 1; i < leaves.length && batch.length < DELEGATE_BATCH; i++) {
       batch.push({ subscriberId: leaves[i], since: role.subscribers.get(leaves[i]).since });
     }
-    for (const b of batch) role.subscribers.delete(b.subscriberId);
-    this._delegateTo(leaf, role, batch);
-    this._log('info', 'delegated', { child: leaf.slice(0, 12), moved: batch.length });
+    // PENDING DELEGATION (dual-root packet 4(d), Aster's "adopt during merge"):
+    // the batch is NOT deleted from role.subscribers here. It moves to
+    // role.merge.pendingDelegation under the ADOPT's nonce and this node KEEPS
+    // SERVING those subscribers until the child's ADOPTACK names them accepted.
+    // Before this the parent deleted them at the send; a child whose adoptChild
+    // was refused (a root with custody) — or that never heard the ADOPT — left
+    // them with no server. A refusal, a timeout (ADOPT_ACK_MS sweep) or a lost
+    // ack keeps them seated here; a partial ack releases only the named ids.
+    const nonce = this._delegateTo(leaf, role, batch);
+    if (!role.merge) role.merge = makeMergeState();
+    role.merge.pendingDelegation.set(nonce, { child: leaf, subs: batch.map((b) => b.subscriberId), at: this._now() });
+    this._log('info', 'delegated', { child: leaf.slice(0, 12), moved: batch.length, nonce: nonce.slice(0, 8), pending: true });
     return true;
   },
 
   _delegateTo(childHex, role, subs) {
+    const nonce = randomNonce();
     this._route(idBig(childHex), T.ADOPT, {
-      topicId: idHex(role.topicId), parent: idHex(this.nodeId), subs,
+      topicId: idHex(role.topicId), parent: idHex(this.nodeId), subs, nonce,
     });
+    return nonce;
+  },
+
+  // Release the subscribers a child confirmed adopting; keep the rest. Called
+  // from _onAdoptAck and from the ADOPT_ACK_MS sweep (which releases nothing).
+  _settleDelegation(role, nonce, acceptedIds, why) {
+    const pend = role.merge?.pendingDelegation?.get(nonce);
+    if (!pend) return null;
+    role.merge.pendingDelegation.delete(nonce);
+    const accepted = new Set((acceptedIds || []).map(lc));
+    let released = 0, kept = 0;
+    for (const sh of pend.subs) {
+      if (accepted.has(sh) && role.subscribers.has(sh) && !role.children.has(sh)) { role.subscribers.delete(sh); released++; }
+      else if (role.subscribers.has(sh)) kept++;
+    }
+    if (released === 0) role.children.delete(pend.child);   // nothing moved: the leaf is a leaf again
+    this._log('info', 'delegation-settled', { topic: idHex(role.topicId).slice(0, 12), child: pend.child.slice(0, 12), nonce: nonce.slice(0, 8), why, released, kept });
+    return { released, kept };
+  },
+
+  // The ADOPT_ACK_MS sweep: a delegation no ADOPTACK answered rolls back — the
+  // parent was serving those subscribers all along, so "rollback" is only the
+  // ledger entry and the child flag. Driven from refreshTick.
+  _delegationSweep(now) {
+    for (const role of this.axonRoles.values()) {
+      const pd = role.merge?.pendingDelegation;
+      if (!pd || !pd.size) continue;
+      for (const [nonce, pend] of pd) {
+        if (now - pend.at >= ADOPT_ACK_MS) this._settleDelegation(role, nonce, [], 'ack-timeout');
+      }
+    }
   },
 
   // A node is told to become a child relay and adopt a set of subscribers.
+  // Answers the parent with ADOPTACK (dual-root packet 4(d)): the ids it seated,
+  // or `refused` when adoptChild declined the flip (a root with custody on a
+  // merge-capable node). A legacy parent without the nonce gets no ack and
+  // behaves as before (it already deleted its batch at the send).
   _onAdopt(payload, meta) {
     if (meta.targetId !== this.nodeId) return;        // routed to me specifically
     const topicBig = idBig(payload.topicId);
-    const role = this._rootClaim.adoptChild(topicBig, lc(payload.parent));
+    const parentHex = lc(payload.parent);
+    const nonce = typeof payload.nonce === 'string' ? payload.nonce : null;
+    const role = this._rootClaim.adoptChild(topicBig, parentHex);
+    if (!role) {
+      this._log('info', 'adopt-refused', { topic: idHex(topicBig).slice(0, 12), parent: parentHex.slice(0, 12), why: 'custody' });
+      if (nonce && isHexId(parentHex)) this._route(idBig(parentHex), T.ADOPTACK, { topicId: payload.topicId, nonce, accepted: [], refused: 'custody' });
+      return 'consumed';
+    }
+    const accepted = [];
     for (const s of (Array.isArray(payload.subs) ? payload.subs : [])) {
       const sh = lc(s.subscriberId);
-      if (isHexId(sh) && idBig(sh) !== this.nodeId) this._accept(role, sh, s.since);
+      if (isHexId(sh) && idBig(sh) !== this.nodeId) { this._accept(role, sh, s.since); if (role.subscribers.has(sh)) accepted.push(sh); }
     }
+    if (nonce && isHexId(parentHex)) this._route(idBig(parentHex), T.ADOPTACK, { topicId: payload.topicId, nonce, accepted });
     // Attach UP toward the parent so we receive the live feed + cache replay.
     this._sendSubscribe(topicBig);
+    return 'consumed';
+  },
+
+  // The child's answer to a delegation (ADOPTACK). Only the delegating parent
+  // settles; an ack for an unknown nonce (late, duplicate, or forged) changes
+  // nothing. `refused` keeps every subscriber here and un-flags the child.
+  _onAdoptAck(payload, meta) {
+    if (meta.targetId !== this.nodeId) return;
+    let topicBig; try { topicBig = idBig(payload.topicId); } catch { return 'consumed'; }
+    const role = this.axonRoles.get(topicBig);
+    if (!role || typeof payload.nonce !== 'string') return 'consumed';
+    const accepted = payload.refused ? [] : (Array.isArray(payload.accepted) ? payload.accepted.filter((x) => typeof x === 'string') : []);
+    this._settleDelegation(role, payload.nonce, accepted, payload.refused ? `refused:${String(payload.refused).slice(0, 16)}` : 'acked');
     return 'consumed';
   },
 

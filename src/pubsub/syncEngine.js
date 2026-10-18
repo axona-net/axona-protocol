@@ -117,18 +117,24 @@ export const syncEngineMethods = {
   // The per-pair quench ledger is consulted HERE (not at call sites): a
   // SPLIT_UNION pull is one-shot per (child, lw) and re-arms only when the
   // child's lw decreases. Returns true iff the pull was sent.
-  _syncPull(targetBig, topicBig, policyName, { sinceHw = 0, lw = null, role = null } = {}) {
+  // Returns true (sent) / false (quenched by the SPLIT_UNION ledger) — the
+  // synchronous contract smoke_sync_engine pins. A caller that needs the
+  // route's VERDICT uses _syncPullAwait below.
+  _syncPull(targetBig, topicBig, policyName, opts = {}) {
+    return this._syncPullAwait(targetBig, topicBig, policyName, opts) !== false;
+  },
+  // Same send; returns the ROUTE'S PROMISE (dual-root packet (a)) or false
+  // when quenched. The promise resolves to the verdict routing already
+  // produces ({consumed, …}, or undefined from a non-reporting adapter) and
+  // never rejects (_route contains that). The empty-root probe awaits it so a
+  // try that reached nobody is not counted as a try.
+  _syncPullAwait(targetBig, topicBig, policyName, { sinceHw = 0, lw = null, role = null } = {}) {
     if (policyName === 'SPLIT_UNION') {
       const peerHex = lc(idHex(targetBig));
       const prev = role.sync.pulledLw.get(peerHex);
       if (!(prev === undefined || lw < prev)) return false;
       role.sync.pulledLw.set(peerHex, lw);
     }
-    // Returns the ROUTE'S PROMISE (dual-root packet (a)): it resolves to the
-    // verdict routing already produces ({consumed, …}, or undefined from a
-    // non-reporting adapter) and never rejects (_route contains that). Every
-    // caller that used the old `true` may ignore it; the empty-root probe
-    // awaits it so a try that reached nobody is not counted as a try.
     return this._route(targetBig, T.PULLUP, { topicId: idHex(topicBig), sinceHw, parentId: idHex(this.nodeId) });
   },
 

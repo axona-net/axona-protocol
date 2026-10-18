@@ -123,7 +123,9 @@ export const rootElectionMethods = {
       const staleClaim = !!this._rootTombstoned?.(tBig, payload.root, epoch);
       const closer = (rootBig ^ tBig) < (this.nodeId ^ tBig);
       if (supersedesMine || (closer && !staleClaim)) {
-        this._rootClaim.demote(tBig, lc(payload.root),
+        // Through the ONE candidate entry (dual-root packet 4(d)): a root with
+        // custody on a merge-capable node records the winner instead of yielding.
+        this._mergeCandidate(tBig, lc(payload.root), epoch,
           supersedesMine && !closer ? 'epoch-superseded' : 'beacon-closer');
       }
       // Branch reattachment (David 2026-08-30, gated). A node SUBSCRIBED to this
@@ -385,7 +387,7 @@ export const rootElectionMethods = {
   // handed to the merge and demote() is reached only from its step 5 — and
   // leaves it for a root that holds nothing. One method so the swap is one site.
   _rootVerifyCandidate(t, hex) {
-    this._rootClaim.demote(t, hex, 'verify-closer');
+    this._mergeCandidate(t, hex, null, 'verify-closer');
     this._log('info', 'root-verify-demote', { topic: idHex(t).slice(0, 12), to: hex.slice(0, 10) });
   },
 

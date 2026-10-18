@@ -1222,6 +1222,36 @@
       "note": "dual-root packet (b) (axona-docs 14a6bd8; David build 2026-10-17): the root self-verify reads the CLOSEST node the lookup walk visited, not the walk's last hop — a greedy walk bounces to its hop cap and the 2026-10-17 #council seat walked through the true root at hop 9 of 41 for nine hours while _verifyRoots read hop 41; a closer mid-path node demotes, a closer last hop still demotes, no closer node keeps the claim, self alone keeps it, the demotion pairs with the confirming SUB, a role already demoted is left alone. Mutant: restore r.path[r.path.length-1] as the terminus -> A fails."
     },
     {
+      "file": "fence_merge_crossed_claims.mjs",
+      "class": "default",
+      "note": "dual-root packet Part 3 (axona-docs 14a6bd8; David build 2026-10-17), stage d1: ONE election relation — RootClaim.claimWins orders (id, epoch) by epoch descending then XOR distance ascending; an UNVERSIONED side (epoch 0) falls back to closeness alone (the kernel's standing mixed-version rule); antisymmetric over random pairs, transitive over random VERSIONED triples; wins() reads this node's ROOT epoch. The crossing scene on the real beacon path, merge-capable with custody: the closer lower-epoch root records the farther higher-epoch root as its candidate, the farther root hearing the closer one logs merge-candidate-loses and keeps its claim — one candidate, never two; unarmed both sides yield as 4.114.1 (the two-yield predicate `supersedesMine || closer`). Mutant: closeness-only claimWins -> 1, 5b, 6a-6c fail."
+    },
+    {
+      "file": "fence_merge_transition_atomic.mjs",
+      "class": "default",
+      "note": "dual-root packet 4(d), stage d1: _set RETURNS {committed, reason} and every caller branches on it. On a MERGE-CAPABLE node a ROOT->non-ROOT flip of a role WITH CUSTODY (a body or an active tombstone) is refused unless ctx carries the release token (role.merge.releaseToken) — demote() returns false, no upstream, no SUB, no step-down hold, custody-refused logged, nextCandidate recorded; a wrong token is refused; the minted token commits and is consumed; promotion is never gated; unarmed the same flip commits as 4.114.1; a no-op flip reports committed:noop. Mutant: demote() ignores the result -> 1-4, 6, 7 fail."
+    },
+    {
+      "file": "fence_merge_adopt_during_merge.mjs",
+      "class": "default",
+      "note": "dual-root packet 4(d), stage d1 (Aster's adopt bypass): ADOPT never called demote(); the custody gate at _set now covers it and the child ANSWERS with ADOPTACK {topicId, nonce, accepted} or {refused:'custody'}. Armed with custody: still root, no upstream/SUB toward the parent, delegated subscribers not seated, adopt-refused logged, ADOPTACK refused to the parent; with an empty cache it adopts and acks the seated ids; unarmed with custody it adopts as 4.114.1; a legacy ADOPT without a nonce gets no ack. Mutant: adoptChild ignores the result -> 2-5 fail."
+    },
+    {
+      "file": "fence_merge_adopt_pending_delegation.mjs",
+      "class": "default",
+      "note": "dual-root packet 4(d), stage d1: the parent RELEASES delegated subscribers only on a confirmed adoption. _promoteChild no longer deletes the batch at the send: it moves to role.merge.pendingDelegation under the ADOPT's nonce and the parent keeps serving (a publish in the window still fans to the batch); a full ADOPTACK releases the batch, a partial one only the named ids, a refusal keeps all and un-flags the child, the ADOPT_ACK_MS sweep (refreshTick) rolls back an unanswered one the same way, an unknown nonce changes nothing; end to end on the manager fabric the child adopts, acks and the parent's seat shrinks; unarmed the ledger is used the same (the protocol does not depend on the merge option). Mutant: delete at the send as 4.114.1 -> 1, 3-10 fail."
+    },
+    {
+      "file": "fence_merge_authority_empty_cache.mjs",
+      "class": "default",
+      "note": "dual-root packet Part 3, stage d1: CUSTODY is a body or an ACTIVE tombstone, nothing else — hasCustody reads both; a root holding nothing on a merge-capable node yields directly on every path (beacon, verify, ADOPT, handoff) with no candidate and no refusal; an active tombstone alone makes the beacon yield record a candidate; once it expires the next yield demotes directly. Mutant: hasCustody ignores tombstones -> 1, 6, 7 fail."
+    },
+    {
+      "file": "fence_merge_authority_single_path.mjs",
+      "class": "default",
+      "note": "dual-root packet 4(d), stage d1: every claim-shedding path names its candidate at ONE entry, AxonaManager._mergeCandidate — the beacon yield (beacon-closer / epoch-superseded), the self-verify (verify-closer), the defer-confirmed verdict in _forwardToRoot, the SUB defer in _deferToRoot (defer-terminal) and handoffArrived (handoff-better-heir); armed with custody each records role.merge.candidate under the relation, keeps the claim and the cache, sends no SUB; a candidate naming self is dropped; two winners in one tick converge on the relation; STRUCTURAL: the only .demote( outside rootClaim.js is the direct branch inside _mergeCandidate (the source is read). Mutant: the beacon site demotes directly -> 1 and 8 fail."
+    },
+    {
       "file": "fence_pool_profile.mjs",
       "class": "default",
       "note": "4.114.0, two-pool packet G4 (axona-docs ca52384; Aster bc4fe433 s2, b395fe8f G4): the pool profile {M, I, H, pPending, cInbound, serveFloor, promoteMs, hostBudget} is validated at construction and REFUSED (PoolProfileError naming the field) on any overcommit — M+I>H, pPending>M, cInbound>I, serveFloor>M, hostBudget<H+doorSockets — never trimmed or borrowed; the review rows (relay M50/I50/H100, leaf M6/I6/H12) are feasible examples, none adopted; webTransport({meshPools}) refuses before building the mesh, and pools without the ledger are refused. Mutant: delete the M+I>H check -> check 1 fails."

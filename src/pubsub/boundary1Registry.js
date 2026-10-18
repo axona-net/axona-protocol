@@ -191,11 +191,11 @@ function rowDefs() {
       evidence: EvidenceLevel.ROUTED, proves: Proves.ROUTING, outcome: 'RoutingOutcome', terminalOutcome: 'SUBTREE_ADOPTED',
       retry: Retry.IDEMPOTENT, topicProfile: PROFILE, eventIdScheme: NA, replayCursorType: NA, orderingModel: 'ARRIVAL',
       authGuard: NA, admissionGuard: 'admitDelegatedSubs', placementGuard: 'regionOk',
-      projection: { payload: ['topicId', 'parent', 'subs'] },
-      schema: { require: ['topicId', 'parent'], types: { topicId: 'string', parent: 'string', subs: 'arr' } },
+      projection: { payload: ['topicId', 'parent', 'subs', 'nonce'] },   // nonce (dual-root 4(d)): pairs the child's ADOPTACK; absent from a legacy parent
+      schema: { require: ['topicId', 'parent'], types: { topicId: 'string', parent: 'string', subs: 'arr', nonce: 'string' } },
       idempotency: { from: ['topicId', 'parent'] },
       capabilityRange: { profile: PROFILE },
-      errorContract: ['refuse-region'], traceFields: ['topicId', 'parent'], budget: budget(3),
+      errorContract: ['refuse-region'], traceFields: ['topicId', 'parent'], budget: budget(4),
       note: 'delegation command: adopt these subscribers under this parent',
     }),
 
@@ -274,6 +274,20 @@ function rowDefs() {
       capabilityRange: { profile: PROFILE },
       errorContract: ['refuse-role-budget'], traceFields: ['topicId', 'from'], budget: budget(4),
       note: 'standing-state transfer to the heir; answered by HANDOFFACK routed back to `from`',
+    }),
+    ({
+      type: 'pubsub:adoptack', wire: T.ADOPTACK, kind: FrameKind.ONE_WAY, owningService: 'TopicDeliveryPlane', versionRange: V,
+      evidence: EvidenceLevel.ROUTED, proves: Proves.ROUTING, outcome: 'RoutingOutcome', terminalOutcome: 'DELEGATION_SETTLED',
+      retry: Retry.NONE, topicProfile: PROFILE, eventIdScheme: NA, replayCursorType: NA, orderingModel: 'ARRIVAL',
+      authGuard: NA, admissionGuard: NA, placementGuard: NA,
+      projection: { payload: ['topicId', 'nonce', 'accepted', 'refused'], meta: ['targetId'] },
+      schema: { require: ['topicId', 'nonce'], types: { topicId: 'string', nonce: 'string', accepted: 'arr', refused: 'string' } },
+      // RESPONSE leg: routed back to the delegating parent (meta), matched to ADOPT.nonce. The parent keeps serving
+      // the delegated subscribers until `accepted` names them; a refusal, a timeout or a lost response keeps them.
+      conversation: { role: RESP, opposite: 'pubsub:adopt', pairing: [{ local: 'topicId', remote: 'topicId' }, { local: 'nonce', remote: 'nonce' }] },
+      capabilityRange: { profile: PROFILE },
+      errorContract: [], traceFields: ['topicId', 'nonce'], budget: budget(5),
+      note: 'dual-root packet 4(d): the child\'s answer to a delegation — the parent\'s half of ADOPT completes here, never on a hop-local verdict',
     }),
     ({
       type: 'pubsub:handoffack', wire: T.HANDOFFACK, kind: FrameKind.ONE_WAY, owningService: 'SyncEngine', versionRange: V,
