@@ -68,6 +68,7 @@ import { wireHandlersMethods }  from './wireHandlers.js';
 import { syncEngineMethods }    from './syncEngine.js';
 import { writeFlightMethods }   from './writeFlight.js';
 import { tombstoneAuthWiringMethods, makeTombstoneAuthority } from './tombstoneAuthWiring.js';
+import { mergeMachineMethods }  from './mergeMachine.js';
 import buildBoundary1Registry from './boundary1Registry.js';
 import { shadowEnabled } from '../registry/index.js';
 import { envNum, envStr } from '../utils/env.js';
@@ -1838,6 +1839,7 @@ Object.assign(
   syncEngineMethods,     // Phase 8: the ONE repair/durability sync operation + policy table
   writeFlightMethods,    // E3 (Dead-Root Eviction v0.3): ingest-ack write completion, receipt probe, evict + retry-promote
   tombstoneAuthWiringMethods,  // REF-1.1 S2.0c Phase 3: DEFAULT-OFF shadow observers (no-op unless the tombstoneAuth flag is set)
+  mergeMachineMethods,   // dual-root reconciliation 4(d) (axona-docs 14a6bd8): the cut, the gate, the forward to the winner — behind mergeCapable
 );
 
 export default AxonaManager;

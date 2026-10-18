@@ -407,6 +407,9 @@ export const T = {
 // env MERGE_CAPABLE=1). OFF by default: an unarmed node behaves as 4.114.1.
 export const MERGE_CAPABLE_DEFAULT = 0;
 export const ADOPT_ACK_MS          = 5_000;   // a delegation not acknowledged within this is rolled back: the parent keeps serving its subscribers
+// The gate's forward ledger (the shape of the step-down hold's holdFwd ledger).
+export const MERGE_GATE_FWD_MAX     = 256;
+export const MERGE_GATE_REENTRY_MS  = 10_000;
 
 // ── Empty-self-root cohort pull (v4.24.0 — the alert-bot read-miss fix) ──────
 // A cold subscriber whose SUB terminates at itself becomes the topic's root with
@@ -440,3 +443,26 @@ export const HANDOFF_TRIES   = 2;     // sends before falling back to cohort spr
 // a ~68-root prod leaver). The window now scales with the round's batch size.
 export const HANDOFF_ACK_PER_TOPIC_MS = 25;    // per-unacked-topic margin added to the round window
 export const HANDOFF_ACK_MAX_MS       = 5000;  // per-round window cap (leave()'s outer bound already scales with role count)
+
+// ── Timing version (packet 4(d), "MERGE_TIMEOUT_MS bounds ONE gate interval") ──
+// The three terms are frozen with the version and published with it; a peer
+// whose OFFER carries another version or an A outside limits is refused
+// before the cut (d3). EXPORT_BYTES_MAX is the SERIALIZED bound the export is
+// measured against at the cut: bodies at CACHE_BYTES, tombstones at their
+// count cap times the proof's maximum size, the manifest and header at their
+// fixed sizes, one frame of slack for packing. F_MAX = ⌈EXPORT_BYTES_MAX /
+// REPLAY_CHUNK_BYTES⌉ + 1 (the header). S_MAX is an ASSUMED per-frame service
+// allowance (the 2026-10-08 RTT matrix read 39 ms p50 one hop; a 96 KiB frame
+// of ~100 signed bodies verifies in ~100 ms on a relay); it informs, it does
+// not prove. A_ack = HANDOFF_ACK_MAX_MS. The constant is the universal worst
+// case 2 × ((2 + 2·F_MAX) × S_MAX + A_ack), never below HANDOFF_ACK_MAX_MS.
+export const MERGE_TIMING_VERSION   = 1;
+export const MERGE_TOMB_PROOF_MAX_BYTES = 512;                       // one signed kill proof, serialized, upper bound
+export const EXPORT_BYTES_MAX       = CACHE_BYTES                       // bodies
+                                    + CACHE_MAX * MERGE_TOMB_PROOF_MAX_BYTES   // tombstones with proofs (count bounded by the body cap)
+                                    + CACHE_MAX * 2 * 80                      // manifest: two msgId lists
+                                    + 1024                                    // header frame
+                                    + REPLAY_CHUNK_BYTES;                     // one frame of packing slack
+export const MERGE_F_MAX            = Math.ceil(EXPORT_BYTES_MAX / REPLAY_CHUNK_BYTES) + 1;
+export const MERGE_S_MAX_MS         = 250;
+export const MERGE_TIMEOUT_MS       = Math.max(HANDOFF_ACK_MAX_MS, 2 * ((2 + 2 * MERGE_F_MAX) * MERGE_S_MAX_MS + HANDOFF_ACK_MAX_MS));

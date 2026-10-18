@@ -72,3 +72,108 @@ export function hearBeacon(ctx, rootBig, epoch, t = T, seq = 1) {
 }
 
 export const settle = async (n = 6) => { for (let i = 0; i < n; i++) await new Promise((r) => setImmediate(r)); };
+
+// ── stage d2 additions: real topics, signed writes, gated roots, a two-node fabric ──
+import { AxonaManager as _AM } from '../../src/pubsub/AxonaManager.js';
+import { buildEnvelope } from '../../src/pubsub/envelope.js';
+import { buildKill } from '../../src/pubsub/kill.js';
+import { deriveTopicIdBig } from '../../src/pubsub/post.js';
+import { createNodeIdentity, createAuthorIdentity } from '../../src/identity/index.js';
+import { regionCenter } from '../../src/utils/region-names.js';
+
+/** A real topic (descriptor-derived id) and a layout around it: self 0x100 away, NEAR closer, FAR farther. */
+export async function realTopic(name) {
+  const desc = { region: 'useast', owner: null, name, write: 'open' };
+  const topicId = await deriveTopicIdBig(desc);
+  return { desc, topicId, self: topicId ^ 0x100n, near: topicId ^ 0x1n, near2: topicId ^ 0x2n, far: topicId ^ 0x40000n, publisher: topicId ^ 0x50000n };
+}
+
+/** Like makeManager but at an explicit self id (for real topics). */
+export function makeManagerAt(selfBig, { mergeCapable = true, neighbors = [], route = null, verdicts = false, lookupPath = null, now = 1_000_000, extra = {} } = {}) {
+  const routed = [];
+  const logs = [];
+  const clock = { t: now };
+  const dht = {
+    getSelfId: () => selfBig,
+    onRoutedMessage: () => {},
+    verdictsSupported: verdicts,
+    routeMessage: (target, type, payload) => { routed.push({ target, type, payload }); return route ? route(target, type, payload) : undefined; },
+    neighbors: () => neighbors.map(idHex),
+    bridgeId: () => null,
+    servingCapable: () => true,
+    lookup: async () => ({ path: (lookupPath || [selfBig]).map(idHex), hops: 0, time: 10, found: false }),
+  };
+  const am = new _AM({ dht: sealTestDht(dht), mergeCapable, rootReplicas: 0, emitLog: (lvl, ev, ctx) => logs.push({ lvl, ev, ctx }), ...extra });
+  am._now = () => clock.t;
+  return { am, rc: am._rootClaim, routed, logs, clock, self: selfBig };
+}
+
+export const author = await createAuthorIdentity();
+/** A signed publish for the topic: {env, json, msgId}. ts = the fixture clock so freshness passes. */
+export async function signedPub(ctx, desc, k, seq = k + 1) {
+  const env = await buildEnvelope({ topic: desc, message: { k }, seq, identity: author, ts: ctx.clock.t });
+  return { env, json: JSON.stringify(env), msgId: env.msgId };
+}
+/** A signed kill of msgId on the topic, by the fixture author. */
+export async function signedKill(ctx, topicId, msgId, seq = 1) {
+  return buildKill({ topicId: idHex(topicId), msgId, ts: ctx.clock.t, seq, identity: author });
+}
+/** Meta for a bare write that terminates at ctx.self, sent by `from`. */
+export const bareMeta = (ctx, from) => ({ targetId: ctx.self, isTerminal: true, hopCount: 2, fromId: idHex(from) });
+
+/** Root at ctx for topicId with `n` signed bodies in its cache (custody by body), stamped through the real ingress. */
+export async function rootWithBodies(ctx, L, n = 3) {
+  const role = ctx.rc.become(L.topicId, 'sub-terminal');
+  const ids = [];
+  for (let k = 0; k < n; k++) {
+    ctx.clock.t += 10;
+    const w = await signedPub(ctx, L.desc, k);
+    const r = await ctx.am._ingestPublish(role, w.json, ctx.am._cutCapture(role));
+    if (!r?.ok) throw new Error('rootWithBodies: ingest failed ' + JSON.stringify(r));
+    ids.push(w.msgId);
+  }
+  return { role, ids };
+}
+/** Cut and gate ctx's root for topicId toward `winner` at `winnerEpoch` under `corr`. */
+export function gateRoot(ctx, topicId, winner, winnerEpoch = 3, corr = 'c0000001') {
+  return ctx.am._mergeCut(topicId, { winner: idHex(winner), winnerEpoch, corr });
+}
+export const pubsTo = (ctx, hex) => ctx.routed.filter((r) => r.type === 'pubsub:pub' && Array.isArray(r.payload?.via) && r.payload.via[0] === hex);
+export const killsTo = (ctx, hex) => ctx.routed.filter((r) => r.type === 'pubsub:kill' && Array.isArray(r.payload?.via) && r.payload.via[0] === hex);
+export const acksFrom = (ctx) => ctx.routed.filter((r) => r.type === 'pubsub:ingestack');
+export const flightKeyOf = (topicId, w, epoch) => `${topicId.toString(16)}|${idHex(w)}|${epoch}`;
+
+/** Two-node (or more) fabric of real managers routed by XOR closeness; per-node opts; no verdicts. */
+export class Fabric {
+  constructor(now = 1_700_000_000_000) { this.nodes = new Map(); this.queue = []; this.clock = now; }
+  addNode(idBig, opts = {}) {
+    const handlers = new Map(); const self = this; const logs = []; const routed = [];
+    const dht = {
+      getSelfId: () => idBig, onRoutedMessage: (type, h) => handlers.set(type, h), verdictsSupported: false,
+      routeMessage: (target, type, payload) => {
+        routed.push({ target, type, payload });
+        const dest = self._closestAlive(target); if (dest === null) return;
+        self.queue.push({ dest, type, payload, meta: { targetId: target, isTerminal: true, hopCount: 1, fromId: idHex(idBig) } });
+      },
+      findKClosest: async (target, k = 3) => [...self.nodes.keys()].sort((a, b) => { const da = a ^ target, db = b ^ target; return da < db ? -1 : da > db ? 1 : 0; }).slice(0, k).map(idHex),
+      neighbors: () => [...self.nodes.keys()].filter((id) => id !== idBig && self.nodes.get(id).alive).map(idHex),
+      bridgeId: () => null, servingCapable: () => true,
+      lookup: async () => ({ path: [idHex(idBig)], hops: 0, time: 1, found: false }),
+    };
+    const am = new _AM({ dht: sealTestDht(dht), now: () => self.clock, rootReplicas: 0, mergeCapable: true, emitLog: (lvl, ev, ctx) => logs.push({ lvl, ev, ctx }), ...opts });
+    const rec = { id: idBig, am, rc: am._rootClaim, handlers, logs, routed, alive: true, self: idBig, clock: { get t() { return self.clock; }, set t(v) { self.clock = v; } } };
+    this.nodes.set(idBig, rec); return rec;
+  }
+  _closestAlive(target) { let best = null, bd = null; for (const [id, n] of this.nodes) { if (!n.alive) continue; const d = id ^ target; if (bd === null || d < bd) { bd = d; best = id; } } return best; }
+  async settle() {
+    let i = 0;
+    while (this.queue.length) {
+      if (++i > 20_000) throw new Error('settle: did not converge');
+      const j = this.queue.shift(); const n = this.nodes.get(j.dest); if (!n || !n.alive) continue;
+      const h = n.handlers.get(j.type); if (h) await h(j.payload, j.meta);
+    }
+    for (let k = 0; k < 4; k++) await new Promise((r) => setImmediate(r));
+  }
+}
+export const LOC = regionCenter('useast');
+export const freshId = async () => BigInt('0x' + (await createNodeIdentity(LOC)).id);

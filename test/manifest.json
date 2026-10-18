@@ -1252,6 +1252,71 @@
       "note": "dual-root packet 4(d), stage d1: every claim-shedding path names its candidate at ONE entry, AxonaManager._mergeCandidate — the beacon yield (beacon-closer / epoch-superseded), the self-verify (verify-closer), the defer-confirmed verdict in _forwardToRoot, the SUB defer in _deferToRoot (defer-terminal) and handoffArrived (handoff-better-heir); armed with custody each records role.merge.candidate under the relation, keeps the claim and the cache, sends no SUB; a candidate naming self is dropped; two winners in one tick converge on the relation; STRUCTURAL: the only .demote( outside rootClaim.js is the direct branch inside _mergeCandidate (the source is read). Mutant: the beacon site demotes directly -> 1 and 8 fail."
     },
     {
+      "file": "fence_merge_cut_is_total.mjs",
+      "class": "default",
+      "note": "dual-root packet 4(d), stage d2 (axona-docs 14a6bd8; David build 2026-10-17): a write reaching L after the bind is NOT stamped at L — the bare PUB is intercepted after the hold (_mergeGateIntercept) and forwarded to W by name with via, gateFwd and the flight's ack routing; a via-pinned PUB that reaches the stamp is refused there (cut-refused at:'stamp') and forwarded the same way; a bare KILL likewise with no tombstone; no ingest ack leaves L for a write it did not stamp; gen moves once at the cut; with no gate the same write is stamped. Mutant: _cutHolds ignores the gate and the intercept call is deleted -> 1-3 fail."
+    },
+    {
+      "file": "fence_merge_cut_async_ingress.mjs",
+      "class": "default",
+      "note": "dual-root packet 4(d), stage d2: a check at the handler's entry is not a cut — a PUB parked in verifyEnvelope when the cut happens is refused at the stamp against the entry-time capture, never enters L's cache, is forwarded to W by the gate, and earns no ack from L; a KILL parked in verifyKill is refused at _applyKill, sets no tombstone, and is forwarded. Mutant: delete the _cutHolds check before the stamp (keep the entry intercept) -> 1 fails."
+    },
+    {
+      "file": "fence_merge_gen_across_awaits.mjs",
+      "class": "default",
+      "note": "dual-root packet 4(d), stage d2: the entry-time {role0, gen0}, not the gate, is the test — a body (REPLAY_UP, parked in verifyEnvelope), a delete (a transfer's del, parked in _applyDels's proof verify via a stubbed _taVerifyBoundKill) and a kill (_onKill, parked in verifyKill) are refused at their mutations both when the gate is still set at resume and when a cut was followed by a token demotion and the gate cleared (gen moved, no gate). Mutant: _cutHolds checks the gate only -> B's three checks fail."
+    },
+    {
+      "file": "fence_merge_gated_ingest_refused.mjs",
+      "class": "default",
+      "note": "dual-root packet 4(d), stage d2: a whole transfer at a gated L is refused before anything is applied — a HANDOFF applies no del and no body and sends NO HANDOFFACK (handoff-refused-gated; the leaver's silence contract), a REPLAYUP and a REPLICATE at a gated root are refused entry by entry; with the gate cleared a fresh HANDOFF is ingested and acked. Mutant: delete the gate check at the top of the HANDOFF branch -> 1 fails."
+    },
+    {
+      "file": "fence_merge_tombstone_only_handoff_gated.mjs",
+      "class": "default",
+      "note": "dual-root packet 4(d), stage d2: a tombstone-only HANDOFF refused at a gated L is refused SILENTLY (held = sent = 0 reads as success at the leaver) — gated at the top: no tombstone, no ack; gate set during the proof verify so the del is refused at _applyKill: handoff-refused-cut, no ack; ungated the tombstone applies and the honest ack is held = sent = 0. Mutant: ignore _applyDels's refusal in the HANDOFF branch -> 2 fails (an ack with held = sent = 0 leaves L)."
+    },
+    {
+      "file": "fence_merge_migrated_delete_across_cut.mjs",
+      "class": "default",
+      "note": "dual-root packet 4(d), stage d2: tombstones are mutations too and commit first — a transfer's delete parked in _applyDels's proof await across the cut is refused at _applyKill with the entry-time capture (gen0 0, gen 1), absent from the export (_activeDels), the body behind it not applied, the second del behind it not applied (one refusal, whole transfer refused); with no cut everything applies. Mutant: _applyKill skips the _cutHolds check -> 1, 2 fail."
+    },
+    {
+      "file": "fence_merge_gate_self_return.mjs",
+      "class": "default",
+      "note": "dual-root packet 4(d), stage d2, re-entry: the gated forward carries a gateFwd nonce in a bounded ledger at L; the same write returning bare with that nonce is undeliverable merge-gate-return, not forwarded again, not stamped, nonce consumed; an unknown nonce while gated is merge-gate-return-unknown; a ledger at MERGE_GATE_FWD_MAX refuses with merge-gate-saturated; a return after the gate cleared is still undeliverable; an unknown nonce with no gate is an ordinary bare write. Mutant: delete the gateFwd branch in _mergeGateIntercept -> 2 fails (forwarded twice)."
+    },
+    {
+      "file": "fence_merge_gate_no_defer.mjs",
+      "class": "default",
+      "note": "dual-root packet 4(d), stage d2: the gated forward is _forwardToRoot's SIBLING — a consumed verdict attributed to W moves nothing (L root, no custody-refused, no SUB, no defer-confirmed candidate), the flight is keyed by the bound winnerEpoch (3) and not the beacon's epoch (7), and carries the round's corr; the gate stays. Mutant: route the gated forward through the unmodified _forwardToRoot -> 1 and 2 fail."
+    },
+    {
+      "file": "fence_merge_gate_w_unreachable.mjs",
+      "class": "default",
+      "note": "dual-root packet 4(d), stage d2: a gated forward whose verdict is failed ends the round (merge-abort winner-unreachable), the gate clears, L keeps root at its unchanged epoch, and the publisher's re-send is stamped at L and acked; a consumed verdict does not abort. Mutant: ignore the failed verdict in _forwardToWinner -> 1, 2 fail."
+    },
+    {
+      "file": "fence_merge_gate_epoch_authority.mjs",
+      "class": "default",
+      "note": "dual-root packet 4(d), stage d2, the epoch authority: with NO beacon for W the merge flight opens at winnerEpoch (not 0) and W's ack at winnerEpoch discharges it; with a STALE beacon at another epoch an ack at the beacon's epoch does not discharge (write-flight-ack-epoch-mismatch) and one at winnerEpoch does; L's claim does not move either way. Mutant: _flightOpen ignores expectedEpoch -> 1 (epoch 0) and 4 (any epoch accepted) fail."
+    },
+    {
+      "file": "fence_merge_gate_w_reminted.mjs",
+      "class": "default",
+      "note": "dual-root packet 4(d), stage d2: W re-mints after the bind — its new-epoch ack is rejected (not discharged), the round aborts as winner-reminted with the gate cleared, L is still root under its unchanged epoch, the candidate record carries W at the new epoch for the next OFFER; a beacon from W at a higher epoch during the gate updates the candidate the same way. Mutant: treat a merge flight as unversioned in _flightComplete -> 1, 2 fail."
+    },
+    {
+      "file": "fence_merge_gate_late_ack.mjs",
+      "class": "default",
+      "note": "dual-root packet 4(d), stage d2: MERGE_TIMEOUT_MS bounds one gate interval from the bind — the refreshTick sweep leaves the gate one tick before and aborts it (timeout) at the bound, L root at its epoch, the publisher's re-send stamped at L; W's ack for the gated forward arriving after the gate cleared closes the flight entry (merge-late-ack) and L's claim does not move; a merge flight past INGEST_ACK_MS with no ack ends its round (winner-no-ack) through the flight sweep. Mutant: _mergeSweep never aborts -> 2, 3 fail; _flightSweep skips _mergeFlightSilent -> 5 fails."
+    },
+    {
+      "file": "fence_merge_gate_forwards_writes.mjs",
+      "class": "default",
+      "note": "dual-root packet 4(d), stage d2, the linearization point: on a two-node fabric a publisher writes through L every 10 ms from before the bind to after the demotion; the writes before the bind are stamped (acked) at L, every write after it is held at W and acked by W, L acked none of them and forwarded each gated one (L may hold them afterwards, replayed down as W's child — the shipped path), every gated forward's flight was discharged by W's ack, and L ends as W's child. Mutant: _mergeGateForward marks undeliverable instead of forwarding -> 2 fails."
+    },
+    {
       "file": "fence_pool_profile.mjs",
       "class": "default",
       "note": "4.114.0, two-pool packet G4 (axona-docs ca52384; Aster bc4fe433 s2, b395fe8f G4): the pool profile {M, I, H, pPending, cInbound, serveFloor, promoteMs, hostBudget} is validated at construction and REFUSED (PoolProfileError naming the field) on any overcommit — M+I>H, pPending>M, cInbound>I, serveFloor>M, hostBudget<H+doorSockets — never trimmed or borrowed; the review rows (relay M50/I50/H100, leaf M6/I6/H12) are feasible examples, none adopted; webTransport({meshPools}) refuses before building the mesh, and pools without the ledger are refused. Mutant: delete the M+I>H check -> check 1 fails."

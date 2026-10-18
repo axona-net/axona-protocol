@@ -89,6 +89,8 @@ export const repairPlaneMethods = {
     this._tickAt = now;
     // Pending delegations past ADOPT_ACK_MS roll back (dual-root packet 4(d)).
     try { this._delegationSweep(now); } catch (e) { this._log('warn', 'delegation-sweep-error', { err: String(e?.message || e) }); }
+    // A gate past MERGE_TIMEOUT_MS from its bind aborts its round (dual-root packet 4(d)).
+    try { this._mergeSweep(now); } catch (e) { this._log('warn', 'merge-sweep-error', { err: String(e?.message || e) }); }
 
     // REMOVED 2026-07-30 (D0 / M4). This loop stamped `lastServicedAt` on every
     // role here, at the top of the tick, before any work — and its own comment

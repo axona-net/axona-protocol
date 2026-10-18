@@ -67,7 +67,8 @@ export function makeMergeState() {
     releaseToken: null,     // minted by the merge's step 5; _set consumes it on the ROOT→non-ROOT flip
     nextCandidate: null,    // the last refused flip {why, ctx, at}: what the machine reconciles toward
     candidate: null,        // accepted winner record {id, epoch, source, at} (d4 arms the hold toward it)
-    gate: null,             // (d2) the cut: {gen, winner, nonce ledger} while this role forwards writes
+    gate: null,             // (d2) the cut: {winner, winnerEpoch, corr, at} while this role forwards writes
+    gateFwd: new Map(),     // (d2) gateFwd nonce -> {at, type, corr}: forwards whose return must not be stamped
     corr: null,             // (d3) the live exchange's correlation id
     pendingDelegation: new Map(), // (d1) ADOPT nonce -> {subs:[hex], at}: subscribers delegated but unacked
   };
@@ -140,6 +141,10 @@ export function makeRole(topicId, isRoot, createdAt = null) {
     // dual-root packet 4(d): the merge machine's per-role state; null until the
     // first candidate, gate, pin or token touches it (makeMergeState()).
     merge: null,
+    // dual-root packet 4(d): the cut generation. Incremented by the cut in the
+    // same synchronous run that sets the gate; never decremented. Commit paths
+    // capture it before their first await and re-check it at the mutation.
+    gen: 0,
     replicas: new Map(),             // (when ROOT) backupHex -> { at }  nodes holding a warm copy of our cache
     backupOf: null,                  // (when BACKUP) hex of the root replicating to us; null if we're not a backup
     lastReplicaAt: 0,                // (when BACKUP) _now() of the last replica push from our root (staleness → presume root gone)

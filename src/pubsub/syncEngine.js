@@ -210,11 +210,28 @@ export const syncEngineMethods = {
       // cohort spray, and depart — dropping the last copy. We now hold no role
       // and send no ack, so the leaver's unacked path re-homes the topic.
       let role = this.axonRoles.get(topicBig);
+      // A WHOLE transfer at a GATED heir is refused before anything is applied
+      // (dual-root packet 4(d)): no del, no body, NO HANDOFFACK — the silence
+      // the leaver already understands (it retries another heir and cohort-
+      // sprays). A short ack would be wrong: held = sent = 0 on a tombstone-
+      // only transfer reads as success at the leaver.
+      if (role?.merge?.gate) {
+        this._log('warn', 'handoff-refused-gated', { topic: String(payload.topicId).slice(0, 12), from: typeof payload.from === 'string' ? payload.from.slice(0, 12) : null, corr: role.merge.gate.corr.slice(0, 8) });
+        return;
+      }
       if (!role && !this.admitPushedRole(topicBig)) return;   // refuse: stay silent, leaver retries
       if (!role) role = this._becomeRoot(topicBig, 'handoff-heir');
       if (!role) return;                 // hard refusal (bridge) — no role, no ack, leaver re-homes
-      await this._applyDels(role, topicBig, payload.dels);
-      const tally = await this._ingestStampedBatch(role, payload.msgs);
+      const cut = this._cutCapture(role);                      // THE CUT: before the first await (dual-root 4(d))
+      const delsOk = await this._applyDels(role, topicBig, payload.dels, cut);
+      const tally = delsOk ? await this._ingestStampedBatch(role, payload.msgs, cut)
+                           : { sent: Array.isArray(payload.msgs) ? payload.msgs.length : 0, held: 0, rejected: Array.isArray(payload.msgs) ? payload.msgs.length : 0, refused: true };
+      if (tally.refused) {
+        // Refused at the cut mid-transfer: the whole transfer is refused, NO
+        // HANDOFFACK (the leaver retries elsewhere), nothing further applied.
+        this._log('warn', 'handoff-refused-cut', { topic: String(payload.topicId).slice(0, 12), from: typeof payload.from === 'string' ? payload.from.slice(0, 12) : null, sent: tally.sent, held: tally.held });
+        return;
+      }
       // Departure rules — purge the leaver's ghost beacon, never defer back to
       // the leaver, yield only to a strictly-closer live root (rootClaim).
       const leaver = typeof payload.from === 'string' ? lc(payload.from) : null;
@@ -247,8 +264,8 @@ export const syncEngineMethods = {
       if (mine?.isRoot) {
         // UNION_AT_ROOT — the cohort anti-entropy contract: co-hosting roots
         // converge to the union of cache+tombstones. We keep our claim.
-        await this._applyDels(mine, topicBig, payload.dels);
-        await this._ingestStampedBatch(mine, payload.msgs);
+        const cut = this._cutCapture(mine);
+        if (await this._applyDels(mine, topicBig, payload.dels, cut)) await this._ingestStampedBatch(mine, payload.msgs, cut);
         return;
       }
       if (!this._rootReplicas) return;                  // backup duty disabled on this node
@@ -258,8 +275,8 @@ export const syncEngineMethods = {
       let role = this.axonRoles.get(topicBig);
       if (!role) { role = makeRole(topicBig, false, this._now()); this.axonRoles.set(topicBig, role); }
       this._rootClaim.becomeBackup(topicBig, role, from);   // nature transition (I-10)
-      await this._applyDels(role, topicBig, payload.dels);
-      await this._ingestStampedBatch(role, payload.msgs);
+      const cut = this._cutCapture(role);
+      if (await this._applyDels(role, topicBig, payload.dels, cut)) await this._ingestStampedBatch(role, payload.msgs, cut);
       // SUBSCRIBER-LIST REPLICATION: stash the principal's subscriber list so a
       // promoted backup can re-adopt them into its fanout + replay (rootClaim._set).
       // STORED, not applied — a backup serves nobody until it becomes root.
@@ -291,8 +308,8 @@ export const syncEngineMethods = {
     // REPLAY_UP — stamped history I asked for; only meaningful if the role lives.
     const role = this.axonRoles.get(topicBig);
     if (!role) return;
-    await this._applyDels(role, topicBig, payload.dels);
-    await this._ingestStampedBatch(role, payload.msgs);
+    const cut = this._cutCapture(role);                      // THE CUT: before the first await (dual-root 4(d))
+    if (await this._applyDels(role, topicBig, payload.dels, cut)) await this._ingestStampedBatch(role, payload.msgs, cut);
   },
 };
 

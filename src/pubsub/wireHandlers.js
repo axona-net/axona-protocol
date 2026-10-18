@@ -535,6 +535,7 @@ export const wireHandlersMethods = {
 
     const topicBig = idBig(payload.topicId);
     if (this._holdIntercept(topicBig, T.PUB, payload)) return 'consumed';   // step-down hold (4.102.0)
+    if (this._mergeGateIntercept(topicBig, T.PUB, payload)) return 'consumed';   // merge gate (dual-root 4(d)): forwarded to W by name, or a returned forward
     // Root-beacon last-mile correction. At this point I'm the acting target for
     // the publish (bare-topic terminus, or via-pinned to me). If a fresh beacon
     // names a different root genuinely CLOSER to the topic than me, forward to it
@@ -567,13 +568,31 @@ export const wireHandlersMethods = {
     // continue toward the topic id. Bare-topic publishes always promote above.
     if (!role.isRoot) { this._reroute(T.PUB, payload); return 'consumed'; }
 
-    const ingest = await this._ingestPublish(role, payload.json);
+    // THE CUT (dual-root packet 4(d)): capture {role0, gen0} ONCE, here,
+    // before _ingestPublish's first await; the stamp re-checks it.
+    const cut = this._cutCapture(role);
+    const ingest = await this._ingestPublish(role, payload.json, cut);
     if (ingest?.ok) this._sendIngestAck(meta?.fromId, role, ingest.msgId, 'pub', payload);
+    else if (ingest?.reason === 'cut') this._cutDisposition(topicBig, T.PUB, payload);   // forwarded, not ingested: no ack from here
     return 'consumed';
   },
 
+  // A write admitted before the cut that resumed after it (dual-root 4(d)):
+  // handed to the gate's forward if the gate is set, or to the ordinary
+  // routing walk if the role has since demoted. Never _reroute (its topic-id
+  // fall-through can return here in a split) and never stamped here.
+  _cutDisposition(topicBig, type, payload) {
+    const role = this.axonRoles.get(topicBig);
+    if (role?.merge?.gate) { this._mergeGateForward(topicBig, type, payload, role, role.merge.gate); return; }
+    const up = this._upstream.get(topicBig);
+    if (up && up[0]) { this._forwardToRoot(topicBig, type, payload, lc(up[0])); return; }
+    this._undeliverable(type, topicBig, 'cut-no-forward');
+  },
+
   // Root ingress: authenticate, enforce write policy, stamp, cache, fan out.
-  async _ingestPublish(role, json) {
+  // `cut` is the caller's entry-time capture; the stamp below is refused when
+  // the role was cut (or demoted) while this function awaited.
+  async _ingestPublish(role, json, cut = null) {
     let env;
     try { env = JSON.parse(json); } catch { this._log('warn', 'drop-unparseable'); return { ok: false, reason: 'unparseable' }; }
     this._latStage(env?.msgId, 'root:recv');
@@ -613,12 +632,18 @@ export const wireHandlersMethods = {
     if (role.cacheIds.has(env.msgId)) return { ok: true, msgId: env.msgId, dup: true };
     if (this._tombstoned(role, env.msgId, json)) return { ok: true, msgId: env.msgId, suppressed: true };
 
+    // THE CUT, checked synchronously immediately before the stamp (dual-root
+    // packet 4(d)): a write admitted before the cut must not commit after it.
+    if (!this._cutHolds(role, cut)) {
+      this._log('info', 'cut-refused', { topic: idHex(role.topicId).slice(0, 12), at: 'stamp', msgId: String(env.msgId).slice(0, 12), gated: !!role.merge?.gate, gen: role.gen | 0, gen0: cut ? cut.gen0 : null });
+      return { ok: false, reason: 'cut', msgId: env.msgId };
+    }
     // STAMP — single serialization point; strictly monotonic, floored at now.
     const ts = Math.max(role.lastTs + 1, this._now());
     role.lastTs = ts;
     const seq = ++role.seq;                                              // dense per-topic counter (gap detection)
     const msg = { json, publishTs: ts, msgId: env.msgId, seq };
-    this._cachePush(role, { msgId: env.msgId, publishTs: ts, json, seq });
+    this._cachePush(role, { msgId: env.msgId, publishTs: ts, json, seq }, cut);
     // Phase 3 shadow: observe the VERIFIED body (env passed verifyEnvelope above)
     // ONLY if it survived the cache write (an immediate byte-cap eviction must not
     // leave a stale shadow body). The observer independently re-binds the topic.
@@ -859,12 +884,14 @@ export const wireHandlersMethods = {
   // honestly claim to account for; `rejected` is what it dropped. Callers that
   // confirm receipt (HANDOFF → HANDOFFACK) MUST report these rather than the
   // bare fact that the loop finished.
-  async _ingestStampedBatch(role, msgs) {
-    let n = 0, held = 0, rejected = 0;
+  async _ingestStampedBatch(role, msgs, cut = null) {
+    let n = 0, held = 0, rejected = 0, refused = false;
     const list = Array.isArray(msgs) ? msgs : [];
     for (const m of list) {
+      if (refused) { rejected++; continue; }           // a refusal at the cut marks the whole transfer (dual-root 4(d))
       if (m && typeof m.json === 'string' && Number.isFinite(m.publishTs)) {
-        if (await this._ingestStamped(role, m) === 'held') held++; else rejected++;
+        const r = await this._ingestStamped(role, m, cut);
+        if (r === 'held') held++; else { rejected++; if (r === 'refused') refused = true; }
       } else {
         // Shape guard. Previously skipped with NO log at all — the most silent
         // of the drop paths, and indistinguishable from success to the leaver.
@@ -875,7 +902,7 @@ export const wireHandlersMethods = {
         await new Promise(r => (typeof setImmediate === 'function' ? setImmediate(r) : setTimeout(r, 0)));
       }
     }
-    return { sent: list.length, held, rejected };
+    return { sent: list.length, held, rejected, refused };
   },
 
   // Returns an OUTCOME, consumed by _ingestStampedBatch's tally:
@@ -888,7 +915,10 @@ export const wireHandlersMethods = {
   // rejected half a batch acked identically to one that took all of it, and the
   // leaver then exempted the topic from retry AND cohort spray — dropping the
   // last copy of exactly the rejected messages.
-  async _ingestStamped(role, m) {
+  //   'refused'  — refused AT THE CUT (dual-root 4(d)): the role was cut or
+  //                demoted while this ingest awaited; counted as rejected and
+  //                the batch applies nothing further.
+  async _ingestStamped(role, m, cut = null) {
     let env;
     try { env = JSON.parse(m.json); } catch { this._log('warn', 'drop-malformed-stamped', { msgId: String(m?.msgId).slice(0, 12) }); return 'rejected'; }
     const v = await verifyEnvelope(env);                                 // B-4 still applies
@@ -908,7 +938,7 @@ export const wireHandlersMethods = {
     if (m.publishTs > this._now() + FUTURE_TOLERANCE_MS) { this._log('warn', 'drop-future-replayup'); return 'rejected'; } // §5 bad-clock
     if (role.cacheIds.has(m.msgId)) return 'held';                       // already have it
     if (this._tombstoned(role, m.msgId, m.json)) return 'held';          // killed → don't resurrect via replay-up
-    this._cachePush(role, { msgId: m.msgId, publishTs: m.publishTs, json: m.json, seq: m.seq });
+    if (!this._cachePush(role, { msgId: m.msgId, publishTs: m.publishTs, json: m.json, seq: m.seq }, cut)) return 'refused';
     // Phase 3 shadow: observe the VERIFIED body (env passed verifyEnvelope + the
     // topic-binding check above) if it survived the cache write. The observer
     // independently re-binds the topic too (defense in depth). No-op flag-off.
@@ -1135,8 +1165,14 @@ export const wireHandlersMethods = {
   // delete re-acquires it on its next renewal, exactly like a missed publish
   // re-acquires from cache. Idempotent: the fan-out + cache-drop happen only the
   // first time we see the kill (tombstone-gated).
-  _applyKill(role, topicBig, m) {
+  // RETURNS false when refused at the cut (dual-root packet 4(d)); the caller
+  // propagates it. Tombstones are mutations too, and they commit first.
+  _applyKill(role, topicBig, m, cut = null) {
     const target = m.msgId;
+    if (role && !this._cutHolds(role, cut)) {
+      this._log('info', 'cut-refused', { topic: idHex(topicBig).slice(0, 12), at: 'applyKill', msgId: String(target).slice(0, 12), gated: !!role.merge?.gate, gen: role.gen | 0, gen0: cut ? cut.gen0 : null });
+      return false;
+    }
     // A retracted message has no durability obligation left. Cancel it BEFORE
     // the tombstone/fan-out work below, so no retry can outlive the retraction
     // (Aster: the kill must cancel atomically and preserve the tombstone).
@@ -1225,6 +1261,7 @@ export const wireHandlersMethods = {
     if (d === 'reroute') { this._reroute(T.KILL, payload); return 'consumed'; }
     const topicBig = idBig(payload.topicId);
     if (this._holdIntercept(topicBig, T.KILL, payload)) return 'consumed';   // step-down hold (4.102.0)
+    if (this._mergeGateIntercept(topicBig, T.KILL, payload)) return 'consumed';   // merge gate (dual-root 4(d))
     // Root-beacon last-mile correction (KILL) — same one-shot semantics as PUB:
     // a kill landing on a near-miss node must reach the true root, not mint a
     // competing root that the rest of the tree never consults.
@@ -1246,6 +1283,7 @@ export const wireHandlersMethods = {
     const kill = payload.kill;
     const target = kill?.msgId;
     if (!target) return 'consumed';
+    const cut = this._cutCapture(role);                 // THE CUT: captured before the first await (dual-root 4(d))
     // AUTHZ: a kill must be signed, and only the AUTHOR of the target may kill it.
     // (1) signature self-valid (B-4 analog for kills).
     const v = await verifyKill(kill);
@@ -1268,13 +1306,18 @@ export const wireHandlersMethods = {
     }
     // STAMP the kill like a publish (monotonic + dense counter) so it orders +
     // replays via `since` AND occupies a seq slot (a missed kill shows as a gap).
+    const prevTs = role.lastTs, prevSeq = role.seq;     // restored if the cut refuses the commit below
     const ts = Math.max(role.lastTs + 1, this._now());
     role.lastTs = ts;
     const seq = ++role.seq;
     // Pass the COMPLETE signed kill so _applyKill can retain + transport the proof
     // (blocker b). The root re-stamps ts/seq for replay ordering; the signed kill
     // keeps the author's own ts/seq for verifyKill() at every downstream node.
-    this._applyKill(role, topicBig, { msgId: target, killTs: ts, signer: lc(kill.signerPubkey), seq, kill });
+    if (this._applyKill(role, topicBig, { msgId: target, killTs: ts, signer: lc(kill.signerPubkey), seq, kill }, cut) === false) {
+      role.seq = prevSeq; role.lastTs = prevTs;               // the stamp above did not commit
+      this._cutDisposition(topicBig, T.KILL, payload);          // forwarded, not ingested: no ack from here
+      return 'consumed';
+    }
     // KILL completes on tombstone ingest, separately from PUB (v0.3 §1).
     // _applyKill is tombstone-gated internally; re-acking a duplicate kill is
     // the idempotent-success case, same as a duplicate publish.

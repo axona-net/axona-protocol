@@ -22,7 +22,17 @@ import { idHex, idBig, lc, isHexId } from './ids.js';
 
 export const topicStoreMethods = {
   // ── cache ────────────────────────────────────────────────────────────
-  _cachePush(role, entry) {
+  // RETURNS true when the entry committed, false when refused at the cut
+  // (dual-root packet 4(d)): `cut` is the caller's entry-time capture
+  // ({role0, gen0}, _cutCapture) and the check runs here, synchronously,
+  // immediately before the write; a gated role refuses with or without a
+  // capture. Callers that pass no cut (the relay DELIVER path) are checked
+  // against the gate alone.
+  _cachePush(role, entry, cut = null) {
+    if (!this._cutHolds(role, cut)) {
+      this._log('info', 'cut-refused', { topic: idHex(role.topicId).slice(0, 12), at: 'cachePush', msgId: String(entry?.msgId).slice(0, 12), gated: !!role.merge?.gate, gen: role.gen | 0, gen0: cut ? cut.gen0 : null });
+      return false;
+    }
     entry.bytes = (entry.json ? entry.json.length : 0) + 80;
     role.cache.push(entry);
     role.cacheIds.add(entry.msgId);
@@ -43,6 +53,7 @@ export const topicStoreMethods = {
     // verification, and _cachePush is also reached from the relay _onDeliver path
     // (unverified). Body observation is driven from the verified ingress
     // (_ingestPublish / _ingestStamped) with a cache-survival guard.
+    return true;
   },
 
   _expireCache(role, now) {
@@ -108,7 +119,11 @@ export const topicStoreMethods = {
   // Apply a batch of migrated tombstones BEFORE ingesting the migrated bodies, so a
   // killed message in the same batch is suppressed (not briefly fanned/delivered then
   // retracted). Shared by the replay-up and handoff receive paths.
-  async _applyDels(role, topicBig, dels) {
+  // RETURNS true when every entry committed, false at the FIRST refusal at the
+  // cut (dual-root packet 4(d)): the transfer's entry-time `cut` is passed to
+  // every _applyKill and nothing is captured after the proof await; a refusal
+  // stops the batch so no later entry commits behind the export.
+  async _applyDels(role, topicBig, dels, cut = null) {
     for (const d of (Array.isArray(dels) ? dels : [])) {
       if (d && d.msgId) {
         // Verify + BIND any propagated proof (topicId+msgId+signer) BEFORE _applyKill
@@ -118,9 +133,10 @@ export const topicStoreMethods = {
         // before retention; a verified proof also observes into the shadow authority.
         let dd = d;
         if (this._tombAuthority && d.kill && !(await this._taVerifyBoundKill(topicBig, d))) { const { kill, ...rest } = d; dd = rest; }
-        this._applyKill(role, topicBig, dd);
+        if (this._applyKill(role, topicBig, dd, cut) === false) return false;
       }
     }
+    return true;
   },
 
   // ── app delivery (exactly-once) ──────────────────────────────────────
