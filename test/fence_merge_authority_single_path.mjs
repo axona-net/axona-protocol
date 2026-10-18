@@ -87,11 +87,12 @@ console.log('fence_merge_authority_single_path: 4(d) — every claim-shedding pa
   check('7 two winners in one tick converge on the relation: a losing later candidate does not replace the standing one; a winning one does', keptNear && role.merge.candidate.id === idHex(FAR) && role.merge.candidate.epoch === 2 && log(ctx, 'merge-candidate')[1]?.ctx.replaced === true, why(ctx, role));
 }
 { // 8 structural
-  // The TWO permitted direct calls: inside _mergeCandidate itself (the "not
-  // capable or no custody → demote directly" branch) and inside _onReplayAck
+  // The THREE permitted direct calls: inside _mergeCandidate itself (the "not
+  // capable or no custody → demote directly" branch), inside _onReplayAck
   // (step 5: the one call _set accepts on a role with custody, carrying the
-  // release token). Each body is found by its header and the next
-  // method-level close brace; nothing else may call demote.
+  // release token) and inside _mergeSweep (the legacy fallback, d4, minting
+  // its own token after a reached offer timed out). Each body is found by its
+  // header and the next method-level close brace; nothing else may call demote.
   const dir = new URL('../src/pubsub/', import.meta.url);
   const offenders = []; let inside = 0;
   const bodyRange = (lines, header) => {
@@ -106,13 +107,13 @@ console.log('fence_merge_authority_single_path: 4(d) — every claim-shedding pa
     if (!f.endsWith('.js') || f === 'rootClaim.js') continue;
     const src = readFileSync(new URL(f, dir), 'utf8');
     const lines = src.split('\n');
-    const ranges = [bodyRange(lines, /^  _mergeCandidate\(/), bodyRange(lines, /^  _onReplayAck\(/)].filter(Boolean);
+    const ranges = [bodyRange(lines, /^  _mergeCandidate\(/), bodyRange(lines, /^  _onReplayAck\(/), bodyRange(lines, /^  _mergeSweep\(/)].filter(Boolean);
     lines.forEach((line, i) => {
       if (!/\.demote\(/.test(line) || /^\s*\/\//.test(line)) return;
       if (ranges.some(([a, b]) => i > a && i < b)) inside++; else offenders.push(`${f}:${i + 1}`);
     });
   }
-  check('8 structural: the only .demote( calls outside rootClaim.js are the direct branch inside _mergeCandidate and step 5 inside _onReplayAck', offenders.length === 0 && inside === 2, `offenders=${offenders.join(' ')} inside=${inside}`);
+  check('8 structural: the only .demote( calls outside rootClaim.js are the direct branch inside _mergeCandidate, step 5 inside _onReplayAck, and the legacy fallback inside _mergeSweep (each minting the token it needs)', offenders.length === 0 && inside === 3, `offenders=${offenders.join(' ')} inside=${inside}`);
 }
 
 console.log(`\nfence_merge_authority_single_path: ${passed} passed, ${failed} failed`);

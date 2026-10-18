@@ -261,6 +261,14 @@ export const writeFlightMethods = {
       topic: idHex(f.topicBig).slice(0, 12), root: f.rootHex.slice(0, 12), epoch: f.epoch,
       detail: 'no correlated receipt within the flight budget — incarnation tombstoned',
     });
+    // A tombstone for the accepted winner's claim clears the record and the
+    // hold at once (dual-root 4(d)): the loser may promote on the next request.
+    const evRole = this.axonRoles.get(f.topicBig);
+    if (evRole?.merge?.acceptedWinner?.id === f.rootHex && evRole.merge.acceptedWinner.epoch <= f.epoch) {
+      evRole.merge.acceptedWinner = null;
+      const h = this._stepDownHold?.get(f.topicBig); if (h && h.to === f.rootHex) this._stepDownHold.delete(f.topicBig);
+      this._log('info', 'merge-record-cleared', { topic: idHex(f.topicBig).slice(0, 12), winner: f.rootHex.slice(0, 10), why: 'root-evicted' });
+    }
     // Retry-promote: the closest LIVE candidate gets the write via-pinned;
     // its own terminal machinery roots, ingests, and acks. Same closest-live
     // rule as everywhere; the tombstone keeps the corpse out of the pool.

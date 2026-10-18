@@ -90,6 +90,15 @@ export const rootElectionMethods = {
       // promoted root it must adopt under is farther — a pure closeness gate
       // would silently discard the one beacon that corrects it.
       const supersedesMine = myEpoch > 0 && epoch > myEpoch;
+      // EVIDENCE REFRESHES THE ACCEPTED-WINNER RECORD (dual-root 4(d)): a beacon
+      // from W at the accepted epoch extends it; at a higher epoch replaces the
+      // epoch and extends; the hold extends with it. Read BEFORE the closeness
+      // skip below: the accepted winner may be farther than this node.
+      const aw = myRole?.merge?.acceptedWinner;
+      if (aw && aw.id === lc(payload.root) && epoch >= aw.epoch) {
+        aw.epoch = epoch; aw.at = now; aw.exp = now + (this._stepDownHoldMs | 0);
+        const h = this._stepDownHold?.get(tBig); if (h && h.to === aw.id) h.at = now;
+      }
       const mine = this._bestKnownClosest(tBig);                           // local-only
       if (!supersedesMine && mine != null && (rootBig ^ tBig) > (mine ^ tBig)) continue;   // verify-don't-trust
       // Record keeps the HIGHEST epoch ever seen for the seat even when the
@@ -97,6 +106,7 @@ export const rootElectionMethods = {
       const prev = this._rootBeacons.get(tBig);
       this._rootBeacons.set(tBig, { root: lc(payload.root), at: now, exp: now + BEACON_TTL_MS,
         epoch: Math.max(epoch, (prev && Number.isInteger(prev.epoch)) ? prev.epoch : 0) });
+
       // If I'd wrongly become this topic's root but the beacon proves a strictly
       // closer root exists, yield NOW — rootClaim.demote demotes, re-homes, and
       // sends the confirming subscribe (the new root must ADOPT us or our

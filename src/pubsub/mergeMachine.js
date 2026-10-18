@@ -158,8 +158,13 @@ export const mergeMachineMethods = {
   },
   /**
    * The sweep, from refreshTick: MERGE_TIMEOUT_MS bounds ONE gate interval
-   * from the bind; an OFFER unanswered for MERGE_OFFER_TIMEOUT_MS is dropped
-   * (the fallback, d4, takes it from here); W's retention ends at tS + R.
+   * from the bind; an OFFER unanswered for MERGE_OFFER_TIMEOUT_MS runs the
+   * LEGACY FALLBACK when the offer was reached (W drops MERGE_OFFER as an
+   * unknown frame and never pulls under corr): L logs merge-legacy-fallback
+   * and takes today's path, demote() with the SUB carrying hw and lw, so the
+   * legacy W pulls what the shipped SPLIT_UNION rule pulls — the delta-only
+   * weakness the packet names. An offer whose route FAILED is dropped and
+   * retried on the next trigger; W's retention ends at tS + R.
    */
   _mergeSweep(now) {
     for (const role of this.axonRoles.values()) {
@@ -167,8 +172,14 @@ export const mergeMachineMethods = {
       if (g && now - g.at >= MERGE_TIMEOUT_MS) this._mergeAbort(role, 'timeout', { boundMs: MERGE_TIMEOUT_MS });
       for (const [corr, m] of role.sync.openMerges || []) {
         if (m.state === 'offered' && now - m.offeredAt >= MERGE_OFFER_TIMEOUT_MS) {
-          role.sync.openMerges.delete(corr);
-          this._log('warn', 'merge-offer-timeout', { topic: idHex(role.topicId).slice(0, 12), corr: corr.slice(0, 8), winner: m.winner.slice(0, 10) });
+          this._mergeCloseCorr(role, corr);
+          if (m.reached === false || !role.isRoot || role.merge?.gate) {
+            this._log('warn', 'merge-offer-timeout', { topic: idHex(role.topicId).slice(0, 12), corr: corr.slice(0, 8), winner: m.winner.slice(0, 10), reached: m.reached ?? null });
+          } else {
+            this._log('warn', 'merge-legacy-fallback', { topic: idHex(role.topicId).slice(0, 12), corr: corr.slice(0, 8), winner: m.winner.slice(0, 10), cache: role.cache.length });
+            role.merge.releaseToken = randomNonce() + randomNonce();
+            this._rootClaim.demote(role.topicId, m.winner, 'merge-legacy-fallback', { releaseToken: role.merge.releaseToken });
+          }
         }
       }
       for (const [corr, p] of role.sync.openPulls || []) {
@@ -183,6 +194,27 @@ export const mergeMachineMethods = {
         }
       }
     }
+  },
+
+  /**
+   * CUSTODY-ALIVE (packet v0.14): a role holds custody of something a reaper
+   * must not discard — an open merge or pull, a completion in flight, an
+   * accepted-winner record, pinned entries, or ANY active tombstone (a
+   * tombstone is custody of a deletion). Both role reapers, the role delete
+   * and backup retirement read this and skip the role while it holds.
+   * Discharge: correlated closure, or local expiry of every pin and tombstone.
+   */
+  _custodyAlive(role, now = this._now()) {
+    if (!role) return false;
+    const mg = role.merge;
+    if (mg) {
+      if (mg.completing || mg.gate) return true;
+      if (mg.acceptedWinner && mg.acceptedWinner.exp > now) return true;
+      if (mg.pins && mg.pins.size) return true;
+    }
+    if (role.sync?.openMerges?.size || role.sync?.openPulls?.size) return true;
+    for (const t of role.tombstones.values()) if ((t?.exp ?? 0) > now) return true;
+    return false;
   },
 
   // ── the gate's forward ─────────────────────────────────────────────────
@@ -305,10 +337,14 @@ export const mergeMachineMethods = {
     const corr = randomNonce() + randomNonce();
     const timing = this._mergeTiming();
     role.sync.openMerges.set(corr, { winner: c.id, winnerEpoch: c.epoch | 0, loserEpoch: role.epoch | 0, state: 'offered', snapshot: null, manifest: null, lastCursorSent: null, offeredAt: this._now(), boundAt: 0, tB: 0, timing });
-    this._route(idBig(c.id), T.MERGE_OFFER, {
+    const rec = role.sync.openMerges.get(corr);
+    const sent = this._route(idBig(c.id), T.MERGE_OFFER, {
       topicId: idHex(topicBig), corr, loser: idHex(this.nodeId), loserEpoch: role.epoch | 0,
       hw: this._highWater(role), lw: this._lowWater(role), count: role.cache.length, timing,
     });
+    // Did the offer reach anyone? A failed verdict means W is unreachable, not
+    // legacy: the sweep then drops the record instead of falling back.
+    Promise.resolve(sent).then((r) => { const v = dispatchVerdict(r, this.dht?.verdictsSupported); rec.reached = v === 'failed' ? false : true; });
     this._log('info', 'merge-offer', { topic: idHex(topicBig).slice(0, 12), corr: corr.slice(0, 8), winner: c.id.slice(0, 10), winnerEpoch: c.epoch | 0, loserEpoch: role.epoch | 0, count: role.cache.length });
     return true;
   },
@@ -570,9 +606,11 @@ export const mergeMachineMethods = {
     role.merge.releaseToken = randomNonce() + randomNonce();
     const tok = role.merge.releaseToken;
     const gateCorr = role.merge.gate?.corr;
-    const ok = this._rootClaim.demote(topicBig, m.winner, 'merge-step5', { releaseToken: tok });
+    const stepAt = this._now();
+    role.merge.acceptedWinner = { id: m.winner, epoch: m.winnerEpoch | 0, at: stepAt, exp: stepAt + (this._stepDownHoldMs | 0) };
+    const ok = this._rootClaim.demote(topicBig, m.winner, 'merge-step5', { releaseToken: tok, holdAlways: true });
     if (!ok) {
-      role.merge.releaseToken = null;
+      role.merge.releaseToken = null; role.merge.acceptedWinner = null;
       this._log('error', 'merge-flip-refused', { topic: idHex(topicBig).slice(0, 12), corr: corr.slice(0, 8) });
       this._mergeAbort(role, 'flip-refused');
       return 'consumed';

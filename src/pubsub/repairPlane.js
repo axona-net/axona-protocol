@@ -197,7 +197,7 @@ export const repairPlaneMethods = {
       // election (that path must never be pruned, or a split-brain topic gets NO root).
       const up = this._upstream.get(t);
       const rehomed = Array.isArray(up) && up.length > 0 && up[0] !== lc(idHex(this.nodeId)) && this._isReachableId(up[0]);
-      if (rehomed && role.subscribers.size === 0 && (now - (role.lastReplicaAt || 0)) > BACKUP_EVICT_MS) {
+      if (rehomed && role.subscribers.size === 0 && (now - (role.lastReplicaAt || 0)) > BACKUP_EVICT_MS && !this._custodyAlive(role, now)) {   // custody-alive beside the seat exemption (dual-root 4(d) v0.14)
         this._rootClaim.retireBackup(t, role, 'rehomed-idle'); continue;
       }
       this._sendSubscribe(t);
@@ -279,8 +279,9 @@ export const repairPlaneMethods = {
       // precisely that a generic idle reaper defeats the election obligation on
       // the same seat the dead reaper would have taken, just later.
       const backupSeat = role.backupOf !== null || this._backupTopics.has(t);
+      const custodyAlive = this._custodyAlive(role, now);   // dual-root 4(d) v0.14: never reaped while it holds
       const idleReap = this._roleIdleTtlMs > 0 && role.cache.length === 0
-        && !backupSeat
+        && !backupSeat && !custodyAlive
         && !this.mySubscriptions.has(t) && !this._hostedTopics.has(t)
         && this._roleIdleMs(role, now) > this._roleIdleTtlMs;
       const keyspacePinned = this._hostKeyspace && role.isRoot;
@@ -354,7 +355,7 @@ export const repairPlaneMethods = {
       // condition has to be agreed on its own terms; until it is, retention is
       // the contract and this code honours it rather than guessing.
       const deadNow = role.subscribers.size === 0 && role.cache.length === 0
-        && !backupSeat
+        && !backupSeat && !custodyAlive
         && !keyspacePinned && !metricsLeased
         && !this.mySubscriptions.has(t) && !this._hostedTopics.has(t);
       if (idleReap || deadNow) {
@@ -368,7 +369,7 @@ export const repairPlaneMethods = {
           idleMs: this._roleIdleMs(role, now), everPublished: (role.lastTs || 0) > 0,
         });
       }
-      if (idleReap || deadNow || (role.subscribers.size === 0 && !holdsHistory && !keyspacePinned && !role.backupOf && !this._backupTopics.has(t) && !metricsLeased && !this.mySubscriptions.has(t) && !this._hostedTopics.has(t))) {
+      if (idleReap || deadNow || (role.subscribers.size === 0 && !holdsHistory && !custodyAlive && !keyspacePinned && !role.backupOf && !this._backupTopics.has(t) && !metricsLeased && !this.mySubscriptions.has(t) && !this._hostedTopics.has(t))) {
         this.axonRoles.delete(t);
         this._upstream.delete(t);
         if (this._tombAuthority) this._taPurgeTopic(t);   // Phase 3 shadow: node no longer holds this topic's bodies (no-op flag-off)

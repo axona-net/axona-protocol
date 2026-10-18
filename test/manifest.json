@@ -1417,6 +1417,26 @@
       "note": "dual-root 4(d) d3, commit_guard + lease_overlap (assumption 7): the lease is rechecked synchronously immediately before the flip — a monotonic jump past tB + A between the recheck and the flip's return logs merge-late-flip, the flip stands, NO completion is claimed (completing null, no merge-bearing SUB), the export stays pinned at L and W's record fails at tS + R with the data at both ends; a recheck that fails flips nothing (merge-ack-expired at:'commit'); control completes. Mutant: check once at the ack -> B; drop the late-flip rule -> A."
     },
     {
+      "file": "fence_merge_repromotion_held.mjs",
+      "class": "default",
+      "note": "dual-root 4(d) stage d4 (axona-docs 14a6bd8; David build 2026-10-17), v0.10's accepted-winner record: A closer at epoch 1 merges into B farther at epoch 2 (B's beacon is the trigger; both beacons otherwise silenced so an EMPTY B does not yield directly to the closer A); at step 5 A records acceptedWinner and arms the hold toward B although B is farther (demote ctx.holdAlways); a bare PUB at A is redirected to B by the hold (holdTarget = the accepted winner), A does not promote and mints no epoch; a bare SUB at A is seated at A as W's child (the shipped rule — a stated departure from the packet's row); claimReachable is refused and promote() a no-op; a beacon from B at the accepted epoch extends the record and the hold (read before the verify-don't-trust closeness skip). Mutant: ignore holdAlways -> 1, 2, 4 fail."
+    },
+    {
+      "file": "fence_merge_record_expiry.mjs",
+      "class": "default",
+      "note": "dual-root 4(d) d4: after the merge L holds the record and the hold; at STEPDOWN_HOLD_MS with no beacon from W both expire together (merge-record-expired, root-hold-expired); L promotes on the next bare request and mints a fresh epoch above W's; the next contact (W hears L's beacon, now loses on epoch) runs a ROUND at W (candidate + offer), not a direct demote; a flight eviction tombstoning W's claim clears the record and the hold at once (merge-record-cleared). Mutant: keep the record past the hold -> 3; demote directly at the beacon site -> 4."
+    },
+    {
+      "file": "fence_merge_legacy_fallback.mjs",
+      "class": "default",
+      "note": "dual-root 4(d) d4, mixed versions: W unarmed drops the OFFER (no PULLUP under corr); at MERGE_OFFER_TIMEOUT_MS with the offer REACHED, L logs merge-legacy-fallback and takes today's demote (a token minted for it) with the SUB carrying hw and lw, and the legacy W pulls L's history by today's hw/lw rule (a PULLUP without corr) and holds it; an offer whose route FAILED is merge-offer-timeout with no fallback and L still root; both armed: the round binds inside the window and no fallback fires. Mutant: never fall back -> 2 and 3 fail."
+    },
+    {
+      "file": "fence_merge_role_gc_custody.mjs",
+      "class": "default",
+      "note": "dual-root 4(d) v0.14, stage d4: a role is CUSTODY-ALIVE (open merge/pull, completing, gate, a valid accepted-winner record, pins, or ANY active tombstone) and both reapers, the role delete and backup retirement skip it — a lost completion with no subscribers and a tombstone-only export survives a full cleanup tick past the idle TTL and W's retention expiry, a late reappearance of the killed body is suppressed, and the role goes only once its tombstone expires by L's own TTL and completion is abandoned; a plain unarmed root holding only an active tombstone is custody-alive too. Mutant: restore the cache-only reaper tests -> 2 and 3 fail."
+    },
+    {
       "file": "fence_pool_profile.mjs",
       "class": "default",
       "note": "4.114.0, two-pool packet G4 (axona-docs ca52384; Aster bc4fe433 s2, b395fe8f G4): the pool profile {M, I, H, pPending, cInbound, serveFloor, promoteMs, hostBudget} is validated at construction and REFUSED (PoolProfileError naming the field) on any overcommit — M+I>H, pPending>M, cInbound>I, serveFloor>M, hostBudget<H+doorSockets — never trimmed or borrowed; the review rows (relay M50/I50/H100, leaf M6/I6/H12) are feasible examples, none adopted; webTransport({meshPools}) refuses before building the mesh, and pools without the ledger are refused. Mutant: delete the M+I>H check -> check 1 fails."

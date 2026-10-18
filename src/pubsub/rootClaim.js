@@ -492,7 +492,12 @@ export class RootClaim {
     // (smoke_root_reconcile phase 5). The keyspace-closest node may always
     // reclaim; the hold binds only the node that the keyspace says should not
     // own the topic.
-    if ((to ^ topicBig) < (m.nodeId ^ topicBig)) {
+    // THE ACCEPTED-WINNER HOLD (dual-root packet 4(d), v0.10): a merge-capable
+    // loser that shed its claim at step 5 holds toward W WHETHER OR NOT W IS
+    // CLOSER — under epoch-first election a closer loser at a lower epoch would
+    // otherwise re-promote on the next bare request, mint knownEpoch + 1 and
+    // outrank the live winner at once. `ctx.holdAlways` is set only by step 5.
+    if (ctx?.holdAlways || (to ^ topicBig) < (m.nodeId ^ topicBig)) {
       m._stepDownHold?.set(topicBig, { to: lc(toHex), at: m._now(), lastLog: 0 });
     }
     m._sendSubscribe(topicBig);
@@ -508,6 +513,13 @@ export class RootClaim {
     if (!h) return null;
     if (!(m._stepDownHoldMs > 0) || m._now() - h.at >= m._stepDownHoldMs) {
       m._stepDownHold.delete(topicBig);
+      // The accepted-winner record expires WITH the hold (dual-root 4(d)): no
+      // beacon from W refreshed it, so this node may promote on the next request.
+      const role = m.axonRoles.get(topicBig);
+      if (role?.merge?.acceptedWinner && role.merge.acceptedWinner.id === h.to) {
+        role.merge.acceptedWinner = null;
+        m._log('info', 'merge-record-expired', { topic: idHex(topicBig).slice(0, 12), winner: h.to.slice(0, 10) });
+      }
       m._log('info', 'root-hold-expired', {
         topic: idHex(topicBig).slice(0, 12), to: h.to.slice(0, 10), heldS: Math.round((m._now() - h.at) / 1000),
       });
@@ -529,6 +541,12 @@ export class RootClaim {
     const m = this.m;
     const h = this.holdFor(topicBig);
     if (!h) return null;
+    // The accepted winner IS the target while its record is valid (dual-root
+    // 4(d)): the keyspace terminus is this node, the owner is W, and a bare
+    // request here is redirected to W by name for the record's life. The
+    // forward's own verdict and the re-entry ledger bound a dead W.
+    const aw = m.axonRoles.get(topicBig)?.merge?.acceptedWinner;
+    if (aw && aw.id === h.to && aw.exp > m._now()) return h.to;
     if (m._isReachableId(h.to)) return h.to;
     const c = this.liveCloserRoot(topicBig, { requireReachable });
     return (c && lc(c) === h.to) ? h.to : null;
