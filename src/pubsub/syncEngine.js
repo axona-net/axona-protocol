@@ -135,18 +135,32 @@ export const syncEngineMethods = {
       if (!(prev === undefined || lw < prev)) return false;
       role.sync.pulledLw.set(peerHex, lw);
     }
-    return this._route(targetBig, T.PULLUP, { topicId: idHex(topicBig), sinceHw, parentId: idHex(this.nodeId) });
+    return this._emitPullUp(targetBig, { topicId: idHex(topicBig), sinceHw, parentId: idHex(this.nodeId) });
+  },
+  // THE ONE PULLUP EMISSION SITE and THE ONE REPLAYUP EMISSION SITE
+  // (smoke_emission_sites pins each verb to one `_route` in this engine). The
+  // merge machine (dual-root 4(d)) emits its corr-bearing pulls and frames
+  // through these two, never through its own route call.
+  _emitPullUp(targetBig, payload) {
+    return this._route(targetBig, T.PULLUP, payload);
+  },
+  _emitReplayUp(targetBig, payload) {
+    return this._route(targetBig, T.REPLAYUP, payload);
   },
 
   // Answer a PULLUP: replay my cache delta (and active tombstones) UP to the
   // asking parent. The only REPLAYUP emission site.
   _syncAnswerPull(payload) {
     const role = this.axonRoles.get(idBig(payload.topicId));
-    if (!role || !role.cache.length) return;
+    if (!role) return;
+    // A TOMBSTONE-ONLY role transfers its dels (dual-root packet 4(d)): the
+    // old `!role.cache.length` return answered nothing for a role whose
+    // whole state is deletions, and a puller then resurrected the killed body.
+    if (!role.cache.length && !this._activeDels(role).length) return;
     const sinceHw = Number.isFinite(payload.sinceHw) ? payload.sinceHw : 0;
     const { msgs, dels } = this._syncDelta(role, sinceHw);
     if ((msgs.length || dels.length) && isHexId(lc(payload.parentId))) {
-      this._route(idBig(payload.parentId), T.REPLAYUP, { topicId: idHex(role.topicId), msgs, dels });
+      this._emitReplayUp(idBig(payload.parentId), { topicId: idHex(role.topicId), msgs, dels });
     }
   },
 

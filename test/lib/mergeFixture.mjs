@@ -165,15 +165,83 @@ export class Fabric {
     this.nodes.set(idBig, rec); return rec;
   }
   _closestAlive(target) { let best = null, bd = null; for (const [id, n] of this.nodes) { if (!n.alive) continue; const d = id ^ target; if (bd === null || d < bd) { bd = d; best = id; } } return best; }
+  /** Drain the wire queue AND every node's ingest queue until both stay quiet across a few macrotask yields. */
   async settle() {
     let i = 0;
-    while (this.queue.length) {
-      if (++i > 20_000) throw new Error('settle: did not converge');
-      const j = this.queue.shift(); const n = this.nodes.get(j.dest); if (!n || !n.alive) continue;
-      const h = n.handlers.get(j.type); if (h) await h(j.payload, j.meta);
+    for (let round = 0; ; round++) {
+      if (round > 2000) throw new Error('settle: did not converge');
+      while (this.queue.length) {
+        if (++i > 50_000) throw new Error('settle: did not converge');
+        const j = this.queue.shift(); const n = this.nodes.get(j.dest); if (!n || !n.alive) continue;
+        const h = n.handlers.get(j.type); if (h) await h(j.payload, j.meta);
+      }
+      let flushed = false;
+      for (const n of this.nodes.values()) {
+        if (n.alive && ((n.am._ingestQueue && n.am._ingestQueue.length) || n.am._ingestPumping)) { await n.am._ingestIdle(); flushed = true; }
+      }
+      for (let k = 0; k < 4; k++) await new Promise((r) => setImmediate(r));
+      if (!this.queue.length && !flushed) {
+        // one more quiet confirmation: async work (a hash, a verify) may still enqueue
+        for (let k = 0; k < 4; k++) await new Promise((r) => setImmediate(r));
+        if (!this.queue.length) return;
+      }
     }
-    for (let k = 0; k < 4; k++) await new Promise((r) => setImmediate(r));
   }
 }
 export const LOC = regionCenter('useast');
 export const freshId = async () => BigInt('0x' + (await createNodeIdentity(LOC)).id);
+
+// ── stage d3: the split scene on the fabric ──
+import { ROOT_VERIFY_FIRST_MS as _RVF } from '../../src/pubsub/constants.js';
+/**
+ * Two real managers W (closer) and L (farther), both root for a real topic,
+ * L not hearing W (W's beacons silenced), L's lookup visiting W. `fab.tap`
+ * (j => j | null | j') edits or drops wire jobs before dispatch.
+ */
+export async function splitScene(name, { wOpts = {}, lOpts = {} } = {}) {
+  const Lt = await realTopic(name);
+  const fab = new Fabric();
+  const a = await freshId(), b = await freshId();
+  const [wId, lId] = ((a ^ Lt.topicId) < (b ^ Lt.topicId)) ? [a, b] : [b, a];
+  const W = fab.addNode(wId, wOpts); const Ln = fab.addNode(lId, lOpts);
+  W.am._announceRoot = () => {};
+  Ln.am.dht.lookup = async () => ({ path: [idHex(lId), idHex(wId)], hops: 1, time: 1, found: false });
+  const wRole = W.rc.become(Lt.topicId, 'sub-terminal');
+  const lRole = Ln.rc.become(Lt.topicId, 'sub-terminal');
+  const meta = (node) => ({ targetId: node.id, isTerminal: true, hopCount: 2, fromId: idHex(Lt.publisher) });
+  const stamp = async (node, k, size = 0) => {
+    fab.clock += 10;
+    const env = await buildEnvelope({ topic: Lt.desc, message: size ? { k, pad: 'x'.repeat(size) } : { k }, seq: k, identity: author, ts: fab.clock });
+    await node.handlers.get('pubsub:pub')({ topicId: idHex(Lt.topicId), json: JSON.stringify(env) }, meta(node));
+    await fab.settle();
+    return env.msgId;
+  };
+  const kill = async (node, msgId, seq = 1) => {
+    fab.clock += 10;
+    const k = await buildKill({ topicId: idHex(Lt.topicId), msgId, ts: fab.clock, seq, identity: author });
+    await node.handlers.get('pubsub:kill')({ topicId: idHex(Lt.topicId), kill: k }, meta(node));
+    await fab.settle();
+  };
+  /** Fire L's self-verify (the trigger) and let the machine run to quiet. */
+  const trigger = async () => {
+    lRole.formedAt = fab.clock - _RVF - 1; lRole.lastVerify = 0;
+    Ln.am._verifyRoots(fab.clock);
+    for (let i = 0; i < 6; i++) await new Promise((r) => setImmediate(r));
+    await fab.settle();
+  };
+  const logs = (n, ev) => n.logs.filter((l) => l.ev === `pubsub:${ev}`);
+  const frames = (type, pred = () => true) => fab.sent.filter((j) => j.type === type && pred(j));
+  return { Lt, fab, W, Ln, wId, lId, wRole, lRole, stamp, kill, trigger, logs, frames, meta };
+}
+// Fabric: a tap on every job, and a record of every job sent
+Fabric.prototype._origSettle = Fabric.prototype.settle;
+Fabric.prototype.settle = async function () {
+  if (!this.sent) this.sent = [];
+  if (!this._tapped) {
+    this._tapped = true;
+    const q = this.queue; const self = this;
+    const push = q.push.bind(q);
+    q.push = (j) => { self.sent.push(j); const t = self.tap ? self.tap(j) : j; return t ? push(t) : q.length; };
+  }
+  return this._origSettle();
+};

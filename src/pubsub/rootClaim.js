@@ -71,6 +71,10 @@ export function makeMergeState() {
     gateFwd: new Map(),     // (d2) gateFwd nonce -> {at, type, corr}: forwards whose return must not be stamped
     corr: null,             // (d3) the live exchange's correlation id
     pendingDelegation: new Map(), // (d1) ADOPT nonce -> {subs:[hex], at}: subscribers delegated but unacked
+    pins: new Set(),        // (d3) msgIds exempt from cap eviction and expiry: W's baseline + manifest for a round's life; L's export after the flip
+    reserve: null,          // (d3, W) {entries, bytes} left for W's own writes during a round; null = no round
+    completing: null,       // (d3, L) {corr, winner, winnerEpoch, loserEpoch, hash} after the committed flip until MERGE_CLOSED; rides every SUB
+    acceptedWinner: null,   // (d4, L) {id, epoch, at, exp}: the hold toward W regardless of closeness
   };
 }
 
@@ -134,6 +138,8 @@ export function makeRole(topicId, isRoot, createdAt = null) {
       probeDeferrals: 0,             // deferred tries so far (bounded by EMPTY_ROOT_PROBE_MAX)
       probeDeferredAt: 0,            // _now() of the last deferral
       probeInflight: false,          // a try is awaiting its verdicts; the sweep does not stack another
+      openMerges: new Map(),         // (d3, L) corr -> {winner, winnerEpoch, loserEpoch, state, snapshot, manifest, lastCursorSent, offeredAt, boundAt, tB, timing}
+      openPulls: new Map(),          // (d3, W) corr -> {loser, loserEpoch, cursor, framesIn, held, sent, startedAt, timing, state, manifest, header, tS}
       pulledLw: new Map(),           // subHex -> lowest lw already PULLUP'd from that child (4.22.1:
                                      // a refused pull — e.g. the child's oldest is tombstoned here —
                                      // must not re-fire on every renewal; re-arm only if lw DECREASES)

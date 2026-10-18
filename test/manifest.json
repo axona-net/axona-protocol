@@ -1317,6 +1317,106 @@
       "note": "dual-root packet 4(d), stage d2, the linearization point: on a two-node fabric a publisher writes through L every 10 ms from before the bind to after the demotion; the writes before the bind are stamped (acked) at L, every write after it is held at W and acked by W, L acked none of them and forwarded each gated one (L may hold them afterwards, replayed down as W's child — the shipped path), every gated forward's flight was discharged by W's ack, and L ends as W's child. Mutant: _mergeGateForward marks undeliverable instead of forwarding -> 2 fails."
     },
     {
+      "file": "fence_merge_two_way_unique.mjs",
+      "class": "default",
+      "note": "dual-root packet 4(d), stage d3 (axona-docs 14a6bd8; David build 2026-10-17): THE EXCHANGE END TO END on the split fabric (W closer, L farther, L not hearing W, L's lookup visiting W): L's self-verify records W as the candidate → ONE MERGE_OFFER → W pulls under corr → L binds (cut + gate, header with the manifest counts) → W admits on the header and pins its baseline → frames in cursor order → W acks FULL (retained/delsActive against the manifest, hash) → step 5 at L (release token, demote, gate cleared, export pinned) → the merge-bearing since-all SUB completes at W (MERGE_CLOSED, pins released, completing cleared) → W holds a and b with x and y tombstoned; L as child converges; one root remains. Mutant: drop L's dels from the frames -> 4 (short) and 7 fail."
+    },
+    {
+      "file": "fence_merge_direction.mjs",
+      "class": "default",
+      "note": "dual-root 4(d) d3, direction (Aster 436ca7b6): the WINNER pulls, the loser answers — every PULLUP under corr is W → L, every REPLAYUP L → W, the OFFER L → W and the one REPLAYACK W → L; W ends with L's unique body and tombstone. Mutant: W answers the OFFER with a full ack without pulling -> 1 and 3 fail."
+    },
+    {
+      "file": "fence_merge_stale_round.mjs",
+      "class": "default",
+      "note": "dual-root 4(d) d3: nothing stale moves a claim or opens a record — an ack under another corr, a stale loserEpoch, another winner or another winnerEpoch is merge-stale with L still root and the round still bound; a PULLUP under an unknown corr from a non-winning claim opens no record; one from a winning claim opens a record without an offer and binds. Mutant: drop the six-field match -> 1-4 fail."
+    },
+    {
+      "file": "fence_merge_cursor_invalid.mjs",
+      "class": "default",
+      "note": "dual-root 4(d) d3, the cursor: a PULLUP whose cursor is not lastCursorSent is merge-cursor-invalid and answered with no frame; the correct cursor is answered; an entry the TTL expired out of the live cache mid-merge is still in the frame (the export is the snapshot fixed at the cut); the frame's lastCursor is the (publishTs, msgId) pair of the last entry sent. Mutant: answer a wrong cursor anyway -> 1; export from the live cache -> 3."
+    },
+    {
+      "file": "fence_merge_equal_stamp_boundary.mjs",
+      "class": "default",
+      "note": "dual-root 4(d) d3: a frame never ends inside an equal-stamp group — with t1 (50 KiB) then t2a + t2b (30 KiB each, one stamp) the first frame carries t1 alone and the second the whole group; three 40 KiB bodies sharing one stamp (the group alone exceeds a frame) arrive across ≥ 2 frames in msgId order with cursor continuity. Mutant: delete the group rule -> A1 fails."
+    },
+    {
+      "file": "fence_merge_full_pull.mjs",
+      "class": "default",
+      "note": "dual-root 4(d) d3, full_pull + hw_above_export: W's high water above every stamp L holds; all of L's bodies arrive under corr by the cursor pull (W's ack counted them against the manifest), not by a high-water delta. Mutant: export only above the PULLUP's sinceHw -> 2 fails."
+    },
+    {
+      "file": "fence_merge_tombstone_only.mjs",
+      "class": "default",
+      "note": "dual-root 4(d) d3: a tombstone-only export transfers its deletion — header bodies 0 dels 1, W holds the tombstone, the ack is full with delsActive 1, L demotes, the killed body re-delivered at W is suppressed; LEGACY: _syncAnswerPull on a tombstone-only role answers a REPLAYUP carrying the del (the `!role.cache.length` return moved). Mutant: restore that return -> 5; export bodies only -> 2."
+    },
+    {
+      "file": "fence_merge_terminal_ack.mjs",
+      "class": "default",
+      "note": "dual-root 4(d) d3, terminal_ack + replayack: ≥ 3 data frames under corr and exactly ONE REPLAYACK, sent after the frame with more:false, carrying topicId, corr, winner, winnerEpoch, loser, loserEpoch, retained, delsActive, hash, disposition full; counts equal L's manifest; step 5 ran once. Mutant: ack after every frame -> the first ack is short -> 1 and 4 fail."
+    },
+    {
+      "file": "fence_merge_retention_ack.mjs",
+      "class": "default",
+      "note": "dual-root 4(d) d3, retention_ack + manifest_dels: W counts retention against the MANIFEST at ack time — a manifest body W lost before the ack makes it short (retained 1 of 2) and L logs merge-ack-short, aborts and stays root with its cache intact; a manifest tombstone W failed to keep makes it short (delsActive 0 of 1); nothing lost → full and L demotes. Mutant: ack full on held === sent -> A and B fail."
+    },
+    {
+      "file": "fence_merge_capacity_refused.mjs",
+      "class": "default",
+      "note": "dual-root 4(d) d3, capacity_refused + growth_offer_to_cut + full_w_unique_baseline: admission sized at the cut, fail closed — two valid caches whose union exceeds W's cap are refused on the header (refused-capacity; L clears its gate, keeps custody; W's baseline intact); an export that grew from 3 at the offer to 5 at the cut is refused although the offer fit; a full W with unique bodies refuses a one-body export; a tombstone-only export is refused when the baseline alone fails; a fitting union is admitted. Mutant: admit on the offer's count -> A, B, C fail."
+    },
+    {
+      "file": "fence_merge_reserve_exhaustion.mjs",
+      "class": "default",
+      "note": "dual-root 4(d) d3: W's own writes during a round draw on MERGE_WRITE_RESERVE_ENTRIES and the next is refused with refused-merge-reserve; nothing pinned is evicted; after completion the refused write re-sent is stamped; the reserve and pins clear at completion. Mutant: admit past the reserve -> 1 fails."
+    },
+    {
+      "file": "fence_merge_timing_bound.mjs",
+      "class": "default",
+      "note": "dual-root 4(d) d3, shared parameters bound to the round: an OFFER with another timing version, A below A_MIN, A above A_MAX or E above E_MAX is answered refused-timing with no pull; a PULLUP echoing a different A than offered is refused at L before the cut with the record dropped; the correct echo binds. Mutant: compare by presence not value -> 5; drop the limits -> 2-4."
+    },
+    {
+      "file": "fence_merge_export_bound.mjs",
+      "class": "default",
+      "note": "dual-root 4(d) d3: EXPORT_BYTES_MAX ≥ CACHE_BYTES + CACHE_MAX × MERGE_TOMB_PROOF_MAX_BYTES and F_MAX = ⌈bound / REPLAY_CHUNK_BYTES⌉ + 1; an export measured above the bound at the cut is refused-export-bound before the header (a refused REPLAYUP to W, gate cleared, L root with its cache intact) and W closes its pull; an export under the bound binds and sends the header. Mutant: skip the measure -> 2 fails."
+    },
+    {
+      "file": "fence_merge_ttl_live_at_cut.mjs",
+      "class": "default",
+      "note": "dual-root 4(d) d3 (v0.11, no margin): a body and a tombstone two minutes from expiry at L, absent at W, W's clock five minutes ahead — both exported (header 1/1), both retained at W at the ack, W's expiry sweep during the round removes neither (pins exempt), L demotes, and only after completion does W's own TTL apply. Mutant: apply v0.10's margin at the cut -> 1 and 2 fail."
+    },
+    {
+      "file": "fence_merge_handover_retention.mjs",
+      "class": "default",
+      "note": "dual-root 4(d) d3: W does not close the round when it SENDS the ack — with the REPLAYACK held back W's record is acked with pins intact; W's sweep past the entry's TTL (by W's clock, _expireCache + _expireTombstones) removes nothing pinned (manifest tombstones are pinned too); the ack released, L flips and W still holds every manifest entry; the merge-bearing SUB completes and only then does W's TTL apply. Mutant: release pins at ack send -> 2 fails."
+    },
+    {
+      "file": "fence_merge_lease_cancellation.mjs",
+      "class": "default",
+      "note": "dual-root 4(d) d3, the lease at L anchored at the bind: an ack delivered after tB + A on L's monotonic clock is merge-ack-expired (L root with custody, gate cleared, no step 5) and W's record fails at tS + R (retention-expired, pins released); a wall-clock jump past E inside A is discarded the same way; inside both → step 5. Mutant: drop the lease check -> A and B fail."
+    },
+    {
+      "file": "fence_merge_lease_end_completion_lost.mjs",
+      "class": "default",
+      "note": "dual-root 4(d) d3, the holder on a lost completion: with every SUB from L dropped, L flipped with completing set and its export pinned; every renewal after the flip carries the merge block; W's record fails at tS + R; W's cap then evicts L's entry while L still holds it (the holder is L); L's cap cannot evict the pinned export; L's pinned export is exempt from expiry while completing (d4 discharges by TTL of every pinned entry). Mutant: L drops its pins at the flip -> 5 fails."
+    },
+    {
+      "file": "fence_merge_stale_sub_before_cut.mjs",
+      "class": "default",
+      "note": "dual-root 4(d) d3, stale_sub_before_cut + sub_other_corr: with W acked, a SUB from L without a merge block completes nothing; a block with another corr, winnerEpoch, loserEpoch or hash is merge-stale with pins intact; the matching block completes (MERGE_CLOSED, pins released). Mutant: complete on any SUB from the loser -> 1-5 fail."
+    },
+    {
+      "file": "fence_merge_merge_closed.mjs",
+      "class": "default",
+      "note": "dual-root 4(d) d3: L clears completing only on a MERGE_CLOSED matching its corr and winnerEpoch (another corr or epoch is merge-stale, completing and pins kept); the match clears completing, releases pins, drops the record; a second match is stale. Mutant: accept any MERGE_CLOSED -> 1 and 2 fail."
+    },
+    {
+      "file": "fence_merge_commit_guard.mjs",
+      "class": "default",
+      "note": "dual-root 4(d) d3, commit_guard + lease_overlap (assumption 7): the lease is rechecked synchronously immediately before the flip — a monotonic jump past tB + A between the recheck and the flip's return logs merge-late-flip, the flip stands, NO completion is claimed (completing null, no merge-bearing SUB), the export stays pinned at L and W's record fails at tS + R with the data at both ends; a recheck that fails flips nothing (merge-ack-expired at:'commit'); control completes. Mutant: check once at the ack -> B; drop the late-flip rule -> A."
+    },
+    {
       "file": "fence_pool_profile.mjs",
       "class": "default",
       "note": "4.114.0, two-pool packet G4 (axona-docs ca52384; Aster bc4fe433 s2, b395fe8f G4): the pool profile {M, I, H, pPending, cInbound, serveFloor, promoteMs, hostBudget} is validated at construction and REFUSED (PoolProfileError naming the field) on any overcommit — M+I>H, pPending>M, cInbound>I, serveFloor>M, hostBudget<H+doorSockets — never trimmed or borrowed; the review rows (relay M50/I50/H100, leaf M6/I6/H12) are feasible examples, none adopted; webTransport({meshPools}) refuses before building the mesh, and pools without the ledger are refused. Mutant: delete the M+I>H check -> check 1 fails."

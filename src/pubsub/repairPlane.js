@@ -244,7 +244,7 @@ export const repairPlaneMethods = {
       for (const [subHex, sub] of role.subscribers) {
         if (now - sub.lastRenewed > this.dropMs) { role.subscribers.delete(subHex); role.children.delete(subHex); role.sync.pulledLw.delete(subHex); }
       }
-      for (const [msgId, t] of role.tombstones) if ((t?.exp ?? 0) <= now) role.tombstones.delete(msgId);
+      this._expireTombstones(role, now);
       this._expireCache(role, now);
       // A ROOT holding non-expired cache MUST persist even with zero subscribers
       // — otherwise a message published before anyone subscribes (or after the

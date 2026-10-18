@@ -42,8 +42,15 @@ export const topicStoreMethods = {
     // once per holder; monotonic (eviction below never decrements it). Surfaced
     // as metrics().publishes, maxed across the cohort.
     role.publishes = (role.publishes || 0) + 1;
-    while (role.cache.length > this._cacheMax || role.cacheBytes > this._cacheBytes) {
-      const old = role.cache.shift();
+    // PINS (dual-root 4(d)): a pinned entry is never evicted by the caps. The
+    // eviction loop takes the OLDEST UNPINNED entry; with nothing unpinned it
+    // stops (the admission arithmetic guarantees pins plus reserve fit).
+    const pins = role.merge?.pins;
+    let guard = role.cache.length + 1;
+    while ((role.cache.length > this._cacheMax || role.cacheBytes > this._cacheBytes) && guard-- > 0) {
+      let i = 0;
+      if (pins && pins.size) { while (i < role.cache.length && pins.has(role.cache[i].msgId)) i++; if (i >= role.cache.length) break; }
+      const old = role.cache.splice(i, 1)[0];
       if (!old) break;
       role.cacheIds.delete(old.msgId);
       role.cacheBytes -= old.bytes;
@@ -57,13 +64,29 @@ export const topicStoreMethods = {
   },
 
   _expireCache(role, now) {
-    while (role.cache.length && (now - role.cache[0].publishTs) > TTL_MS) {
-      const old = role.cache.shift();
+    // PINS (dual-root 4(d)): pinned entries are exempt from expiry for the
+    // round's life, whatever this node's clock says; the cache is ordered by
+    // stamp, so a pinned head is skipped and expiry continues behind it.
+    const pins = role.merge?.pins;
+    let i = 0;
+    while (i < role.cache.length && (now - role.cache[i].publishTs) > TTL_MS) {
+      if (pins && pins.has(role.cache[i].msgId)) { i++; continue; }
+      const old = role.cache.splice(i, 1)[0];
       role.cacheIds.delete(old.msgId);
       role.cacheBytes -= old.bytes;
       if (this._tombAuthority) this._taObserveEvict(role, old.msgId);   // Phase 3 shadow (no-op flag-off)
     }
     if (this._tombAuthority) this._taReclaim();                          // Phase 3 shadow: reclaim + retry (no-op flag-off)
+  },
+
+  // Tombstone expiry (from refreshTick). PINS (dual-root 4(d)): a pinned
+  // tombstone — a manifest entry at W for a round's life, or a loser's
+  // pinned export — is exempt until the pin releases.
+  _expireTombstones(role, now) {
+    const pins = role.merge?.pins;
+    for (const [msgId, t] of role.tombstones) {
+      if ((t?.exp ?? 0) <= now && !(pins && pins.has(msgId))) role.tombstones.delete(msgId);
+    }
   },
 
   // My cache high-water = the newest stamp I hold (or have emitted, as root).

@@ -5,10 +5,10 @@
     "onNotification",
     "onRoutedMessage"
   ],
-  "treeHash": "78e5b14c41d8e193e82b0703ef5877496642e6fc",
+  "treeHash": "b152fa9bdcc896521bd85e313b3ea3a6cd50bb25",
   "filesScanned": 85,
   "summary": {
-    "migration-target": 40,
+    "migration-target": 43,
     "registration-helper": 0,
     "mechanism-shim": 0,
     "canonical-door": 0,
@@ -18,7 +18,7 @@
     "wrapper-passthrough": 2,
     "public-api-out-of-scope": 3
   },
-  "b1PubsubFrames": 20,
+  "b1PubsubFrames": 23,
   "rows": [
     {
       "file": "dht/AxonaPeer.js",
@@ -244,7 +244,7 @@
       "line": 60,
       "callee": "registerFrame",
       "receiver": "this._frameDoor",
-      "wire": "pubsub:pullup",
+      "wire": "pubsub:mergeoffer",
       "classification": "migration-target",
       "boundary": "B1"
     },
@@ -253,7 +253,7 @@
       "line": 61,
       "callee": "registerFrame",
       "receiver": "this._frameDoor",
-      "wire": "pubsub:handoffack",
+      "wire": "pubsub:replayack",
       "classification": "migration-target",
       "boundary": "B1"
     },
@@ -262,7 +262,7 @@
       "line": 62,
       "callee": "registerFrame",
       "receiver": "this._frameDoor",
-      "wire": "pubsub:replayup",
+      "wire": "pubsub:mergeclosed",
       "classification": "migration-target",
       "boundary": "B1"
     },
@@ -271,7 +271,7 @@
       "line": 63,
       "callee": "registerFrame",
       "receiver": "this._frameDoor",
-      "wire": "pubsub:handoff",
+      "wire": "pubsub:pullup",
       "classification": "migration-target",
       "boundary": "B1"
     },
@@ -280,7 +280,7 @@
       "line": 64,
       "callee": "registerFrame",
       "receiver": "this._frameDoor",
-      "wire": "pubsub:replicate",
+      "wire": "pubsub:handoffack",
       "classification": "migration-target",
       "boundary": "B1"
     },
@@ -289,7 +289,7 @@
       "line": 65,
       "callee": "registerFrame",
       "receiver": "this._frameDoor",
-      "wire": "pubsub:kill",
+      "wire": "pubsub:replayup",
       "classification": "migration-target",
       "boundary": "B1"
     },
@@ -298,7 +298,7 @@
       "line": 66,
       "callee": "registerFrame",
       "receiver": "this._frameDoor",
-      "wire": "pubsub:ingestack",
+      "wire": "pubsub:handoff",
       "classification": "migration-target",
       "boundary": "B1"
     },
@@ -307,7 +307,7 @@
       "line": 67,
       "callee": "registerFrame",
       "receiver": "this._frameDoor",
-      "wire": "pubsub:receiptprobe",
+      "wire": "pubsub:replicate",
       "classification": "migration-target",
       "boundary": "B1"
     },
@@ -316,7 +316,7 @@
       "line": 68,
       "callee": "registerFrame",
       "receiver": "this._frameDoor",
-      "wire": "pubsub:receiptnack",
+      "wire": "pubsub:kill",
       "classification": "migration-target",
       "boundary": "B1"
     },
@@ -325,7 +325,7 @@
       "line": 69,
       "callee": "registerFrame",
       "receiver": "this._frameDoor",
-      "wire": "pubsub:touch",
+      "wire": "pubsub:ingestack",
       "classification": "migration-target",
       "boundary": "B1"
     },
@@ -334,7 +334,7 @@
       "line": 70,
       "callee": "registerFrame",
       "receiver": "this._frameDoor",
-      "wire": "pubsub:pull",
+      "wire": "pubsub:receiptprobe",
       "classification": "migration-target",
       "boundary": "B1"
     },
@@ -343,7 +343,7 @@
       "line": 71,
       "callee": "registerFrame",
       "receiver": "this._frameDoor",
-      "wire": "pubsub:pullresp",
+      "wire": "pubsub:receiptnack",
       "classification": "migration-target",
       "boundary": "B1"
     },
@@ -352,13 +352,40 @@
       "line": 72,
       "callee": "registerFrame",
       "receiver": "this._frameDoor",
-      "wire": "pubsub:rootbeacon",
+      "wire": "pubsub:touch",
       "classification": "migration-target",
       "boundary": "B1"
     },
     {
       "file": "pubsub/wireHandlers.js",
       "line": 73,
+      "callee": "registerFrame",
+      "receiver": "this._frameDoor",
+      "wire": "pubsub:pull",
+      "classification": "migration-target",
+      "boundary": "B1"
+    },
+    {
+      "file": "pubsub/wireHandlers.js",
+      "line": 74,
+      "callee": "registerFrame",
+      "receiver": "this._frameDoor",
+      "wire": "pubsub:pullresp",
+      "classification": "migration-target",
+      "boundary": "B1"
+    },
+    {
+      "file": "pubsub/wireHandlers.js",
+      "line": 75,
+      "callee": "registerFrame",
+      "receiver": "this._frameDoor",
+      "wire": "pubsub:rootbeacon",
+      "classification": "migration-target",
+      "boundary": "B1"
+    },
+    {
+      "file": "pubsub/wireHandlers.js",
+      "line": 76,
       "callee": "registerFrame",
       "receiver": "this._frameDoor",
       "wire": "pubsub:metricson",

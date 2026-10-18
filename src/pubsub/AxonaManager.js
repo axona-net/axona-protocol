@@ -337,6 +337,9 @@ export class AxonaManager {
     // The root-claim state machine: every isRoot transition + its guards
     // (claim / defer / demote / handoff decision table) live in rootClaim.js.
     this._rootClaim = new RootClaim(this, { beaconMs: BEACON_MS });
+    // Monotonic clock for the merge's bind-anchored deadlines (dual-root 4(d)):
+    // the wall clock (`now`) can jump; this one cannot. Fences override it.
+    this._mono = () => (globalThis.performance && typeof globalThis.performance.now === 'function') ? globalThis.performance.now() : Date.now();
 
     this._registerHandlers();
   }
@@ -834,6 +837,7 @@ export class AxonaManager {
     if (prev && !RootClaim.claimWins(topicBig, claim, prev)) return false;
     role.merge.candidate = { ...claim, source, at: this._now() };
     this._log('info', 'merge-candidate', { topic: idHex(topicBig).slice(0, 12), id: w.slice(0, 10), epoch: claim.epoch, source, cache: role.cache.length, replaced: !!prev });
+    this._mergeOffer(topicBig, role);                       // step 1 of the exchange (d3): OFFER toward the recorded winner
     return false;
   }
 
@@ -1365,11 +1369,19 @@ export class AxonaManager {
     // so it is the only one that can act on a failure. See _unpinIfWaypointDead.
     const sent = this._send(T.SUB, {
       topicId: idHex(topicBig), via, subscriberId: idHex(this.nodeId),
-      since: this._sinceFor(topicBig),
+      // THE SINCE-ALL REPLAY (dual-root 4(d) step 5): the first merge-bearing SUB
+      // asks for everything, so the demoted loser converges to the winner's
+      // state as its child — a child's ordinary since is its own high water, and
+      // the winner's older unique history sits below it. One shot, then ordinary.
+      since: role?.merge?.completing?.sinceAll ? 0 : this._sinceFor(topicBig),
       hw: role ? this._highWater(role) : 0,   // a cache-bearing relay advertises its history (§6)
       lw: role ? this._lowWater(role) : 0,    // …and its OLDEST stamp, so a root missing the pre-transition half pulls it
       latest,
+      // COMPLETION IS CORRELATED (dual-root 4(d)): while this loser is completing a
+      // handover, every SUB carries the merge block; an ordinary renewal completes nothing.
+      ...(role?.merge?.completing ? { merge: { corr: role.merge.completing.corr, winner: role.merge.completing.winner, winnerEpoch: role.merge.completing.winnerEpoch, loserEpoch: role.merge.completing.loserEpoch, hash: role.merge.completing.hash } } : {}),
     });
+    if (role?.merge?.completing?.sinceAll) role.merge.completing.sinceAll = false;
     // D0 / M4 COMPLETION STAMP. The renewal obligation (CHILD / BACKUP / HOLDER /
     // APP_SUB in OBLIGATIONS) is discharged HERE — after the SUB is on the wire,
     // not when the tick decided to try. Placed in _emitSubscribe rather than at

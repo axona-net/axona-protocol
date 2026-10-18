@@ -399,6 +399,9 @@ export const T = {
   REPLICATE: 'pubsub:replicate', // singleton-root durability: root pushes cache+tombstones to its N nearest neighbours (warm backup roots)
   METRICSON: 'pubsub:metricson', // demand-driven metrics: routed toward the topic id like SUB; marks the path + root so ANY root publishes snapshots while the lease is fresh
   HANDOFFACK: 'pubsub:handoffack', // heir confirms a HANDOFF landed (v4.24.0) — the leaver retries / cohort-sprays unacked topics instead of silently dropping the last copy
+  MERGE_OFFER:  'pubsub:mergeoffer',  // dual-root 4(d) step 1: the LOSER offers its claim to the winner (corr, loserEpoch, hw, lw, count, timing)
+  REPLAYACK:    'pubsub:replayack',   // dual-root 4(d) step 4: the WINNER's terminal ack of the whole export under corr (retained, delsActive, hash) or a refusal
+  MERGE_CLOSED: 'pubsub:mergeclosed', // dual-root 4(d) completion: the winner closes the handover on the loser's merge-bearing SUB
   ADOPTACK: 'pubsub:adoptack',   // dual-root packet 4(d) (axona-docs 14a6bd8): the child answers an ADOPT — accepted ids or a refusal — so the parent releases delegated subscribers only on confirmed adoption
 };
 
@@ -466,3 +469,12 @@ export const EXPORT_BYTES_MAX       = CACHE_BYTES                       // bodie
 export const MERGE_F_MAX            = Math.ceil(EXPORT_BYTES_MAX / REPLAY_CHUNK_BYTES) + 1;
 export const MERGE_S_MAX_MS         = 250;
 export const MERGE_TIMEOUT_MS       = Math.max(HANDOFF_ACK_MAX_MS, 2 * ((2 + 2 * MERGE_F_MAX) * MERGE_S_MAX_MS + HANDOFF_ACK_MAX_MS));
+// The remaining round constants (packet 4(d), "Shared parameters, bound to the round").
+export const MERGE_A_MIN_MS         = HANDOFF_ACK_MAX_MS;       // an offered A below this is refused-timing
+export const MERGE_A_MAX_MS         = 4 * MERGE_TIMEOUT_MS;     // …or above this
+export const MERGE_E_MAX_MS         = FUTURE_TOLERANCE_MS;      // E = the kernel's clock allowance; a larger E is refused
+export const MERGE_TICK_MS          = 5_000;                    // P: one scheduler tick (refreshIntervalMs default)
+export const MERGE_RETENTION_MS     = MERGE_TIMEOUT_MS + 2 * FUTURE_TOLERANCE_MS + MERGE_TICK_MS;   // R = A + E_L + E_W + P at equal tolerances
+export const MERGE_OFFER_TIMEOUT_MS = 2 * HANDOFF_ACK_MAX_MS;   // an OFFER unanswered for this long: the winner is legacy or gone (fallback, d4)
+export const MERGE_WRITE_RESERVE_ENTRIES = 64;                  // W's own writes during a round draw on this reserve, fail closed past it
+export const MERGE_WRITE_RESERVE_BYTES   = 1024 * 1024;

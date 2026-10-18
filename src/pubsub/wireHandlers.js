@@ -57,6 +57,9 @@ export const wireHandlersMethods = {
     registerFrame(this.dht, T.DELIVER,      this._onDeliver.bind(this),      { registry: this._frameDoor });
     registerFrame(this.dht, T.ADOPT,        this._onAdopt.bind(this),        { registry: this._frameDoor });
     registerFrame(this.dht, T.ADOPTACK,     this._onAdoptAck.bind(this),     { registry: this._frameDoor });
+    registerFrame(this.dht, T.MERGE_OFFER,  this._onMergeOffer.bind(this),   { registry: this._frameDoor });
+    registerFrame(this.dht, T.REPLAYACK,    this._onReplayAck.bind(this),    { registry: this._frameDoor });
+    registerFrame(this.dht, T.MERGE_CLOSED, this._onMergeClosed.bind(this),  { registry: this._frameDoor });
     registerFrame(this.dht, T.PULLUP,       this._onPullUp.bind(this),       { registry: this._frameDoor });
     registerFrame(this.dht, T.HANDOFFACK,   this._onHandoffAck.bind(this),   { registry: this._frameDoor });
     registerFrame(this.dht, T.REPLAYUP,     this._onReplayUp.bind(this),     { registry: this._frameDoor });
@@ -342,6 +345,10 @@ export const wireHandlersMethods = {
     //    roots, zero-delivery runs, leave() drains pinned at timeout). Remember
     //    the lw already pulled per child; re-arm only if its lw DECREASES
     //    (a deeper split — genuinely new history).
+    // HANDOVER COMPLETION (dual-root 4(d)): only a SUB carrying the merge block
+    // that matches an acked pull on all five fields completes; everything else
+    // is an ordinary renewal here.
+    if (payload.merge && typeof payload.merge === 'object') this._mergeCompleteOnSub(role, subHex, payload);
     const myHw = this._highWater(role);
     if (Number.isFinite(payload.hw) && payload.hw > myHw) {
       this._syncPull(idBig(subHex), topicBig, 'REPLAY_UP', { sinceHw: myHw });
@@ -632,6 +639,13 @@ export const wireHandlersMethods = {
     if (role.cacheIds.has(env.msgId)) return { ok: true, msgId: env.msgId, dup: true };
     if (this._tombstoned(role, env.msgId, json)) return { ok: true, msgId: env.msgId, suppressed: true };
 
+    // W'S OWN WRITES DURING A ROUND, FAIL CLOSED (dual-root 4(d)): they draw on
+    // the reserve admitted with the header; past it the write is refused and
+    // the writer's flight recovers after the round. Nothing is queued.
+    if (role.merge?.reserve && (role.merge.reserve.entries <= 0 || role.merge.reserve.bytes < json.length + 80)) {
+      this._log('warn', 'refused-merge-reserve', { topic: idHex(role.topicId).slice(0, 12), msgId: String(env.msgId).slice(0, 12) });
+      return { ok: false, reason: 'merge-reserve', msgId: env.msgId };
+    }
     // THE CUT, checked synchronously immediately before the stamp (dual-root
     // packet 4(d)): a write admitted before the cut must not commit after it.
     if (!this._cutHolds(role, cut)) {
@@ -644,6 +658,7 @@ export const wireHandlersMethods = {
     const seq = ++role.seq;                                              // dense per-topic counter (gap detection)
     const msg = { json, publishTs: ts, msgId: env.msgId, seq };
     this._cachePush(role, { msgId: env.msgId, publishTs: ts, json, seq }, cut);
+    if (role.merge?.reserve) { role.merge.reserve.entries--; role.merge.reserve.bytes -= json.length + 80; }
     // Phase 3 shadow: observe the VERIFIED body (env passed verifyEnvelope above)
     // ONLY if it survived the cache write (an immediate byte-cap eviction must not
     // leave a stale shadow body). The observer independently re-binds the topic.
@@ -854,6 +869,7 @@ export const wireHandlersMethods = {
   // adopting history must not resurrect a killed message).
   _onPullUp(payload, meta) {
     if (meta.targetId !== this.nodeId) return;
+    if (typeof payload.corr === 'string') { this._mergeAnswerPull(payload, meta); return 'consumed'; }   // dual-root 4(d) step 3
     this._syncAnswerPull(payload);
     return 'consumed';
   },
@@ -868,7 +884,9 @@ export const wireHandlersMethods = {
     if (meta.targetId !== this.nodeId) return;
     // DEPENDENCY (row 4): none. A child's history pushed up to its root
     // installs no role toward the child; nothing is owed when it drains.
-    await this._ingestEnqueue(() => this._syncIngest(payload, meta, 'REPLAY_UP'), null);   // inline path completes here; queued path returns at once
+    // One enqueue (the duty gate pins exactly two callers in this file): a frame
+    // under corr is a merge frame (dual-root 4(d)), else the REPLAY_UP union.
+    await this._ingestEnqueue(() => (typeof payload.corr === 'string' ? this._mergeIngestFrame(payload, meta) : this._syncIngest(payload, meta, 'REPLAY_UP')), null);   // inline path completes here; queued path returns at once
     return 'consumed';
   },
 

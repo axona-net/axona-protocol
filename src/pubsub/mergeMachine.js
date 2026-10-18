@@ -3,7 +3,7 @@
 // of the design packet (axona-docs/architecture/Axona-Dual-Root-
 // Reconciliation-v0.1.md, header v0.15, SHA 14a6bd8; David "build it"
 // 2026-10-17). Everything here is behind `mergeCapable` (OFF by default);
-// an unarmed node never sets a gate, never cuts, never forwards.
+// an unarmed node never sets a gate, never cuts, never offers, never pulls.
 //
 // THE CUT AND THE GATE (stage d2). When the loser L binds a merge round it
 // CUTS and GATES in one synchronous run: `role.gen` increments and
@@ -35,22 +35,64 @@
 //   · A `failed` verdict, or a flight that passes INGEST_ACK_MS without W's
 //     ack, ends the round: the gate clears, L keeps root under its epoch.
 //   · W re-minted (an ack from W at a different epoch) aborts the round and
-//     records the new epoch on the candidate for the next OFFER (d3).
+//     records the new epoch on the candidate for the next OFFER.
 //   · MERGE_TIMEOUT_MS bounds one gate interval from the bind (`_mergeSweep`).
 //
-// Stage d3 adds the exchange (OFFER / PULLUP with corr / header / REPLAYUP
-// cursor / REPLAYACK / MERGE_CLOSED) and the release token at step 5; the
-// bind in d3 calls `_mergeCut` below.
+// THE EXCHANGE (stage d3). Two roots for one topic, W the one that WINS
+// under the Part 3 relation (rootClaim.claimWins), L the other. One merge
+// per (topic, L, W) at a time, bound by `corr`, `winnerEpoch` and
+// `loserEpoch` in every frame. Four messages, two of them new:
+//   1. OFFER, L → W (`MERGE_OFFER`): from the candidate `_mergeCandidate`
+//      recorded. L stays root, keeps stamping; `openMerges[corr]` = offered.
+//   2. PULL, W → L (`PULLUP` with corr, winnerEpoch, cursor:null, timing
+//      echoed): W evaluates the relation first (if the offer wins over W's
+//      claim, W is the loser and offers instead), then the timing limits.
+//   3. FRAMES, L → W: on the first PULLUP under corr L BINDS — timing must
+//      equal what was offered — then CUTS and GATES (`_mergeCut`), fixes the
+//      export (cache sorted by (publishTs, msgId) then the active dels),
+//      measures it against EXPORT_BYTES_MAX, records tB on its monotonic
+//      clock, and answers the HEADER frame (no data; bodies, dels, bytes,
+//      hash). W admits or refuses on the header against its baseline plus
+//      the manifest plus MERGE_WRITE_RESERVE, pins its baseline, and pulls
+//      with the cursor. Each data frame is at most REPLAY_CHUNK_BYTES, never
+//      ends inside an equal-stamp group unless the group alone exceeds a
+//      frame, carries its manifest slice, and the terminal frame carries the
+//      manifest's hash and counts. L validates every cursor against
+//      lastCursorSent. W pins each frame's ids BEFORE ingesting it.
+//   4. ACK, W → L (`REPLAYACK`), terminal only: retained and delsActive
+//      computed against the manifest at ack time, the hash, tS recorded,
+//      pins held; the record moves to `acked`.
+//   5. STEP-DOWN at L: all six fields match, the lease holds (monotonic
+//      now ≤ tB + A, wall clock not jumped past E), the ack is full; then,
+//      synchronously, the lease is re-checked, `completing` is set, the
+//      release token is minted and `demote(W)` runs with it — the one call
+//      `_set` accepts on a role with custody. The gate clears with the flip;
+//      the export stays pinned at L until MERGE_CLOSED.
+//   Completion is correlated: every SUB L emits while `completing` carries
+//   the merge block; W completes only on a SUB whose block matches the acked
+//   record on all five fields, answers `MERGE_CLOSED`, converts pins to
+//   ordinary custody. W's retention runs from tS for MERGE_RETENTION_MS
+//   (= A + 2E + P); at its end the pins release and the record fails. L on
+//   a lost completion keeps the export pinned as W's child until its own
+//   TTL — the custodian rule, unconditional.
 // =====================================================================
-import { T, MERGE_TIMEOUT_MS, MERGE_GATE_FWD_MAX, MERGE_GATE_REENTRY_MS } from './constants.js';
-import { idHex, idBig, lc } from './ids.js';
-import { makeMergeState } from './rootClaim.js';
+import {
+  T, REPLAY_CHUNK_BYTES, FUTURE_TOLERANCE_MS,
+  MERGE_TIMEOUT_MS, MERGE_GATE_FWD_MAX, MERGE_GATE_REENTRY_MS,
+  MERGE_TIMING_VERSION, EXPORT_BYTES_MAX, MERGE_A_MIN_MS, MERGE_A_MAX_MS, MERGE_E_MAX_MS,
+  MERGE_RETENTION_MS, MERGE_OFFER_TIMEOUT_MS, MERGE_WRITE_RESERVE_ENTRIES, MERGE_WRITE_RESERVE_BYTES,
+} from './constants.js';
+import { idHex, idBig, lc, isHexId } from './ids.js';
+import { makeMergeState, RootClaim } from './rootClaim.js';
 import { dispatchVerdict } from './dispatch.js';
+import { sha256Hex } from './post.js';
 
 const randomNonce = () => {
   const b = new Uint8Array(8); globalThis.crypto.getRandomValues(b);
   return Array.from(b, (x) => x.toString(16).padStart(2, '0')).join('');
 };
+const cursorOf = (e) => `${e.publishTs}:${e.msgId}`;
+const sameTiming = (a, b) => !!a && !!b && a.version === b.version && a.A === b.A && a.E === b.E;
 
 export const mergeMachineMethods = {
 
@@ -73,9 +115,7 @@ export const mergeMachineMethods = {
   },
   /**
    * CUT + GATE, one synchronous run, no await between. Called at the bind
-   * (d3) and by the fences. Returns the gate record. A gate already set for
-   * another corr is replaced only by the caller's explicit choice (d3's
-   * supersession rule); here a second cut on a gated role is refused.
+   * and by the fences. A second cut on a gated role is refused.
    */
   _mergeCut(topicBig, { winner, winnerEpoch, corr }) {
     const role = this.axonRoles.get(topicBig);
@@ -98,21 +138,50 @@ export const mergeMachineMethods = {
     return true;
   },
   /**
-   * ABORT a round at L: the gate clears, L keeps root under its own epoch,
-   * forwarded writes the winner never acked are the publisher's to re-send.
-   * The next trigger issues a new OFFER with a new corr (d3).
+   * ABORT a round at L: the gate clears, the open record is dropped, L keeps
+   * root under its own epoch, forwarded writes the winner never acked are the
+   * publisher's to re-send. The next trigger issues a new OFFER with a new corr.
    */
   _mergeAbort(role, why, extra = {}) {
     if (!role?.merge?.gate) return false;
-    this._log('warn', 'merge-abort', { topic: idHex(role.topicId).slice(0, 12), why, corr: role.merge.gate.corr.slice(0, 8), ...extra });
+    const corr = role.merge.gate.corr;
+    this._log('warn', 'merge-abort', { topic: idHex(role.topicId).slice(0, 12), why, corr: corr.slice(0, 8), ...extra });
+    this._mergeCloseCorr(role, corr);
     return this._mergeGateClear(role, why, extra);
   },
-  /** MERGE_TIMEOUT_MS bounds ONE gate interval, measured from the bind. Driven from refreshTick. */
+  /** A corr this node ended (abort, refusal, completion) stays closed: a late PULLUP under it is stale, never a fresh open. Bounded. */
+  _mergeCloseCorr(role, corr) {
+    role.sync.openMerges?.delete(corr);
+    const closed = (role.merge.closedCorrs ??= new Set());
+    closed.add(corr);
+    while (closed.size > 64) closed.delete(closed.values().next().value);
+  },
+  /**
+   * The sweep, from refreshTick: MERGE_TIMEOUT_MS bounds ONE gate interval
+   * from the bind; an OFFER unanswered for MERGE_OFFER_TIMEOUT_MS is dropped
+   * (the fallback, d4, takes it from here); W's retention ends at tS + R.
+   */
   _mergeSweep(now) {
     for (const role of this.axonRoles.values()) {
       const g = role.merge?.gate;
-      if (!g) continue;
-      if (now - g.at >= MERGE_TIMEOUT_MS) this._mergeAbort(role, 'timeout', { boundMs: MERGE_TIMEOUT_MS });
+      if (g && now - g.at >= MERGE_TIMEOUT_MS) this._mergeAbort(role, 'timeout', { boundMs: MERGE_TIMEOUT_MS });
+      for (const [corr, m] of role.sync.openMerges || []) {
+        if (m.state === 'offered' && now - m.offeredAt >= MERGE_OFFER_TIMEOUT_MS) {
+          role.sync.openMerges.delete(corr);
+          this._log('warn', 'merge-offer-timeout', { topic: idHex(role.topicId).slice(0, 12), corr: corr.slice(0, 8), winner: m.winner.slice(0, 10) });
+        }
+      }
+      for (const [corr, p] of role.sync.openPulls || []) {
+        if (p.state === 'acked' && now - p.tS >= MERGE_RETENTION_MS) {
+          this._mergeReleasePins(role, p, 'retention-expired');
+          role.sync.openPulls.delete(corr);
+          this._log('warn', 'merge-retention-expired', { topic: idHex(role.topicId).slice(0, 12), corr: corr.slice(0, 8), loser: p.loser.slice(0, 10), heldMs: now - p.tS });
+        } else if (p.state === 'pulling' && now - p.startedAt >= MERGE_TIMEOUT_MS) {
+          this._mergeReleasePins(role, p, 'pull-timeout');
+          role.sync.openPulls.delete(corr);
+          this._log('warn', 'merge-pull-timeout', { topic: idHex(role.topicId).slice(0, 12), corr: corr.slice(0, 8) });
+        }
+      }
     }
   },
 
@@ -199,8 +268,7 @@ export const mergeMachineMethods = {
   _mergeWinnerReminted(f, gotEpoch) {
     const role = this.axonRoles.get(f.topicBig);
     if (!role?.merge?.gate || role.merge.gate.corr !== f.merge.corr) return;
-    const claim = { id: f.rootHex, epoch: gotEpoch | 0, source: 'reminted', at: this._now() };
-    role.merge.candidate = claim;                          // the next OFFER carries the new epoch
+    role.merge.candidate = { id: f.rootHex, epoch: gotEpoch | 0, source: 'reminted', at: this._now() };   // the next OFFER carries the new epoch
     this._mergeAbort(role, 'winner-reminted', { got: gotEpoch | 0, want: f.epoch });
   },
   /** A merge flight passed INGEST_ACK_MS with no ack from W: the round ends. */
@@ -208,6 +276,353 @@ export const mergeMachineMethods = {
     const role = this.axonRoles.get(f.topicBig);
     if (!role?.merge?.gate || role.merge.gate.corr !== f.merge.corr) return;
     this._mergeAbort(role, 'winner-no-ack', { winner: f.rootHex.slice(0, 10) });
+  },
+
+  // ══════════════════════ THE EXCHANGE (stage d3) ══════════════════════
+  _mergeTiming() { return { version: MERGE_TIMING_VERSION, A: MERGE_TIMEOUT_MS, E: FUTURE_TOLERANCE_MS }; },
+  _mergeTimingAccepted(t) {
+    return !!t && t.version === MERGE_TIMING_VERSION && Number.isInteger(t.A) && t.A >= MERGE_A_MIN_MS && t.A <= MERGE_A_MAX_MS && Number.isInteger(t.E) && t.E >= 0 && t.E <= MERGE_E_MAX_MS;
+  },
+  async _mergeManifestHash(bodies, dels) {
+    return sha256Hex(`${bodies.join(',')}|${dels.join(',')}`);
+  },
+
+  // ── step 1 (L): OFFER from the recorded candidate ─────────────────────
+  /**
+   * Run from _mergeCandidate once a candidate is recorded (and from any
+   * later trigger naming the same winner). One open merge per (topic, W):
+   * a new OFFER to the same W with a higher loserEpoch supersedes.
+   */
+  _mergeOffer(topicBig, role) {
+    const c = role.merge?.candidate;
+    if (!this._mergeCapable || !role?.isRoot || !c || role.merge.gate || role.merge.completing) return false;
+    for (const [corr, m] of role.sync.openMerges) {
+      if (m.winner === c.id) {
+        if (m.loserEpoch >= (role.epoch | 0)) return false;    // standing offer to this winner at this incarnation
+        role.sync.openMerges.delete(corr);                      // superseded by a higher loserEpoch
+      }
+    }
+    const corr = randomNonce() + randomNonce();
+    const timing = this._mergeTiming();
+    role.sync.openMerges.set(corr, { winner: c.id, winnerEpoch: c.epoch | 0, loserEpoch: role.epoch | 0, state: 'offered', snapshot: null, manifest: null, lastCursorSent: null, offeredAt: this._now(), boundAt: 0, tB: 0, timing });
+    this._route(idBig(c.id), T.MERGE_OFFER, {
+      topicId: idHex(topicBig), corr, loser: idHex(this.nodeId), loserEpoch: role.epoch | 0,
+      hw: this._highWater(role), lw: this._lowWater(role), count: role.cache.length, timing,
+    });
+    this._log('info', 'merge-offer', { topic: idHex(topicBig).slice(0, 12), corr: corr.slice(0, 8), winner: c.id.slice(0, 10), winnerEpoch: c.epoch | 0, loserEpoch: role.epoch | 0, count: role.cache.length });
+    return true;
+  },
+
+  // ── step 2 (W): the OFFER arrives; evaluate the relation, then pull ────
+  _onMergeOffer(payload, meta) {
+    if (meta.targetId !== this.nodeId) return;
+    if (!this._mergeCapable) return 'consumed';
+    let topicBig; try { topicBig = idBig(payload.topicId); } catch { return 'consumed'; }
+    const loser = lc(payload.loser);
+    if (!isHexId(loser) || typeof payload.corr !== 'string' || idBig(loser) === this.nodeId) return 'consumed';
+    const role = this.axonRoles.get(topicBig);
+    if (!role || !role.isRoot) { this._log('info', 'merge-offer-not-root', { topic: idHex(topicBig).slice(0, 12), from: loser.slice(0, 10) }); return 'consumed'; }
+    const loserEpoch = Number.isInteger(payload.loserEpoch) ? payload.loserEpoch : 0;
+    // THE RELATION FIRST: W pulls only from a claim it wins over. If the
+    // offered claim wins over W's own, W is the loser and offers instead.
+    if (this._rootClaim.wins(topicBig, { id: loser, epoch: loserEpoch })) {
+      this._log('info', 'merge-offer-loses', { topic: idHex(topicBig).slice(0, 12), from: loser.slice(0, 10), loserEpoch, myEpoch: role.epoch | 0 });
+      this._mergeCandidate(topicBig, loser, loserEpoch, 'offer');
+      return 'consumed';
+    }
+    // TIMING LIMITS, refused before any data.
+    if (!this._mergeTimingAccepted(payload.timing)) {
+      this._log('warn', 'merge-refused-timing', { topic: idHex(topicBig).slice(0, 12), corr: payload.corr.slice(0, 8), timing: payload.timing ?? null });
+      this._route(idBig(loser), T.REPLAYACK, { topicId: payload.topicId, corr: payload.corr, winner: idHex(this.nodeId), winnerEpoch: role.epoch | 0, loser, loserEpoch, disposition: 'refused-timing' });
+      return 'consumed';
+    }
+    if (role.sync.openPulls.has(payload.corr)) return 'consumed';
+    if (!role.merge) role.merge = makeMergeState();
+    role.sync.openPulls.set(payload.corr, { loser, loserEpoch, cursor: null, framesIn: 0, held: 0, sent: 0, startedAt: this._now(), timing: { ...payload.timing }, state: 'pulling', manifest: { bodies: [], dels: [] }, header: null, tS: 0 });
+    this._mergePull(topicBig, role, payload.corr, null);
+    this._log('info', 'merge-pull-start', { topic: idHex(topicBig).slice(0, 12), corr: payload.corr.slice(0, 8), loser: loser.slice(0, 10), loserEpoch, offered: payload.count ?? null });
+    return 'consumed';
+  },
+  _mergePull(topicBig, role, corr, cursor) {
+    const p = role.sync.openPulls.get(corr);
+    if (!p) return;
+    this._emitPullUp(idBig(p.loser), { topicId: idHex(topicBig), corr, parentId: idHex(this.nodeId), winnerEpoch: role.epoch | 0, cursor, sinceHw: 0, timing: { ...p.timing } });
+  },
+
+  // ── step 3 (L): the bound PULLUP, the cut, the header, the frames ──────
+  _mergeAnswerPull(payload, meta) {
+    let topicBig; try { topicBig = idBig(payload.topicId); } catch { return; }
+    const role = this.axonRoles.get(topicBig);
+    const corr = payload.corr;
+    const requester = lc(payload.parentId);
+    if (!role || !isHexId(requester)) return;
+    const winnerEpoch = Number.isInteger(payload.winnerEpoch) ? payload.winnerEpoch : 0;
+    let m = role.sync.openMerges.get(corr);
+    if (m && m.winner !== requester) { this._log('warn', 'merge-stale', { topic: idHex(topicBig).slice(0, 12), corr: corr.slice(0, 8), why: 'requester' }); return; }
+    if (!m) {
+      if (role.merge?.closedCorrs?.has(corr)) { this._log('warn', 'merge-stale', { topic: idHex(topicBig).slice(0, 12), corr: corr.slice(0, 8), why: 'closed-corr' }); return; }
+      // No offer of ours: open the record only when the requester's claim wins
+      // over L's own under the relation; anything else is stale.
+      if (!this._mergeCapable || !role.isRoot || !this._rootClaim.wins(topicBig, { id: requester, epoch: winnerEpoch })) {
+        this._log('warn', 'merge-stale', { topic: idHex(topicBig).slice(0, 12), corr: corr.slice(0, 8), why: 'no-offer-and-not-winner', from: requester.slice(0, 10) });
+        return;
+      }
+      if (!this._mergeTimingAccepted(payload.timing)) { this._log('warn', 'merge-refused-timing', { topic: idHex(topicBig).slice(0, 12), corr: corr.slice(0, 8), timing: payload.timing ?? null }); return; }
+      m = { winner: requester, winnerEpoch, loserEpoch: role.epoch | 0, state: 'offered', snapshot: null, manifest: null, lastCursorSent: null, offeredAt: this._now(), boundAt: 0, tB: 0, timing: { ...payload.timing } };
+      role.sync.openMerges.set(corr, m);
+    }
+    if (m.state === 'offered') {
+      // THE BIND. Timing must equal what was offered, as numbers.
+      if (!sameTiming(payload.timing, m.timing)) {
+        this._log('warn', 'merge-refused-timing', { topic: idHex(topicBig).slice(0, 12), corr: corr.slice(0, 8), offered: m.timing, echoed: payload.timing ?? null });
+        role.sync.openMerges.delete(corr);
+        return;
+      }
+      if (!role.isRoot || role.merge?.gate || role.merge?.completing) { this._log('warn', 'merge-stale', { topic: idHex(topicBig).slice(0, 12), corr: corr.slice(0, 8), why: role.isRoot ? 'busy' : 'not-root' }); return; }
+      m.winnerEpoch = winnerEpoch;
+      // CUT + GATE, then the export, all in this synchronous run.
+      const gate = this._mergeCut(topicBig, { winner: requester, winnerEpoch, corr });
+      if (!gate) { this._log('warn', 'merge-stale', { topic: idHex(topicBig).slice(0, 12), corr: corr.slice(0, 8), why: 'cut-refused' }); return; }
+      const bodies = role.cache.slice().sort((a, b) => a.publishTs - b.publishTs || (a.msgId < b.msgId ? -1 : a.msgId > b.msgId ? 1 : 0))
+        .map((c) => ({ json: c.json, publishTs: c.publishTs, msgId: c.msgId, seq: c.seq, bytes: c.bytes }));
+      const dels = this._activeDels(role).sort((a, b) => a.killTs - b.killTs || (a.msgId < b.msgId ? -1 : a.msgId > b.msgId ? 1 : 0))
+        .map((d) => ({ ...d, publishTs: d.killTs }));
+      const manifest = { bodies: bodies.map((b) => b.msgId), dels: dels.map((d) => d.msgId) };
+      const bytes = JSON.stringify({ bodies, dels, manifest }).length;
+      if (bytes > EXPORT_BYTES_MAX) {
+        this._log('warn', 'refused-export-bound', { topic: idHex(topicBig).slice(0, 12), corr: corr.slice(0, 8), bytes, bound: EXPORT_BYTES_MAX });
+        this._mergeCloseCorr(role, corr);
+        this._mergeGateClear(role, 'export-bound');
+        this._emitReplayUp(idBig(requester), { topicId: payload.topicId, corr, loserEpoch: role.epoch | 0, refused: 'export-bound', msgs: [], dels: [] });
+        return;
+      }
+      m.snapshot = { bodies, dels, items: [...bodies.map((b) => ({ kind: 'body', e: b })), ...dels.map((d) => ({ kind: 'del', e: d }))] };
+      m.manifest = manifest; m.bytes = bytes;
+      m.state = 'bound'; m.boundAt = this._now(); m.tB = this._mono(); m.tBWall = this._now();
+      m.lastCursorSent = 'h';
+      this._mergeManifestHash(manifest.bodies, manifest.dels).then((hash) => {
+        m.hash = hash;
+        this._emitReplayUp(idBig(requester), { topicId: payload.topicId, corr, loserEpoch: role.epoch | 0, header: { bodies: manifest.bodies.length, dels: manifest.dels.length, bytes, hash }, cursor: null, more: true, msgs: [], dels: [] });
+        this._log('info', 'merge-bound', { topic: idHex(topicBig).slice(0, 12), corr: corr.slice(0, 8), winner: requester.slice(0, 10), winnerEpoch, bodies: manifest.bodies.length, dels: manifest.dels.length, bytes });
+      });
+      return;
+    }
+    if (m.state !== 'bound') { this._log('warn', 'merge-stale', { topic: idHex(topicBig).slice(0, 12), corr: corr.slice(0, 8), why: m.state }); return; }
+    // A DATA FRAME. The cursor must equal the last one we sent.
+    const want = m.lastCursorSent;
+    const got = payload.cursor == null ? null : String(payload.cursor);
+    if (got !== want) {
+      this._log('warn', 'merge-cursor-invalid', { topic: idHex(topicBig).slice(0, 12), corr: corr.slice(0, 8), got: got ? got.slice(-12) : null, want: want ? want.slice(-12) : null });
+      return;                                                   // W restarts with a new corr after its timeout
+    }
+    const items = m.snapshot.items;
+    let start = 0;
+    if (want !== 'h') { while (start < items.length && cursorOf(items[start].e) !== want) start++; start++; }
+    const sizeOf = (it) => (it.e.json ? it.e.json.length : 0) + 160;
+    // Each frame is at most REPLAY_CHUNK_BYTES and NEVER ENDS INSIDE AN
+    // EQUAL-STAMP GROUP: when the next entry would overflow the frame, the
+    // frame ends BEFORE the group that entry belongs to (members of that group
+    // already placed move to the next frame), unless the group alone exceeds a
+    // frame, in which case the frame may end inside it and the (publishTs,
+    // msgId) pair still advances within it.
+    const groupBytes = (j) => { let b = 0; const ts = items[j].e.publishTs; let k = j; while (k >= start && items[k].e.publishTs === ts) k--; k++; for (; k < items.length && items[k].e.publishTs === ts; k++) b += sizeOf(items[k]); return b; };
+    let i = start, bytes = 0;
+    while (i < items.length) {
+      const size = sizeOf(items[i]);
+      if (bytes + size > REPLAY_CHUNK_BYTES && i > start) {
+        const ts = items[i].e.publishTs;
+        if (items[i - 1].e.publishTs === ts && groupBytes(i) <= REPLAY_CHUNK_BYTES) {
+          while (i > start && items[i - 1].e.publishTs === ts) i--;   // end before the group
+        }
+        break;
+      }
+      bytes += size; i++;
+    }
+    if (i === start && start < items.length) i = start + 1;             // one entry alone never stalls the export
+    const msgs = [], dels = [], slice = { bodies: [], dels: [] };
+    for (let k = start; k < i; k++) {
+      const it = items[k];
+      if (it.kind === 'body') { msgs.push({ json: it.e.json, publishTs: it.e.publishTs, msgId: it.e.msgId, seq: it.e.seq }); slice.bodies.push(it.e.msgId); }
+      else { const { publishTs: _p, ...d } = it.e; dels.push(d); slice.dels.push(it.e.msgId); }
+    }
+    const more = i < items.length;
+    const last = i > start ? cursorOf(items[i - 1].e) : want;
+    m.lastCursorSent = last;
+    const frame = { topicId: payload.topicId, corr, loserEpoch: role.epoch | 0, cursor: want, lastCursor: last, more, msgs, dels, slice };
+    if (!more) frame.manifest = { bodies: m.manifest.bodies.length, dels: m.manifest.dels.length, hash: m.hash };
+    this._emitReplayUp(idBig(requester), frame);
+    this._log('debug', 'merge-frame', { topic: idHex(topicBig).slice(0, 12), corr: corr.slice(0, 8), msgs: msgs.length, dels: dels.length, more });
+  },
+
+  // ── step 3 (W): ingest a frame under corr; header admission; pins ──────
+  async _mergeIngestFrame(payload, meta) {
+    let topicBig; try { topicBig = idBig(payload.topicId); } catch { return; }
+    const role = this.axonRoles.get(topicBig);
+    const corr = payload.corr;
+    const p = role?.sync.openPulls.get(corr);
+    if (!role || !p) { this._log('warn', 'merge-stale', { topic: idHex(topicBig).slice(0, 12), corr: String(corr).slice(0, 8), why: 'no-pull' }); return; }
+    if (p.state !== 'pulling') return;
+    if (Number.isInteger(payload.loserEpoch) && payload.loserEpoch !== p.loserEpoch) {
+      this._log('warn', 'merge-stale', { topic: idHex(topicBig).slice(0, 12), corr: corr.slice(0, 8), why: 'loserEpoch', got: payload.loserEpoch, want: p.loserEpoch });
+      return;
+    }
+    if (payload.refused) {
+      this._log('warn', 'merge-pull-refused', { topic: idHex(topicBig).slice(0, 12), corr: corr.slice(0, 8), why: payload.refused });
+      role.sync.openPulls.delete(corr);
+      return;
+    }
+    if (payload.header) {
+      // ADMISSION, SIZED AT THE CUT: baseline (every entry and active
+      // tombstone W holds now) + the header's bodies and bytes +
+      // MERGE_WRITE_RESERVE must fit under the caps. Fail closed.
+      const h = payload.header;
+      const baselineN = role.cache.length, baselineB = role.cacheBytes;
+      const needN = baselineN + (h.bodies | 0) + MERGE_WRITE_RESERVE_ENTRIES;
+      const needB = baselineB + (h.bytes | 0) + MERGE_WRITE_RESERVE_BYTES;
+      if (needN > this._cacheMax || needB > this._cacheBytes) {
+        this._log('warn', 'refused-capacity', { topic: idHex(topicBig).slice(0, 12), corr: corr.slice(0, 8), baselineN, baselineB, bodies: h.bodies, bytes: h.bytes, cacheMax: this._cacheMax, cacheBytes: this._cacheBytes });
+        this._route(idBig(p.loser), T.REPLAYACK, { topicId: payload.topicId, corr, winner: idHex(this.nodeId), winnerEpoch: role.epoch | 0, loser: p.loser, loserEpoch: p.loserEpoch, disposition: 'refused-capacity', retained: 0, delsActive: 0 });
+        role.sync.openPulls.delete(corr);
+        return;
+      }
+      p.header = { ...h };
+      if (!role.merge) role.merge = makeMergeState();
+      for (const c of role.cache) role.merge.pins.add(c.msgId);        // pin the baseline
+      role.merge.reserve = { entries: MERGE_WRITE_RESERVE_ENTRIES, bytes: MERGE_WRITE_RESERVE_BYTES };
+      p.cursor = 'h';
+      this._log('info', 'merge-admitted', { topic: idHex(topicBig).slice(0, 12), corr: corr.slice(0, 8), bodies: h.bodies, dels: h.dels, bytes: h.bytes, baselineN });
+      this._mergePull(topicBig, role, corr, 'h');
+      return;
+    }
+    // A DATA FRAME: cursor continuity, pins before ingest, counts, next pull or terminal.
+    const got = payload.cursor == null ? null : String(payload.cursor);
+    if (got !== p.cursor) { this._log('warn', 'merge-cursor-invalid', { topic: idHex(topicBig).slice(0, 12), corr: corr.slice(0, 8), side: 'winner' }); return; }
+    const slice = payload.slice || { bodies: [], dels: [] };
+    for (const id of slice.bodies) { role.merge.pins.add(id); p.manifest.bodies.push(id); }
+    for (const id of slice.dels) { role.merge.pins.add(id); p.manifest.dels.push(id); }   // a manifest tombstone is pinned too: it must be active at the ack and until completion
+    const cut = this._cutCapture(role);
+    const delsOk = await this._applyDels(role, topicBig, payload.dels, cut);
+    const tally = delsOk ? await this._ingestStampedBatch(role, payload.msgs, cut) : { sent: (payload.msgs || []).length, held: 0, rejected: (payload.msgs || []).length, refused: true };
+    p.framesIn++; p.held += tally.held; p.sent += tally.sent;
+    if (!delsOk || tally.refused) { this._log('warn', 'merge-frame-refused', { topic: idHex(topicBig).slice(0, 12), corr: corr.slice(0, 8) }); }
+    p.cursor = payload.lastCursor == null ? p.cursor : String(payload.lastCursor);
+    if (payload.more) { this._mergePull(topicBig, role, corr, p.cursor); return; }
+    // TERMINAL: the retention check against the manifest, at ack time.
+    const man = payload.manifest || { bodies: 0, dels: 0, hash: null };
+    const hash = await this._mergeManifestHash(p.manifest.bodies, p.manifest.dels);
+    let retained = 0, delsActive = 0;
+    const now = this._now();
+    for (const id of p.manifest.bodies) if (role.cacheIds.has(id) || (role.tombstones.get(id)?.exp ?? 0) > now) retained++;
+    for (const id of p.manifest.dels) if ((role.tombstones.get(id)?.exp ?? 0) > now) delsActive++;
+    const full = retained === man.bodies && delsActive === man.dels && p.manifest.bodies.length === man.bodies && p.manifest.dels.length === man.dels && hash === man.hash;
+    p.state = 'acked'; p.tS = now; p.hash = hash; p.full = full;
+    this._route(idBig(p.loser), T.REPLAYACK, { topicId: payload.topicId, corr, winner: idHex(this.nodeId), winnerEpoch: role.epoch | 0, loser: p.loser, loserEpoch: p.loserEpoch, retained, delsActive, hash, disposition: full ? 'full' : 'short' });
+    this._log(full ? 'info' : 'warn', 'merge-acked', { topic: idHex(topicBig).slice(0, 12), corr: corr.slice(0, 8), loser: p.loser.slice(0, 10), retained, delsActive, bodies: man.bodies, dels: man.dels, full, frames: p.framesIn });
+  },
+  _mergeReleasePins(role, p, why) {
+    if (!role.merge) return;
+    role.merge.pins.clear();
+    role.merge.reserve = null;
+    this._log('info', 'merge-pins-released', { topic: idHex(role.topicId).slice(0, 12), why });
+  },
+
+  // ── step 5 (L): the terminal ack; the lease; the flip with the token ───
+  _onReplayAck(payload, meta) {
+    if (meta.targetId !== this.nodeId) return;
+    let topicBig; try { topicBig = idBig(payload.topicId); } catch { return 'consumed'; }
+    const role = this.axonRoles.get(topicBig);
+    const corr = payload.corr;
+    const m = role?.sync.openMerges.get(corr);
+    if (!role || !m) { this._log('warn', 'merge-stale', { topic: idHex(topicBig).slice(0, 12), corr: String(corr).slice(0, 8), why: 'no-record' }); return 'consumed'; }
+    const six = lc(payload.winner) === m.winner && (payload.winnerEpoch | 0) === (m.winnerEpoch | 0) && lc(payload.loser) === lc(idHex(this.nodeId)) && (payload.loserEpoch | 0) === (m.loserEpoch | 0) && lc(payload.topicId) === idHex(topicBig);
+    if (!six) { this._log('warn', 'merge-stale', { topic: idHex(topicBig).slice(0, 12), corr: corr.slice(0, 8), why: 'fields' }); return 'consumed'; }
+    if (payload.disposition === 'refused-timing' || payload.disposition === 'refused-capacity') {
+      this._log('warn', 'merge-refused', { topic: idHex(topicBig).slice(0, 12), corr: corr.slice(0, 8), why: payload.disposition });
+      this._mergeCloseCorr(role, corr);
+      if (role.merge?.gate?.corr === corr) this._mergeGateClear(role, payload.disposition);
+      return 'consumed';
+    }
+    if (m.state !== 'bound') { this._log('warn', 'merge-stale', { topic: idHex(topicBig).slice(0, 12), corr: corr.slice(0, 8), why: m.state }); return 'consumed'; }
+    // THE LEASE, anchored at the bind: monotonic now ≤ tB + A, and no wall-clock jump past E.
+    const leaseOk = () => {
+      const dm = this._mono() - m.tB, dw = this._now() - m.tBWall;
+      return dm <= m.timing.A && Math.abs(dw - dm) <= m.timing.E;
+    };
+    if (!leaseOk()) {
+      this._log('warn', 'merge-ack-expired', { topic: idHex(topicBig).slice(0, 12), corr: corr.slice(0, 8), sinceBindMs: Math.round(this._mono() - m.tB), A: m.timing.A });
+      this._mergeAbort(role, 'ack-expired');
+      return 'consumed';
+    }
+    // THE RETENTION CHECK: every manifest body held or tombstoned at W, every
+    // manifest tombstone active at W, the hash matches. Anything less is short.
+    const full = payload.disposition === 'full' && (payload.retained | 0) === m.manifest.bodies.length && (payload.delsActive | 0) === m.manifest.dels.length && payload.hash === m.hash;
+    if (!full) {
+      this._log('warn', 'merge-ack-short', { topic: idHex(topicBig).slice(0, 12), corr: corr.slice(0, 8), retained: payload.retained, delsActive: payload.delsActive, bodies: m.manifest.bodies.length, dels: m.manifest.dels.length, hashOk: payload.hash === m.hash });
+      this._mergeAbort(role, 'ack-short');
+      return 'consumed';
+    }
+    // STEP 5, synchronous from here to the flip: re-check the lease, pin the
+    // export, mint the token, demote with it. The SUB demote() sends is an
+    // ordinary renewal; completion is claimed AFTER the flip, below.
+    if (!leaseOk()) { this._log('warn', 'merge-ack-expired', { topic: idHex(topicBig).slice(0, 12), corr: corr.slice(0, 8), at: 'commit' }); this._mergeAbort(role, 'ack-expired'); return 'consumed'; }
+    for (const id of m.manifest.bodies) role.merge.pins.add(id);
+    for (const id of m.manifest.dels) role.merge.pins.add(id);
+    role.merge.releaseToken = randomNonce() + randomNonce();
+    const tok = role.merge.releaseToken;
+    const gateCorr = role.merge.gate?.corr;
+    const ok = this._rootClaim.demote(topicBig, m.winner, 'merge-step5', { releaseToken: tok });
+    if (!ok) {
+      role.merge.releaseToken = null;
+      this._log('error', 'merge-flip-refused', { topic: idHex(topicBig).slice(0, 12), corr: corr.slice(0, 8) });
+      this._mergeAbort(role, 'flip-refused');
+      return 'consumed';
+    }
+    if (gateCorr === corr) this._mergeGateClear(role, 'completed');
+    m.state = 'completed';
+    // THE COMMIT GUARD (assumption 7): the synchronous run from the recheck to
+    // the completed flip must not have been suspended past the lease. L cannot
+    // prevent it and detects it only here, after the fact: the flip stands (the
+    // claim is W's) but NO COMPLETION IS CLAIMED — no merge-bearing SUB goes
+    // out, the export stays pinned at L as W's child until L's own TTL (the
+    // custodian rule), and W's record fails at tS + R. The data is safe; W's
+    // union is not claimed.
+    const late = this._mono() - m.tB > m.timing.A;
+    this._log(late ? 'warn' : 'info', late ? 'merge-late-flip' : 'merge-step5', { topic: idHex(topicBig).slice(0, 12), corr: corr.slice(0, 8), winner: m.winner.slice(0, 10), winnerEpoch: m.winnerEpoch | 0, bodies: m.manifest.bodies.length, dels: m.manifest.dels.length, sinceBindMs: Math.round(this._mono() - m.tB) });
+    if (late) return 'consumed';
+    // COMPLETION IS CLAIMED: the merge block rides every SUB from here until
+    // MERGE_CLOSED; the first asks for everything (since-all) so L converges.
+    role.merge.completing = { corr, winner: m.winner, winnerEpoch: m.winnerEpoch | 0, loserEpoch: m.loserEpoch | 0, hash: m.hash, sinceAll: true };
+    this._sendSubscribe(topicBig);
+    return 'consumed';
+  },
+
+  // ── completion (W): the merge-bearing SUB; MERGE_CLOSED ────────────────
+  _mergeCompleteOnSub(role, subHex, payload) {
+    const b = payload.merge;
+    const corr = typeof b.corr === 'string' ? b.corr : null;
+    const p = corr ? role.sync.openPulls.get(corr) : null;
+    const selfHex = idHex(this.nodeId);
+    if (!p || p.state !== 'acked') { this._log('warn', 'merge-stale', { topic: idHex(role.topicId).slice(0, 12), corr: String(corr).slice(0, 8), why: p ? p.state : 'no-acked-record', from: subHex.slice(0, 10) }); return false; }
+    const via = Array.isArray(payload.via) && payload.via.length ? lc(payload.via[0]) : null;
+    const match = lc(b.winner) === selfHex && (b.winnerEpoch | 0) === (role.epoch | 0) && (b.loserEpoch | 0) === (p.loserEpoch | 0) && b.hash === p.hash && subHex === p.loser && (via === null || via === selfHex);
+    if (!match || !p.full) { this._log('warn', 'merge-stale', { topic: idHex(role.topicId).slice(0, 12), corr: corr.slice(0, 8), why: p.full ? 'block-mismatch' : 'short-ack', from: subHex.slice(0, 10) }); return false; }
+    this._mergeReleasePins(role, p, 'completed');                 // pinned entries become ordinary custody
+    role.sync.openPulls.delete(corr);
+    this._route(idBig(subHex), T.MERGE_CLOSED, { topicId: idHex(role.topicId), corr, winnerEpoch: role.epoch | 0 });
+    this._log('info', 'merge-complete', { topic: idHex(role.topicId).slice(0, 12), corr: corr.slice(0, 8), loser: subHex.slice(0, 10), held: p.held, sent: p.sent, sinceAckMs: this._now() - p.tS });
+    return true;
+  },
+  _onMergeClosed(payload, meta) {
+    if (meta.targetId !== this.nodeId) return;
+    let topicBig; try { topicBig = idBig(payload.topicId); } catch { return 'consumed'; }
+    const role = this.axonRoles.get(topicBig);
+    const c = role?.merge?.completing;
+    if (!c || c.corr !== payload.corr || (payload.winnerEpoch | 0) !== c.winnerEpoch) { this._log('warn', 'merge-stale', { topic: idHex(topicBig).slice(0, 12), corr: String(payload.corr).slice(0, 8), why: 'closed-mismatch' }); return 'consumed'; }
+    role.merge.completing = null;
+    role.merge.pins.clear();
+    this._mergeCloseCorr(role, payload.corr);
+    this._log('info', 'merge-closed', { topic: idHex(topicBig).slice(0, 12), corr: payload.corr.slice(0, 8), winner: c.winner.slice(0, 10) });
+    return 'consumed';
   },
 };
 
