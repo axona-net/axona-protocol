@@ -1332,9 +1332,16 @@ export const wireHandlersMethods = {
     // existed (Aster lifecycle v0.2 item 3, "age laundering"; confirmed from
     // source). _applyKill still runs for the existing tombstone so a bound
     // proof can attach (its B2 upgrade path), carrying the tombstone's own stamp.
+    // The duplicate commits under the same cut as a fresh kill: a gate, a moved
+    // generation or a retirement during the verify await refuses it, and a
+    // refused duplicate is forwarded and NOT acked, exactly like a refused
+    // fresh kill (Aster edfdd869).
     const existingTomb = role.tombstones.get(target);
     if (existingTomb) {
-      this._applyKill(role, topicBig, { msgId: target, killTs: existingTomb.killTs, signer: lc(kill.signerPubkey), seq: existingTomb.seq, kill }, cut);
+      if (this._applyKill(role, topicBig, { msgId: target, killTs: existingTomb.killTs, signer: lc(kill.signerPubkey), seq: existingTomb.seq, kill }, cut) === false) {
+        this._cutDisposition(topicBig, T.KILL, payload);        // forwarded, not ingested: no ack from here
+        return 'consumed';
+      }
       this._sendIngestAck(meta?.fromId, role, target, 'kill', payload);
       return 'consumed';
     }

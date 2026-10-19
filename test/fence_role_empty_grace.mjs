@@ -82,7 +82,7 @@ const tick = async (m, at) => { m.clock = at; await m.refreshTick(); };
 const reapRow = (m, t) => m.rows.find((r) => r.event === 'pubsub:role-reaped' && r.ctx.topic === hex(t).slice(0, 12));
 
 console.log('fence_role_empty_grace: the keyspace pin on an empty root is a bounded grace');
-check('ROLE_EMPTY_GRACE_MS is 5 min, two orders above the birth probe / re-send / verify windows', GRACE === 5 * MIN, GRACE);
+check('ROLE_EMPTY_GRACE_MS is 5 min: 6.7× the 45 s verify, 10× the 30 s re-send, ~9× the birth probe (a policy choice, not a suspension bound)', GRACE === 5 * MIN, GRACE);
 
 console.log('\n[E1] retained within the grace, reaped the tick after it, tagged why=empty and counted apart');
 {

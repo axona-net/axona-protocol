@@ -54,6 +54,25 @@ export const repairPlaneMethods = {
    * A role that never carried one is measured from its admission stamp.
    * Returns 0 when neither exists, which leaves the role un-reapable by age.
    */
+  /**
+   * THE ONE DETACH SITE (Aster edfdd869, 2026-10-19). A role leaves axonRoles
+   * only here, and it leaves MARKED: `retired` names the reason and the
+   * generation moves. A handler parked in its verification await still holds
+   * the object; when it resumes, `_cutHolds` reads the mark and refuses the
+   * commit (the write is forwarded or left unacked for its sender to retry),
+   * whether or not a replacement role has been admitted since. This is what
+   * distinguishes a previously registered role from one a construction path
+   * pushes into before registering it: the latter was never retired. The
+   * detached object is served to nobody and goes with its last reference.
+   */
+  _retireRole(t, role, why) {
+    role.retired = why;
+    role.gen = (role.gen | 0) + 1;
+    this.axonRoles.delete(t);
+    this._upstream.delete(t);
+    if (this._tombAuthority) this._taPurgeTopic(t);   // Phase 3 shadow: node no longer holds this topic's bodies (no-op flag-off)
+  },
+
   _roleIdleMs(role, now) {
     const anchor = (role.lastTs || 0) > 0 ? role.lastTs : (role.createdAt || 0);
     return anchor > 0 ? Math.max(0, now - anchor) : 0;
@@ -386,10 +405,10 @@ export const repairPlaneMethods = {
         && !backupSeat && !custodyAlive
         && !keyspacePinned && !metricsLeased
         && !this.mySubscriptions.has(t) && !this._hostedTopics.has(t);
+      // `empty` = a keyspace-pinned root whose grace is spent (it would have
+      // been retained before 4.116.0); `dead` = the on-sight rule; `idle` = the TTL.
+      const why = deadNow ? (this._hostKeyspace && role.isRoot && graceSpent ? 'empty' : 'dead') : (idleReap ? 'idle' : null);
       if (idleReap || deadNow) {
-        // `empty` = a keyspace-pinned root whose grace is spent (it would have
-        // been retained before 4.116.0); `dead` = the on-sight rule; `idle` = the TTL.
-        const why = deadNow ? (this._hostKeyspace && role.isRoot && graceSpent ? 'empty' : 'dead') : 'idle';
         if (why === 'empty')     this._rolesReapedEmpty = (this._rolesReapedEmpty || 0) + 1;
         else if (why === 'dead') this._rolesReapedDead  = (this._rolesReapedDead  || 0) + 1;
         else                     this._rolesReapedIdle  = (this._rolesReapedIdle  || 0) + 1;
@@ -402,9 +421,7 @@ export const repairPlaneMethods = {
         });
       }
       if (idleReap || deadNow || (role.subscribers.size === 0 && !holdsHistory && !custodyAlive && !keyspacePinned && !role.backupOf && !this._backupTopics.has(t) && !metricsLeased && !this.mySubscriptions.has(t) && !this._hostedTopics.has(t))) {
-        this.axonRoles.delete(t);
-        this._upstream.delete(t);
-        if (this._tombAuthority) this._taPurgeTopic(t);   // Phase 3 shadow: node no longer holds this topic's bodies (no-op flag-off)
+        this._retireRole(t, role, why || 'teardown');
       }
     }
 

@@ -49,9 +49,11 @@ export const ROLE_IDLE_TTL_MS = 24 * 60 * 60 * 1000;   // 24 h
 // so the inventory was one day of churn held by the keyspace pin. The pin is
 // now a bounded grace measured from the last tick on which the role held
 // anything; a later SUB or PUB re-forms the role at the same routing terminus.
-// Sized two orders above everything an empty root may still be doing: the
-// birth probe (≤ 3 tries 5 s apart, re-armed once after 20 s), a publisher's
-// 30 s re-send window, the 6 s / 45 s root verify. 0 restores the eternal pin.
+// Sized about an order of magnitude above everything an empty root may still
+// be doing: 6.7× the 45 s root verify, 10× a publisher's 30 s re-send window,
+// ~9× the birth probe (≤ 3 tries 5 s apart, re-armed once after 20 s). A
+// policy choice, not a bound on scheduler suspension (Aster edfdd869). 0
+// restores the eternal pin.
 export const ROLE_EMPTY_GRACE_MS = 5 * 60 * 1000;   // 5 min
 
 // ── Root election / convergence ─────────────────────────────────────────
