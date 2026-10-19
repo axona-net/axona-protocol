@@ -154,7 +154,7 @@ console.log('\n[D6] the reap is one observable row, tagged why=dead');
   check('tagged why=dead and backup=false', row && row.ctx.why === 'dead' && row.ctx.backup === false, JSON.stringify(row?.ctx));
 }
 
-console.log('\n[D7] keyspace hosting is LOCAL INTENT and is not overridden');
+console.log('\n[D7] keyspace hosting is LOCAL INTENT and is not overridden on sight (4.116.0: it is a bounded grace — fence_role_empty_grace)');
 {
   const m = manager();
   m._hostKeyspace = true;

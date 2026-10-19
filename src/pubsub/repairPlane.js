@@ -284,13 +284,41 @@ export const repairPlaneMethods = {
         && !backupSeat && !custodyAlive
         && !this.mySubscriptions.has(t) && !this._hostedTopics.has(t)
         && this._roleIdleMs(role, now) > this._roleIdleTtlMs;
-      const keyspacePinned = this._hostKeyspace && role.isRoot;
+      // A root with a fresh metrics lease keeps publishing snapshots (read below).
+      const metricsLeased = role.isRoot && role.metricsOn > now;
+      // EMPTY-ROLE GRACE (David 2026-10-19, "address the root issue with unreaped
+      // topics raised by Aster"). Measured on sfo3 grizzly1 over seven days of
+      // 4.114.1: the reapers fire exactly as specified — 1,315 idle root reaps,
+      // every one in the 24 h bucket — and the fleet still carried 1,011 empty
+      // roots at Aster's census (council f64a8dbd), because a keyspace host
+      // forms ~200 roots a day per relay for single-use test topics and the pin
+      // above holds each one for the whole idle TTL with NOTHING in it. The
+      // keyspace pin's reason ("a durable home") is served by ROUTING: a later
+      // SUB or PUB walks to the same terminus and re-forms the role. So the pin
+      // is now a bounded GRACE, not an eternal exemption (Aster lifecycle v0.2
+      // item 2 names "bounded keyspace idle grace" as the one retention reason
+      // a generic keyspace host may claim). A role HOLDS NOTHING when every
+      // retention reason is absent by the node's own state: no bodies, no
+      // active tombstone or merge custody, no seated subscriber or child, not
+      // a backup seat, no metrics lease, no local intent. `emptySince` is the
+      // first tick that observed it so; a seat, a body or a tombstone clears
+      // it, so the grace restarts from the last time the role held anything —
+      // never from a beacon, a renewal or a duplicate kill. Once the grace is
+      // spent the pin no longer applies and the dead-now rule takes the role.
+      // ROLE_EMPTY_GRACE_MS 0 restores the eternal pin (bounded by the idle TTL).
+      const holdsNothing = role.cache.length === 0 && role.subscribers.size === 0 && role.children.size === 0
+        && !backupSeat && !custodyAlive && !metricsLeased
+        && !this.mySubscriptions.has(t) && !this._hostedTopics.has(t);
+      if (holdsNothing) { if (role.emptySince == null) role.emptySince = now; }
+      else role.emptySince = null;
+      const graceSpent = this._roleEmptyGraceMs > 0 && role.emptySince != null && (now - role.emptySince) > this._roleEmptyGraceMs;
+      const keyspacePinned = this._hostKeyspace && role.isRoot && !graceSpent;
       // A BACKUP holds a deliberate warm copy of another root's history — never tear
       // it down for being subscriber-less, or the durability replica vanishes.
       // A root with a fresh metrics lease keeps publishing snapshots, so retain it
       // even with zero subscribers/cache — the lease self-expires (soft state), and
-      // the role then tears down on a later tick like any other.
-      const metricsLeased = role.isRoot && role.metricsOn > now;
+      // the role then tears down on a later tick like any other. (`metricsLeased`
+      // is computed above, before the empty-role grace reads it.)
       // IMMEDIATE REAP (David 2026-09-23): a topic with NO subscribers and NO
       // messages is dead weight NOW, not in 24 h. What it uniquely overrides is
       // a pushed BACKUP replica (`role.backupOf`), because an empty replica
@@ -359,14 +387,18 @@ export const repairPlaneMethods = {
         && !keyspacePinned && !metricsLeased
         && !this.mySubscriptions.has(t) && !this._hostedTopics.has(t);
       if (idleReap || deadNow) {
-        const why = deadNow ? 'dead' : 'idle';
-        if (deadNow) this._rolesReapedDead = (this._rolesReapedDead || 0) + 1;
-        else         this._rolesReapedIdle = (this._rolesReapedIdle || 0) + 1;
+        // `empty` = a keyspace-pinned root whose grace is spent (it would have
+        // been retained before 4.116.0); `dead` = the on-sight rule; `idle` = the TTL.
+        const why = deadNow ? (this._hostKeyspace && role.isRoot && graceSpent ? 'empty' : 'dead') : 'idle';
+        if (why === 'empty')     this._rolesReapedEmpty = (this._rolesReapedEmpty || 0) + 1;
+        else if (why === 'dead') this._rolesReapedDead  = (this._rolesReapedDead  || 0) + 1;
+        else                     this._rolesReapedIdle  = (this._rolesReapedIdle  || 0) + 1;
         this._log?.('info', 'pubsub:role-reaped', {
           why, topic: idHex(t).slice(0, 12), isRoot: !!role.isRoot,
           backup: role.backupOf !== null,
           subscribers: role.subscribers.size, children: role.children.size,
           idleMs: this._roleIdleMs(role, now), everPublished: (role.lastTs || 0) > 0,
+          emptyMs: role.emptySince != null ? Math.max(0, now - role.emptySince) : null,
         });
       }
       if (idleReap || deadNow || (role.subscribers.size === 0 && !holdsHistory && !custodyAlive && !keyspacePinned && !role.backupOf && !this._backupTopics.has(t) && !metricsLeased && !this.mySubscriptions.has(t) && !this._hostedTopics.has(t))) {

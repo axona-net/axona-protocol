@@ -59,7 +59,7 @@ import { T, RENEW_MS, RENEW_FAST_MS, DROP_MS, ROOT_REPLICAS, CACHE_MAX,
          MAX_ROLES, ROLE_GRACE_MS, ROLE_ADMIT_PER_TICK,
          HELLO_DEADLINE_MS, SATURATION_PRESSURE, ROOT_REPLICATE_FULL_MS,
          TICK_LAG_WINDOW, OBLIGATIONS, ROUTE_FAIL_TRACK_MAX,
-         ROLE_IDLE_TTL_MS, MESH_REWARM_COOLDOWN_MS, MESH_REWARM_BACKOFF_MAX_MS,
+         ROLE_IDLE_TTL_MS, ROLE_EMPTY_GRACE_MS, MESH_REWARM_COOLDOWN_MS, MESH_REWARM_BACKOFF_MAX_MS,
          MERGE_CAPABLE_DEFAULT } from './constants.js';
 import { topicStoreMethods }   from './topicStore.js';
 import { rootElectionMethods } from './rootElection.js';
@@ -304,6 +304,9 @@ export class AxonaManager {
     this._hostKeyspace    = false;
     // Idle-role reap (David 2026-09-23). 0 disables. See ROLE_IDLE_TTL_MS.
     this._roleIdleTtlMs   = envNum('ROLE_IDLE_TTL_MS', ROLE_IDLE_TTL_MS);
+    // Empty-role grace (David 2026-10-19): how long a keyspace host keeps a root
+    // that holds nothing. 0 = the eternal pin of 4.115.0 and before. See ROLE_EMPTY_GRACE_MS.
+    this._roleEmptyGraceMs = envNum('ROLE_EMPTY_GRACE_MS', ROLE_EMPTY_GRACE_MS);
     // STEP-DOWN HOLD (4.102.0, council 9dc90970 option A with a clock, David
     // 2026-10-04). A node that yields a root claim to a named closer root does
     // not take the root back for this long, even when it cannot reach that
@@ -769,6 +772,7 @@ export class AxonaManager {
       reaped: {
         dead: this._rolesReapedDead || 0,
         idle: this._rolesReapedIdle || 0,
+        empty: this._rolesReapedEmpty || 0,   // keyspace-pinned roots whose empty-role grace was spent (4.116.0)
       },
       capacity: this.inspectCapacity(),
     };
