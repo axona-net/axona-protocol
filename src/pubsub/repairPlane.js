@@ -56,8 +56,9 @@ export const repairPlaneMethods = {
    */
   /**
    * THE ONE DETACH SITE (Aster edfdd869, 2026-10-19). A role leaves axonRoles
-   * only here, and it leaves MARKED: `retired` names the reason and the
-   * generation moves. A handler parked in its verification await still holds
+   * only here — the reapers' four paths and AxonaManager.resetState (Aster
+   * 87632cbb) all call it — and it leaves MARKED: `retired` names the reason
+   * and the generation moves. A handler parked in its verification await still holds
    * the object; when it resumes, `_cutHolds` reads the mark and refuses the
    * commit (the write is forwarded or left unacked for its sender to retry),
    * whether or not a replacement role has been admitted since. This is what

@@ -1622,6 +1622,11 @@ export class AxonaManager {
   setLogSink(fn) { this._logSink = (typeof fn === 'function') ? fn : null; }
 
   resetState() {
+    // Every role leaves through _retireRole so a handler parked in its verify
+    // await finds the mark when it resumes (Aster 87632cbb: a bare clear() left
+    // the objects unmarked). In-tree this is reached only by a test; a runtime
+    // caller would still owe quiescence for the writes it cannot mark.
+    for (const [t, role] of [...this.axonRoles]) this._retireRole(t, role, 'reset');
     this.axonRoles.clear();
     if (this._tombAuthority) this._taReset();   // Phase 3 shadow: no role holds a body now — rebuild (no-op flag-off)
     this.mySubscriptions.clear();

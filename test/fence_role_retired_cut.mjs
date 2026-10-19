@@ -119,5 +119,17 @@ async function parkedKill(during) {
   check('R6 the idle TTL marks retired=idle', r3.retired === 'idle', r3.retired);
 }
 
+{ // R7 — the bulk reset is not a second, unmarked detach site (Aster 87632cbb): every role leaves marked
+  const ctx = makeManagerAt(L.self, { neighbors: [L.near] });
+  const { role, ids } = await rootWithBodies(ctx, L, 1);
+  const kill = await signedKill(ctx, L.topicId, ids[0]);
+  const acksBefore = acks(ctx);
+  const p = ctx.am._onKill({ topicId: idHex(L.topicId), kill }, bareMeta(ctx, L.publisher));   // parked in verifyKill
+  ctx.am.resetState();                                                                           // the bulk reset lands while it waits
+  await p; await settle();
+  check('R7 resetState marks the role retired=reset and empties the map', role.retired === 'reset' && ctx.am.axonRoles.size === 0, role.retired);
+  check('R7 the parked kill resuming after the reset is refused, no tombstone, not acked', role.tombstones.size === 0 && acks(ctx) === acksBefore);
+}
+
 console.log(`\nfence_role_retired_cut: ${passed} passed, ${failed} failed`);
 process.exit(failed ? 1 : 0);
