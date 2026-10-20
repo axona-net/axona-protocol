@@ -348,6 +348,9 @@ export const topicLifetimeMethods = {
   _thinBranchSweep(now) {
     for (const [t, role] of [...this.axonRoles]) {
       if (role.isRoot || role.backupOf !== null || this._backupTopics.has(t) || role.readHolder) continue;
+      // BOUNDED (Aster 848688cb): the held-body set describes bodies in the
+      // cache and is pruned with it, every tick, on every relay role.
+      if (role.upstreamHeld && role.upstreamHeld.size) { for (const id of role.upstreamHeld) if (!role.cacheIds.has(id)) role.upstreamHeld.delete(id); }
       if (role.subscribers.size === 0) continue;                       // not a relay
       const demand = this._roleDemand(role);
       if (demand >= this._childMinReaders) { role.thinSince = null; continue; }
@@ -412,6 +415,7 @@ export const topicLifetimeMethods = {
     const me = lc(idHex(this.nodeId));
     const next = (typeof payload.upstream === 'string' && isHexId(lc(payload.upstream)) && lc(payload.upstream) !== me) ? lc(payload.upstream) : null;
     if (next) this._upstream.set(t, [next]); else this._upstream.delete(t);
+    if (role) { role.upstreamHeld = new Set(); role.upstreamHeldFrom = null; }   // custody evidence does not survive an upstream change (TL-B05)
     const s = this.mySubscriptions.get(t);
     if (s) { s.interval = this.renewFastMs; s.lastRenewSent = null; }
     if (role?.sync) role.sync.lastRenewAt = null;

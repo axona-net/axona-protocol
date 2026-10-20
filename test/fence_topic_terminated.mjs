@@ -273,6 +273,28 @@ console.log('\n[B01] EXACT generation binding (Aster c5adedec): a delayed notice
   check('with no generation attached (older-kernel upstream) a notice from the upstream still ends it', !ctx.am.mySubscriptions.has(TP(21)));
 }
 
+console.log('\n[B04] attachment moves FORWARD only within a root (Aster 848688cb): a delayed older DELIVER cannot roll it back');
+{
+  const ctx = manager();
+  const rows = []; ctx.am.onPubsubDelivery((t, json) => rows.push(JSON.parse(json)));
+  ctx.am.pubsubSubscribe(TP(22));
+  await ctx.am._onDeliver({ topicId: idHex(TP(22)), from: idHex(R1), msgs: [], gen: gen(R1, 2) }, { targetId: SELF, isTerminal: true, hopCount: 1 });
+  await ctx.am._onDeliver({ topicId: idHex(TP(22)), from: idHex(R1), msgs: [], gen: gen(R1, 1) }, { targetId: SELF, isTerminal: true, hopCount: 1 });
+  check('a delayed (R1, 1) DELIVER after (R1, 2) leaves the attachment at epoch 2', ctx.am._attachedGen.get(TP(22))?.epoch === 2);
+  await terminated(ctx, TP(22), R1, gen(R1, 1));
+  check('the old (R1, 1) notice then ends nothing', ctx.am.mySubscriptions.has(TP(22)) && rows.length === 0);
+  await ctx.am._onDeliver({ topicId: idHex(TP(22)), from: idHex(R2), msgs: [], gen: gen(R2, 1) }, { targetId: SELF, isTerminal: true, hopCount: 1 });
+  check('a DIFFERENT root re-attaches whatever its epoch (no global order across roots)', ctx.am._attachedGen.get(TP(22))?.root === lc(idHex(R2)) && ctx.am._attachedGen.get(TP(22)).epoch === 1);
+  // the same rule on a relay role
+  const child = seed(ctx, TP(23), { isRoot: false });
+  ctx.am._upstream.set(TP(23), [lc(idHex(R1))]);
+  await ctx.am._onDeliver({ topicId: idHex(TP(23)), from: idHex(R1), msgs: [], gen: gen(R1, 3) }, { targetId: SELF, isTerminal: true, hopCount: 1 });
+  await ctx.am._onDeliver({ topicId: idHex(TP(23)), from: idHex(R1), msgs: [{ msgId: 'old', publishTs: T0, json: '{}', seq: 1 }], gen: gen(R1, 2) }, { targetId: SELF, isTerminal: true, hopCount: 1 });
+  check('a relay keeps epoch 3 through a delayed epoch-2 DELIVER, and still caches that DELIVER\'s body', child.attachedGen.epoch === 3 && child.cache.length === 1);
+  await terminated(ctx, TP(23), R1, gen(R1, 2));
+  check('the old notice is foreign to it', ctx.held(TP(23)));
+}
+
 console.log('\n[R6] unarmed: the frame is consumed without effect; the tick terminates nothing');
 {
   const ctx = manager({ armed: false });

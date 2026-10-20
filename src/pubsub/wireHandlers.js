@@ -1102,10 +1102,27 @@ export const wireHandlersMethods = {
     // ATTACHMENT (Topic Lifetime 4.1, Aster TL-B01): the generation this DELIVER
     // names is the one this node is attached to; a notice or a REHOME binds to it
     // exactly. Recorded on the relay role and, for a reader, on the manager.
+    // FORWARD ONLY within a root (Aster 848688cb TL-B04): a delayed DELIVER of
+    // an older epoch of the SAME root never rolls the attachment back, so an
+    // old notice cannot be made to match again by reordered traffic. A
+    // different root is a different generation and re-attaches (no global
+    // epoch order across roots). The bodies in an obsolete DELIVER are still
+    // valid bodies and are handled below; only the attachment ignores it.
+    // CUSTODY EVIDENCE IS BOUND TO THE ATTACHMENT (TL-B05): when the upstream
+    // or the generation changes, a relay's upstreamHeld set is cleared — an
+    // old sender having once sent a body says nothing about the current one.
     if (this._topicLifetime && payload.from && this._genValid(payload.gen)) {
       const g = this._genNorm(payload.gen);
-      if (role && !role.isRoot) role.attachedGen = g;
-      if (this.mySubscriptions.has(topicBig)) this._attachedGen.set(topicBig, g);
+      const fromHex = lc(payload.from);
+      const advance = (cur) => !cur || cur.root !== g.root || (g.epoch | 0) >= (cur.epoch | 0);
+      if (role && !role.isRoot) {
+        const changed = !role.attachedGen || role.attachedGen.root !== g.root || (role.attachedGen.epoch | 0) !== (g.epoch | 0) || role.upstreamHeldFrom !== fromHex;
+        if (advance(role.attachedGen)) {
+          if (changed) { role.upstreamHeld = new Set(); role.upstreamHeldFrom = fromHex; }
+          role.attachedGen = g;
+        }
+      }
+      if (this.mySubscriptions.has(topicBig) && advance(this._attachedGen.get(topicBig))) this._attachedGen.set(topicBig, g);
     }
     for (const m of (Array.isArray(payload.msgs) ? payload.msgs : [])) {
       if (!m) continue;
@@ -1119,7 +1136,8 @@ export const wireHandlersMethods = {
         continue;
       }
       if (this._tombstoned(role, m.msgId, m.json)) continue;          // killed → suppress (don't cache/deliver/re-fan)
-      if (role && !role.isRoot) { (role.upstreamHeld ??= new Set()).add(m.msgId); }   // the upstream SENT this body: it holds it (Topic Lifetime 4.7, TL-B02)
+      // the CURRENT upstream SENT this body: it holds it (Topic Lifetime 4.7, TL-B02/B05). Armed only; the set is bound to the attachment above and pruned with the cache.
+      if (this._topicLifetime && role && !role.isRoot && role.upstreamHeldFrom === lc(payload.from)) { (role.upstreamHeld ??= new Set()).add(m.msgId); }
       if (role && !role.cacheIds.has(m.msgId)) {       // relay: cache once + re-fan once
         this._cachePush(role, { msgId: m.msgId, publishTs: m.publishTs, json: m.json, seq: m.seq });
         if (Number.isFinite(m.seq) && m.seq > role.seq) role.seq = m.seq;   // keep counter ready if we're promoted to root

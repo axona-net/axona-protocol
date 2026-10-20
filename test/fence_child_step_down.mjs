@@ -126,6 +126,41 @@ console.log('\n[B02] BODY CUSTODY (Aster c5adedec): a thin child holding a body 
   check('a thin child whose only body came from its upstream steps down', !ctx.held(TP(11)));
 }
 
+console.log('\n[B05] custody evidence is bound to the CURRENT upstream and generation (Aster 848688cb); the set is armed-only and pruned with the cache');
+{
+  const ctx = manager({ neighbors: [ROOT, B] });
+  const R2 = B;                                                       // the replacement root, reachable
+  const role = await child(ctx, TP(12), [A]);
+  await ctx.am._onDeliver({ topicId: idHex(TP(12)), from: idHex(ROOT), msgs: [{ msgId: 'm0', publishTs: ctx.clock.t, json: '{}', seq: 1 }], gen: { root: lc(idHex(ROOT)), epoch: 1 } }, { targetId: SELF, isTerminal: true, hopCount: 1 });
+  check('m0 from R1 is cached and held by R1', role.cache.length === 1 && role.upstreamHeld.has('m0') && role.upstreamHeldFrom === lc(idHex(ROOT)));
+  await ctx.am._onDeliver({ topicId: idHex(TP(12)), from: idHex(R2), msgs: [], gen: { root: lc(idHex(R2)), epoch: 1 } }, { targetId: SELF, isTerminal: true, hopCount: 1 });
+  check('an empty DELIVER from replacement root R2 re-attaches and CLEARS the evidence: m0 is no longer held by anyone current', role.attachedGen.root === lc(idHex(R2)) && role.upstreamHeld.size === 0 && ctx.am._upstream.get(TP(12))[0] === lc(idHex(R2)));
+  let at = ctx.clock.t;
+  const until = at + 3 * CHILD_STEP_DOWN_MS;
+  for (; at <= until; at += TICK) { await renewAll(ctx, TP(12), [A]); await ctx.tick(at); }
+  check('thin for three windows under R2 with m0 unevidenced: no step-down, m0 kept', ctx.held(TP(12)) && role.cache.length === 1 && ctx.sent(T.REHOME).length === 0);
+  await ctx.am._onDeliver({ topicId: idHex(TP(12)), from: idHex(R2), msgs: [{ msgId: 'm0', publishTs: T0, json: '{}', seq: 1 }], gen: { root: lc(idHex(R2)), epoch: 1 } }, { targetId: SELF, isTerminal: true, hopCount: 1 });
+  await renewAll(ctx, TP(12), [A]); await ctx.tick(at);
+  check('once R2 itself has sent m0 back, the child steps down', !ctx.held(TP(12)) && ctx.sent(T.REHOME).length === 1);
+  // a REHOME (upstream change) clears the evidence too
+  const r3 = await child(ctx, TP(13), [A]);
+  await ctx.am._onDeliver({ topicId: idHex(TP(13)), from: idHex(ROOT), msgs: [{ msgId: 'x', publishTs: ctx.clock.t, json: '{}', seq: 1 }], gen: { root: lc(idHex(ROOT)), epoch: 1 } }, { targetId: SELF, isTerminal: true, hopCount: 1 });
+  await rehome(ctx, TP(13), ROOT, R2);
+  check('a REHOME from the upstream clears the held set with the pin', r3.upstreamHeld.size === 0 && r3.upstreamHeldFrom === null);
+  // bounded: pruned with the cache
+  const r4 = await child(ctx, TP(14), [A, B]);
+  await ctx.am._onDeliver({ topicId: idHex(TP(14)), from: idHex(ROOT), msgs: [{ msgId: 'e1', publishTs: ctx.clock.t, json: '{}', seq: 1 }, { msgId: 'e2', publishTs: ctx.clock.t, json: '{}', seq: 2 }], gen: { root: lc(idHex(ROOT)), epoch: 1 } }, { targetId: SELF, isTerminal: true, hopCount: 1 });
+  check('two bodies, two held ids', r4.cache.length === 2 && r4.upstreamHeld.size === 2);
+  r4.cache.length = 0; r4.cacheIds.clear();                              // expiry / eviction / a kill
+  await renewAll(ctx, TP(14), [A, B]); await ctx.tick(ctx.clock.t + TICK);
+  check('the tick prunes the held set to the cache: 0 of 2 remain', r4.upstreamHeld.size === 0);
+  // unarmed: no set at all
+  const off = manager({ armed: false, neighbors: [ROOT] });
+  const r5 = seed(off, TP(15), { isRoot: false }); off.am._upstream.set(TP(15), [lc(idHex(ROOT))]);
+  await off.am._onDeliver({ topicId: idHex(TP(15)), from: idHex(ROOT), msgs: [{ msgId: 'u', publishTs: off.clock.t, json: '{}', seq: 1 }], gen: { root: lc(idHex(ROOT)), epoch: 1 } }, { targetId: SELF, isTerminal: true, hopCount: 1 });
+  check('unarmed: the body is cached and NO held set and NO attachment are kept', r5.cache.length === 1 && r5.upstreamHeld === undefined && r5.attachedGen == null);
+}
+
 console.log('\n[H1] REHOME received: the reader keeps the app\'s subscription, re-pins to the named upstream, renews fast; a REHOME from a non-upstream is ignored');
 {
   const ctx = manager();
