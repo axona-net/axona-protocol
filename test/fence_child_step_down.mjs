@@ -21,7 +21,7 @@
 // P1; count a child's seats as readers regardless of its declaration → C1.
 // Run: TOPIC_LIFETIME=1 node test/fence_child_step_down.mjs
 // =====================================================================
-import { manager, seed, sub, rehome, deliver, attachNonceFor, idHex, lc, TP, NODE, SELF, T0, MIN, T } from './lib/lifetimeFixture.mjs';
+import { manager, seed, sub, rehome, deliver, attachNonceFor, attachOf, idHex, lc, TP, NODE, SELF, T0, MIN, T } from './lib/lifetimeFixture.mjs';
 import { CHILD_MIN_READERS, CHILD_STEP_DOWN_MS, CHILD_MIN_STAY_MS, CHILD_COOLDOWN_MS, DROP_MS } from '../src/pubsub/constants.js';
 
 let passed = 0, failed = 0;
@@ -134,7 +134,7 @@ console.log('\n[B05] custody evidence is bound to the CURRENT upstream and gener
   await deliver(ctx, TP(12), ROOT, { msgs: [{ msgId: 'm0', publishTs: ctx.clock.t, json: '{}', seq: 1 }], gen: { root: lc(idHex(ROOT)), epoch: 1 } });
   check('m0 from R1 is cached and held by R1', role.cache.length === 1 && role.upstreamHeld.has('m0') && role.upstreamHeldFrom === lc(idHex(ROOT)));
   await deliver(ctx, TP(12), R2, { gen: { root: lc(idHex(R2)), epoch: 1 } });
-  check('an empty DELIVER from replacement root R2 re-attaches and CLEARS the evidence: m0 is no longer held by anyone current', role.attachedGen.root === lc(idHex(R2)) && role.upstreamHeld.size === 0 && ctx.am._upstream.get(TP(12))[0] === lc(idHex(R2)));
+  check('an empty DELIVER from replacement root R2 re-attaches and CLEARS the evidence: m0 is no longer held by anyone current', attachOf(ctx, TP(12))?.gen?.root === lc(idHex(R2)) && role.upstreamHeld.size === 0 && ctx.am._upstream.get(TP(12))[0] === lc(idHex(R2)));
   let at = ctx.clock.t;
   const until = at + 3 * CHILD_STEP_DOWN_MS;
   for (; at <= until; at += TICK) { await renewAll(ctx, TP(12), [A]); await ctx.tick(at); }
@@ -158,7 +158,7 @@ console.log('\n[B05] custody evidence is bound to the CURRENT upstream and gener
   const off = manager({ armed: false, neighbors: [ROOT] });
   const r5 = seed(off, TP(15), { isRoot: false }); off.am._upstream.set(TP(15), [lc(idHex(ROOT))]);
   await off.am._onDeliver({ topicId: idHex(TP(15)), from: idHex(ROOT), msgs: [{ msgId: 'u', publishTs: off.clock.t, json: '{}', seq: 1 }], gen: { root: lc(idHex(ROOT)), epoch: 1 } }, { targetId: SELF, isTerminal: true, hopCount: 1 });
-  check('unarmed: the body is cached and NO held set and NO attachment are kept', r5.cache.length === 1 && r5.upstreamHeld === undefined && r5.attachedGen == null);
+  check('unarmed: the body is cached and NO held set and NO attachment are kept', r5.cache.length === 1 && r5.upstreamHeld === undefined && attachOf(off, TP(15)) == null);
 }
 
 console.log('\n[B08] an obsolete same-root DELIVER credits no custody (Aster 0cfdd82d); [B09] the prune covers a backup too');
@@ -167,7 +167,7 @@ console.log('\n[B08] an obsolete same-root DELIVER credits no custody (Aster 0cf
   const role = await child(ctx, TP(16), [A]);
   await deliver(ctx, TP(16), ROOT, { gen: { root: lc(idHex(ROOT)), epoch: 2 } });
   await deliver(ctx, TP(16), ROOT, { msgs: [{ msgId: 'm0', publishTs: T0, json: '{}', seq: 1 }], gen: { root: lc(idHex(ROOT)), epoch: 1 }, authorized: false });
-  check('attached to epoch 2; the delayed epoch-1 DELIVER\'s body is cached but NOT credited as held', role.attachedGen.epoch === 2 && role.cache.length === 1 && !(role.upstreamHeld && role.upstreamHeld.has('m0')));
+  check('attached to epoch 2; the delayed epoch-1 DELIVER\'s body is cached but NOT credited as held', attachOf(ctx, TP(16))?.gen?.epoch === 2 && role.cache.length === 1 && !(role.upstreamHeld && role.upstreamHeld.has('m0')));
   let at = ctx.clock.t; const until = at + 3 * CHILD_STEP_DOWN_MS;
   for (; at <= until; at += TICK) { await renewAll(ctx, TP(16), [A]); await ctx.tick(at); }
   check('thin for three windows: no step-down, m0 kept', ctx.held(TP(16)) && role.cache.length === 1 && ctx.sent(T.REHOME).length === 0);

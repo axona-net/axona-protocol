@@ -109,7 +109,9 @@ export function makeRole(topicId, isRoot, createdAt = null) {
     dismantling: null,               // (when ROOT) { at, sends } once termination began (4.5): grants no seat,
                                      // takes no write, replicates nothing, beacons nothing.
     thinSince: null,                 // (when CHILD) _now() of the first tick that read demand < CHILD_MIN_READERS (4.7)
-    standbyGen: null,                // (when BACKUP) { root, epoch } the appointment names (4.1); null = legacy grant
+    standbyGen: null,                // (when BACKUP) { root, epoch } the appointment names (4.1); null = legacy grant.
+                                     // The ATTACHMENT (the parent a relay or reader selected) is NOT on the role: it is
+                                     // one record per topic on the manager (_attach), shared with the node's own reader.
     lastTs: 0,                       // highest stamp emitted (monotonic; root authority)
     seq: 0,                          // DENSE per-topic counter (root authority): ++ per emitted
                                      // message AND kill, so subscribers detect GAPS (env.seq jumps

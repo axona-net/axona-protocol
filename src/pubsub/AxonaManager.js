@@ -339,7 +339,15 @@ export class AxonaManager {
     this._leftRecords     = new Map();  // topicIdBig -> { rootId, epoch, upstream, until (mono), why }  (4.2, LEFT only)
     this._childCooldown   = new Map();  // subHex -> wall ts  a node that stepped down is not re-promoted before this (4.7)
     this._genHighWater    = new Map();  // topicIdBig -> { epoch, until (mono) }  the epoch a generation this node ENDED carried (4.1; identity only)
-    this._attachedGen     = new Map();  // topicIdBig -> { root, epoch }  the generation this node's OWN subscription is attached to (from its DELIVERs; 4.1)
+    // THE ATTACHMENT (Topic Lifetime 4.1; Aster TL-B07/B11/B12/B13): ONE record
+    // per topic per node, shared by this node's relay role and its own reader —
+    // the kernel sends ONE SUB per topic for both duties, so there is one
+    // selection. { gen, from, nonce, seq, attempts: Map nonce -> seq (the last
+    // ATTACH_WINDOW attempts: a cold subscribe emits several SUBs in seconds and
+    // the reply to the first must still be recognised), committed }. A backup
+    // APPOINTMENT (role.backupOf / standbyGen) is a separate obligation.
+    this._attach          = new Map();
+    this._attachWindow    = 16;
     this._childMinReaders = envNum('CHILD_MIN_READERS', CHILD_MIN_READERS);
     this._childStepDownMs = envNum('CHILD_STEP_DOWN_MS', CHILD_STEP_DOWN_MS);
     this._childMinStayMs  = envNum('CHILD_MIN_STAY_MS', CHILD_MIN_STAY_MS);
@@ -1413,15 +1421,18 @@ export class AxonaManager {
     if (this._topicLifetime) {
       const b = new Uint8Array(8); globalThis.crypto.getRandomValues(b);
       const nonce = Array.from(b, (x) => x.toString(16).padStart(2, '0')).join('');
-      const holder = sub || (role && !role.isRoot ? role.sync : null);
       // LOCAL REQUEST ORDER (Aster 535a6741 TL-B11): each nonce carries this
-      // holder's attempt number; a reply commits a selection only if its
-      // attempt is NEWER than the last committed one, so a delayed reply to an
-      // older request never replaces a newer committed selection, and a
-      // repeated reply to the committed attempt is data only.
-      if (holder) {
-        holder.attachPrev = holder.attachNonce || null; holder.attachPrevSeq = holder.attachNonceSeq | 0;
-        holder.attachNonce = nonce; holder.attachNonceSeq = (holder.attachNonceSeq | 0) + 1;
+      // node's attempt number for the topic; a reply commits a selection only
+      // if its attempt is NEWER than the last committed one, so a delayed reply
+      // to an older request never replaces a newer committed selection, and a
+      // repeated reply to the committed attempt is data only. One record per
+      // topic (TL-B13), whatever duty the SUB serves.
+      if (!(role && role.isRoot)) {
+        const a = this._attach.get(topicBig) || { gen: null, from: null, nonce: null, seq: 0, attempts: new Map(), committed: 0 };
+        a.nonce = nonce; a.seq = (a.seq | 0) + 1;
+        a.attempts.set(nonce, a.seq);
+        while (a.attempts.size > this._attachWindow) a.attempts.delete(a.attempts.keys().next().value);   // the oldest attempt falls off
+        this._attach.set(topicBig, a);
         decl = { attach: nonce };
       }
     }
@@ -1533,7 +1544,7 @@ export class AxonaManager {
 
   pubsubUnsubscribe(topicId) {
     this.mySubscriptions.delete(topicId);
-    this._attachedGen?.delete(topicId);
+    if (!this.axonRoles.has(topicId)) this._attach?.delete(topicId);   // the attachment belongs to the topic; a remaining relay role keeps it
     this._coldSteerGen?.delete(topicId);   // release any live cold-steer cycle so a resubscribe starts clean
     const via = this._upstream.get(topicId) || [];
     this._send(T.UNSUB, { topicId: idHex(topicId), via, subscriberId: idHex(this.nodeId) });
@@ -1704,7 +1715,7 @@ export class AxonaManager {
     this._leftRecords?.clear();
     this._childCooldown?.clear();
     this._genHighWater?.clear();
-    this._attachedGen?.clear();
+    this._attach?.clear();
     this._appDelivered.clear();
     for (const p of this._pending.values()) clearTimeout(p.timer);
     this._pending.clear();

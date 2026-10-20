@@ -415,6 +415,10 @@ export const wireHandlersMethods = {
         if (c) {
           if (latest) this._replayTo(role, subHex, since, false, true, attach);  // current value from here, then hand off
           this._delegateTo(c, role, [{ subscriberId: subHex, since }]);
+          if (this._topicLifetime) {   // the selection handover (see _promoteChild); this seat was answered by us (attach) so the subscriber's pin is us
+            const g = this._genCarried(role);
+            try { this._route(idBig(subHex), T.DELIVER, { topicId: idHex(role.topicId), from: idHex(this.nodeId), msgs: [], ...(g ? { gen: g } : {}), ...(attach ? { attach } : {}), delegate: c }); } catch { /* best-effort */ }
+          }
           return;
         }
         // neither possible (no leaf to promote, no child) → seat over capacity
@@ -481,6 +485,20 @@ export const wireHandlersMethods = {
     const nonce = this._delegateTo(leaf, role, batch);
     if (!role.merge) role.merge = makeMergeState();
     role.merge.pendingDelegation.set(nonce, { child: leaf, subs: batch.map((b) => b.subscriberId), at: this._now() });
+    // THE SELECTION IS HANDED OVER BY THE SELECTED PARENT (Topic Lifetime 4.1,
+    // armed only): a delegated subscriber's first DELIVER from its new child
+    // echoes an attempt this parent already committed, from a node that is not
+    // its pinned parent, so under the selected-parent rule it would be data
+    // only and the subscriber would re-seat here every renewal. The parent,
+    // which the subscriber selected, therefore tells it: one empty DELIVER per
+    // delegated seat carrying `delegate` = the child, which moves the pin and
+    // the attachment's parent without changing the generation or the attempt.
+    if (this._topicLifetime) {
+      const g = this._genCarried(role);
+      for (const b of batch) {
+        try { this._route(idBig(b.subscriberId), T.DELIVER, { topicId: idHex(role.topicId), from: idHex(this.nodeId), msgs: [], ...(g ? { gen: g } : {}), delegate: leaf }); } catch { /* best-effort; the next renewal re-seats */ }
+      }
+    }
     this._log('info', 'delegated', { child: leaf.slice(0, 12), moved: batch.length, nonce: nonce.slice(0, 8), pending: true });
     return true;
   },
@@ -1104,29 +1122,47 @@ export const wireHandlersMethods = {
     //             generation moved forward; accepted. Fan-out from any other
     //             node, or naming another root, or before a first attachment,
     //             is 'data'. Same root and epoch do not identify the parent.
+    // ONE record per topic (TL-B13): the relay role and the node's own reader
+    // share it, so there is exactly one decision and one selected parent.
     const gated = this._topicLifetime && payload.from && this._genValid(payload.gen);
-    let decision = null;   // { role: 'commit'|'data'|'forward'|null, sub: same, g, fromHex, k }
+    let decision = null;   // { v: 'commit'|'data'|'forward', k, g, fromHex, a }
     if (gated) {
       const g = this._genNorm(payload.gen);
       const fromHex = lc(payload.from);
       const nonce = typeof payload.attach === 'string' ? payload.attach : null;
       const pin = (this._upstream.get(topicBig) || [])[0] || null;
-      const seqOf = (h) => (nonce && h) ? (nonce === h.attachNonce ? (h.attachNonceSeq | 0) : (nonce === h.attachPrev ? (h.attachPrevSeq | 0) : 0)) : 0;
-      const decide = (h, cur) => {
-        if (!h) return null;
-        if (nonce) { const k = seqOf(h); return (k > 0 && k > (h.attachCommitted | 0)) ? { v: 'commit', k } : { v: 'data', k }; }
-        if (pin && fromHex === pin && cur && cur.root === g.root && (g.epoch | 0) >= (cur.epoch | 0)) return { v: 'forward', k: 0 };
-        return { v: 'data', k: 0 };
-      };
+      const a = this._attach.get(topicBig) || null;
       const role0 = this.axonRoles.get(topicBig);
-      const sub0 = this.mySubscriptions.get(topicBig);
-      decision = {
-        g, fromHex,
-        role: (role0 && !role0.isRoot) ? decide(role0.sync, role0.attachedGen) : null,
-        sub: sub0 ? decide(sub0, this._attachedGen.get(topicBig)) : null,
-      };
+      let v = 'data', k = 0;
+      if (role0 && role0.isRoot) v = 'data';                              // a root is attached to nothing
+      else if (nonce) {
+        k = (a && a.attempts && a.attempts.has(nonce)) ? (a.attempts.get(nonce) | 0) : 0;   // an attempt in the window; older ones are unknown
+        v = (k > 0 && k > ((a && a.committed) | 0)) ? 'commit' : 'data';
+      } else if (a && a.gen && pin && fromHex === pin && a.gen.root === g.root && (g.epoch | 0) >= (a.gen.epoch | 0)) v = 'forward';
+      decision = { v, k, g, fromHex, a };
     }
-    const accepted = !gated || (decision.role && decision.role.v !== 'data') || (decision.sub && decision.sub.v !== 'data');
+    // HANDOVER (armed): the SELECTED parent (the pin, or the reply to our own
+    // live attempt) names a child to take its seat; the pin and the attachment's
+    // parent move to the child, the generation and the attempt do not.
+    if (gated && typeof payload.delegate === 'string' && isHexId(lc(payload.delegate)) && lc(payload.delegate) !== lc(idHex(this.nodeId))) {
+      const pin = (this._upstream.get(topicBig) || [])[0] || null;
+      const fromSelected = (pin && decision.fromHex === pin) || decision.v === 'commit';
+      if (fromSelected) {
+        const child = lc(payload.delegate);
+        const a = decision.a || { gen: null, from: null, nonce: null, seq: 0, attempts: new Map(), committed: 0 };
+        if (decision.v === 'commit') { a.committed = decision.k; a.gen = decision.g; }
+        a.from = child; this._attach.set(topicBig, a);
+        this._upstream.set(topicBig, [child]);
+        const s = this.mySubscriptions.get(topicBig); if (s) s.interval = this.renewFastMs;
+        const role1 = this.axonRoles.get(topicBig);
+        if (role1 && !role1.isRoot) { role1.upstreamHeld = new Set(); role1.upstreamHeldFrom = child; }
+        this._log('info', 'delegated-by-parent', { topic: idHex(topicBig).slice(0, 12), from: decision.fromHex.slice(0, 10), to: child.slice(0, 10) });
+      } else {
+        this._log('info', 'delegate-ignored', { topic: idHex(topicBig).slice(0, 12), from: decision.fromHex.slice(0, 10), why: 'not-selected-parent' });
+      }
+      return 'consumed';
+    }
+    const accepted = !gated || decision.v !== 'data';
     if (payload.from && accepted) {
       const fromHex = lc(payload.from);
       const prev = this._upstream.get(topicBig);
@@ -1164,27 +1200,19 @@ export const wireHandlersMethods = {
     // custody is credited only from an accepted current-generation DELIVER.
     let deliverAccepted = false;
     if (decision) {
-      const { g, fromHex } = decision;
-      if (role && !role.isRoot && decision.role) {
-        const d = decision.role;
-        if (d.v !== 'data') {
-          if (d.v === 'commit') role.sync.attachCommitted = d.k;         // this attempt's selection is committed; older replies are data only
-          const changed = !role.attachedGen || role.attachedGen.root !== g.root || (role.attachedGen.epoch | 0) !== (g.epoch | 0) || role.upstreamHeldFrom !== fromHex;
-          if (changed) { role.upstreamHeld = new Set(); role.upstreamHeldFrom = fromHex; }
-          role.attachedGen = g;
+      const { g, fromHex, v, k } = decision;
+      if (v !== 'data') {
+        const a = decision.a || { gen: null, from: null, nonce: null, seq: 0, attempts: new Map(), committed: 0 };
+        if (v === 'commit') a.committed = k;                               // this attempt's selection is committed; older replies are data only
+        const changed = !a.gen || a.gen.root !== g.root || (a.gen.epoch | 0) !== (g.epoch | 0) || a.from !== fromHex;
+        a.gen = g; a.from = fromHex;
+        this._attach.set(topicBig, a);
+        if (role && !role.isRoot) {
+          if (changed || role.upstreamHeldFrom !== fromHex) { role.upstreamHeld = new Set(); role.upstreamHeldFrom = fromHex; }
           deliverAccepted = true;
-        } else {
-          this._log('info', 'deliver-attachment-ignored', { topic: idHex(topicBig).slice(0, 12), from: fromHex.slice(0, 10), gen: g.root.slice(0, 10), epoch: g.epoch, nonce: typeof payload.attach === 'string', k: d.k });
         }
-      }
-      if (decision.sub) {
-        const d = decision.sub;
-        if (d.v !== 'data') {
-          if (d.v === 'commit') this.mySubscriptions.get(topicBig).attachCommitted = d.k;
-          this._attachedGen.set(topicBig, g);
-        } else {
-          this._log('info', 'deliver-attachment-ignored', { topic: idHex(topicBig).slice(0, 12), from: fromHex.slice(0, 10), gen: g.root.slice(0, 10), epoch: g.epoch, nonce: typeof payload.attach === 'string', k: d.k, reader: true });
-        }
+      } else {
+        this._log('info', 'deliver-attachment-ignored', { topic: idHex(topicBig).slice(0, 12), from: fromHex.slice(0, 10), gen: g.root.slice(0, 10), epoch: g.epoch, nonce: typeof payload.attach === 'string', k, reader: this.mySubscriptions.has(topicBig) });
       }
     }
     for (const m of (Array.isArray(payload.msgs) ? payload.msgs : [])) {

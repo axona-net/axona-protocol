@@ -180,10 +180,10 @@ function rowDefs() {
       evidence: EvidenceLevel.OBSERVED, proves: Proves.OBSERVATION, outcome: 'DeliveryOutcome', terminalOutcome: 'ENTRIES_DELIVERED_AT_MOST_ONCE',
       retry: Retry.NONE, topicProfile: PROFILE, eventIdScheme: 'MSGID_CONTENT_V1', replayCursorType: NA, orderingModel: 'UNION_IDEMPOTENT',
       authGuard: NA, admissionGuard: NA, placementGuard: NA,
-      projection: { payload: ['topicId', 'from', 'msgs', 'gen', 'attach'] },   // gen: the generation served; attach: the SUB nonce this reply answers (Topic Lifetime 4.1, armed only)
-      schema: { require: ['topicId', 'msgs'], types: { topicId: 'string', msgs: 'arr', gen: 'obj', attach: 'string' } },
+      projection: { payload: ['topicId', 'from', 'msgs', 'gen', 'attach', 'delegate'] },   // gen: the generation served; attach: the SUB nonce this reply answers; delegate: the selected parent hands the seat to this child (Topic Lifetime 4.1, armed only)
+      schema: { require: ['topicId', 'msgs'], types: { topicId: 'string', msgs: 'arr', gen: 'obj', attach: 'string', delegate: 'string' } },
       capabilityRange: { profile: PROFILE },
-      errorContract: ['drop-duplicate-msgid'], traceFields: ['topicId'], budget: budget(5),
+      errorContract: ['drop-duplicate-msgid'], traceFields: ['topicId'], budget: budget(6),
       note: 'fan-out down the tree; each entry keyed by its own msgId (per-entry idempotency, not a frame key)',
     }),
     ({

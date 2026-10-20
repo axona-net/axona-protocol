@@ -86,22 +86,21 @@ export async function rehome(ctx, topic, from, upstream) {
 export const gen = (nodeBig, epoch = 1) => ({ root: lc(idHex(nodeBig)), epoch });
 /** The attachment nonce this node's last SUB for `topic` carried (a reader's subscription or a relay role's sync ledger); minted if none. */
 export function attachNonceFor(ctx, topic) {
-  const sub = ctx.am.mySubscriptions.get(topic);
   const role = ctx.am.axonRoles.get(topic);
-  const holder = sub || (role && !role.isRoot ? role.sync : null);
-  if (!holder) return null;
-  if (!holder.attachNonce) ctx.am._emitSubscribe(topic, []);   // mint a real attempt (nonce + sequence) the way the kernel does
-  return holder.attachNonce;
+  if (role && role.isRoot) return null;
+  if (!ctx.am._attach.get(topic)?.nonce) ctx.am._emitSubscribe(topic, []);   // mint a real attempt (nonce + sequence) the way the kernel does
+  return ctx.am._attach.get(topic)?.nonce ?? null;
 }
+/** The node's attachment record for `topic` (one per topic: relay role and own reader share it). */
+export const attachOf = (ctx, topic) => ctx.am._attach.get(topic) || null;
 /** A DELIVER from `from` to SELF. `authorized` (default true) echoes this node's attachment nonce, as a reply to its own SUB does; false = fan-out / a delayed frame. */
 export async function deliver(ctx, topic, from, { msgs = [], gen = null, authorized = true } = {}) {
   const payload = { topicId: idHex(topic), from: idHex(from), msgs };
   if (gen) payload.gen = gen;
   if (authorized) {
     // an authorized reply answers a LIVE attempt: if the current one is already committed, renew first (a new SUB, a new attempt), as the kernel would have
-    const sub = ctx.am.mySubscriptions.get(topic); const role = ctx.am.axonRoles.get(topic);
-    const holder = sub || (role && !role.isRoot ? role.sync : null);
-    if (holder && holder.attachNonce && (holder.attachCommitted | 0) >= (holder.attachNonceSeq | 0)) ctx.am._emitSubscribe(topic, []);
+    const a = ctx.am._attach.get(topic);
+    if (a && a.nonce && (a.committed | 0) >= (a.seq | 0)) ctx.am._emitSubscribe(topic, []);
     const n = attachNonceFor(ctx, topic); if (n) payload.attach = n;
   }
   return ctx.am._onDeliver(payload, { targetId: ctx.self, isTerminal: true, hopCount: 1 });

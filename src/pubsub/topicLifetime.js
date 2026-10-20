@@ -94,7 +94,9 @@ export const topicLifetimeMethods = {
   // ── generation (4.1) ──────────────────────────────────────────────────
   _genOf(role) { return { root: lc(idHex(this.nodeId)), epoch: role.epoch | 0 }; },
   /** The generation a holder carries DOWN on its DELIVERs: a root its own, a child the one its upstream named, else null. */
-  _genCarried(role) { if (!role) return null; if (role.isRoot) return this._genOf(role); return role.attachedGen ? { ...role.attachedGen } : null; },
+  _genCarried(role) { if (!role) return null; if (role.isRoot) return this._genOf(role); const a = this._attach.get(role.topicId); return a && a.gen ? { ...a.gen } : null; },
+  /** The generation this node is attached to for `t` (relay role and own reader alike), or null. */
+  _attachedGenOf(t) { const a = this._attach.get(t); return a && a.gen ? a.gen : null; },
   _sameGen(a, b) { return !!a && !!b && a.root === b.root && (a.epoch | 0) === (b.epoch | 0); },
   _genValid(g) { return !!(g && typeof g === 'object' && typeof g.root === 'string' && isHexId(lc(g.root))); },
   _genNorm(g) { return { root: lc(g.root), epoch: (Number.isInteger(g.epoch) && g.epoch >= 0) ? g.epoch : 0 }; },
@@ -294,40 +296,60 @@ export const topicLifetimeMethods = {
     const up = (this._upstream.get(t) || [])[0] || null;
     const topic = idHex(t).slice(0, 12);
     if (role?.isRoot) { this._log('info', 'terminated-ignored', { topic, why: 'i-am-root', from: from ? from.slice(0, 10) : null }); return 'consumed'; }
-    // EXACT GENERATION BINDING (Aster c5adedec TL-B01): a notice ends only the
-    // generation this node is attached to. A backup binds by its appointment's
-    // exact (root, epoch) when it has one; a child or reader by the generation
-    // its DELIVERs named (role.attachedGen / _attachedGen); only an UNVERSIONED
-    // attachment (an older-kernel upstream that named none) binds by upstream.
-    // A delayed notice of (R, 1) therefore never ends a seat in (R, 2).
-    const att = role ? role.attachedGen : (this._attachedGen.get(t) || null);
-    let bound;
-    if (role && role.backupOf !== null) bound = role.standbyGen ? this._sameGen(role.standbyGen, gen) : role.backupOf === gen.root;
-    else if (att) bound = this._sameGen(att, gen);
-    else bound = (up !== null && (up === gen.root || up === from)) || (!role && up === null);
-    if (!bound) { this._log('info', 'terminated-ignored', { topic, why: 'foreign-generation', from: from ? from.slice(0, 10) : null, gen: gen.root.slice(0, 10) }); return 'consumed'; }
-    if (role) {
-      // 4.5: a backup holding a body the root lacks does NOT obey — the root's
-      // cache was empty, so any body here is one it lacks — and elects by 4.4(1).
-      if (role.cache.length > 0) { this._log('info', 'terminated-ignored', { topic, why: 'holds-body', bodies: role.cache.length }); return 'consumed'; }
-      // A CHILD forwards the notice to its own seats, then drops its role and its list.
-      let fwd = 0;
-      for (const [h, s] of role.subscribers) {
-        if (h === me || (s && s.kind === 'standby')) continue;
-        try { this._route(idBig(h), T.TOPIC_TERMINATED, { topicId: payload.topicId, from: idHex(this.nodeId), gen }); fwd++; } catch { /* best-effort */ }
-      }
-      if (fwd) this._log('info', 'terminated-forwarded', { topic, seats: fwd });
-      if (role.backupOf !== null || this._backupTopics.has(t)) this._rootClaim.retireBackup(t, role, 'terminated');
-      const tombs = role.tombstones.size;
-      this._retireRole(t, role, 'terminated');
-      this._log('info', 'role-terminated', { topic, nature: fwd ? 'child' : 'backup', tombstonesDropped: tombs });
-    } else {
-      this._upstream.delete(t);
+    // TWO OBLIGATIONS, BOUND SEPARATELY (Aster TL-B01, TL-B13). A backup
+    // APPOINTMENT binds by its exact (root, epoch) when it has one, by its
+    // principal when the grant was legacy. The ATTACHMENT (one per topic: the
+    // relay role's parent and the node's own reader share it) binds by the
+    // exact generation its DELIVERs named; an UNVERSIONED attachment (an
+    // older-kernel upstream that named none) binds by upstream. A notice ends
+    // only the obligation it matches: an old appointment's end never ends a
+    // reader attached elsewhere, and the role object goes only when no live
+    // duty remains on it.
+    const att = this._attachedGenOf(t);
+    const hasAppointment = !!(role && role.backupOf !== null);
+    const appointmentMatch = hasAppointment && (role.standbyGen ? this._sameGen(role.standbyGen, gen) : role.backupOf === gen.root);
+    const attachmentMatch = att ? this._sameGen(att, gen) : ((up !== null && (up === gen.root || up === from)) || (!role && up === null));
+    if (!appointmentMatch && !attachmentMatch) { this._log('info', 'terminated-ignored', { topic, why: 'foreign-generation', from: from ? from.slice(0, 10) : null, gen: gen.root.slice(0, 10) }); return 'consumed'; }
+    // 4.5: a backup holding a body the root lacks does NOT obey — the root's
+    // cache was empty, so any body here is one it lacks — and elects by 4.4(1).
+    if (appointmentMatch && role.cache.length > 0) { this._log('info', 'terminated-ignored', { topic, why: 'holds-body', bodies: role.cache.length }); return 'consumed'; }
+    let tombs = 0, fwd = 0;
+    if (appointmentMatch) {
+      this._rootClaim.retireBackup(t, role, 'terminated');
+      role.standbyGen = null;
+      tombs = role.tombstones.size; role.tombstones.clear();              // the generation's deletions go with it
     }
-    const b = this._rootBeacons.get(t);
-    if (b && lc(b.root) === gen.root) this._rootBeacons.delete(t);   // the ended root's advert is a ghost now
-    this._rootHint.delete(t);
-    if (this.mySubscriptions.has(t)) this._endSubscriptionTerminated(t, gen);
+    if (attachmentMatch) {
+      if (role) {
+        // A CHILD forwards the notice to its own seats, then drops its list.
+        for (const [h, s] of role.subscribers) {
+          if (h === me || (s && s.kind === 'standby')) continue;
+          try { this._route(idBig(h), T.TOPIC_TERMINATED, { topicId: payload.topicId, from: idHex(this.nodeId), gen }); fwd++; } catch { /* best-effort */ }
+        }
+        if (fwd) this._log('info', 'terminated-forwarded', { topic, seats: fwd });
+        role.subscribers.clear(); role.children.clear();
+        role.upstreamHeld = new Set(); role.upstreamHeldFrom = null;
+      }
+      this._attach.delete(t);
+      this._upstream.delete(t);
+      const b = this._rootBeacons.get(t);
+      if (b && lc(b.root) === gen.root) this._rootBeacons.delete(t);   // the ended root's advert is a ghost now
+      this._rootHint.delete(t);
+      if (this.mySubscriptions.has(t)) this._endSubscriptionTerminated(t, gen);
+    }
+    if (role) {
+      // The role object goes only when no live duty remains on it: not a backup
+      // of another generation, not the relay of a reader attached elsewhere.
+      const liveReader = this.mySubscriptions.has(t);
+      const stillBackup = role.backupOf !== null;
+      if (!stillBackup && !liveReader && role.subscribers.size === 0) {
+        tombs += role.tombstones.size;
+        this._retireRole(t, role, 'terminated');
+        this._log('info', 'role-terminated', { topic, nature: appointmentMatch ? 'backup' : 'child', tombstonesDropped: tombs, appointment: appointmentMatch, attachment: attachmentMatch });
+      } else {
+        this._log('info', 'obligation-terminated', { topic, appointment: appointmentMatch, attachment: attachmentMatch, tombstonesDropped: tombs, keeps: stillBackup ? 'backup' : (liveReader ? 'reader' : 'seats') });
+      }
+    }
     return 'consumed';
   },
 
@@ -350,7 +372,7 @@ export const topicLifetimeMethods = {
     this._coldSteerGen?.delete(t);
     this._upstream.delete(t);
     this._unattachedSince.delete(t);
-    this._attachedGen.delete(t);
+    this._attach.delete(t);
     this._subscriptionsEnded++;
     this._log('info', 'subscription-terminated', { topic: idHex(t).slice(0, 12), gen: gen.root.slice(0, 10), epoch: gen.epoch });
   },
@@ -386,7 +408,7 @@ export const topicLifetimeMethods = {
     let n = 0;
     for (const [h, s] of role.subscribers) {
       if (h === me || (s && s.kind === 'standby')) continue;
-      try { this._route(idBig(h), T.REHOME, { topicId: idHex(t), from: idHex(this.nodeId), upstream: up, ...(role.attachedGen ? { gen: { ...role.attachedGen } } : {}) }); n++; } catch { /* best-effort */ }
+      try { const ag = this._attachedGenOf(t); this._route(idBig(h), T.REHOME, { topicId: idHex(t), from: idHex(this.nodeId), upstream: up, ...(ag ? { gen: { ...ag } } : {}) }); n++; } catch { /* best-effort */ }
     }
     // Tell the parent now (a seat that lapses in DROP_MS would be re-promoted
     // meanwhile): an UNSUB marked steppedDown arms the parent's cooldown.
@@ -417,7 +439,7 @@ export const topicLifetimeMethods = {
     // Generation binding (TL-B01): a REHOME naming a generation other than the
     // one this node is attached to is dropped; an unversioned REHOME from the
     // upstream still re-homes (the older-kernel case).
-    const attR = role ? role.attachedGen : (this._attachedGen.get(t) || null);
+    const attR = this._attachedGenOf(t);
     const rg = this._genValid(payload.gen) ? this._genNorm(payload.gen) : null;
     if (rg && attR && !this._sameGen(attR, rg)) { this._log('info', 'rehome-ignored', { topic, why: 'foreign-generation', gen: rg.root.slice(0, 10), epoch: rg.epoch }); return 'consumed'; }
     const me = lc(idHex(this.nodeId));

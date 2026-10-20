@@ -71,6 +71,7 @@ export const repairPlaneMethods = {
     role.gen = (role.gen | 0) + 1;
     this.axonRoles.delete(t);
     this._upstream.delete(t);
+    if (this._attach && !this.mySubscriptions.has(t)) this._attach.delete(t);   // the attachment outlives the role only for a reader (Topic Lifetime 4.1)
     if (this._tombAuthority) this._taPurgeTopic(t);   // Phase 3 shadow: node no longer holds this topic's bodies (no-op flag-off)
   },
 
