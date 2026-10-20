@@ -318,7 +318,20 @@ export const topicLifetimeMethods = {
     // the ended generation, or untagged when the ended appointment was legacy
     // (no generation to tag with). A deletion the live attachment delivered
     // stays and keeps suppressing its body.
-    const dropOwned = (owner) => { let n = 0; for (const [id, tb] of role.tombstones) { const own = tb.gen ? (owner && this._sameGen(tb.gen, owner)) : !owner; if (own) { role.tombstones.delete(id); n++; } } return n; };
+    // An obligation's end removes ITSELF from each tombstone's owner set and
+    // drops the record only when no owner remains (Aster ef073745: the same
+    // deletion delivered through two live duties stays while either lives).
+    // An untagged record (no owners) belongs to a legacy appointment.
+    const dropOwned = (owner) => {
+      const key = owner ? `${owner.root}:${owner.epoch | 0}` : null;
+      let n = 0;
+      for (const [id, tb] of role.tombstones) {
+        if (tb.owners && tb.owners.size) {
+          if (key && tb.owners.has(key)) { tb.owners.delete(key); if (tb.owners.size === 0) { role.tombstones.delete(id); n++; } }
+        } else if (!key) { role.tombstones.delete(id); n++; }
+      }
+      return n;
+    };
     if (appointmentMatch) {
       const ownerGen = role.standbyGen ? { ...role.standbyGen } : null;
       this._rootClaim.retireBackup(t, role, 'terminated');

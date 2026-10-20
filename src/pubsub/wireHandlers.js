@@ -1344,6 +1344,12 @@ export const wireHandlersMethods = {
   // propagates it. Tombstones are mutations too, and they commit first.
   _applyKill(role, topicBig, m, cut = null, genTag = null) {
     const target = m.msgId;
+    // OWNERSHIP IS A SET (Aster ef073745): the same deletion can arrive through
+    // several live obligations, and each one that delivered it owns it; the
+    // record goes only when its last owner ends. Armed only; untagged means
+    // the carrier named no generation (a root's own, a legacy grant).
+    const ownerKey = genTag ? `${genTag.root}:${genTag.epoch | 0}` : null;
+    const own = (tomb) => { if (ownerKey && tomb) { (tomb.owners ??= new Set()).add(ownerKey); } };
     if (role && !this._cutHolds(role, cut)) {
       this._log('info', 'cut-refused', { topic: idHex(topicBig).slice(0, 12), at: 'applyKill', msgId: String(target).slice(0, 12), gated: !!role.merge?.gate, gen: role.gen | 0, gen0: cut ? cut.gen0 : null });
       return false;
@@ -1371,6 +1377,7 @@ export const wireHandlersMethods = {
     // internally inconsistent carrier (Aster S1/S2). Flag-off / proof-less keeps m.signer.
     const proofSigner = proof ? lc(proof.signerPubkey) : null;
     const existing = role ? role.tombstones.get(target) : null;
+    if (existing) own(existing);                      // a second obligation delivering the same deletion owns it too
     if (role && existing && proof && !existing.kill) {
       // B2 UPGRADE — a proof-less tombstone gains a verified, bound proof. Attach it and
       // converge it downstream (re-fan now + re-replicate; the replay / replicate /
@@ -1392,7 +1399,7 @@ export const wireHandlersMethods = {
       // DELETION OWNERSHIP (Topic Lifetime 4.6; Aster b0748c4c X1): a tombstone
       // belongs to the generation that delivered it, so an obligation's end
       // drops only its own. Armed only; a root's own and a legacy carrier's are untagged.
-      if (genTag) tomb.gen = { root: genTag.root, epoch: genTag.epoch | 0 };
+      if (genTag) { tomb.gen = { root: genTag.root, epoch: genTag.epoch | 0 }; own(tomb); }
       role.tombstones.set(target, tomb);
       const i = role.cache.findIndex(c => c.msgId === target);
       if (i >= 0) { role.cacheBytes -= role.cache[i].bytes; role.cache.splice(i, 1); }

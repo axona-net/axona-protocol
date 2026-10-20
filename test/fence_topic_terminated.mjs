@@ -495,6 +495,38 @@ console.log('\n[X1] a deletion belongs to the obligation that delivered it (Aste
   check('(R2, 1) first: the attachment\'s tombstone goes, the appointment\'s stays with the backup', ctx2.held(TP(39)) && role2.tombstones.size === 1 && role2.tombstones.has('r1dead') && role2.backupOf === lc(idHex(R1)));
 }
 
+console.log('\n[X1b] the SAME deletion through BOTH duties (Aster ef073745): it stays while either lives, both arrival orders');
+{
+  const K = { del: true, msgId: 'kboth', killTs: T0, signer: null, seq: 1, publishTs: T0 };
+  // order 1: backup R1 gets K, reader R2 gets the identical K; end R1 → K stays for the reader
+  const ctx = manager();
+  await replicate(ctx, TP(41), R1, { gen: gen(R1, 1), issuedAt: T0, dels: [K] });
+  const role = ctx.role(TP(41));
+  ctx.am.pubsubSubscribe(TP(41));
+  await deliver(ctx, TP(41), R2, { gen: gen(R2, 1), msgs: [K] });
+  check('one tombstone with two owners', role.tombstones.size === 1 && role.tombstones.get('kboth').owners.size === 2);
+  await deliver(ctx, TP(41), R2, { msgs: [{ msgId: 'kboth', publishTs: T0, json: '{}', seq: 2 }], gen: gen(R2, 1), authorized: false });
+  check('control: the body is suppressed', !role.cacheIds.has('kboth'));
+  await terminated(ctx, TP(41), R1, gen(R1, 1));
+  check('end R1: the reader and its pin survive AND K stays, now owned by R2 alone', ctx.am.mySubscriptions.has(TP(41)) && role.tombstones.has('kboth') && role.tombstones.get('kboth').owners.size === 1);
+  await deliver(ctx, TP(41), R2, { msgs: [{ msgId: 'kboth', publishTs: T0, json: '{}', seq: 2 }], gen: gen(R2, 1), authorized: false });
+  check('…and the reordered R2 body is still suppressed', !role.cacheIds.has('kboth') && role.cache.length === 0);
+  // order 2: reader R2 gets K first, backup R1 then gets the identical K; end R2 → K stays with the backup
+  const ctx2 = manager();
+  ctx2.am.pubsubSubscribe(TP(42));
+  await deliver(ctx2, TP(42), R2, { gen: gen(R2, 1), msgs: [K] });
+  await replicate(ctx2, TP(42), R1, { gen: gen(R1, 1), issuedAt: T0, dels: [K] });
+  const role2 = ctx2.role(TP(42));
+  check('order 2: a roleless reader records no tombstone (it only delivers the kill to its app, as before), so the backup\'s grant is K\'s one owner', role2.tombstones.get('kboth')?.owners.size === 1);
+  await terminated(ctx2, TP(42), R2, gen(R2, 1));
+  check('end R2: the backup survives AND K stays, owned by R1 alone', ctx2.held(TP(42)) && role2.backupOf === lc(idHex(R1)) && role2.tombstones.has('kboth') && role2.tombstones.get('kboth').owners.size === 1);
+  await ctx2.am._onReplicate({ topicId: idHex(TP(42)), from: idHex(R1), msgs: [{ msgId: 'kboth', publishTs: T0, json: '{}', seq: 2 }], dels: [], gen: gen(R1, 1), issuedAt: ctx2.clock.t }, { targetId: SELF, isTerminal: true, hopCount: 1, fromId: idHex(R1) });
+  await ctx2.am._ingestIdle();
+  check('…and a reordered body arriving through the backup is still suppressed', !role2.cacheIds.has('kboth'));
+  await terminated(ctx2, TP(42), R1, gen(R1, 1));
+  check('end R1 too: the last owner gone, the record and the role go', !ctx2.held(TP(42)));
+}
+
 console.log('\n[X2] the handover obeys the same decision as every control effect (Aster b0748c4c)');
 {
   const ctx = manager();
