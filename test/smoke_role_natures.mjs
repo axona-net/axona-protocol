@@ -34,7 +34,7 @@ function mk({ neighbors = [], bridge = null, replicas = 2 } = {}) {
     routeMessage: (target, type, payload) => sends.push({ target, type, payload }),
     neighbors: () => neighbors, bridgeId: () => bridge,
   };
-  const am = new AxonaManager({ dht: sealTestDht(dht), now: () => clock.t, rootReplicas: replicas });
+  const am = new AxonaManager({ topicLifetime: false /* pre-lifetime scene: hand-built generation-less REPLICATE / the 4.94.0 standby contract; the armed contract is fence_standby_lease + fence_topic_terminated */, dht: sealTestDht(dht), now: () => clock.t, rootReplicas: replicas });
   am.nodeId = SELF;
   am.setLogSink((level, type, data) => logs.push({ level, type, data }));
   return { am, sends, logs, clock };

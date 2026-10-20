@@ -27,7 +27,7 @@ function mk({neighbors=[],bridge=null,replicas=2}={}){
     getSelfId:()=>SELF, onRoutedMessage:()=>{},
     routeMessage:(target,type,payload)=>(sends.push({target,type,payload}), { consumed: true }),
     neighbors:()=>neighbors, bridgeId:()=>bridge };
-  const am=new AxonaManager({dht: sealTestDht(dht), now:()=>clock.t, rootReplicas:replicas}); am.nodeId=SELF;
+  const am=new AxonaManager({topicLifetime: false /* pre-lifetime scene: hand-built generation-less REPLICATE; the armed contract is fence_standby_lease */, dht: sealTestDht(dht), now:()=>clock.t, rootReplicas:replicas}); am.nodeId=SELF;
   return {am,sends,clock};
 }
 const repl=(sends)=>sends.filter(s=>s.type==='pubsub:replicate');

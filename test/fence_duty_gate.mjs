@@ -70,7 +70,7 @@ function manager() {
     findKClosest: async () => [],
   };
   depositDispatchCapability(dht, { routed: () => {} });
-  const m = new AxonaManager({ dht });
+  const m = new AxonaManager({ topicLifetime: false /* pre-lifetime scene: hand-built generation-less REPLICATE / the 4.94.0 standby contract; the armed contract is fence_standby_lease + fence_topic_terminated */, dht });
   m._log = () => {};
   return m;
 }

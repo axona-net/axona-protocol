@@ -66,7 +66,7 @@ function mk({ neighbors = [hex(ROOTN)] } = {}) {
     bridgeId: () => null,
     isTransit: () => false, isIntroduction: () => false, introductionIds: () => [],
   };
-  const am = new AxonaManager({ dht: sealTestDht(dht), now: () => clock.t, rootReplicas: 2 });
+  const am = new AxonaManager({ topicLifetime: false /* pre-lifetime scene: hand-built generation-less REPLICATE / the 4.94.0 standby contract; the armed contract is fence_standby_lease + fence_topic_terminated */, dht: sealTestDht(dht), now: () => clock.t, rootReplicas: 2 });
   am.nodeId = SELF;
   am.setLogSink(() => {});
   return { am, clock, sends };

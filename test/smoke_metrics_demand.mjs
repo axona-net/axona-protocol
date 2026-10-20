@@ -33,7 +33,7 @@ function mk() {
     routeMessage: (_t, type, payload) => sent.push({ type, payload }),
     neighbors: () => [], bridgeId: () => null, findKClosest: async () => [],
   };
-  const am = new AxonaManager({ dht: sealTestDht(dht), now });
+  const am = new AxonaManager({ topicLifetime: false /* pre-lifetime scene: hand-built generation-less REPLICATE / the 4.94.0 standby contract; the armed contract is fence_standby_lease + fence_topic_terminated */, dht: sealTestDht(dht), now });
   am.nodeId = SELF;
   am.setMetricsPublisher((dataIdHex, snap) => { pubs.push({ dataIdHex, snap }); });
   return { am, sent, pubs };

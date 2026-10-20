@@ -77,7 +77,17 @@ console.log('\n[C2] hysteresis: demand at the floor clears the clock; a new chil
   const young = seed(ctx, TP(3), { isRoot: false, createdAt: ctx.clock.t });
   ctx.am._upstream.set(TP(3), [lc(idHex(ROOT))]);
   for (let i = 0; i <= (CHILD_STEP_DOWN_MS / TICK) + 1; i++) { await sub(ctx, TP(3), C, {}, { viaSelf: true }); await ctx.tick(ctx.clock.t + TICK); }
-  check('a child created at t0 and thin throughout is NOT stepped down at 90 s thin when 90 s is also its whole life… (stay) — it goes on the next tick past both', !ctx.held(TP(3)) || (ctx.clock.t - young.createdAt) <= CHILD_MIN_STAY_MS);
+  check('a child thin from birth goes once past both its thin window and its stay (equal here)', !ctx.held(TP(3)));
+  // the stay has teeth when it is LONGER than the thin window: 150 s of stay, 90 s thin → not before 150 s
+  ctx.am._childMinStayMs = 150_000;
+  const young2 = seed(ctx, TP(30), { isRoot: false, createdAt: ctx.clock.t });
+  ctx.am._upstream.set(TP(30), [lc(idHex(ROOT))]);
+  const born = ctx.clock.t;
+  while (ctx.clock.t - born < 150_000) { await sub(ctx, TP(30), C, {}, { viaSelf: true }); await ctx.tick(ctx.clock.t + TICK); }
+  check('thin for 150 s but inside a 150 s stay: still a child', ctx.held(TP(30)) && (ctx.clock.t - young2.createdAt) <= 150_000, ctx.clock.t - born);
+  await sub(ctx, TP(30), C, {}, { viaSelf: true }); await ctx.tick(ctx.clock.t + TICK);
+  check('one tick past the stay it steps down', !ctx.held(TP(30)));
+  ctx.am._childMinStayMs = CHILD_MIN_STAY_MS;
   // a backup with a seat
   const bk = seed(ctx, TP(4), { isRoot: false }); bk.backupOf = lc(idHex(ROOT)); ctx.am._backupTopics.add(TP(4)); bk.lastReplicaAt = ctx.clock.t;
   ctx.am._upstream.set(TP(4), [lc(idHex(ROOT))]);
@@ -118,10 +128,13 @@ console.log('\n[P1] the parent: an UNSUB marked steppedDown drops the seat and a
   await sub(ctx, TP(7), A); await sub(ctx, TP(7), B); await sub(ctx, TP(7), C);
   await ctx.am._onUnsub({ topicId: idHex(TP(7)), via: [idHex(SELF)], subscriberId: idHex(A), steppedDown: true }, { targetId: SELF, isTerminal: true, hopCount: 1 });
   check('A\'s seat is dropped and A is on cooldown', !root.subscribers.has(lc(idHex(A))) && ctx.am._childCooldown.get(lc(idHex(A))) === T0 + CHILD_COOLDOWN_MS && ctx.log('child-cooldown').length === 1);
-  await sub(ctx, TP(7), A);                                 // A re-seats as a leaf (it still reads)
-  await sub(ctx, TP(7), STRANGER);                          // the fourth seat: over MAX_DIRECT → promote a leaf
+  // a fresh root where the cooled node is FIRST in line: without the filter it would be the one promoted
+  const root2 = seed(ctx, TP(71));
+  await sub(ctx, TP(71), A); await sub(ctx, TP(71), B); await sub(ctx, TP(71), C);
+  await sub(ctx, TP(71), STRANGER);                         // the fourth seat: over MAX_DIRECT → promote a leaf
   const adopts = ctx.sent(T.ADOPT);
-  check('over capacity the root promotes a leaf that is NOT the cooled node', adopts.length === 1 && adopts[0].target !== A && !root.children.has(lc(idHex(A))), adopts.map((a) => idHex(a.target).slice(-4)).join(','));
+  check('over capacity the root promotes the first leaf that is NOT the cooled node (B, not A)', adopts.length === 1 && adopts[0].target === B && !root2.children.has(lc(idHex(A))) && root2.children.has(lc(idHex(B))), adopts.map((a) => idHex(a.target).slice(-4)).join(','));
+  void root;
   ctx.clock.t = T0 + CHILD_COOLDOWN_MS + 1;
   await ctx.tick(ctx.clock.t);
   check('the cooldown expires with time', !ctx.am._childCooldown.has(lc(idHex(A))));
