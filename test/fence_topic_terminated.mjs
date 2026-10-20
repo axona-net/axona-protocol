@@ -371,6 +371,43 @@ console.log('\n[B11] a reply to an OLDER request never replaces a newer committe
   check('a relay: the older reply does not switch back, is not pinned, but its body is still cached (data only)', child.attachedGen.root === lc(idHex(R2)) && ctx.am._upstream.get(TP(30))[0] === lc(idHex(R2)) && child.cache.length === 1 && !(child.upstreamHeld && child.upstreamHeld.has('late')));
 }
 
+console.log('\n[B12] same generation, two parents (Aster c59cb0be): an obsolete correlated reply, or fan-out from a parent not selected, moves nothing');
+{
+  const ctx = manager();
+  const C1 = NODE(21), C2 = NODE(22);                                  // two child relays under the same root generation (R1, 1)
+  // READER: select C1 (reply to n1), then C2 (reply to n2); C1's delayed reply to n1 must not re-pin
+  ctx.am.pubsubSubscribe(TP(31));
+  const sub = ctx.am.mySubscriptions.get(TP(31));
+  const n1 = sub.attachNonce;                                           // pubsubSubscribe already sent SUB #1
+  await ctx.am._onDeliver({ topicId: idHex(TP(31)), from: idHex(C1), msgs: [], gen: gen(R1, 1), attach: n1 }, { targetId: SELF, isTerminal: true, hopCount: 1 });
+  check('selected C1 under (R1, 1)', ctx.am._upstream.get(TP(31))[0] === lc(idHex(C1)) && ctx.am._attachedGen.get(TP(31))?.root === lc(idHex(R1)));
+  ctx.am._emitSubscribe(TP(31), []); const n2 = sub.attachNonce;
+  await ctx.am._onDeliver({ topicId: idHex(TP(31)), from: idHex(C2), msgs: [], gen: gen(R1, 1), attach: n2 }, { targetId: SELF, isTerminal: true, hopCount: 1 });
+  check('the reply to n2 from C2, SAME generation, commits C2', ctx.am._upstream.get(TP(31))[0] === lc(idHex(C2)));
+  await ctx.am._onDeliver({ topicId: idHex(TP(31)), from: idHex(C1), msgs: [], gen: gen(R1, 1), attach: n1 }, { targetId: SELF, isTerminal: true, hopCount: 1 });
+  check('C1\'s delayed reply to n1 (same generation) is data only: still pinned to C2', ctx.am._upstream.get(TP(31))[0] === lc(idHex(C2)) && ctx.log('deliver-attachment-ignored').some((r) => r.ctx.reader === true && r.ctx.k === 1));
+  await ctx.am._onDeliver({ topicId: idHex(TP(31)), from: idHex(C1), msgs: [], gen: gen(R1, 1) }, { targetId: SELF, isTerminal: true, hopCount: 1 });
+  check('fan-out from C1, not the selected parent, re-pins nothing either', ctx.am._upstream.get(TP(31))[0] === lc(idHex(C2)));
+  await ctx.am._onDeliver({ topicId: idHex(TP(31)), from: idHex(C2), msgs: [], gen: gen(R1, 2) }, { targetId: SELF, isTerminal: true, hopCount: 1 });
+  check('fan-out from the SELECTED parent C2 naming the root\'s next epoch moves the attachment forward', ctx.am._attachedGen.get(TP(31))?.epoch === 2 && ctx.am._upstream.get(TP(31))[0] === lc(idHex(C2)));
+  await ctx.am._onDeliver({ topicId: idHex(TP(31)), from: idHex(C2), msgs: [], gen: gen(R1, 1), attach: 'never-ours' }, { targetId: SELF, isTerminal: true, hopCount: 1 });
+  check('a nonce we never issued is data only', ctx.am._attachedGen.get(TP(31))?.epoch === 2);
+  // RELAY: the same two-parent reordering; the old parent's body is cached but earns no custody credit
+  const child = seed(ctx, TP(32), { isRoot: false });
+  ctx.am._upstream.set(TP(32), [lc(idHex(C1))]);
+  ctx.am._emitSubscribe(TP(32), []); const r1 = child.sync.attachNonce;
+  await ctx.am._onDeliver({ topicId: idHex(TP(32)), from: idHex(C1), msgs: [], gen: gen(R1, 1), attach: r1 }, { targetId: SELF, isTerminal: true, hopCount: 1 });
+  ctx.am._emitSubscribe(TP(32), []); const r2 = child.sync.attachNonce;
+  await ctx.am._onDeliver({ topicId: idHex(TP(32)), from: idHex(C2), msgs: [], gen: gen(R1, 1), attach: r2 }, { targetId: SELF, isTerminal: true, hopCount: 1 });
+  check('relay: committed to C2 under the same generation', ctx.am._upstream.get(TP(32))[0] === lc(idHex(C2)) && child.upstreamHeldFrom === lc(idHex(C2)));
+  await ctx.am._onDeliver({ topicId: idHex(TP(32)), from: idHex(C1), msgs: [{ msgId: 'c1body', publishTs: T0, json: '{}', seq: 1 }], gen: gen(R1, 1), attach: r1 }, { targetId: SELF, isTerminal: true, hopCount: 1 });
+  check('C1\'s delayed reply: body cached, no re-pin, no custody credit', child.cache.length === 1 && ctx.am._upstream.get(TP(32))[0] === lc(idHex(C2)) && child.upstreamHeldFrom === lc(idHex(C2)) && !(child.upstreamHeld && child.upstreamHeld.has('c1body')));
+  await ctx.am._onDeliver({ topicId: idHex(TP(32)), from: idHex(C1), msgs: [{ msgId: 'c1fan', publishTs: T0, json: '{}', seq: 2 }], gen: gen(R1, 1) }, { targetId: SELF, isTerminal: true, hopCount: 1 });
+  check('fan-out from the unselected parent: body cached, nothing else', child.cache.length === 2 && !(child.upstreamHeld && child.upstreamHeld.has('c1fan')) && ctx.am._upstream.get(TP(32))[0] === lc(idHex(C2)));
+  await ctx.am._onDeliver({ topicId: idHex(TP(32)), from: idHex(C2), msgs: [{ msgId: 'c2fan', publishTs: T0, json: '{}', seq: 3 }], gen: gen(R1, 1) }, { targetId: SELF, isTerminal: true, hopCount: 1 });
+  check('fan-out from the selected parent credits custody', child.upstreamHeld.has('c2fan'));
+}
+
 console.log('\n[R6] unarmed: the frame is consumed without effect; the tick terminates nothing');
 {
   const ctx = manager({ armed: false });

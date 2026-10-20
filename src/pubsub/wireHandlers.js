@@ -1088,19 +1088,45 @@ export const wireHandlersMethods = {
     // decision below accepts it (Aster TL-B11: the decision precedes every
     // control effect, the pin included). Unarmed, or a frame naming no
     // generation (an older kernel), re-pins as 4.116.0 did.
+    // THE ATTACHMENT DECISION (Topic Lifetime 4.1; Aster TL-B07, B11, B12), made
+    // ONCE here and read by the pin below and the attachment block further down.
+    // Three outcomes per holder (a relay role, this node's own subscription):
+    //   'commit'  the frame echoes a nonce of an attempt NEWER than the last
+    //             committed one: this is the reply to our own request, the
+    //             selected transition — any generation, any parent; commits it.
+    //   'data'    the frame echoes a nonce we recognise as obsolete or already
+    //             committed, or one we do not recognise at all: a delayed or
+    //             repeated reply; bodies are kept, nothing else moves — no
+    //             attachment, no pin, no custody credit.
+    //   'forward' the frame echoes nothing (fan-out) AND comes from the parent
+    //             we currently select (the pinned upstream) AND names the
+    //             current root at an epoch not lower: the parent's own
+    //             generation moved forward; accepted. Fan-out from any other
+    //             node, or naming another root, or before a first attachment,
+    //             is 'data'. Same root and epoch do not identify the parent.
     const gated = this._topicLifetime && payload.from && this._genValid(payload.gen);
-    let accepted = !gated;
+    let decision = null;   // { role: 'commit'|'data'|'forward'|null, sub: same, g, fromHex, k }
     if (gated) {
       const g = this._genNorm(payload.gen);
+      const fromHex = lc(payload.from);
       const nonce = typeof payload.attach === 'string' ? payload.attach : null;
+      const pin = (this._upstream.get(topicBig) || [])[0] || null;
+      const seqOf = (h) => (nonce && h) ? (nonce === h.attachNonce ? (h.attachNonceSeq | 0) : (nonce === h.attachPrev ? (h.attachPrevSeq | 0) : 0)) : 0;
+      const decide = (h, cur) => {
+        if (!h) return null;
+        if (nonce) { const k = seqOf(h); return (k > 0 && k > (h.attachCommitted | 0)) ? { v: 'commit', k } : { v: 'data', k }; }
+        if (pin && fromHex === pin && cur && cur.root === g.root && (g.epoch | 0) >= (cur.epoch | 0)) return { v: 'forward', k: 0 };
+        return { v: 'data', k: 0 };
+      };
       const role0 = this.axonRoles.get(topicBig);
       const sub0 = this.mySubscriptions.get(topicBig);
-      const seqOf = (h) => (nonce && h) ? (nonce === h.attachNonce ? (h.attachNonceSeq | 0) : (nonce === h.attachPrev ? (h.attachPrevSeq | 0) : 0)) : 0;
-      const newer = (h) => { const k = seqOf(h); return k > 0 && k > (h.attachCommitted | 0); };
-      const forward = (cur) => !!cur && cur.root === g.root && (g.epoch | 0) >= (cur.epoch | 0);
-      accepted = (role0 && !role0.isRoot && (newer(role0.sync) || forward(role0.attachedGen)))
-        || (sub0 && (newer(sub0) || forward(this._attachedGen.get(topicBig))));
+      decision = {
+        g, fromHex,
+        role: (role0 && !role0.isRoot) ? decide(role0.sync, role0.attachedGen) : null,
+        sub: sub0 ? decide(sub0, this._attachedGen.get(topicBig)) : null,
+      };
     }
+    const accepted = !gated || (decision.role && decision.role.v !== 'data') || (decision.sub && decision.sub.v !== 'data');
     if (payload.from && accepted) {
       const fromHex = lc(payload.from);
       const prev = this._upstream.get(topicBig);
@@ -1137,34 +1163,28 @@ export const wireHandlersMethods = {
     // not evidence of a new selection. `deliverAccepted` is read below: body
     // custody is credited only from an accepted current-generation DELIVER.
     let deliverAccepted = false;
-    if (this._topicLifetime && payload.from && this._genValid(payload.gen)) {
-      const g = this._genNorm(payload.gen);
-      const fromHex = lc(payload.from);
-      const nonce = typeof payload.attach === 'string' ? payload.attach : null;
-      // A reply ANSWERS a holder only for an attempt NEWER than the last one
-      // committed there (TL-B11): local request order, not an order of roots.
-      const seqOf = (h) => (nonce && h) ? (nonce === h.attachNonce ? (h.attachNonceSeq | 0) : (nonce === h.attachPrev ? (h.attachPrevSeq | 0) : 0)) : 0;
-      const answers = (h) => { const k = seqOf(h); return (k > 0 && k > (h.attachCommitted | 0)) ? k : 0; };
-      const forward = (cur) => !!cur && cur.root === g.root && (g.epoch | 0) >= (cur.epoch | 0);
-      if (role && !role.isRoot) {
-        const k = answers(role.sync);
-        const ok = k > 0 || forward(role.attachedGen);
-        if (ok) {
-          if (k > 0) role.sync.attachCommitted = k;                       // this attempt's selection is committed; older replies are data only
+    if (decision) {
+      const { g, fromHex } = decision;
+      if (role && !role.isRoot && decision.role) {
+        const d = decision.role;
+        if (d.v !== 'data') {
+          if (d.v === 'commit') role.sync.attachCommitted = d.k;         // this attempt's selection is committed; older replies are data only
           const changed = !role.attachedGen || role.attachedGen.root !== g.root || (role.attachedGen.epoch | 0) !== (g.epoch | 0) || role.upstreamHeldFrom !== fromHex;
           if (changed) { role.upstreamHeld = new Set(); role.upstreamHeldFrom = fromHex; }
           role.attachedGen = g;
           deliverAccepted = true;
         } else {
-          this._log('info', 'deliver-attachment-ignored', { topic: idHex(topicBig).slice(0, 12), from: fromHex.slice(0, 10), gen: g.root.slice(0, 10), epoch: g.epoch, nonce: !!nonce });
+          this._log('info', 'deliver-attachment-ignored', { topic: idHex(topicBig).slice(0, 12), from: fromHex.slice(0, 10), gen: g.root.slice(0, 10), epoch: g.epoch, nonce: typeof payload.attach === 'string', k: d.k });
         }
       }
-      if (this.mySubscriptions.has(topicBig)) {
-        const sub = this.mySubscriptions.get(topicBig);
-        const k = answers(sub);
-        if (k > 0) { sub.attachCommitted = k; this._attachedGen.set(topicBig, g); }
-        else if (forward(this._attachedGen.get(topicBig))) this._attachedGen.set(topicBig, g);
-        else this._log('info', 'deliver-attachment-ignored', { topic: idHex(topicBig).slice(0, 12), from: fromHex.slice(0, 10), gen: g.root.slice(0, 10), epoch: g.epoch, nonce: !!nonce, reader: true });
+      if (decision.sub) {
+        const d = decision.sub;
+        if (d.v !== 'data') {
+          if (d.v === 'commit') this.mySubscriptions.get(topicBig).attachCommitted = d.k;
+          this._attachedGen.set(topicBig, g);
+        } else {
+          this._log('info', 'deliver-attachment-ignored', { topic: idHex(topicBig).slice(0, 12), from: fromHex.slice(0, 10), gen: g.root.slice(0, 10), epoch: g.epoch, nonce: typeof payload.attach === 'string', k: d.k, reader: true });
+        }
       }
     }
     for (const m of (Array.isArray(payload.msgs) ? payload.msgs : [])) {
