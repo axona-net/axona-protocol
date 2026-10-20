@@ -1414,7 +1414,16 @@ export class AxonaManager {
       const b = new Uint8Array(8); globalThis.crypto.getRandomValues(b);
       const nonce = Array.from(b, (x) => x.toString(16).padStart(2, '0')).join('');
       const holder = sub || (role && !role.isRoot ? role.sync : null);
-      if (holder) { holder.attachPrev = holder.attachNonce || null; holder.attachNonce = nonce; decl = { attach: nonce }; }
+      // LOCAL REQUEST ORDER (Aster 535a6741 TL-B11): each nonce carries this
+      // holder's attempt number; a reply commits a selection only if its
+      // attempt is NEWER than the last committed one, so a delayed reply to an
+      // older request never replaces a newer committed selection, and a
+      // repeated reply to the committed attempt is data only.
+      if (holder) {
+        holder.attachPrev = holder.attachNonce || null; holder.attachPrevSeq = holder.attachNonceSeq | 0;
+        holder.attachNonce = nonce; holder.attachNonceSeq = (holder.attachNonceSeq | 0) + 1;
+        decl = { attach: nonce };
+      }
     }
     if (this._topicLifetime && role && !role.isRoot && !sub && !this._hostedTopics.has(topicBig)) {
       if (role.subscribers.size > 0) decl = { ...decl, demand: this._roleDemand(role) };

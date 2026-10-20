@@ -324,6 +324,53 @@ console.log('\n[B07] a root switch needs a reply to THIS node\'s own SUB (Aster 
   check('a reply carrying the PREVIOUS nonce still attaches (overlapping renewals)', ctx.am._attachedGen.get(TP(26))?.root === lc(idHex(R1)));
 }
 
+console.log('\n[B11] a reply to an OLDER request never replaces a newer committed selection (Aster 535a6741); the pin follows the decision');
+{
+  const ctx = manager();
+  const rows = []; ctx.am.onPubsubDelivery((t, json) => rows.push(JSON.parse(json)));
+  // cross-root: attached R1/1; renewals n1 then n2; R2's reply to n2 commits; R1's delayed reply to n1 must not switch back
+  ctx.am.pubsubSubscribe(TP(27));
+  await deliver(ctx, TP(27), R1, { gen: gen(R1, 1) });
+  const sub = ctx.am.mySubscriptions.get(TP(27));
+  ctx.am._emitSubscribe(TP(27), []); const n1 = sub.attachNonce;
+  ctx.am._emitSubscribe(TP(27), []); const n2 = sub.attachNonce;
+  await ctx.am._onDeliver({ topicId: idHex(TP(27)), from: idHex(R2), msgs: [], gen: gen(R2, 1), attach: n2 }, { targetId: SELF, isTerminal: true, hopCount: 1 });
+  check('R2\'s reply to the newer request n2 commits (R2, 1) and pins R2', ctx.am._attachedGen.get(TP(27))?.root === lc(idHex(R2)) && ctx.am._upstream.get(TP(27))[0] === lc(idHex(R2)));
+  await ctx.am._onDeliver({ topicId: idHex(TP(27)), from: idHex(R1), msgs: [], gen: gen(R1, 1), attach: n1 }, { targetId: SELF, isTerminal: true, hopCount: 1 });
+  check('R1\'s delayed reply to the OLDER request n1 does not switch back, and does not re-pin', ctx.am._attachedGen.get(TP(27))?.root === lc(idHex(R2)) && ctx.am._upstream.get(TP(27))[0] === lc(idHex(R2)) && ctx.log('deliver-attachment-ignored').length >= 1);
+  await terminated(ctx, TP(27), R1, gen(R1, 1));
+  check('…so the old (R1, 1) notice ends nothing', ctx.am.mySubscriptions.has(TP(27)) && rows.length === 0);
+  await ctx.am._onDeliver({ topicId: idHex(TP(27)), from: idHex(R2), msgs: [], gen: gen(R2, 1), attach: n2 }, { targetId: SELF, isTerminal: true, hopCount: 1 });
+  check('a repeated reply to the already-committed attempt changes nothing (data only)', ctx.am._attachedGen.get(TP(27))?.root === lc(idHex(R2)));
+  // same-root: n2's reply commits R1/2; n1's delayed reply naming R1/1 must not roll back through the nonce path
+  ctx.am.pubsubSubscribe(TP(28));
+  await deliver(ctx, TP(28), R1, { gen: gen(R1, 1) });
+  const sub2 = ctx.am.mySubscriptions.get(TP(28));
+  ctx.am._emitSubscribe(TP(28), []); const m1 = sub2.attachNonce;
+  ctx.am._emitSubscribe(TP(28), []); const m2 = sub2.attachNonce;
+  await ctx.am._onDeliver({ topicId: idHex(TP(28)), from: idHex(R1), msgs: [], gen: gen(R1, 2), attach: m2 }, { targetId: SELF, isTerminal: true, hopCount: 1 });
+  await ctx.am._onDeliver({ topicId: idHex(TP(28)), from: idHex(R1), msgs: [], gen: gen(R1, 1), attach: m1 }, { targetId: SELF, isTerminal: true, hopCount: 1 });
+  check('same root: the delayed reply to m1 naming epoch 1 does not roll back the committed epoch 2', ctx.am._attachedGen.get(TP(28))?.epoch === 2);
+  await terminated(ctx, TP(28), R1, gen(R1, 1));
+  check('…and the old notice ends nothing', ctx.am.mySubscriptions.has(TP(28)));
+  // liveness kept: an older request's reply still commits when NO newer reply has
+  ctx.am.pubsubSubscribe(TP(29));
+  const sub3 = ctx.am.mySubscriptions.get(TP(29));
+  ctx.am._emitSubscribe(TP(29), []); const p1 = sub3.attachNonce;
+  ctx.am._emitSubscribe(TP(29), []);
+  await ctx.am._onDeliver({ topicId: idHex(TP(29)), from: idHex(R1), msgs: [], gen: gen(R1, 1), attach: p1 }, { targetId: SELF, isTerminal: true, hopCount: 1 });
+  check('with no newer reply committed, the reply to the previous attempt still attaches (overlap liveness)', ctx.am._attachedGen.get(TP(29))?.root === lc(idHex(R1)));
+  // the same order rule on a relay role
+  const child = seed(ctx, TP(30), { isRoot: false });
+  ctx.am._upstream.set(TP(30), [lc(idHex(R1))]);
+  await deliver(ctx, TP(30), R1, { gen: gen(R1, 1) });
+  ctx.am._emitSubscribe(TP(30), []); const c1 = child.sync.attachNonce;
+  ctx.am._emitSubscribe(TP(30), []); const c2 = child.sync.attachNonce;
+  await ctx.am._onDeliver({ topicId: idHex(TP(30)), from: idHex(R2), msgs: [], gen: gen(R2, 1), attach: c2 }, { targetId: SELF, isTerminal: true, hopCount: 1 });
+  await ctx.am._onDeliver({ topicId: idHex(TP(30)), from: idHex(R1), msgs: [{ msgId: 'late', publishTs: T0, json: '{}', seq: 1 }], gen: gen(R1, 1), attach: c1 }, { targetId: SELF, isTerminal: true, hopCount: 1 });
+  check('a relay: the older reply does not switch back, is not pinned, but its body is still cached (data only)', child.attachedGen.root === lc(idHex(R2)) && ctx.am._upstream.get(TP(30))[0] === lc(idHex(R2)) && child.cache.length === 1 && !(child.upstreamHeld && child.upstreamHeld.has('late')));
+}
+
 console.log('\n[R6] unarmed: the frame is consumed without effect; the tick terminates nothing');
 {
   const ctx = manager({ armed: false });
