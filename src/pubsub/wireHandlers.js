@@ -366,7 +366,7 @@ export const wireHandlersMethods = {
       // or to this pull from a log, instead of argued from the count of entries.
       if (sent !== false) this._log('info', 'split-union-pull', { topic: idHex(topicBig).slice(0, 12), from: subHex.slice(0, 12), policy: 'SPLIT_UNION', lw: payload.lw, myLw: this._lowWater(role) });
     }
-    this._accept(role, subHex, since, !!payload.latest, seat);
+    this._accept(role, subHex, since, !!payload.latest, seat, typeof payload.attach === 'string' ? payload.attach : null);
     return 'consumed';
   },
 
@@ -393,7 +393,7 @@ export const wireHandlersMethods = {
   // A reader SUB and a child SUB with n > 0 stamp lastDemandAt; a standby SUB
   // never does. A standby seat is never delegated to a child: it exists to be
   // at the root.
-  _accept(role, subHex, since, latest = false, seat = null) {
+  _accept(role, subHex, since, latest = false, seat = null, attach = null) {
     const kind = seat?.kind || 'reader';
     const demand = seat ? (seat.demand | 0) : 1;
     const stampsDemand = kind === 'reader' || (kind === 'child' && demand > 0);
@@ -402,7 +402,7 @@ export const wireHandlersMethods = {
       existing.lastRenewed = this._now();
       existing.kind = kind; existing.demand = demand;
       if (stampsDemand) role.lastDemandAt = this._now();
-      this._replayTo(role, subHex, since, false, latest);
+      this._replayTo(role, subHex, since, false, latest, attach);
       return;
     }
     if (role.subscribers.size >= this.maxDirect && kind !== 'standby') {    // overloaded → delegate
@@ -413,7 +413,7 @@ export const wireHandlersMethods = {
       if (!this._promoteChild(role)) {
         const c = this._pickChild(role, subHex);
         if (c) {
-          if (latest) this._replayTo(role, subHex, since, false, true);  // current value from here, then hand off
+          if (latest) this._replayTo(role, subHex, since, false, true, attach);  // current value from here, then hand off
           this._delegateTo(c, role, [{ subscriberId: subHex, since }]);
           return;
         }
@@ -422,7 +422,7 @@ export const wireHandlersMethods = {
     }
     role.subscribers.set(subHex, { since: Number.isFinite(since) ? since : 0, lastRenewed: this._now(), kind, demand });
     if (stampsDemand) role.lastDemandAt = this._now();
-    this._replayTo(role, subHex, since, true, latest);  // delta (+ newest if latest) + a via-repin ping
+    this._replayTo(role, subHex, since, true, latest, attach);  // delta (+ newest if latest) + a via-repin ping
   },
 
   // Choose the child relay XOR-closest to a subscriber (keyspace locality).
@@ -1111,18 +1111,36 @@ export const wireHandlersMethods = {
     // CUSTODY EVIDENCE IS BOUND TO THE ATTACHMENT (TL-B05): when the upstream
     // or the generation changes, a relay's upstreamHeld set is cleared — an
     // old sender having once sent a body says nothing about the current one.
+    // AUTHORIZED OR FORWARD-ONLY (Aster 0cfdd82d TL-B07). A DELIVER that echoes
+    // this node's current or previous attachment nonce answers ITS OWN SUB and
+    // may attach to any generation it names (that is the selected transition);
+    // one that echoes nothing is fan-out and may only ADVANCE the attachment
+    // within the current root (same root, epoch not lower), never switch
+    // roots and never make a first attachment. A different root id alone is
+    // not evidence of a new selection. `deliverAccepted` is read below: body
+    // custody is credited only from an accepted current-generation DELIVER.
+    let deliverAccepted = false;
     if (this._topicLifetime && payload.from && this._genValid(payload.gen)) {
       const g = this._genNorm(payload.gen);
       const fromHex = lc(payload.from);
-      const advance = (cur) => !cur || cur.root !== g.root || (g.epoch | 0) >= (cur.epoch | 0);
+      const nonce = typeof payload.attach === 'string' ? payload.attach : null;
+      const answers = (h) => !!(nonce && h && (nonce === h.attachNonce || nonce === h.attachPrev));
+      const forward = (cur) => !!cur && cur.root === g.root && (g.epoch | 0) >= (cur.epoch | 0);
       if (role && !role.isRoot) {
-        const changed = !role.attachedGen || role.attachedGen.root !== g.root || (role.attachedGen.epoch | 0) !== (g.epoch | 0) || role.upstreamHeldFrom !== fromHex;
-        if (advance(role.attachedGen)) {
+        const ok = answers(role.sync) || forward(role.attachedGen);
+        if (ok) {
+          const changed = !role.attachedGen || role.attachedGen.root !== g.root || (role.attachedGen.epoch | 0) !== (g.epoch | 0) || role.upstreamHeldFrom !== fromHex;
           if (changed) { role.upstreamHeld = new Set(); role.upstreamHeldFrom = fromHex; }
           role.attachedGen = g;
+          deliverAccepted = true;
+        } else {
+          this._log('info', 'deliver-attachment-ignored', { topic: idHex(topicBig).slice(0, 12), from: fromHex.slice(0, 10), gen: g.root.slice(0, 10), epoch: g.epoch });
         }
       }
-      if (this.mySubscriptions.has(topicBig) && advance(this._attachedGen.get(topicBig))) this._attachedGen.set(topicBig, g);
+      if (this.mySubscriptions.has(topicBig)) {
+        const sub = this.mySubscriptions.get(topicBig);
+        if (answers(sub) || forward(this._attachedGen.get(topicBig))) this._attachedGen.set(topicBig, g);
+      }
     }
     for (const m of (Array.isArray(payload.msgs) ? payload.msgs : [])) {
       if (!m) continue;
@@ -1137,7 +1155,7 @@ export const wireHandlersMethods = {
       }
       if (this._tombstoned(role, m.msgId, m.json)) continue;          // killed → suppress (don't cache/deliver/re-fan)
       // the CURRENT upstream SENT this body: it holds it (Topic Lifetime 4.7, TL-B02/B05). Armed only; the set is bound to the attachment above and pruned with the cache.
-      if (this._topicLifetime && role && !role.isRoot && role.upstreamHeldFrom === lc(payload.from)) { (role.upstreamHeld ??= new Set()).add(m.msgId); }
+      if (deliverAccepted && role.upstreamHeldFrom === lc(payload.from)) { (role.upstreamHeld ??= new Set()).add(m.msgId); }   // credited only by an ACCEPTED current-generation DELIVER (TL-B08)
       if (role && !role.cacheIds.has(m.msgId)) {       // relay: cache once + re-fan once
         this._cachePush(role, { msgId: m.msgId, publishTs: m.publishTs, json: m.json, seq: m.seq });
         if (Number.isFinite(m.seq) && m.seq > role.seq) role.seq = m.seq;   // keep counter ready if we're promoted to root
@@ -1170,11 +1188,13 @@ export const wireHandlersMethods = {
   // ts-floor delta can't express "newest regardless of age": a current value
   // published before the subscriber's now-anchored floor sits below it and is
   // filtered out (the "subscribe latest → no callback" bug). Receiver dedups.
-  _replayTo(role, subHex, sinceTs, ping, latest = false) {
+  _replayTo(role, subHex, sinceTs, ping, latest = false, attach = null) {
     const subBig = idBig(subHex);
     const isSelf = subBig === this.nodeId;
     const genT = this._topicLifetime ? this._genCarried(role) : null;   // Topic Lifetime 4.1
-    const gx = genT ? { gen: genT } : {};
+    // The reply to a SUB echoes its attachment nonce on every DELIVER it sends
+    // (TL-B07): that is what makes it an authorized attachment at the receiver.
+    const gx = { ...(genT ? { gen: genT } : {}), ...(this._topicLifetime && attach ? { attach } : {}) };
     let batch = [], bytes = 0, sent = false;
     const inBatch = new Set();
     const flush = () => {

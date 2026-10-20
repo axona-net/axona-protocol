@@ -390,7 +390,7 @@ export class RootClaim {
   // isRoot in Phase 1, extended to the nature whose unmodeled residue caused
   // #333. One structured `role-nature` log per genuine transition (a replica
   // refresh from the SAME principal is bookkeeping, not a transition).
-  becomeBackup(topicBig, role, principalHex, gen = null) {
+  becomeBackup(topicBig, role, principalHex, gen = null, issuedAt = null) {
     const m = this.m;
     const entering = role.backupOf === null;
     const rePrincipaled = !entering && role.backupOf !== principalHex;
@@ -399,6 +399,7 @@ export class RootClaim {
     // Topic Lifetime 4.1: the appointment names its generation when the grant
     // carried one; a legacy grant leaves the last known generation in place.
     if (gen && typeof gen.root === 'string') role.standbyGen = { root: lc(gen.root), epoch: Number.isInteger(gen.epoch) ? gen.epoch : 0 };
+    if (Number.isFinite(issuedAt)) role.standbyIssuedAt = issuedAt;   // the grant's own stamp: a later grant must not be older (TL-B10)
     m._backupTopics.add(topicBig);
     if (entering || rePrincipaled) {
       m._log('info', 'role-nature', {

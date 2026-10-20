@@ -21,7 +21,7 @@
 // P1; count a child's seats as readers regardless of its declaration → C1.
 // Run: TOPIC_LIFETIME=1 node test/fence_child_step_down.mjs
 // =====================================================================
-import { manager, seed, sub, rehome, idHex, lc, TP, NODE, SELF, T0, MIN, T } from './lib/lifetimeFixture.mjs';
+import { manager, seed, sub, rehome, deliver, attachNonceFor, idHex, lc, TP, NODE, SELF, T0, MIN, T } from './lib/lifetimeFixture.mjs';
 import { CHILD_MIN_READERS, CHILD_STEP_DOWN_MS, CHILD_MIN_STAY_MS, CHILD_COOLDOWN_MS, DROP_MS } from '../src/pubsub/constants.js';
 
 let passed = 0, failed = 0;
@@ -114,12 +114,12 @@ console.log('\n[B02] BODY CUSTODY (Aster c5adedec): a thin child holding a body 
   for (; at <= T0 + 3 * CHILD_STEP_DOWN_MS; at += TICK) { await renewAll(ctx, TP(10), [A]); await ctx.tick(at); }
   check('thin for three windows with an untransferred body: still a child, the body still held, logged once', ctx.held(TP(10)) && role.cache.length === 1 && ctx.log('step-down-held-body').length === 1 && ctx.sent(T.REHOME).length === 0);
   // the root pulled it and fanned it back: a DELIVER from the upstream carrying that msgId marks it upstream-held
-  await ctx.am._onDeliver({ topicId: idHex(TP(10)), from: idHex(ROOT), msgs: [{ msgId: 'below', publishTs: T0, json: '{}', seq: 1 }], gen: { root: lc(idHex(ROOT)), epoch: 1 } }, { targetId: SELF, isTerminal: true, hopCount: 1 });
+  await deliver(ctx, TP(10), ROOT, { msgs: [{ msgId: 'below', publishTs: T0, json: '{}', seq: 1 }], gen: { root: lc(idHex(ROOT)), epoch: 1 } });
   await renewAll(ctx, TP(10), [A]); await ctx.tick(at);
   check('once the upstream has sent that body back, the child steps down', !ctx.held(TP(10)) && ctx.sent(T.REHOME).length === 1);
   // a body the upstream SENT is no bar: the ordinary relay case
   const r2 = await child(ctx, TP(11), [A]);
-  await ctx.am._onDeliver({ topicId: idHex(TP(11)), from: idHex(ROOT), msgs: [{ msgId: 'fromup', publishTs: ctx.clock.t, json: '{}', seq: 1 }], gen: { root: lc(idHex(ROOT)), epoch: 1 } }, { targetId: SELF, isTerminal: true, hopCount: 1 });
+  await deliver(ctx, TP(11), ROOT, { msgs: [{ msgId: 'fromup', publishTs: ctx.clock.t, json: '{}', seq: 1 }], gen: { root: lc(idHex(ROOT)), epoch: 1 } });
   check('the relayed body is cached and marked upstream-held', r2.cache.length === 1 && r2.upstreamHeld.has('fromup'));
   const born = ctx.clock.t;
   while (ctx.clock.t - born <= CHILD_STEP_DOWN_MS + TICK) { await renewAll(ctx, TP(11), [A]); await ctx.tick(ctx.clock.t + TICK); }
@@ -131,25 +131,25 @@ console.log('\n[B05] custody evidence is bound to the CURRENT upstream and gener
   const ctx = manager({ neighbors: [ROOT, B] });
   const R2 = B;                                                       // the replacement root, reachable
   const role = await child(ctx, TP(12), [A]);
-  await ctx.am._onDeliver({ topicId: idHex(TP(12)), from: idHex(ROOT), msgs: [{ msgId: 'm0', publishTs: ctx.clock.t, json: '{}', seq: 1 }], gen: { root: lc(idHex(ROOT)), epoch: 1 } }, { targetId: SELF, isTerminal: true, hopCount: 1 });
+  await deliver(ctx, TP(12), ROOT, { msgs: [{ msgId: 'm0', publishTs: ctx.clock.t, json: '{}', seq: 1 }], gen: { root: lc(idHex(ROOT)), epoch: 1 } });
   check('m0 from R1 is cached and held by R1', role.cache.length === 1 && role.upstreamHeld.has('m0') && role.upstreamHeldFrom === lc(idHex(ROOT)));
-  await ctx.am._onDeliver({ topicId: idHex(TP(12)), from: idHex(R2), msgs: [], gen: { root: lc(idHex(R2)), epoch: 1 } }, { targetId: SELF, isTerminal: true, hopCount: 1 });
+  await deliver(ctx, TP(12), R2, { gen: { root: lc(idHex(R2)), epoch: 1 } });
   check('an empty DELIVER from replacement root R2 re-attaches and CLEARS the evidence: m0 is no longer held by anyone current', role.attachedGen.root === lc(idHex(R2)) && role.upstreamHeld.size === 0 && ctx.am._upstream.get(TP(12))[0] === lc(idHex(R2)));
   let at = ctx.clock.t;
   const until = at + 3 * CHILD_STEP_DOWN_MS;
   for (; at <= until; at += TICK) { await renewAll(ctx, TP(12), [A]); await ctx.tick(at); }
   check('thin for three windows under R2 with m0 unevidenced: no step-down, m0 kept', ctx.held(TP(12)) && role.cache.length === 1 && ctx.sent(T.REHOME).length === 0);
-  await ctx.am._onDeliver({ topicId: idHex(TP(12)), from: idHex(R2), msgs: [{ msgId: 'm0', publishTs: T0, json: '{}', seq: 1 }], gen: { root: lc(idHex(R2)), epoch: 1 } }, { targetId: SELF, isTerminal: true, hopCount: 1 });
+  await deliver(ctx, TP(12), R2, { msgs: [{ msgId: 'm0', publishTs: T0, json: '{}', seq: 1 }], gen: { root: lc(idHex(R2)), epoch: 1 } });
   await renewAll(ctx, TP(12), [A]); await ctx.tick(at);
   check('once R2 itself has sent m0 back, the child steps down', !ctx.held(TP(12)) && ctx.sent(T.REHOME).length === 1);
   // a REHOME (upstream change) clears the evidence too
   const r3 = await child(ctx, TP(13), [A]);
-  await ctx.am._onDeliver({ topicId: idHex(TP(13)), from: idHex(ROOT), msgs: [{ msgId: 'x', publishTs: ctx.clock.t, json: '{}', seq: 1 }], gen: { root: lc(idHex(ROOT)), epoch: 1 } }, { targetId: SELF, isTerminal: true, hopCount: 1 });
+  await deliver(ctx, TP(13), ROOT, { msgs: [{ msgId: 'x', publishTs: ctx.clock.t, json: '{}', seq: 1 }], gen: { root: lc(idHex(ROOT)), epoch: 1 } });
   await rehome(ctx, TP(13), ROOT, R2);
   check('a REHOME from the upstream clears the held set with the pin', r3.upstreamHeld.size === 0 && r3.upstreamHeldFrom === null);
   // bounded: pruned with the cache
   const r4 = await child(ctx, TP(14), [A, B]);
-  await ctx.am._onDeliver({ topicId: idHex(TP(14)), from: idHex(ROOT), msgs: [{ msgId: 'e1', publishTs: ctx.clock.t, json: '{}', seq: 1 }, { msgId: 'e2', publishTs: ctx.clock.t, json: '{}', seq: 2 }], gen: { root: lc(idHex(ROOT)), epoch: 1 } }, { targetId: SELF, isTerminal: true, hopCount: 1 });
+  await deliver(ctx, TP(14), ROOT, { msgs: [{ msgId: 'e1', publishTs: ctx.clock.t, json: '{}', seq: 1 }, { msgId: 'e2', publishTs: ctx.clock.t, json: '{}', seq: 2 }], gen: { root: lc(idHex(ROOT)), epoch: 1 } });
   check('two bodies, two held ids', r4.cache.length === 2 && r4.upstreamHeld.size === 2);
   r4.cache.length = 0; r4.cacheIds.clear();                              // expiry / eviction / a kill
   await renewAll(ctx, TP(14), [A, B]); await ctx.tick(ctx.clock.t + TICK);
@@ -161,6 +161,30 @@ console.log('\n[B05] custody evidence is bound to the CURRENT upstream and gener
   check('unarmed: the body is cached and NO held set and NO attachment are kept', r5.cache.length === 1 && r5.upstreamHeld === undefined && r5.attachedGen == null);
 }
 
+console.log('\n[B08] an obsolete same-root DELIVER credits no custody (Aster 0cfdd82d); [B09] the prune covers a backup too');
+{
+  const ctx = manager({ neighbors: [ROOT] });
+  const role = await child(ctx, TP(16), [A]);
+  await deliver(ctx, TP(16), ROOT, { gen: { root: lc(idHex(ROOT)), epoch: 2 } });
+  await deliver(ctx, TP(16), ROOT, { msgs: [{ msgId: 'm0', publishTs: T0, json: '{}', seq: 1 }], gen: { root: lc(idHex(ROOT)), epoch: 1 }, authorized: false });
+  check('attached to epoch 2; the delayed epoch-1 DELIVER\'s body is cached but NOT credited as held', role.attachedGen.epoch === 2 && role.cache.length === 1 && !(role.upstreamHeld && role.upstreamHeld.has('m0')));
+  let at = ctx.clock.t; const until = at + 3 * CHILD_STEP_DOWN_MS;
+  for (; at <= until; at += TICK) { await renewAll(ctx, TP(16), [A]); await ctx.tick(at); }
+  check('thin for three windows: no step-down, m0 kept', ctx.held(TP(16)) && role.cache.length === 1 && ctx.sent(T.REHOME).length === 0);
+  await deliver(ctx, TP(16), ROOT, { msgs: [{ msgId: 'm0', publishTs: T0, json: '{}', seq: 1 }], gen: { root: lc(idHex(ROOT)), epoch: 2 }, authorized: false });
+  await renewAll(ctx, TP(16), [A]); await ctx.tick(at);
+  check('the CURRENT generation sending m0 credits it, and the child steps down', !ctx.held(TP(16)) && ctx.sent(T.REHOME).length === 1);
+  // B09: a backup role with a one-entry cache receiving five bodies keeps a held set no larger than its cache after a tick
+  const small = manager({ neighbors: [ROOT], extra: { replayCacheSize: 1 } });
+  const bk = seed(small, TP(17), { isRoot: false }); bk.backupOf = lc(idHex(ROOT)); small.am._backupTopics.add(TP(17)); bk.lastReplicaAt = small.clock.t;
+  small.am._upstream.set(TP(17), [lc(idHex(ROOT))]);
+  await deliver(small, TP(17), ROOT, { gen: { root: lc(idHex(ROOT)), epoch: 1 } });
+  for (let i = 0; i < 5; i++) await deliver(small, TP(17), ROOT, { msgs: [{ msgId: 'b' + i, publishTs: small.clock.t + i, json: '{}', seq: i + 1 }], gen: { root: lc(idHex(ROOT)), epoch: 1 }, authorized: false });
+  check('five bodies through a one-entry cache: cache 1, held set 5 before the tick', bk.cache.length === 1 && bk.upstreamHeld.size === 5);
+  bk.lastReplicaAt = small.clock.t; await small.tick(small.clock.t + TICK);
+  check('the tick prunes the BACKUP\'s held set to its cache (1), not only a child\'s', bk.upstreamHeld.size === 1 && small.am._backupTopics.has(TP(17)));
+}
+
 console.log('\n[H1] REHOME received: the reader keeps the app\'s subscription, re-pins to the named upstream, renews fast; a REHOME from a non-upstream is ignored');
 {
   const ctx = manager();
@@ -170,7 +194,7 @@ console.log('\n[H1] REHOME received: the reader keeps the app\'s subscription, r
   const subsBefore = ctx.sent(T.SUB).length;
   await rehome(ctx, TP(6), STRANGER, ROOT);
   check('from a stranger: ignored, pin unchanged', ctx.log('rehome-ignored').length === 1 && ctx.am._upstream.get(TP(6))[0] === lc(idHex(C)) && ctx.sent(T.SUB).length === subsBefore);
-  await ctx.am._onDeliver({ topicId: idHex(TP(6)), from: idHex(C), msgs: [], gen: { root: lc(idHex(ROOT)), epoch: 2 } }, { targetId: SELF, isTerminal: true, hopCount: 1 });
+  await deliver(ctx, TP(6), C, { gen: { root: lc(idHex(ROOT)), epoch: 2 } });
   await ctx.am._onRehome({ topicId: idHex(TP(6)), from: idHex(C), upstream: idHex(ROOT), gen: { root: lc(idHex(ROOT)), epoch: 1 } }, { targetId: SELF, isTerminal: true, hopCount: 1, fromId: idHex(C) });
   check('from my upstream but naming an OLD generation (epoch 1 while attached to 2): ignored (TL-B01)', ctx.log('rehome-ignored').some((r) => r.ctx.why === 'foreign-generation') && ctx.am._upstream.get(TP(6))[0] === lc(idHex(C)));
   await rehome(ctx, TP(6), C, ROOT);

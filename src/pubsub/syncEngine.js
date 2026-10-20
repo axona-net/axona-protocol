@@ -26,7 +26,7 @@
 // there. It joins the engine only if it earns its way in.
 // =====================================================================
 
-import { T, METRICS_LEASE_MS } from './constants.js';
+import { T, METRICS_LEASE_MS, APPOINTMENT_SKEW_MS } from './constants.js';
 import { idHex, idBig, lc, isHexId } from './ids.js';
 import { makeRole } from './rootClaim.js';
 
@@ -328,10 +328,25 @@ export const syncEngineMethods = {
           this._grantsRefused++;
           this._log('info', 'grant-refused', { topic, why: 'stale', ageMs: now - payload.issuedAt, gen: gen.root.slice(0, 10) });
           return;
+        } else if (role && role.standbyGen && role.standbyGen.root === gen.root && gen.epoch < (role.standbyGen.epoch | 0)) {
+          // FORWARD ONLY, as for deliveries (Aster 0cfdd82d TL-B10): a still-fresh
+          // grant naming an OLDER epoch of the same root does not roll the
+          // appointment back; freshness is not generation currency.
+          this._grantsRefused++;
+          this._log('info', 'grant-refused', { topic, why: 'obsolete-generation', gen: gen.root.slice(0, 10), epoch: gen.epoch, have: role.standbyGen.epoch | 0 });
+          return;
+        } else if (role && role.standbyGen && role.standbyGen.root !== gen.root && Number.isFinite(role.standbyIssuedAt) && payload.issuedAt + APPOINTMENT_SKEW_MS < role.standbyIssuedAt) {
+          // A DIFFERENT root's grant issued more than S before the current
+          // appointment is an old sender's delayed grant, not a new principal.
+          // Within S the two senders' clocks cannot order them and the grant
+          // re-principals as today (stated in the packet).
+          this._grantsRefused++;
+          this._log('info', 'grant-refused', { topic, why: 'obsolete-grant', gen: gen.root.slice(0, 10), issuedAt: payload.issuedAt, have: role.standbyIssuedAt });
+          return;
         }
       }
       if (!role) { role = makeRole(topicBig, false, this._now()); this.axonRoles.set(topicBig, role); }
-      this._rootClaim.becomeBackup(topicBig, role, from, gen);   // nature transition (I-10)
+      this._rootClaim.becomeBackup(topicBig, role, from, gen, this._topicLifetime && Number.isFinite(payload.issuedAt) ? payload.issuedAt : null);   // nature transition (I-10)
       const cut = this._cutCapture(role);
       if (await this._applyDels(role, topicBig, payload.dels, cut)) await this._ingestStampedBatch(role, payload.msgs, cut);
       // SUBSCRIBER-LIST REPLICATION: stash the principal's subscriber list so a

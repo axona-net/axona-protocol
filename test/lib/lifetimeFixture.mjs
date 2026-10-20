@@ -84,4 +84,21 @@ export async function rehome(ctx, topic, from, upstream) {
   return ctx.am._onRehome({ topicId: idHex(topic), from: idHex(from), upstream: idHex(upstream) }, { targetId: ctx.self, isTerminal: true, hopCount: 1, fromId: idHex(from) });
 }
 export const gen = (nodeBig, epoch = 1) => ({ root: lc(idHex(nodeBig)), epoch });
+/** The attachment nonce this node's last SUB for `topic` carried (a reader's subscription or a relay role's sync ledger); minted if none. */
+export function attachNonceFor(ctx, topic) {
+  const sub = ctx.am.mySubscriptions.get(topic);
+  const role = ctx.am.axonRoles.get(topic);
+  const holder = sub || (role && !role.isRoot ? role.sync : null);
+  if (!holder) return null;
+  if (!holder.attachNonce) holder.attachNonce = 'n-' + topic.toString(16).slice(0, 6) + '-' + (++attachNonceFor.seq);
+  return holder.attachNonce;
+}
+attachNonceFor.seq = 0;
+/** A DELIVER from `from` to SELF. `authorized` (default true) echoes this node's attachment nonce, as a reply to its own SUB does; false = fan-out / a delayed frame. */
+export async function deliver(ctx, topic, from, { msgs = [], gen = null, authorized = true } = {}) {
+  const payload = { topicId: idHex(topic), from: idHex(from), msgs };
+  if (gen) payload.gen = gen;
+  if (authorized) { const n = attachNonceFor(ctx, topic); if (n) payload.attach = n; }
+  return ctx.am._onDeliver(payload, { targetId: ctx.self, isTerminal: true, hopCount: 1 });
+}
 export { T };

@@ -177,9 +177,20 @@ export const topicLifetimeMethods = {
     this._wallJumpCheck(now);
     this._leftPrune();
     for (const [h, until] of this._childCooldown) if (until <= now) this._childCooldown.delete(h);
+    this._metadataPrune();
     this._standbyLeaseSweep(now);
     this._terminationSweep(now);
     this._thinBranchSweep(now);
+  },
+  // BOUNDED (Aster 848688cb, 0cfdd82d TL-B09): the held-body set describes
+  // bodies in the cache and is pruned to it every tick on EVERY role that can
+  // carry it, whatever the role's nature or eligibility for a step-down.
+  _metadataPrune() {
+    for (const role of this.axonRoles.values()) {
+      const s = role.upstreamHeld;
+      if (!s || !s.size) continue;
+      for (const id of s) if (!role.cacheIds.has(id)) s.delete(id);
+    }
   },
 
   // Custody that holds a topic OPEN for termination: an exchange in flight, a
@@ -348,9 +359,6 @@ export const topicLifetimeMethods = {
   _thinBranchSweep(now) {
     for (const [t, role] of [...this.axonRoles]) {
       if (role.isRoot || role.backupOf !== null || this._backupTopics.has(t) || role.readHolder) continue;
-      // BOUNDED (Aster 848688cb): the held-body set describes bodies in the
-      // cache and is pruned with it, every tick, on every relay role.
-      if (role.upstreamHeld && role.upstreamHeld.size) { for (const id of role.upstreamHeld) if (!role.cacheIds.has(id)) role.upstreamHeld.delete(id); }
       if (role.subscribers.size === 0) continue;                       // not a relay
       const demand = this._roleDemand(role);
       if (demand >= this._childMinReaders) { role.thinSince = null; continue; }

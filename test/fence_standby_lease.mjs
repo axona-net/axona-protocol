@@ -180,6 +180,22 @@ console.log('\n[B03] a gen-bearing grant with NO issue stamp is refused, as a cr
   check('a non-finite stamp is no stamp', role.lastReplicaAt === T0 && ctx.log('grant-refused').filter((r) => r.ctx.why === 'no-stamp').length === 3);
 }
 
+console.log('\n[B10] grants move forward only (Aster 0cfdd82d): a still-fresh older-epoch grant does not roll the appointment back; an old root\'s delayed grant beyond S is not a new principal');
+{
+  const ctx = manager();
+  ctx.clock.t = T0 + 10 * MIN;
+  await replicate(ctx, TP(18), R1, { gen: gen(R1, 2), issuedAt: ctx.clock.t });
+  const role = ctx.role(TP(18));
+  await replicate(ctx, TP(18), R1, { gen: gen(R1, 1), issuedAt: ctx.clock.t - 1000 });
+  check('a grant naming (R1, 1) one second older than the (R1, 2) appointment is refused (obsolete-generation); the appointment stays at epoch 2', role.standbyGen.epoch === 2 && ctx.log('grant-refused').some((r) => r.ctx.why === 'obsolete-generation'));
+  await ctx.am._onTopicTerminated({ topicId: idHex(TP(18)), from: idHex(R1), gen: gen(R1, 1) }, { targetId: SELF, isTerminal: true, hopCount: 1, fromId: idHex(R1) });
+  check('…so the old (R1, 1) notice does not retire it', ctx.held(TP(18)) && ctx.am._backupTopics.has(TP(18)));
+  await replicate(ctx, TP(18), R2, { gen: gen(R2, 1), issuedAt: ctx.clock.t - 60_000 });
+  check('a DIFFERENT root\'s grant issued a minute before the current appointment (beyond S) is refused (obsolete-grant)', role.backupOf === lc(idHex(R1)) && ctx.log('grant-refused').some((r) => r.ctx.why === 'obsolete-grant'));
+  await replicate(ctx, TP(18), R2, { gen: gen(R2, 1), issuedAt: ctx.clock.t + 1000 });
+  check('a different root\'s grant issued after it re-principals, as today', role.backupOf === lc(idHex(R2)) && role.standbyGen.root === lc(idHex(R2)));
+}
+
 console.log('\n[U1] unarmed: a REPLICATE carries no gen or issuedAt, any grant appoints, and no lease ever lapses (4.116.0)');
 {
   const ctx = manager({ armed: false });

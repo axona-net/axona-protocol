@@ -1403,9 +1403,22 @@ export class AxonaManager {
     // Reader takes precedence over child over standby, so a backup that also
     // relays or reads is never counted at 0.
     let decl = {};
+    // THE ATTACHMENT NONCE (Topic Lifetime 4.1; Aster 0cfdd82d TL-B07, armed
+    // only): every SUB this node sends carries a fresh nonce, and only a
+    // DELIVER that echoes this node's current or previous nonce is an
+    // AUTHORIZED attachment transition (a reply to our own request); a DELIVER
+    // without it may advance the attachment forward within the current root
+    // and never switch roots. Kept on the subscription (a reader) or on the
+    // role's sync ledger (a relay renewing upstream).
+    if (this._topicLifetime) {
+      const b = new Uint8Array(8); globalThis.crypto.getRandomValues(b);
+      const nonce = Array.from(b, (x) => x.toString(16).padStart(2, '0')).join('');
+      const holder = sub || (role && !role.isRoot ? role.sync : null);
+      if (holder) { holder.attachPrev = holder.attachNonce || null; holder.attachNonce = nonce; decl = { attach: nonce }; }
+    }
     if (this._topicLifetime && role && !role.isRoot && !sub && !this._hostedTopics.has(topicBig)) {
-      if (role.subscribers.size > 0) decl = { demand: this._roleDemand(role) };
-      else if (role.backupOf !== null || this._backupTopics.has(topicBig)) decl = { standby: true, ...(role.standbyGen ? { gen: { ...role.standbyGen } } : {}) };
+      if (role.subscribers.size > 0) decl = { ...decl, demand: this._roleDemand(role) };
+      else if (role.backupOf !== null || this._backupTopics.has(topicBig)) decl = { ...decl, standby: true, ...(role.standbyGen ? { gen: { ...role.standbyGen } } : {}) };
     }
     const sent = this._send(T.SUB, {
       topicId: idHex(topicBig), via, subscriberId: idHex(this.nodeId), ...decl,

@@ -22,7 +22,7 @@
 // let a dismantling role grant a seat → T7; drop the generation binding → R5.
 // Run: TOPIC_LIFETIME=1 node test/fence_topic_terminated.mjs
 // =====================================================================
-import { manager, seed, sub, replicate, terminated, gen, meta, idHex, lc, TP, NODE, SELF, T0, MIN, T } from './lib/lifetimeFixture.mjs';
+import { manager, seed, sub, replicate, terminated, deliver, attachNonceFor, gen, meta, idHex, lc, TP, NODE, SELF, T0, MIN, T } from './lib/lifetimeFixture.mjs';
 import { DROP_MS, TOPIC_TERMINATE_TRIES, TTL_MS } from '../src/pubsub/constants.js';
 
 let passed = 0, failed = 0;
@@ -243,7 +243,7 @@ console.log('\n[B01] EXACT generation binding (Aster c5adedec): a delayed notice
   // a reader attached through its DELIVERs to (R1, 2) ignores the (R1, 1) notice from its upstream, then obeys (R1, 2)
   const rows = []; ctx.am.onPubsubDelivery((t, json) => rows.push(JSON.parse(json)));
   ctx.am.pubsubSubscribe(TP(18));
-  await ctx.am._onDeliver({ topicId: idHex(TP(18)), from: idHex(R1), msgs: [], gen: gen(R1, 2) }, { targetId: SELF, isTerminal: true, hopCount: 1 });
+  await deliver(ctx, TP(18), R1, { gen: gen(R1, 2) });
   check('a DELIVER naming (R1, 2) pins the upstream and records the attachment', ctx.am._upstream.get(TP(18))[0] === lc(idHex(R1)) && ctx.am._attachedGen.get(TP(18))?.epoch === 2);
   await terminated(ctx, TP(18), R1, gen(R1, 1));
   check('the (R1, 1) notice from the same upstream ends nothing: subscription intact, no row', ctx.am.mySubscriptions.has(TP(18)) && rows.length === 0);
@@ -252,7 +252,7 @@ console.log('\n[B01] EXACT generation binding (Aster c5adedec): a delayed notice
   // a CHILD attached to (R1, 2) forwards the exact generation and ignores the old one
   const child = seed(ctx, TP(19), { isRoot: false });
   ctx.am._upstream.set(TP(19), [lc(idHex(R1))]);
-  await ctx.am._onDeliver({ topicId: idHex(TP(19)), from: idHex(R1), msgs: [], gen: gen(R1, 2) }, { targetId: SELF, isTerminal: true, hopCount: 1 });
+  await deliver(ctx, TP(19), R1, { gen: gen(R1, 2) });
   await sub(ctx, TP(19), C1, {}, { viaSelf: true });
   await terminated(ctx, TP(19), R1, gen(R1, 1));
   check('the child attached to (R1, 2) ignores (R1, 1) and keeps its seat', ctx.held(TP(19)) && child.subscribers.size === 1);
@@ -262,13 +262,13 @@ console.log('\n[B01] EXACT generation binding (Aster c5adedec): a delayed notice
   check('…obeys (R1, 2) and forwards exactly that generation', !ctx.held(TP(19)) && fwd.length === 1 && fwd[0].payload.gen.epoch === 2);
   // a renewed reader: re-seated in the next generation, the old notice is harmless
   ctx.am.pubsubSubscribe(TP(20));
-  await ctx.am._onDeliver({ topicId: idHex(TP(20)), from: idHex(R1), msgs: [], gen: gen(R1, 1) }, { targetId: SELF, isTerminal: true, hopCount: 1 });
-  await ctx.am._onDeliver({ topicId: idHex(TP(20)), from: idHex(R1), msgs: [], gen: gen(R1, 2) }, { targetId: SELF, isTerminal: true, hopCount: 1 });
+  await deliver(ctx, TP(20), R1, { gen: gen(R1, 1) });
+  await deliver(ctx, TP(20), R1, { gen: gen(R1, 2) });
   await terminated(ctx, TP(20), R1, gen(R1, 1));
   check('a reader re-attached to (R1, 2) survives a late (R1, 1) notice', ctx.am.mySubscriptions.has(TP(20)));
   // an UNVERSIONED attachment (an older-kernel upstream named no generation) still binds by upstream
   ctx.am.pubsubSubscribe(TP(21));
-  await ctx.am._onDeliver({ topicId: idHex(TP(21)), from: idHex(R1), msgs: [] }, { targetId: SELF, isTerminal: true, hopCount: 1 });
+  await deliver(ctx, TP(21), R1, {  });
   await terminated(ctx, TP(21), R1, gen(R1, 1));
   check('with no generation attached (older-kernel upstream) a notice from the upstream still ends it', !ctx.am.mySubscriptions.has(TP(21)));
 }
@@ -278,21 +278,50 @@ console.log('\n[B04] attachment moves FORWARD only within a root (Aster 848688cb
   const ctx = manager();
   const rows = []; ctx.am.onPubsubDelivery((t, json) => rows.push(JSON.parse(json)));
   ctx.am.pubsubSubscribe(TP(22));
-  await ctx.am._onDeliver({ topicId: idHex(TP(22)), from: idHex(R1), msgs: [], gen: gen(R1, 2) }, { targetId: SELF, isTerminal: true, hopCount: 1 });
-  await ctx.am._onDeliver({ topicId: idHex(TP(22)), from: idHex(R1), msgs: [], gen: gen(R1, 1) }, { targetId: SELF, isTerminal: true, hopCount: 1 });
+  await deliver(ctx, TP(22), R1, { gen: gen(R1, 2) });
+  await deliver(ctx, TP(22), R1, { gen: gen(R1, 1), authorized: false });
   check('a delayed (R1, 1) DELIVER after (R1, 2) leaves the attachment at epoch 2', ctx.am._attachedGen.get(TP(22))?.epoch === 2);
   await terminated(ctx, TP(22), R1, gen(R1, 1));
   check('the old (R1, 1) notice then ends nothing', ctx.am.mySubscriptions.has(TP(22)) && rows.length === 0);
-  await ctx.am._onDeliver({ topicId: idHex(TP(22)), from: idHex(R2), msgs: [], gen: gen(R2, 1) }, { targetId: SELF, isTerminal: true, hopCount: 1 });
+  await deliver(ctx, TP(22), R2, { gen: gen(R2, 1) });
   check('a DIFFERENT root re-attaches whatever its epoch (no global order across roots)', ctx.am._attachedGen.get(TP(22))?.root === lc(idHex(R2)) && ctx.am._attachedGen.get(TP(22)).epoch === 1);
   // the same rule on a relay role
   const child = seed(ctx, TP(23), { isRoot: false });
   ctx.am._upstream.set(TP(23), [lc(idHex(R1))]);
-  await ctx.am._onDeliver({ topicId: idHex(TP(23)), from: idHex(R1), msgs: [], gen: gen(R1, 3) }, { targetId: SELF, isTerminal: true, hopCount: 1 });
-  await ctx.am._onDeliver({ topicId: idHex(TP(23)), from: idHex(R1), msgs: [{ msgId: 'old', publishTs: T0, json: '{}', seq: 1 }], gen: gen(R1, 2) }, { targetId: SELF, isTerminal: true, hopCount: 1 });
+  await deliver(ctx, TP(23), R1, { gen: gen(R1, 3) });
+  await deliver(ctx, TP(23), R1, { msgs: [{ msgId: 'old', publishTs: T0, json: '{}', seq: 1 }], gen: gen(R1, 2), authorized: false });
   check('a relay keeps epoch 3 through a delayed epoch-2 DELIVER, and still caches that DELIVER\'s body', child.attachedGen.epoch === 3 && child.cache.length === 1);
   await terminated(ctx, TP(23), R1, gen(R1, 2));
   check('the old notice is foreign to it', ctx.held(TP(23)));
+}
+
+console.log('\n[B07] a root switch needs a reply to THIS node\'s own SUB (Aster 0cfdd82d): a delayed old DELIVER from a previous root is not a selection');
+{
+  const ctx = manager();
+  const rows = []; ctx.am.onPubsubDelivery((t, json) => rows.push(JSON.parse(json)));
+  ctx.am.pubsubSubscribe(TP(24));
+  await deliver(ctx, TP(24), R1, { gen: gen(R1, 1) });
+  check('attached to (R1, 1) by the reply to the first SUB', ctx.am._attachedGen.get(TP(24))?.root === lc(idHex(R1)));
+  ctx.am._emitSubscribe(TP(24), []);                                    // the next renewal mints a new nonce
+  await deliver(ctx, TP(24), R2, { gen: gen(R2, 1) });
+  check('the reply from replacement root R2 to that renewal switches the attachment to (R2, 1)', ctx.am._attachedGen.get(TP(24))?.root === lc(idHex(R2)));
+  await deliver(ctx, TP(24), R1, { gen: gen(R1, 1), authorized: false });
+  check('a delayed old (R1, 1) DELIVER that answers no SUB of ours does NOT re-attach to R1', ctx.am._attachedGen.get(TP(24))?.root === lc(idHex(R2)));
+  await terminated(ctx, TP(24), R1, gen(R1, 1));
+  check('…so the old (R1, 1) notice ends nothing', ctx.am.mySubscriptions.has(TP(24)) && rows.length === 0);
+  ctx.am._emitSubscribe(TP(24), []);
+  await deliver(ctx, TP(24), R1, { gen: gen(R1, 2) });
+  check('a reply from R1 to a NEW SUB of ours is a selection again: attached to (R1, 2)', ctx.am._attachedGen.get(TP(24))?.epoch === 2 && ctx.am._attachedGen.get(TP(24)).root === lc(idHex(R1)));
+  // a fan-out DELIVER cannot make a FIRST attachment either
+  ctx.am.pubsubSubscribe(TP(25));
+  await deliver(ctx, TP(25), R1, { gen: gen(R1, 1), authorized: false });
+  check('a fan-out DELIVER before any reply makes no attachment', !ctx.am._attachedGen.has(TP(25)));
+  // the previous nonce still answers (two renewals may overlap)
+  ctx.am.pubsubSubscribe(TP(26));
+  const n1 = attachNonceFor(ctx, TP(26));
+  ctx.am._emitSubscribe(TP(26), []);
+  await ctx.am._onDeliver({ topicId: idHex(TP(26)), from: idHex(R1), msgs: [], gen: gen(R1, 1), attach: n1 }, { targetId: SELF, isTerminal: true, hopCount: 1 });
+  check('a reply carrying the PREVIOUS nonce still attaches (overlapping renewals)', ctx.am._attachedGen.get(TP(26))?.root === lc(idHex(R1)));
 }
 
 console.log('\n[R6] unarmed: the frame is consumed without effect; the tick terminates nothing');

@@ -60,11 +60,11 @@ function rowDefs() {
       evidence: EvidenceLevel.ROUTED, proves: Proves.ROUTING, outcome: 'RoutingOutcome', terminalOutcome: 'LEASE_ESTABLISHED',
       retry: Retry.IDEMPOTENT, topicProfile: PROFILE, eventIdScheme: NA, replayCursorType: 'HIGHWATER', orderingModel: 'ARRIVAL',
       authGuard: NA, admissionGuard: NA, placementGuard: 'regionOk+admitRole+meshBareSelfRootGuard',
-      projection: { payload: ['topicId', 'subscriberId', 'since', 'latest', 'hw', 'lw', 'merge', 'standby', 'demand', 'gen'] },   // merge: the completion block while a loser is completing (dual-root 4(d)); standby/demand/gen: the seat declaration (Topic Lifetime 4.3, armed only)root 4(d))
-      schema: { require: ['topicId', 'subscriberId'], types: { topicId: 'string', subscriberId: 'string', standby: 'boolean', demand: 'number', gen: 'obj' } },
+      projection: { payload: ['topicId', 'subscriberId', 'since', 'latest', 'hw', 'lw', 'merge', 'standby', 'demand', 'gen', 'attach'] },   // attach: the attachment nonce the reply echoes (Topic Lifetime 4.1, armed only)   // merge: the completion block while a loser is completing (dual-root 4(d)); standby/demand/gen: the seat declaration (Topic Lifetime 4.3, armed only)root 4(d))
+      schema: { require: ['topicId', 'subscriberId'], types: { topicId: 'string', subscriberId: 'string', standby: 'boolean', demand: 'number', gen: 'obj', attach: 'string' } },
       idempotency: { from: ['topicId', 'subscriberId'] },
       capabilityRange: { profile: PROFILE },
-      errorContract: ['refuse-region', 'refuse-role-budget', 'merge-stale', 'refuse-dismantling'], traceFields: ['topicId', 'subscriberId'], budget: budget(10),
+      errorContract: ['refuse-region', 'refuse-role-budget', 'merge-stale', 'refuse-dismantling'], traceFields: ['topicId', 'subscriberId'], budget: budget(11),
       note: 'establishes/renews a delivery lease routed toward topicId; advertises the subscriber replay cursor (hw/lw)',
     }),
     ({
@@ -180,10 +180,10 @@ function rowDefs() {
       evidence: EvidenceLevel.OBSERVED, proves: Proves.OBSERVATION, outcome: 'DeliveryOutcome', terminalOutcome: 'ENTRIES_DELIVERED_AT_MOST_ONCE',
       retry: Retry.NONE, topicProfile: PROFILE, eventIdScheme: 'MSGID_CONTENT_V1', replayCursorType: NA, orderingModel: 'UNION_IDEMPOTENT',
       authGuard: NA, admissionGuard: NA, placementGuard: NA,
-      projection: { payload: ['topicId', 'from', 'msgs', 'gen'] },   // gen: the generation served (Topic Lifetime 4.1, armed only)
-      schema: { require: ['topicId', 'msgs'], types: { topicId: 'string', msgs: 'arr', gen: 'obj' } },
+      projection: { payload: ['topicId', 'from', 'msgs', 'gen', 'attach'] },   // gen: the generation served; attach: the SUB nonce this reply answers (Topic Lifetime 4.1, armed only)
+      schema: { require: ['topicId', 'msgs'], types: { topicId: 'string', msgs: 'arr', gen: 'obj', attach: 'string' } },
       capabilityRange: { profile: PROFILE },
-      errorContract: ['drop-duplicate-msgid'], traceFields: ['topicId'], budget: budget(4),
+      errorContract: ['drop-duplicate-msgid'], traceFields: ['topicId'], budget: budget(5),
       note: 'fan-out down the tree; each entry keyed by its own msgId (per-entry idempotency, not a frame key)',
     }),
     ({
