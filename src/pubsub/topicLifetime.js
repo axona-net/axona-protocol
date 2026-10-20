@@ -314,10 +314,16 @@ export const topicLifetimeMethods = {
     // cache was empty, so any body here is one it lacks — and elects by 4.4(1).
     if (appointmentMatch && role.cache.length > 0) { this._log('info', 'terminated-ignored', { topic, why: 'holds-body', bodies: role.cache.length }); return 'consumed'; }
     let tombs = 0, fwd = 0;
+    // A tombstone goes with the obligation that delivered it (X1): tagged with
+    // the ended generation, or untagged when the ended appointment was legacy
+    // (no generation to tag with). A deletion the live attachment delivered
+    // stays and keeps suppressing its body.
+    const dropOwned = (owner) => { let n = 0; for (const [id, tb] of role.tombstones) { const own = tb.gen ? (owner && this._sameGen(tb.gen, owner)) : !owner; if (own) { role.tombstones.delete(id); n++; } } return n; };
     if (appointmentMatch) {
+      const ownerGen = role.standbyGen ? { ...role.standbyGen } : null;
       this._rootClaim.retireBackup(t, role, 'terminated');
       role.standbyGen = null;
-      tombs = role.tombstones.size; role.tombstones.clear();              // the generation's deletions go with it
+      tombs += dropOwned(ownerGen);
     }
     if (attachmentMatch) {
       if (role) {
@@ -329,6 +335,7 @@ export const topicLifetimeMethods = {
         if (fwd) this._log('info', 'terminated-forwarded', { topic, seats: fwd });
         role.subscribers.clear(); role.children.clear();
         role.upstreamHeld = new Set(); role.upstreamHeldFrom = null;
+        tombs += dropOwned(att);                                              // the attachment's deletions go with it (X1)
       }
       this._attach.delete(t);
       this._upstream.delete(t);

@@ -1145,8 +1145,12 @@ export const wireHandlersMethods = {
     // live attempt) names a child to take its seat; the pin and the attachment's
     // parent move to the child, the generation and the attempt do not.
     if (gated && typeof payload.delegate === 'string' && isHexId(lc(payload.delegate)) && lc(payload.delegate) !== lc(idHex(this.nodeId))) {
-      const pin = (this._upstream.get(topicBig) || [])[0] || null;
-      const fromSelected = (pin && decision.fromHex === pin) || decision.v === 'commit';
+      // THE SAME FENCE AS EVERY OTHER CONTROL EFFECT (Aster b0748c4c X2): a
+      // handover rides a frame the decision accepted — a reply to a live newer
+      // attempt, or fan-out from the selected parent at the current root at an
+      // epoch not lower. An obsolete attempt or an older epoch moves nothing,
+      // whoever sent it.
+      const fromSelected = decision.v !== 'data';
       if (fromSelected) {
         const child = lc(payload.delegate);
         const a = decision.a || { gen: null, from: null, nonce: null, seq: 0, attempts: new Map(), committed: 0 };
@@ -1223,7 +1227,7 @@ export const wireHandlersMethods = {
         // _applyKill installs the tombstone WITHOUT an unverified/cross-carrier proof.
         let mm = m;
         if (this._tombAuthority && m.kill && !(await this._taVerifyBoundKill(topicBig, m))) { const { kill, ...rest } = m; mm = rest; }
-        this._applyKill(role, topicBig, mm);
+        this._applyKill(role, topicBig, mm, null, (deliverAccepted && decision) ? decision.g : null);
         continue;
       }
       if (this._tombstoned(role, m.msgId, m.json)) continue;          // killed → suppress (don't cache/deliver/re-fan)
@@ -1338,7 +1342,7 @@ export const wireHandlersMethods = {
   // first time we see the kill (tombstone-gated).
   // RETURNS false when refused at the cut (dual-root packet 4(d)); the caller
   // propagates it. Tombstones are mutations too, and they commit first.
-  _applyKill(role, topicBig, m, cut = null) {
+  _applyKill(role, topicBig, m, cut = null, genTag = null) {
     const target = m.msgId;
     if (role && !this._cutHolds(role, cut)) {
       this._log('info', 'cut-refused', { topic: idHex(topicBig).slice(0, 12), at: 'applyKill', msgId: String(target).slice(0, 12), gated: !!role.merge?.gate, gen: role.gen | 0, gen0: cut ? cut.gen0 : null });
@@ -1385,6 +1389,10 @@ export const wireHandlersMethods = {
     if (role && !existing) {
       const tomb = { exp: this._now() + TTL_MS, killTs, signer: proof ? proofSigner : (m.signer ?? null), seq };
       if (proof) tomb.kill = proof;                    // retain only the bound, caller-verified proof
+      // DELETION OWNERSHIP (Topic Lifetime 4.6; Aster b0748c4c X1): a tombstone
+      // belongs to the generation that delivered it, so an obligation's end
+      // drops only its own. Armed only; a root's own and a legacy carrier's are untagged.
+      if (genTag) tomb.gen = { root: genTag.root, epoch: genTag.epoch | 0 };
       role.tombstones.set(target, tomb);
       const i = role.cache.findIndex(c => c.msgId === target);
       if (i >= 0) { role.cacheBytes -= role.cache[i].bytes; role.cache.splice(i, 1); }

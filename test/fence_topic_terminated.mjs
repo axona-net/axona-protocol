@@ -469,6 +469,53 @@ console.log('\n[B14] the selected parent hands a delegated seat to its child; a 
   check('the window is bounded (16): the oldest attempts fall off', attachOf(ctx, TP(37)).attempts.size === 16 && !attachOf(ctx, TP(37)).attempts.has(first));
 }
 
+console.log('\n[X1] a deletion belongs to the obligation that delivered it (Aster b0748c4c): an appointment\'s end never drops the live attachment\'s tombstone');
+{
+  const ctx = manager();
+  await replicate(ctx, TP(38), R1, { gen: gen(R1, 1), issuedAt: T0, dels: [{ del: true, msgId: 'r1dead', killTs: T0, signer: null, seq: 1, publishTs: T0 }] });
+  const role = ctx.role(TP(38));
+  ctx.am.pubsubSubscribe(TP(38));
+  await deliver(ctx, TP(38), R2, { gen: gen(R2, 1), msgs: [{ del: true, msgId: 'r2dead', killTs: T0, signer: null, publishTs: T0, seq: 1 }] });
+  check('two tombstones: one from the appointment (R1, 1), one from the attachment (R2, 1), each tagged', role.tombstones.size === 2 && role.tombstones.get('r1dead')?.gen?.root === lc(idHex(R1)) && role.tombstones.get('r2dead')?.gen?.root === lc(idHex(R2)));
+  await deliver(ctx, TP(38), R2, { msgs: [{ msgId: 'r2dead', publishTs: T0, json: '{}', seq: 2 }], gen: gen(R2, 1), authorized: false });
+  check('control: a reordered R2 body for the deleted id is suppressed (not cached)', !role.cacheIds.has('r2dead'));
+  await terminated(ctx, TP(38), R1, gen(R1, 1));
+  check('(R1, 1) ends the appointment and drops ITS tombstone only; R2\'s stays with the reader and its pin', role.backupOf === null && role.tombstones.size === 1 && role.tombstones.has('r2dead') && ctx.am.mySubscriptions.has(TP(38)) && ctx.am._upstream.get(TP(38))[0] === lc(idHex(R2)));
+  await deliver(ctx, TP(38), R2, { msgs: [{ msgId: 'r2dead', publishTs: T0, json: '{}', seq: 2 }], gen: gen(R2, 1), authorized: false });
+  check('…so the same reordered R2 body is still suppressed after the appointment ended', !role.cacheIds.has('r2dead'));
+  await terminated(ctx, TP(38), R2, gen(R2, 1));
+  check('(R2, 1) ends the attachment: its tombstone goes with it and the role is gone', !ctx.held(TP(38)));
+  // mirror: the attachment ends first; the appointment's tombstone stays with the backup
+  const ctx2 = manager();
+  await replicate(ctx2, TP(39), R1, { gen: gen(R1, 1), issuedAt: T0, dels: [{ del: true, msgId: 'r1dead', killTs: T0, signer: null, seq: 1, publishTs: T0 }] });
+  const role2 = ctx2.role(TP(39));
+  ctx2.am.pubsubSubscribe(TP(39));
+  await deliver(ctx2, TP(39), R2, { gen: gen(R2, 1), msgs: [{ del: true, msgId: 'r2dead', killTs: T0, signer: null, publishTs: T0, seq: 1 }] });
+  await terminated(ctx2, TP(39), R2, gen(R2, 1));
+  check('(R2, 1) first: the attachment\'s tombstone goes, the appointment\'s stays with the backup', ctx2.held(TP(39)) && role2.tombstones.size === 1 && role2.tombstones.has('r1dead') && role2.backupOf === lc(idHex(R1)));
+}
+
+console.log('\n[X2] the handover obeys the same decision as every control effect (Aster b0748c4c)');
+{
+  const ctx = manager();
+  const C1 = NODE(21);
+  ctx.am.pubsubSubscribe(TP(40));
+  await deliver(ctx, TP(40), R1, { gen: gen(R1, 2) });
+  check('selected R1 at epoch 2', ctx.am._upstream.get(TP(40))[0] === lc(idHex(R1)) && attachOf(ctx, TP(40)).gen.epoch === 2);
+  await ctx.am._onDeliver({ topicId: idHex(TP(40)), from: idHex(R1), msgs: [], gen: gen(R1, 1), delegate: idHex(C1) }, { targetId: SELF, isTerminal: true, hopCount: 1 });
+  check('a delayed epoch-1 delegate from the pinned parent moves nothing', ctx.am._upstream.get(TP(40))[0] === lc(idHex(R1)) && attachOf(ctx, TP(40)).gen.epoch === 2);
+  const n1 = attachOf(ctx, TP(40)).nonce;
+  ctx.am._emitSubscribe(TP(40), []); const n2 = attachOf(ctx, TP(40)).nonce;
+  await ctx.am._onDeliver({ topicId: idHex(TP(40)), from: idHex(R1), msgs: [], gen: gen(R1, 2), attach: n2 }, { targetId: SELF, isTerminal: true, hopCount: 1 });
+  await ctx.am._onDeliver({ topicId: idHex(TP(40)), from: idHex(R1), msgs: [], gen: gen(R1, 2), attach: n1, delegate: idHex(C1) }, { targetId: SELF, isTerminal: true, hopCount: 1 });
+  check('a delegate echoing the obsolete attempt n1 after n2 committed moves nothing', ctx.am._upstream.get(TP(40))[0] === lc(idHex(R1)));
+  await ctx.am._onDeliver({ topicId: idHex(TP(40)), from: idHex(R1), msgs: [], gen: gen(R1, 2), delegate: idHex(C1) }, { targetId: SELF, isTerminal: true, hopCount: 1 });
+  check('positive control: a current-generation delegate from the selected parent (fan-out) hands over', ctx.am._upstream.get(TP(40))[0] === lc(idHex(C1)) && attachOf(ctx, TP(40)).from === lc(idHex(C1)));
+  ctx.am._emitSubscribe(TP(40), []); const n3 = attachOf(ctx, TP(40)).nonce;
+  await ctx.am._onDeliver({ topicId: idHex(TP(40)), from: idHex(C1), msgs: [], gen: gen(R1, 2), attach: n3, delegate: idHex(R2) }, { targetId: SELF, isTerminal: true, hopCount: 1 });
+  check('positive control: a delegate riding the reply to a live newer attempt hands over', ctx.am._upstream.get(TP(40))[0] === lc(idHex(R2)));
+}
+
 console.log('\n[R6] unarmed: the frame is consumed without effect; the tick terminates nothing');
 {
   const ctx = manager({ armed: false });

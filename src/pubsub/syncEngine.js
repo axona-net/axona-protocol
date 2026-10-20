@@ -348,7 +348,7 @@ export const syncEngineMethods = {
       if (!role) { role = makeRole(topicBig, false, this._now()); this.axonRoles.set(topicBig, role); }
       this._rootClaim.becomeBackup(topicBig, role, from, gen, this._topicLifetime && Number.isFinite(payload.issuedAt) ? payload.issuedAt : null);   // nature transition (I-10)
       const cut = this._cutCapture(role);
-      if (await this._applyDels(role, topicBig, payload.dels, cut)) await this._ingestStampedBatch(role, payload.msgs, cut);
+      if (await this._applyDels(role, topicBig, payload.dels, cut, this._topicLifetime ? (gen || role.standbyGen || null) : null)) await this._ingestStampedBatch(role, payload.msgs, cut);   // the grant's deletions belong to the appointment's generation (X1)
       // SUBSCRIBER-LIST REPLICATION: stash the principal's subscriber list so a
       // promoted backup can re-adopt them into its fanout + replay (rootClaim._set).
       // STORED, not applied — a backup serves nobody until it becomes root.
