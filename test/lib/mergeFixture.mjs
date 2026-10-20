@@ -41,7 +41,7 @@ export function makeManager({ mergeCapable, neighbors = [], route = null, verdic
     servingCapable: () => true,
     lookup: async () => ({ path: (lookupPath || [SELF]).map(idHex), hops: (lookupPath || [SELF]).length - 1, time: 10, found: false }),
   };
-  const opts = { dht: sealTestDht(dht), mergeCapable, emitLog: (lvl, ev, ctx) => logs.push({ lvl, ev, ctx }) };
+  const opts = { dht: sealTestDht(dht), mergeCapable, topicLifetime: false, emitLog: (lvl, ev, ctx) => logs.push({ lvl, ev, ctx }) };
   if (maxDirect !== undefined) opts.maxDirect = maxDirect;
   const am = new AxonaManager(opts);
   am._now = () => clock.t;
@@ -103,7 +103,7 @@ export function makeManagerAt(selfBig, { mergeCapable = true, neighbors = [], ro
     servingCapable: () => true,
     lookup: async () => ({ path: (lookupPath || [selfBig]).map(idHex), hops: 0, time: 10, found: false }),
   };
-  const am = new _AM({ dht: sealTestDht(dht), mergeCapable, rootReplicas: 0, emitLog: (lvl, ev, ctx) => logs.push({ lvl, ev, ctx }), ...extra });
+  const am = new _AM({ dht: sealTestDht(dht), mergeCapable, rootReplicas: 0, topicLifetime: false, emitLog: (lvl, ev, ctx) => logs.push({ lvl, ev, ctx }), ...extra });   // unarmed unless `extra` arms it: these scenes predate Topic Lifetime
   am._now = () => clock.t;
   return { am, rc: am._rootClaim, routed, logs, clock, self: selfBig };
 }
@@ -160,7 +160,7 @@ export class Fabric {
       bridgeId: () => null, servingCapable: () => true,
       lookup: async () => ({ path: [idHex(idBig)], hops: 0, time: 1, found: false }),
     };
-    const am = new _AM({ dht: sealTestDht(dht), now: () => self.clock, rootReplicas: 0, mergeCapable: true, emitLog: (lvl, ev, ctx) => logs.push({ lvl, ev, ctx }), ...opts });
+    const am = new _AM({ dht: sealTestDht(dht), now: () => self.clock, rootReplicas: 0, mergeCapable: true, topicLifetime: false, emitLog: (lvl, ev, ctx) => logs.push({ lvl, ev, ctx }), ...opts });
     const rec = { id: idBig, am, rc: am._rootClaim, handlers, logs, routed, alive: true, self: idBig, clock: { get t() { return self.clock; }, set t(v) { self.clock = v; } } };
     this.nodes.set(idBig, rec); return rec;
   }

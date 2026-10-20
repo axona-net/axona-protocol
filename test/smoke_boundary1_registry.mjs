@@ -52,7 +52,7 @@ const idHex = (b) => b.toString(16).padStart(66, '0');
 // The 19 wire types _registerHandlers registers (wireHandlers.js).
 const WIRED = [T.SUB, T.UNSUB, T.PUB, T.DELIVER, T.ADOPT, T.ADOPTACK, T.MERGE_OFFER, T.REPLAYACK, T.MERGE_CLOSED, T.PULLUP, T.HANDOFFACK, T.REPLAYUP,
   T.HANDOFF, T.REPLICATE, T.KILL, T.INGESTACK, T.RECEIPTPROBE, T.RECEIPTNACK, T.TOUCH, T.PULL,
-  T.PULLRESP, T.ROOTBEACON, T.METRICSON];
+  T.PULLRESP, T.ROOTBEACON, T.METRICSON, T.TOPIC_TERMINATED, T.REHOME];
 
 // A schema-satisfying representative frame per wire (INGESTACK gets three).
 const CERT = {
@@ -78,6 +78,8 @@ const CERT = {
   [T.PULLRESP]: { corrId: 'c1', json: null, publishTs: 0, requesterId: 'r1' },
   [T.ROOTBEACON]: { root: 'rr', topics: [], epochs: [], beaconId: 'b1', layer: 0 },
   [T.METRICSON]: { topicId: 'aa' },
+  [T.TOPIC_TERMINATED]: { topicId: 'aa', from: 'rr', gen: { root: 'rr', epoch: 1 } },
+  [T.REHOME]: { topicId: 'aa', from: 'cc', upstream: 'rr' },
 };
 const IA_SIGNED = { topicId: 'aa', msgId: 'm1', op: 'PUB', epoch: 1, attemptId: 'x1', ackTo: 'n0', flightNonce: 'fn', rootPub: 'rp', purpose: 'ingest', sig: 'sigstr' };
 const IA_LEGACY = { topicId: 'aa', msgId: 'm1', op: 'PUB', epoch: 1 };
@@ -153,9 +155,9 @@ async function main() {
 
   // ── T. TABLE ────────────────────────────────────────────────────────────────
   const rows = boundary1Rows();
-  check('T1. all 24 rows mint (23 frames; INGESTACK signed+legacy; ADOPTACK + MERGE_OFFER + REPLAYACK + MERGE_CLOSED dual-root 4(d))', rows.length === 24);
+  check('T1. all 26 rows mint (25 frames; INGESTACK signed+legacy; ADOPTACK + MERGE_OFFER + REPLAYACK + MERGE_CLOSED dual-root 4(d); TOPIC_TERMINATED + REHOME Topic Lifetime)', rows.length === 26);
   const reg = buildBoundary1Registry({ enabled: () => false });
-  check('T2. registry registers all 24 rows', reg.size() === 24);
+  check('T2. registry registers all 26 rows', reg.size() === 26);
   check('T3. wiring covers every registered handler wire type', WIRED.every((w) => reg.wiring.has(w)) && reg.wiring.size === WIRED.length,
     JSON.stringify(WIRED.filter((w) => !reg.wiring.has(w))));
   const iaw = reg.wiring.get(T.INGESTACK);
@@ -217,7 +219,7 @@ async function main() {
   check('W1. frameRegistry:false builds no registry', nOff.am.frameRegistryShadow().built === false && nOff.am.frameRegistryShadow().rows === 0);
   const fabOn = new Fabric({ frameRegistry: true }); const nOn = fabOn.addNode(nodeIds[0]);
   const sOn = nOn.am.frameRegistryShadow();
-  check('W2. frameRegistry:true builds the 24-row table', sOn.built === true && sOn.rows === 24);
+  check('W2. frameRegistry:true builds the 26-row table', sOn.built === true && sOn.rows === 26);
   check('W3. every routed handler is registered (wrapped or not)', WIRED.every((w) => typeof nOn.handlers.get(w) === 'function') && WIRED.every((w) => typeof nOff.handlers.get(w) === 'function'));
 
   // ── D. DIFFERENTIAL ──────────────────────────────────────────────────────────
@@ -323,6 +325,8 @@ async function main() {
       [T.PULLRESP]: { corrId: 'c1', json: null, publishTs: 0, requesterId: N2 },
       [T.ROOTBEACON]: { root: N2, topics: [T_HEX], epochs: [1], beaconId: 'b1', layer: 0 },
       [T.METRICSON]: { topicId: T_HEX },
+      [T.TOPIC_TERMINATED]: { topicId: T_HEX, from: N2, gen: { root: N2, epoch: 1 } },
+      [T.REHOME]: { topicId: T_HEX, from: N2, upstream: N2 },
     };
     const driveReal = async (wire, frame, meta) => {
       const traces0 = node.am.frameRegistryShadow().traces.length;

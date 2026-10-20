@@ -74,6 +74,8 @@ export const wireHandlersMethods = {
     registerFrame(this.dht, T.PULLRESP,     this._onPullResp.bind(this),     { registry: this._frameDoor });
     registerFrame(this.dht, T.ROOTBEACON,   this._onRootBeacon.bind(this),   { registry: this._frameDoor });
     registerFrame(this.dht, T.METRICSON,    this._onMetricsOn.bind(this),    { registry: this._frameDoor });
+    registerFrame(this.dht, T.TOPIC_TERMINATED, this._onTopicTerminated.bind(this), { registry: this._frameDoor });   // Topic Lifetime 4.5 (topicLifetime.js)
+    registerFrame(this.dht, T.REHOME,       this._onRehome.bind(this),       { registry: this._frameDoor });   // Topic Lifetime 4.7 (topicLifetime.js)
   },
 
   // REF-1.1 S2 inspector: the Boundary-1 registry's shadow state. `built` is
@@ -316,11 +318,16 @@ export const wireHandlersMethods = {
       if (!this._rerouteDeclined(T.SUB, payload)) this._undeliverable(T.SUB, topicBig, 'refused-no-forward');
       return 'consumed';
     }
+    // DISMANTLING (Topic Lifetime 4.5): a root whose termination began grants no
+    // seat. The subscriber's own renewal retries on its fast cadence and lands
+    // on a fresh role once this one has gone (the late renewal, David 2026-10-20).
+    if (role.dismantling) { this._log('info', 'seat-refused-dismantling', { topic: idHex(topicBig).slice(0, 12), from: String(payload.subscriberId).slice(0, 12) }); return 'consumed'; }
     this._maybePromoteRoot(role, payload, meta);
 
     const subHex = lc(payload.subscriberId);
     if (!isHexId(subHex)) return 'consumed';
     const since = Number.isFinite(payload.since) ? payload.since : 0;
+    const seat = this._seatKindOf(payload);   // Topic Lifetime 4.3: reader | child(n) | standby
 
     // The root's own renewal self-loops here. Don't seat self as a subscriber
     // (no self-fan); just replay locally if the app subscribes.
@@ -359,7 +366,7 @@ export const wireHandlersMethods = {
       // or to this pull from a log, instead of argued from the count of entries.
       if (sent !== false) this._log('info', 'split-union-pull', { topic: idHex(topicBig).slice(0, 12), from: subHex.slice(0, 12), policy: 'SPLIT_UNION', lw: payload.lw, myLw: this._lowWater(role) });
     }
-    this._accept(role, subHex, since, !!payload.latest);
+    this._accept(role, subHex, since, !!payload.latest, seat);
     return 'consumed';
   },
 
@@ -369,6 +376,12 @@ export const wireHandlersMethods = {
     if (d === 'reroute') { this._reroute(T.UNSUB, payload); return 'consumed'; }
     const role = this.axonRoles.get(idBig(payload.topicId));
     if (role) { const s = lc(payload.subscriberId); role.subscribers.delete(s); role.children.delete(s); role.sync.pulledLw.delete(s); }
+    // Topic Lifetime 4.7: a child that stepped down says so; this parent does not
+    // re-promote it for the cooldown (the hysteresis half of the thin-branch rule).
+    if (this._topicLifetime && payload.steppedDown === true) {
+      const s = lc(payload.subscriberId);
+      if (isHexId(s)) { this._childCooldown.set(s, this._now() + this._childCooldownMs); this._log('info', 'child-cooldown', { topic: String(payload.topicId).slice(0, 12), child: s.slice(0, 12), ms: this._childCooldownMs }); }
+    }
     return 'consumed';
   },
 
@@ -376,14 +389,23 @@ export const wireHandlersMethods = {
   // `latest` (since:'latest') folds the newest cache entry into the replay
   // DELIVER regardless of age — served from here (we hold the cache) even when
   // the subscriber is then delegated downward for ongoing fan-out.
-  _accept(role, subHex, since, latest = false) {
+  // `seat` (Topic Lifetime 4.3): { kind: 'reader'|'child'|'standby', demand }.
+  // A reader SUB and a child SUB with n > 0 stamp lastDemandAt; a standby SUB
+  // never does. A standby seat is never delegated to a child: it exists to be
+  // at the root.
+  _accept(role, subHex, since, latest = false, seat = null) {
+    const kind = seat?.kind || 'reader';
+    const demand = seat ? (seat.demand | 0) : 1;
+    const stampsDemand = kind === 'reader' || (kind === 'child' && demand > 0);
     const existing = role.subscribers.get(subHex);
     if (existing) {                                   // renewal of a current subscriber
       existing.lastRenewed = this._now();
+      existing.kind = kind; existing.demand = demand;
+      if (stampsDemand) role.lastDemandAt = this._now();
       this._replayTo(role, subHex, since, false, latest);
       return;
     }
-    if (role.subscribers.size >= this.maxDirect) {    // overloaded → delegate
+    if (role.subscribers.size >= this.maxDirect && kind !== 'standby') {    // overloaded → delegate
       // WIDEN before DEEPEN: promote a new sibling child (offloading a batch)
       // so the tree grows bushy (depth ~log_MAX_DIRECT(S)), not into a chain.
       // Only when every direct is already a child do we deepen — forward the
@@ -398,7 +420,8 @@ export const wireHandlersMethods = {
         // neither possible (no leaf to promote, no child) → seat over capacity
       }
     }
-    role.subscribers.set(subHex, { since: Number.isFinite(since) ? since : 0, lastRenewed: this._now() });
+    role.subscribers.set(subHex, { since: Number.isFinite(since) ? since : 0, lastRenewed: this._now(), kind, demand });
+    if (stampsDemand) role.lastDemandAt = this._now();
     this._replayTo(role, subHex, since, true, latest);  // delta (+ newest if latest) + a via-repin ping
   },
 
@@ -430,8 +453,14 @@ export const wireHandlersMethods = {
     const pending = new Set();
     for (const pd of role.merge?.pendingDelegation?.values() ?? []) for (const sh of pd.subs) pending.add(sh);
     const leaves = [];
-    for (const s of role.subscribers.keys()) {
+    const now = this._now();
+    for (const [s, seat] of role.subscribers) {
       if (role.children.has(s) || pending.has(s)) continue;
+      // Topic Lifetime: a STANDBY seat stays at the root (never promoted, never
+      // handed off); a node that stepped down within the cooldown is not
+      // re-promoted (4.7), though it may still be handed off as a leaf.
+      if (seat?.kind === 'standby') continue;
+      if (this._topicLifetime && leaves.length === 0 && (this._childCooldown.get(s) || 0) > now) continue;
       leaves.push(s);
     }
     if (leaves.length < 2) return false;
@@ -655,6 +684,7 @@ export const wireHandlersMethods = {
     // STAMP — single serialization point; strictly monotonic, floored at now.
     const ts = Math.max(role.lastTs + 1, this._now());
     role.lastTs = ts;
+    role.lastDemandAt = this._now();                                     // a stamped write is demand (Topic Lifetime 4.3)
     const seq = ++role.seq;                                              // dense per-topic counter (gap detection)
     const msg = { json, publishTs: ts, msgId: env.msgId, seq };
     this._cachePush(role, { msgId: env.msgId, publishTs: ts, json, seq }, cut);
@@ -1345,15 +1375,16 @@ export const wireHandlersMethods = {
       this._sendIngestAck(meta?.fromId, role, target, 'kill', payload);
       return 'consumed';
     }
-    const prevTs = role.lastTs, prevSeq = role.seq;     // restored if the cut refuses the commit below
+    const prevTs = role.lastTs, prevSeq = role.seq, prevDemandAt = role.lastDemandAt;   // restored if the cut refuses the commit below
     const ts = Math.max(role.lastTs + 1, this._now());
     role.lastTs = ts;
+    role.lastDemandAt = this._now();                    // a stamped kill is demand (Topic Lifetime 4.3); a duplicate above stamps nothing
     const seq = ++role.seq;
     // Pass the COMPLETE signed kill so _applyKill can retain + transport the proof
     // (blocker b). The root re-stamps ts/seq for replay ordering; the signed kill
     // keeps the author's own ts/seq for verifyKill() at every downstream node.
     if (this._applyKill(role, topicBig, { msgId: target, killTs: ts, signer: lc(kill.signerPubkey), seq, kill }, cut) === false) {
-      role.seq = prevSeq; role.lastTs = prevTs;               // the stamp above did not commit
+      role.seq = prevSeq; role.lastTs = prevTs; role.lastDemandAt = prevDemandAt;   // the stamp above did not commit
       this._cutDisposition(topicBig, T.KILL, payload);          // forwarded, not ingested: no ack from here
       return 'consumed';
     }

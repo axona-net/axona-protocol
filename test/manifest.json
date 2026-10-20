@@ -1480,6 +1480,36 @@
       "file": "fence_pool_union_selector.mjs",
       "class": "default",
       "note": "4.114.0, two-pool packet G3: ONE iterator (_usablePeers: M union I-bound, deduplicated; not dead, connected, not SUSPECT) read by greedy, the two-hop free pass and probe set, the fallback hop, the route_msg handler and health().degree — a SUSPECT I peer is neither selected nor counted (the green-badge counterexample), a closer I peer is the greedy hop, a dead I peer is skipped, a peer in both classes counts once as M, the free pass answers from I with no probe; UNARMED no I set exists and a suspect M peer routes as 4.113.0 did. Mutant: count I in degree.usable without the SUSPECT filter -> 1 fails."
+    },
+    {
+      "file": "fence_topic_terminated.mjs",
+      "class": "default",
+      "note": "Topic Lifetime 4.3/4.5 (axona-docs 11288d7; David 'Build' 2026-10-20): demand counted once (standby 0, child n, bare 1; only demand stamps lastDemandAt); a root with no body and no demand dismantles after one DROP window — dismantling installed before the first TOPIC_TERMINATED, three rounds to seats ∪ replicas, the role goes on the tick after, tombstones with it; what holds it open (a renewing seat, a body, local intent, a lease, open custody) and what does not (tombstones); a write before the install cancels, after it is refused at the cut; a dismantling root refuses seats and the next renewal forms epoch+1; receipt at a backup (drops; holds-body does not obey), a child (forwards then retires), a reader (one terminated row, subscription ENDS); generation binding; unarmed = consumed without effect. 48 checks; 4.117.0."
+    },
+    {
+      "file": "fence_standby_lease.mjs",
+      "class": "default",
+      "note": "Topic Lifetime 4.1/4.2/4.4: a standby appointment is a lease on the root's REPLICATE (L = DROP_MS); the backup's own SUB never moves lastReplicaAt; an empty backup lapses with no election and no further SUB; a lapse ends the appointment and nothing else (a body or tombstone keeps the 4.94.0 election path, a reader keeps its seat); the grant rule (apparent age ≤ D + S = 75 s; Aster's 181 s traces perfect and skewed); LEFT record refuses only the generation it names; a wall-clock jump beyond S holds grants for one D; a generation-less grant renews only from the current principal and never creates a role; armed REPLICATE carries gen + issuedAt, unarmed carries neither and never lapses. 38 checks."
+    },
+    {
+      "file": "fence_child_step_down.mjs",
+      "class": "default",
+      "note": "Topic Lifetime 4.7 (David: '2 subscribers and 90 seconds'): a child below 2 readers for 90 s after a 90 s stay REHOMEs its readers to its upstream, tells its parent (UNSUB steppedDown → 300 s cooldown), writes LEFT and retires; hysteresis (demand at the floor clears, a new child is not judged before its stay); a backup and an unreachable upstream are never stepped down; REHOME keeps the app's subscription and re-pins to the named upstream, ignored from a non-upstream; the parent does not re-promote a cooled node; unarmed = nothing. 24 checks."
+    },
+    {
+      "file": "fence_topic_demand_stamp.mjs",
+      "class": "default",
+      "note": "Topic Lifetime 4.3 on the REAL ingress paths: a stamped publish and a fresh kill stamp lastDemandAt; a duplicate kill (4.116.0 no-restamp), a REPLICATE union and a beacon do not; AxonaPeer._dispatchDelivery delivers one terminated row per Subscription handle and stops them. 8 checks."
+    },
+    {
+      "file": "fence_deleted_body_bound.mjs",
+      "class": "default",
+      "note": "Topic Lifetime 4.6, the residual RECORDED not passed (David: no deletion record): a holder partitioned through BOTH the kill and the notice regenerates a root carrying the deleted body, served until the body's own TTL; a holder that saw the kill holds no body and regenerates nothing with it. 8 checks."
+    },
+    {
+      "file": "fence_topic_late_renewal.mjs",
+      "class": "default",
+      "note": "Topic Lifetime 4.5/4.8 on a fabric of real managers: a reader, a publisher, a root with two cohort backups seated as standbys; the message is deleted, the reader leaves, the root dismantles after one DROP window and the backups drop the generation with the tombstone; THE LATE RENEWAL (David): a standby SUB landing after the role is gone regenerates an empty root at epoch+1 with one seat, which ends by the same rule within one DROP window and two ticks; nothing referenced anywhere after. 13 checks."
     }
   ]
 }

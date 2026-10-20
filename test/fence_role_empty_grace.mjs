@@ -60,7 +60,7 @@ function manager({ keyspace = true } = {}) {
     isTransit: () => false, isIntroduction: () => false, introductionIds: () => [],
   };
   depositDispatchCapability(dht, { routed: (type, h) => dht.onRoutedMessage(type, h) });
-  const m = new AxonaManager({ dht });
+  const m = new AxonaManager({ dht, topicLifetime: false });   // the grace is the UNARMED policy; armed, termination (Topic Lifetime 4.5) ends an empty root at DROP_MS first
   m._log = (level, event, ctx) => rows.push({ event, ctx });
   m.clock = T;
   m._now = () => m.clock;

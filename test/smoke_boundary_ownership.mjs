@@ -286,7 +286,7 @@ L.push(...doorL);
 }
 const A = (s, w) => L.some((x) => x.surface === s && x.wire === w);
 check(`A1. AST-walked ${realFiles.length} src files; ${sites.length} raw sites + ${doorL.length} door sites → ${L.length} in-scope endpoints (B1=${L.filter((x) => x.boundary === 'B1').length}, raw XOR door)`,
-  realFiles.length >= 60 && L.filter((x) => x.boundary === 'B1').length === 23 && L.length >= 33);   // 23 = 19 + four dual-root 4(d) frames
+  realFiles.length >= 60 && L.filter((x) => x.boundary === 'B1').length === 25 && L.length >= 35);   // 25 = 19 + four dual-root 4(d) frames + TOPIC_TERMINATED + REHOME (Topic Lifetime)
 
 check('INV1. forward: every live in-scope endpoint’s boundary registry contains its mapped wire',
   L.every((x) => REG[x.boundary].has(x.regWire)), `\n   miss: ${L.filter((x) => !REG[x.boundary].has(x.regWire)).map((x) => x.key).join(', ')}`);

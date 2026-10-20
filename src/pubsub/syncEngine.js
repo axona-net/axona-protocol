@@ -198,6 +198,15 @@ export const syncEngineMethods = {
     if (full && this._replicateSubs && role.isRoot) {
       payload.metricsRemainingMs = role.metricsOn > this._now() ? (role.metricsOn - this._now()) : 0;
     }
+    // TOPIC LIFETIME (4.1, 4.4; armed only): a REPLICATE names the generation it
+    // appoints to and carries its own issue stamp, so the receiver can drop a
+    // grant delivered outside D + S and one under a LEFT record. A departing
+    // non-root holder names its principal's generation, when it knows one.
+    if (this._topicLifetime) {
+      payload.issuedAt = this._now();
+      if (role.isRoot) payload.gen = this._genOf(role);
+      else if (role.standbyGen) payload.gen = { ...role.standbyGen };
+    }
     if (policyName === 'HANDOFF') return this._route(targetBig, T.HANDOFF, payload);
     return this._route(targetBig, T.REPLICATE, payload);
   },
@@ -287,8 +296,36 @@ export const syncEngineMethods = {
       if (payload.from && isHexId(lc(payload.from))) from = lc(payload.from);
       else if (meta?.fromId != null) { try { from = lc(idHex(idBig(meta.fromId))); } catch { /* */ } }
       let role = this.axonRoles.get(topicBig);
+      // TOPIC LIFETIME — THE GRANT RULE (4.1, 4.2, 4.4; armed only). A REPLICATE
+      // is an appointment or a renewal only if: it names a generation not under a
+      // LEFT record here, and its apparent age is within D + S. A frame naming no
+      // generation (an older kernel) is an appointment only from this node's
+      // CURRENT principal and never creates a role from nothing, so a mixed fleet
+      // retains more, never less. Refused grants are counted and logged; nothing
+      // is applied.
+      let gen = null;
+      if (this._topicLifetime) {
+        const now = this._now();
+        const topic = String(payload.topicId).slice(0, 12);
+        gen = this._genValid(payload.gen) ? this._genNorm(payload.gen) : null;
+        if (!gen) {
+          if (!role || role.backupOf === null || role.backupOf !== from) {
+            this._grantsRefused++;
+            this._log('info', 'grant-refused', { topic, why: 'legacy-not-principal', from: from ? from.slice(0, 10) : null });
+            return;
+          }
+        } else if (this._leftRefuses(topicBig, gen)) {
+          this._grantsRefused++;
+          this._log('info', 'grant-refused', { topic, why: 'left-record', gen: gen.root.slice(0, 10), epoch: gen.epoch });
+          return;
+        } else if (this._grantFresh(payload, now) === false) {
+          this._grantsRefused++;
+          this._log('info', 'grant-refused', { topic, why: 'stale', ageMs: now - payload.issuedAt, gen: gen.root.slice(0, 10) });
+          return;
+        }
+      }
       if (!role) { role = makeRole(topicBig, false, this._now()); this.axonRoles.set(topicBig, role); }
-      this._rootClaim.becomeBackup(topicBig, role, from);   // nature transition (I-10)
+      this._rootClaim.becomeBackup(topicBig, role, from, gen);   // nature transition (I-10)
       const cut = this._cutCapture(role);
       if (await this._applyDels(role, topicBig, payload.dels, cut)) await this._ingestStampedBatch(role, payload.msgs, cut);
       // SUBSCRIBER-LIST REPLICATION: stash the principal's subscriber list so a

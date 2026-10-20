@@ -5,10 +5,10 @@
     "onNotification",
     "onRoutedMessage"
   ],
-  "treeHash": "bdd437dfea9821b7d5b9c8f80808fae5343c2e9d",
-  "filesScanned": 85,
+  "treeHash": "0c9ec13d02c13550831bee37f03e2b191b727a4a",
+  "filesScanned": 86,
   "summary": {
-    "migration-target": 43,
+    "migration-target": 45,
     "registration-helper": 0,
     "mechanism-shim": 0,
     "canonical-door": 0,
@@ -18,7 +18,7 @@
     "wrapper-passthrough": 2,
     "public-api-out-of-scope": 3
   },
-  "b1PubsubFrames": 23,
+  "b1PubsubFrames": 25,
   "rows": [
     {
       "file": "dht/AxonaPeer.js",
@@ -178,7 +178,7 @@
     },
     {
       "file": "dht/AxonaPeer.js",
-      "line": 6522,
+      "line": 6535,
       "callee": "onDirectMessage",
       "receiver": "def",
       "wire": "—",
@@ -389,6 +389,24 @@
       "callee": "registerFrame",
       "receiver": "this._frameDoor",
       "wire": "pubsub:metricson",
+      "classification": "migration-target",
+      "boundary": "B1"
+    },
+    {
+      "file": "pubsub/wireHandlers.js",
+      "line": 77,
+      "callee": "registerFrame",
+      "receiver": "this._frameDoor",
+      "wire": "pubsub:topicterminated",
+      "classification": "migration-target",
+      "boundary": "B1"
+    },
+    {
+      "file": "pubsub/wireHandlers.js",
+      "line": 78,
+      "callee": "registerFrame",
+      "receiver": "this._frameDoor",
+      "wire": "pubsub:rehome",
       "classification": "migration-target",
       "boundary": "B1"
     },

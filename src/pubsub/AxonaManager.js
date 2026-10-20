@@ -60,7 +60,8 @@ import { T, RENEW_MS, RENEW_FAST_MS, DROP_MS, ROOT_REPLICAS, CACHE_MAX,
          HELLO_DEADLINE_MS, SATURATION_PRESSURE, ROOT_REPLICATE_FULL_MS,
          TICK_LAG_WINDOW, OBLIGATIONS, ROUTE_FAIL_TRACK_MAX,
          ROLE_IDLE_TTL_MS, ROLE_EMPTY_GRACE_MS, MESH_REWARM_COOLDOWN_MS, MESH_REWARM_BACKOFF_MAX_MS,
-         MERGE_CAPABLE_DEFAULT } from './constants.js';
+         MERGE_CAPABLE_DEFAULT,
+         TOPIC_LIFETIME_DEFAULT, CHILD_MIN_READERS, CHILD_STEP_DOWN_MS, CHILD_MIN_STAY_MS, CHILD_COOLDOWN_MS } from './constants.js';
 import { topicStoreMethods }   from './topicStore.js';
 import { rootElectionMethods } from './rootElection.js';
 import { repairPlaneMethods }  from './repairPlane.js';
@@ -69,6 +70,7 @@ import { syncEngineMethods }    from './syncEngine.js';
 import { writeFlightMethods }   from './writeFlight.js';
 import { tombstoneAuthWiringMethods, makeTombstoneAuthority } from './tombstoneAuthWiring.js';
 import { mergeMachineMethods }  from './mergeMachine.js';
+import { topicLifetimeMethods } from './topicLifetime.js';
 import buildBoundary1Registry from './boundary1Registry.js';
 import { shadowEnabled } from '../registry/index.js';
 import { envNum, envStr } from '../utils/env.js';
@@ -112,6 +114,7 @@ export class AxonaManager {
     tombstoneAuth = false,         // REF-1.1 S2.0c Phase 3: DEFAULT-OFF shadow wiring of the tombstone authorization core (observe-only; no behavior change)
     frameRegistry = false,         // REF-1.1 S2: DEFAULT-OFF Boundary-1 frame-contract registry (shadow-wraps the 19 routed handlers; observe-only; byte-identical flag-off)
     mergeCapable = null,           // dual-root reconciliation (axona-docs 14a6bd8): DEFAULT-OFF; null = env MERGE_CAPABLE, else MERGE_CAPABLE_DEFAULT
+    topicLifetime = null,          // Topic Lifetime (axona-docs 11288d7): DEFAULT-OFF; null = env TOPIC_LIFETIME, else TOPIC_LIFETIME_DEFAULT
     ..._legacy   // accepted-and-ignored clean-break tunables (pickRelayPeer, rootSetSize, …)
   } = {}) {
     if (!dht || typeof dht.routeMessage !== 'function' || typeof dht.getSelfId !== 'function'
@@ -325,6 +328,25 @@ export class AxonaManager {
     // refused without the release token the machine mints. Release and arming
     // are separate words from David; neither is this option's default.
     this._mergeCapable    = !!(mergeCapable ?? envNum('MERGE_CAPABLE', MERGE_CAPABLE_DEFAULT));
+    // TOPIC LIFETIME (axona-docs architecture/Axona-Topic-Lifetime-v0.1.md v0.9
+    // @ 11288d7; David "Build" 2026-10-20). OFF by default. Armed (option
+    // `topicLifetime` or env TOPIC_LIFETIME=1): a standby appointment is a lease
+    // renewed only by a fresh REPLICATE; a root whose cache holds no body and
+    // whose demand has been zero for DROP_MS dismantles its whole framework
+    // with TOPIC_TERMINATED, tombstones included; a thin child steps down with
+    // REHOME. See topicLifetime.js. Release and arming are David's words.
+    this._topicLifetime   = !!(topicLifetime ?? envNum('TOPIC_LIFETIME', TOPIC_LIFETIME_DEFAULT));
+    this._leftRecords     = new Map();  // topicIdBig -> { rootId, epoch, upstream, until (mono), why }  (4.2, LEFT only)
+    this._childCooldown   = new Map();  // subHex -> wall ts  a node that stepped down is not re-promoted before this (4.7)
+    this._genHighWater    = new Map();  // topicIdBig -> { epoch, until (mono) }  the epoch a generation this node ENDED carried (4.1; identity only)
+    this._childMinReaders = envNum('CHILD_MIN_READERS', CHILD_MIN_READERS);
+    this._childStepDownMs = envNum('CHILD_STEP_DOWN_MS', CHILD_STEP_DOWN_MS);
+    this._childMinStayMs  = envNum('CHILD_MIN_STAY_MS', CHILD_MIN_STAY_MS);
+    this._childCooldownMs = envNum('CHILD_COOLDOWN_MS', CHILD_COOLDOWN_MS);
+    this._grantHoldUntil  = 0;          // wall ts: grants refused until then after a wall-clock jump beyond S (4.4)
+    this._lifeLastWall    = null; this._lifeLastMono = null;
+    this._rolesTerminated = 0; this._rolesSteppedDown = 0; this._standbyLapsed = 0;
+    this._grantsRefused   = 0; this._rehomed = 0; this._subscriptionsEnded = 0;
     this._rolesReapedIdle = 0;
     this._rolesReapedDead = 0;   // subscriber-less AND message-less: reaped on sight
     this._pending         = new Map();  // pull corrId -> { resolve, timer }
@@ -773,7 +795,9 @@ export class AxonaManager {
         dead: this._rolesReapedDead || 0,
         idle: this._rolesReapedIdle || 0,
         empty: this._rolesReapedEmpty || 0,   // keyspace-pinned roots whose empty-role grace was spent (4.116.0)
+        terminated: this._rolesTerminated || 0,   // roots that ended their generation under Topic Lifetime 4.5
       },
+      lifetime: this._lifetimeInspect(),
       capacity: this.inspectCapacity(),
     };
   }
@@ -1371,8 +1395,19 @@ export class AxonaManager {
     // The dispatch outcome is RETURNED, not discarded: _sendSubscribe is the only
     // caller that knows whether the via it handed us came from the _upstream pin,
     // so it is the only one that can act on a failure. See _unpinIfWaypointDead.
+    // THE DECLARATION (Topic Lifetime 4.3, armed only): a seat is exactly one of
+    // three kinds. A reader (this node's own sub/host, or any SUB that declares
+    // nothing) counts 1; a child relay declares its own demand; a standby
+    // declares itself and counts 0, naming the generation it was appointed to.
+    // Reader takes precedence over child over standby, so a backup that also
+    // relays or reads is never counted at 0.
+    let decl = {};
+    if (this._topicLifetime && role && !role.isRoot && !sub && !this._hostedTopics.has(topicBig)) {
+      if (role.subscribers.size > 0) decl = { demand: this._roleDemand(role) };
+      else if (role.backupOf !== null || this._backupTopics.has(topicBig)) decl = { standby: true, ...(role.standbyGen ? { gen: { ...role.standbyGen } } : {}) };
+    }
     const sent = this._send(T.SUB, {
-      topicId: idHex(topicBig), via, subscriberId: idHex(this.nodeId),
+      topicId: idHex(topicBig), via, subscriberId: idHex(this.nodeId), ...decl,
       // THE SINCE-ALL REPLAY (dual-root 4(d) step 5): the first merge-bearing SUB
       // asks for everything, so the demoted loser converges to the winner's
       // state as its child — a child's ordinary since is its own high water, and
@@ -1642,6 +1677,9 @@ export class AxonaManager {
     this._beaconSeen.clear();
     this._lastAnnounce?.clear();
     this._lastBeaconAt = 0;
+    this._leftRecords?.clear();
+    this._childCooldown?.clear();
+    this._genHighWater?.clear();
     this._appDelivered.clear();
     for (const p of this._pending.values()) clearTimeout(p.timer);
     this._pending.clear();
@@ -1861,6 +1899,7 @@ Object.assign(
   writeFlightMethods,    // E3 (Dead-Root Eviction v0.3): ingest-ack write completion, receipt probe, evict + retry-promote
   tombstoneAuthWiringMethods,  // REF-1.1 S2.0c Phase 3: DEFAULT-OFF shadow observers (no-op unless the tombstoneAuth flag is set)
   mergeMachineMethods,   // dual-root reconciliation 4(d) (axona-docs 14a6bd8): the cut, the gate, the forward to the winner — behind mergeCapable
+  topicLifetimeMethods,  // Topic Lifetime (axona-docs 11288d7): standby lease, termination, thin-branch step-down — behind topicLifetime
 );
 
 export default AxonaManager;
