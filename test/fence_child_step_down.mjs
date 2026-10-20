@@ -104,6 +104,28 @@ console.log('\n[C3] an unreachable upstream is not a step-down: the election pat
   check('thin for three windows with the root unreachable: still a child', ctx.held(TP(5)) && ctx.sent(T.REHOME).length === 0);
 }
 
+console.log('\n[B02] BODY CUSTODY (Aster c5adedec): a thin child holding a body its upstream did not send does not step down until the upstream has it');
+{
+  const ctx = manager({ neighbors: [ROOT] });
+  const role = await child(ctx, TP(10), [A]);
+  // a body that arrived from BELOW (a reader's replay-up), not from the upstream
+  role.cache.push({ msgId: 'below', publishTs: T0, json: '{}', bytes: 80 }); role.cacheIds.add('below');
+  let at = T0;
+  for (; at <= T0 + 3 * CHILD_STEP_DOWN_MS; at += TICK) { await renewAll(ctx, TP(10), [A]); await ctx.tick(at); }
+  check('thin for three windows with an untransferred body: still a child, the body still held, logged once', ctx.held(TP(10)) && role.cache.length === 1 && ctx.log('step-down-held-body').length === 1 && ctx.sent(T.REHOME).length === 0);
+  // the root pulled it and fanned it back: a DELIVER from the upstream carrying that msgId marks it upstream-held
+  await ctx.am._onDeliver({ topicId: idHex(TP(10)), from: idHex(ROOT), msgs: [{ msgId: 'below', publishTs: T0, json: '{}', seq: 1 }], gen: { root: lc(idHex(ROOT)), epoch: 1 } }, { targetId: SELF, isTerminal: true, hopCount: 1 });
+  await renewAll(ctx, TP(10), [A]); await ctx.tick(at);
+  check('once the upstream has sent that body back, the child steps down', !ctx.held(TP(10)) && ctx.sent(T.REHOME).length === 1);
+  // a body the upstream SENT is no bar: the ordinary relay case
+  const r2 = await child(ctx, TP(11), [A]);
+  await ctx.am._onDeliver({ topicId: idHex(TP(11)), from: idHex(ROOT), msgs: [{ msgId: 'fromup', publishTs: ctx.clock.t, json: '{}', seq: 1 }], gen: { root: lc(idHex(ROOT)), epoch: 1 } }, { targetId: SELF, isTerminal: true, hopCount: 1 });
+  check('the relayed body is cached and marked upstream-held', r2.cache.length === 1 && r2.upstreamHeld.has('fromup'));
+  const born = ctx.clock.t;
+  while (ctx.clock.t - born <= CHILD_STEP_DOWN_MS + TICK) { await renewAll(ctx, TP(11), [A]); await ctx.tick(ctx.clock.t + TICK); }
+  check('a thin child whose only body came from its upstream steps down', !ctx.held(TP(11)));
+}
+
 console.log('\n[H1] REHOME received: the reader keeps the app\'s subscription, re-pins to the named upstream, renews fast; a REHOME from a non-upstream is ignored');
 {
   const ctx = manager();
@@ -113,6 +135,9 @@ console.log('\n[H1] REHOME received: the reader keeps the app\'s subscription, r
   const subsBefore = ctx.sent(T.SUB).length;
   await rehome(ctx, TP(6), STRANGER, ROOT);
   check('from a stranger: ignored, pin unchanged', ctx.log('rehome-ignored').length === 1 && ctx.am._upstream.get(TP(6))[0] === lc(idHex(C)) && ctx.sent(T.SUB).length === subsBefore);
+  await ctx.am._onDeliver({ topicId: idHex(TP(6)), from: idHex(C), msgs: [], gen: { root: lc(idHex(ROOT)), epoch: 2 } }, { targetId: SELF, isTerminal: true, hopCount: 1 });
+  await ctx.am._onRehome({ topicId: idHex(TP(6)), from: idHex(C), upstream: idHex(ROOT), gen: { root: lc(idHex(ROOT)), epoch: 1 } }, { targetId: SELF, isTerminal: true, hopCount: 1, fromId: idHex(C) });
+  check('from my upstream but naming an OLD generation (epoch 1 while attached to 2): ignored (TL-B01)', ctx.log('rehome-ignored').some((r) => r.ctx.why === 'foreign-generation') && ctx.am._upstream.get(TP(6))[0] === lc(idHex(C)));
   await rehome(ctx, TP(6), C, ROOT);
   check('from my upstream C: the app\'s subscription persists', ctx.am.mySubscriptions.has(TP(6)));
   check('re-pinned to the named upstream (the root), interval snapped to the floor', ctx.am._upstream.get(TP(6))[0] === lc(idHex(ROOT)) && s.interval === ctx.am.renewFastMs);

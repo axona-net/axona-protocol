@@ -231,6 +231,48 @@ console.log('\n[R5] the notice is bound to the generation: a foreign root\'s not
   check('a root ignores another root\'s notice for its topic (a split\'s halves each end by their own rule)', ctx.held(TP(13)) && mine.isRoot && ctx.log('terminated-ignored').some((r) => r.ctx.why === 'i-am-root'));
 }
 
+console.log('\n[B01] EXACT generation binding (Aster c5adedec): a delayed notice of an OLD generation ends nothing in the NEW one');
+{
+  const ctx = manager();
+  // a backup of R at epoch 2 receives R's delayed notice for epoch 1
+  await replicate(ctx, TP(17), R1, { gen: gen(R1, 2), issuedAt: T0 });
+  await terminated(ctx, TP(17), R1, gen(R1, 1));
+  check('a backup appointed at (R1, 2) ignores a notice naming (R1, 1): same root, old epoch', ctx.held(TP(17)) && ctx.am._backupTopics.has(TP(17)) && ctx.log('terminated-ignored').some((r) => r.ctx.why === 'foreign-generation'));
+  await terminated(ctx, TP(17), R1, gen(R1, 2));
+  check('…and obeys the notice naming (R1, 2)', !ctx.held(TP(17)));
+  // a reader attached through its DELIVERs to (R1, 2) ignores the (R1, 1) notice from its upstream, then obeys (R1, 2)
+  const rows = []; ctx.am.onPubsubDelivery((t, json) => rows.push(JSON.parse(json)));
+  ctx.am.pubsubSubscribe(TP(18));
+  await ctx.am._onDeliver({ topicId: idHex(TP(18)), from: idHex(R1), msgs: [], gen: gen(R1, 2) }, { targetId: SELF, isTerminal: true, hopCount: 1 });
+  check('a DELIVER naming (R1, 2) pins the upstream and records the attachment', ctx.am._upstream.get(TP(18))[0] === lc(idHex(R1)) && ctx.am._attachedGen.get(TP(18))?.epoch === 2);
+  await terminated(ctx, TP(18), R1, gen(R1, 1));
+  check('the (R1, 1) notice from the same upstream ends nothing: subscription intact, no row', ctx.am.mySubscriptions.has(TP(18)) && rows.length === 0);
+  await terminated(ctx, TP(18), R1, gen(R1, 2));
+  check('the (R1, 2) notice ends it with one row', !ctx.am.mySubscriptions.has(TP(18)) && rows.length === 1 && rows[0].generation.epoch === 2);
+  // a CHILD attached to (R1, 2) forwards the exact generation and ignores the old one
+  const child = seed(ctx, TP(19), { isRoot: false });
+  ctx.am._upstream.set(TP(19), [lc(idHex(R1))]);
+  await ctx.am._onDeliver({ topicId: idHex(TP(19)), from: idHex(R1), msgs: [], gen: gen(R1, 2) }, { targetId: SELF, isTerminal: true, hopCount: 1 });
+  await sub(ctx, TP(19), C1, {}, { viaSelf: true });
+  await terminated(ctx, TP(19), R1, gen(R1, 1));
+  check('the child attached to (R1, 2) ignores (R1, 1) and keeps its seat', ctx.held(TP(19)) && child.subscribers.size === 1);
+  const before = ctx.sent(T.TOPIC_TERMINATED).length;
+  await terminated(ctx, TP(19), R1, gen(R1, 2));
+  const fwd = ctx.sent(T.TOPIC_TERMINATED).slice(before);
+  check('…obeys (R1, 2) and forwards exactly that generation', !ctx.held(TP(19)) && fwd.length === 1 && fwd[0].payload.gen.epoch === 2);
+  // a renewed reader: re-seated in the next generation, the old notice is harmless
+  ctx.am.pubsubSubscribe(TP(20));
+  await ctx.am._onDeliver({ topicId: idHex(TP(20)), from: idHex(R1), msgs: [], gen: gen(R1, 1) }, { targetId: SELF, isTerminal: true, hopCount: 1 });
+  await ctx.am._onDeliver({ topicId: idHex(TP(20)), from: idHex(R1), msgs: [], gen: gen(R1, 2) }, { targetId: SELF, isTerminal: true, hopCount: 1 });
+  await terminated(ctx, TP(20), R1, gen(R1, 1));
+  check('a reader re-attached to (R1, 2) survives a late (R1, 1) notice', ctx.am.mySubscriptions.has(TP(20)));
+  // an UNVERSIONED attachment (an older-kernel upstream named no generation) still binds by upstream
+  ctx.am.pubsubSubscribe(TP(21));
+  await ctx.am._onDeliver({ topicId: idHex(TP(21)), from: idHex(R1), msgs: [] }, { targetId: SELF, isTerminal: true, hopCount: 1 });
+  await terminated(ctx, TP(21), R1, gen(R1, 1));
+  check('with no generation attached (older-kernel upstream) a notice from the upstream still ends it', !ctx.am.mySubscriptions.has(TP(21)));
+}
+
 console.log('\n[R6] unarmed: the frame is consumed without effect; the tick terminates nothing');
 {
   const ctx = manager({ armed: false });

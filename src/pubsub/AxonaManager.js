@@ -339,6 +339,7 @@ export class AxonaManager {
     this._leftRecords     = new Map();  // topicIdBig -> { rootId, epoch, upstream, until (mono), why }  (4.2, LEFT only)
     this._childCooldown   = new Map();  // subHex -> wall ts  a node that stepped down is not re-promoted before this (4.7)
     this._genHighWater    = new Map();  // topicIdBig -> { epoch, until (mono) }  the epoch a generation this node ENDED carried (4.1; identity only)
+    this._attachedGen     = new Map();  // topicIdBig -> { root, epoch }  the generation this node's OWN subscription is attached to (from its DELIVERs; 4.1)
     this._childMinReaders = envNum('CHILD_MIN_READERS', CHILD_MIN_READERS);
     this._childStepDownMs = envNum('CHILD_STEP_DOWN_MS', CHILD_STEP_DOWN_MS);
     this._childMinStayMs  = envNum('CHILD_MIN_STAY_MS', CHILD_MIN_STAY_MS);
@@ -1510,6 +1511,7 @@ export class AxonaManager {
 
   pubsubUnsubscribe(topicId) {
     this.mySubscriptions.delete(topicId);
+    this._attachedGen?.delete(topicId);
     this._coldSteerGen?.delete(topicId);   // release any live cold-steer cycle so a resubscribe starts clean
     const via = this._upstream.get(topicId) || [];
     this._send(T.UNSUB, { topicId: idHex(topicId), via, subscriberId: idHex(this.nodeId) });
@@ -1680,6 +1682,7 @@ export class AxonaManager {
     this._leftRecords?.clear();
     this._childCooldown?.clear();
     this._genHighWater?.clear();
+    this._attachedGen?.clear();
     this._appDelivered.clear();
     for (const p of this._pending.values()) clearTimeout(p.timer);
     this._pending.clear();

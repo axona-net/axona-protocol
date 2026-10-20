@@ -166,6 +166,20 @@ console.log('\n[G4] a generation-less grant (an older kernel): a renewal only fr
   check('no gen, from a stranger: refused, principal unchanged', role.backupOf === lc(idHex(R1)) && ctx.log('grant-refused').filter((r) => r.ctx.why === 'legacy-not-principal').length === 2);
 }
 
+console.log('\n[B03] a gen-bearing grant with NO issue stamp is refused, as a creation and as a renewal (Aster c5adedec)');
+{
+  const ctx = manager();
+  await replicate(ctx, TP(17), R1, { gen: gen(R1) });
+  check('no stamp, no role here: refused (no-stamp), nothing created', !ctx.held(TP(17)) && ctx.log('grant-refused').some((r) => r.ctx.why === 'no-stamp'));
+  await replicate(ctx, TP(17), R1, { gen: gen(R1), issuedAt: T0 });
+  const role = ctx.role(TP(17));
+  ctx.clock.t = T0 + 30_000;
+  await replicate(ctx, TP(17), R1, { gen: gen(R1) });
+  check('no stamp, from the principal, gen present: refused too; lastReplicaAt unmoved', role.lastReplicaAt === T0 && ctx.log('grant-refused').filter((r) => r.ctx.why === 'no-stamp').length === 2);
+  await replicate(ctx, TP(17), R1, { gen: gen(R1), issuedAt: 'soon' });
+  check('a non-finite stamp is no stamp', role.lastReplicaAt === T0 && ctx.log('grant-refused').filter((r) => r.ctx.why === 'no-stamp').length === 3);
+}
+
 console.log('\n[U1] unarmed: a REPLICATE carries no gen or issuedAt, any grant appoints, and no lease ever lapses (4.116.0)');
 {
   const ctx = manager({ armed: false });

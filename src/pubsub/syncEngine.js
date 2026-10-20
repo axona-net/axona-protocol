@@ -318,6 +318,12 @@ export const syncEngineMethods = {
           this._grantsRefused++;
           this._log('info', 'grant-refused', { topic, why: 'left-record', gen: gen.root.slice(0, 10), epoch: gen.epoch });
           return;
+        } else if (!Number.isFinite(payload.issuedAt)) {
+          // A gen-bearing grant with NO issue stamp cannot be aged and is not a
+          // legacy renewal either (Aster c5adedec TL-B03): refused, created or renewed.
+          this._grantsRefused++;
+          this._log('info', 'grant-refused', { topic, why: 'no-stamp', gen: gen.root.slice(0, 10) });
+          return;
         } else if (this._grantFresh(payload, now) === false) {
           this._grantsRefused++;
           this._log('info', 'grant-refused', { topic, why: 'stale', ageMs: now - payload.issuedAt, gen: gen.root.slice(0, 10) });

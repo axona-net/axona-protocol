@@ -1099,6 +1099,14 @@ export const wireHandlersMethods = {
     }
 
     const role = this.axonRoles.get(topicBig);        // set iff I'm a relay → re-fan
+    // ATTACHMENT (Topic Lifetime 4.1, Aster TL-B01): the generation this DELIVER
+    // names is the one this node is attached to; a notice or a REHOME binds to it
+    // exactly. Recorded on the relay role and, for a reader, on the manager.
+    if (this._topicLifetime && payload.from && this._genValid(payload.gen)) {
+      const g = this._genNorm(payload.gen);
+      if (role && !role.isRoot) role.attachedGen = g;
+      if (this.mySubscriptions.has(topicBig)) this._attachedGen.set(topicBig, g);
+    }
     for (const m of (Array.isArray(payload.msgs) ? payload.msgs : [])) {
       if (!m) continue;
       if (m.del) {
@@ -1111,6 +1119,7 @@ export const wireHandlersMethods = {
         continue;
       }
       if (this._tombstoned(role, m.msgId, m.json)) continue;          // killed → suppress (don't cache/deliver/re-fan)
+      if (role && !role.isRoot) { (role.upstreamHeld ??= new Set()).add(m.msgId); }   // the upstream SENT this body: it holds it (Topic Lifetime 4.7, TL-B02)
       if (role && !role.cacheIds.has(m.msgId)) {       // relay: cache once + re-fan once
         this._cachePush(role, { msgId: m.msgId, publishTs: m.publishTs, json: m.json, seq: m.seq });
         if (Number.isFinite(m.seq) && m.seq > role.seq) role.seq = m.seq;   // keep counter ready if we're promoted to root
@@ -1124,7 +1133,8 @@ export const wireHandlersMethods = {
 
   // Fan a stamped message to every subscriber (optionally excluding the sender).
   _fanout(role, msg, excludeHex) {
-    const base = { topicId: idHex(role.topicId), from: idHex(this.nodeId), msgs: [msg] };
+    const gen = this._topicLifetime ? this._genCarried(role) : null;   // Topic Lifetime 4.1: a DELIVER names the generation it serves
+    const base = { topicId: idHex(role.topicId), from: idHex(this.nodeId), msgs: [msg], ...(gen ? { gen } : {}) };
     // Publish-time expectation ledger (DRAFT, gated) — record the believed
     // recipient/lease set BEFORE the sends, at every fanning node. See _fanoutLedger.
     if (this._latTrace) this._fanoutLedger(role, msg?.msgId, excludeHex);
@@ -1145,6 +1155,8 @@ export const wireHandlersMethods = {
   _replayTo(role, subHex, sinceTs, ping, latest = false) {
     const subBig = idBig(subHex);
     const isSelf = subBig === this.nodeId;
+    const genT = this._topicLifetime ? this._genCarried(role) : null;   // Topic Lifetime 4.1
+    const gx = genT ? { gen: genT } : {};
     let batch = [], bytes = 0, sent = false;
     const inBatch = new Set();
     const flush = () => {
@@ -1152,7 +1164,7 @@ export const wireHandlersMethods = {
       sent = true;
       if (isSelf) for (const m of batch) this._deliverToApp(role.topicId, m.json, m.msgId, m.publishTs, m.seq);
       else this._route(subBig, T.DELIVER,
-        { topicId: idHex(role.topicId), from: idHex(this.nodeId), msgs: batch });
+        { topicId: idHex(role.topicId), from: idHex(this.nodeId), msgs: batch, ...gx });
       batch = []; bytes = 0;
     };
     for (const c of role.cache) {
@@ -1187,10 +1199,10 @@ export const wireHandlersMethods = {
     if (dels.length) {
       sent = true;
       if (isSelf) for (const dm of dels) this._deliverKillToApp(role.topicId, dm.msgId, dm.killTs, dm.seq);
-      else this._route(subBig, T.DELIVER, { topicId: idHex(role.topicId), from: idHex(this.nodeId), msgs: dels });
+      else this._route(subBig, T.DELIVER, { topicId: idHex(role.topicId), from: idHex(this.nodeId), msgs: dels, ...gx });
     }
     if (ping && !sent && !isSelf) {                    // repin even with no history
-      this._route(subBig, T.DELIVER, { topicId: idHex(role.topicId), from: idHex(this.nodeId), msgs: [] });
+      this._route(subBig, T.DELIVER, { topicId: idHex(role.topicId), from: idHex(this.nodeId), msgs: [], ...gx });
     }
   },
 

@@ -180,10 +180,10 @@ function rowDefs() {
       evidence: EvidenceLevel.OBSERVED, proves: Proves.OBSERVATION, outcome: 'DeliveryOutcome', terminalOutcome: 'ENTRIES_DELIVERED_AT_MOST_ONCE',
       retry: Retry.NONE, topicProfile: PROFILE, eventIdScheme: 'MSGID_CONTENT_V1', replayCursorType: NA, orderingModel: 'UNION_IDEMPOTENT',
       authGuard: NA, admissionGuard: NA, placementGuard: NA,
-      projection: { payload: ['topicId', 'from', 'msgs'] },
-      schema: { require: ['topicId', 'msgs'], types: { topicId: 'string', msgs: 'arr' } },
+      projection: { payload: ['topicId', 'from', 'msgs', 'gen'] },   // gen: the generation served (Topic Lifetime 4.1, armed only)
+      schema: { require: ['topicId', 'msgs'], types: { topicId: 'string', msgs: 'arr', gen: 'obj' } },
       capabilityRange: { profile: PROFILE },
-      errorContract: ['drop-duplicate-msgid'], traceFields: ['topicId'], budget: budget(3),
+      errorContract: ['drop-duplicate-msgid'], traceFields: ['topicId'], budget: budget(4),
       note: 'fan-out down the tree; each entry keyed by its own msgId (per-entry idempotency, not a frame key)',
     }),
     ({
@@ -343,11 +343,11 @@ function rowDefs() {
       evidence: EvidenceLevel.ROUTED, proves: Proves.ROUTING, outcome: 'RoutingOutcome', terminalOutcome: 'READER_REHOMED',
       retry: Retry.IDEMPOTENT, topicProfile: PROFILE, eventIdScheme: NA, replayCursorType: NA, orderingModel: 'ARRIVAL',
       authGuard: NA, admissionGuard: NA, placementGuard: 'upstreamBinding',
-      projection: { payload: ['topicId', 'from', 'upstream'], meta: ['targetId'] },
-      schema: { require: ['topicId', 'from'], types: { topicId: 'string', from: 'string', upstream: 'string' } },
+      projection: { payload: ['topicId', 'from', 'upstream', 'gen'], meta: ['targetId'] },
+      schema: { require: ['topicId', 'from'], types: { topicId: 'string', from: 'string', upstream: 'string', gen: 'obj' } },
       idempotency: { from: ['topicId', 'from'] },
       capabilityRange: { profile: PROFILE },
-      errorContract: ['ignore-not-upstream'], traceFields: ['topicId'], budget: budget(4),
+      errorContract: ['ignore-not-upstream'], traceFields: ['topicId'], budget: budget(5),
       note: 'a thin child steps down (4.7): its readers walk to the named upstream on their fast cadence; kernel-internal, the app\'s subscription persists; only from the receiver\'s current upstream',
     }),
     ({
