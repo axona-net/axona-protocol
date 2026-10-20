@@ -548,6 +548,23 @@ console.log('\n[X2] the handover obeys the same decision as every control effect
   check('positive control: a delegate riding the reply to a live newer attempt hands over', ctx.am._upstream.get(TP(40))[0] === lc(idHex(R2)));
 }
 
+console.log('\n[X3] a forward handover applies the accepted generation with the parent change (Aster 31f7527f)');
+{
+  const ctx = manager();
+  const C1 = NODE(21);
+  const rows = []; ctx.am.onPubsubDelivery((t, json) => rows.push(JSON.parse(json)));
+  ctx.am.pubsubSubscribe(TP(43));
+  await deliver(ctx, TP(43), R1, { gen: gen(R1, 1) });
+  check('attached (R1, 1), pinned R1', attachOf(ctx, TP(43)).gen.epoch === 1 && ctx.am._upstream.get(TP(43))[0] === lc(idHex(R1)));
+  await ctx.am._onDeliver({ topicId: idHex(TP(43)), from: idHex(R1), msgs: [], gen: gen(R1, 2), delegate: idHex(C1) }, { targetId: SELF, isTerminal: true, hopCount: 1 });
+  check('a forward handover from the selected parent at epoch 2: pin moves to C1 AND the attachment is at epoch 2', ctx.am._upstream.get(TP(43))[0] === lc(idHex(C1)) && attachOf(ctx, TP(43)).gen.epoch === 2 && attachOf(ctx, TP(43)).from === lc(idHex(C1)));
+  await terminated(ctx, TP(43), R1, gen(R1, 1));
+  check('a delayed (R1, 1) notice ends nothing: subscription intact, no row', ctx.am.mySubscriptions.has(TP(43)) && rows.length === 0);
+  check('the committed attempt did not move on a forward handover', attachOf(ctx, TP(43)).committed === 1);
+  await terminated(ctx, TP(43), R1, gen(R1, 2));
+  check('the (R1, 2) notice ends it with one row', !ctx.am.mySubscriptions.has(TP(43)) && rows.length === 1);
+}
+
 console.log('\n[R6] unarmed: the frame is consumed without effect; the tick terminates nothing');
 {
   const ctx = manager({ armed: false });

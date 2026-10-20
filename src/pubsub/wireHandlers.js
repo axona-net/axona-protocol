@@ -1154,7 +1154,12 @@ export const wireHandlersMethods = {
       if (fromSelected) {
         const child = lc(payload.delegate);
         const a = decision.a || { gen: null, from: null, nonce: null, seq: 0, attempts: new Map(), committed: 0 };
-        if (decision.v === 'commit') { a.committed = decision.k; a.gen = decision.g; }
+        // THE ACCEPTED GENERATION GOES WITH THE PARENT CHANGE (Aster 31f7527f X3):
+        // a forward handover names the selected parent's newer epoch and the
+        // attachment follows it, as the same frame without a delegate would;
+        // the attempt advances only on a commit.
+        if (decision.v === 'commit') a.committed = decision.k;
+        a.gen = decision.g;
         a.from = child; this._attach.set(topicBig, a);
         this._upstream.set(topicBig, [child]);
         const s = this.mySubscriptions.get(topicBig); if (s) s.interval = this.renewFastMs;
