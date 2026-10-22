@@ -42,7 +42,7 @@ async function makePeer(network, domain, lat, lng) {
   await transport.start(id.id);
   const node = new NeuronNode({ id: fromHex(id.id), lat, lng });
   node.transport = transport;
-  const peer = new AxonaPeer({ domain, node, nodeIdentity: id, transport });
+  const peer = new AxonaPeer({ domain, node, nodeIdentity: id, transport, mergeCapable: false /* pre-merge scene (#354): the spurious claim HOLDS A BODY and is demoted by self-verification; armed (4.118.0 default) a root with custody is never demoted without a union (packet guarantee: custody unconditional), so the demotion within 15 s is a pre-merge invariant */ });
   await peer.start();
   return { peer, id, node, transport };
 }

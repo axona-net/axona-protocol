@@ -71,7 +71,7 @@ class DivergentFabric {
         return best === null ? { path: [] } : { path: [idHex(best)] };
       },
     };
-    rec.am = new AxonaManager({ dht: sealTestDht(dht), now: () => self.clock, renewMs: 60_000, renewFastMs: 5_000, dropMs: 180_000 });
+    rec.am = new AxonaManager({ mergeCapable: false /* pre-merge scene (4.21.0 soak disease): the heal under test is the hw/lw PULLUP union with the ex-root DEMOTING on the beacon; armed (4.118.0 default) the loser keeps custody until the merge's step 5, so "exactly one root after two rounds" is a pre-merge invariant — the union itself converges either way */, dht: sealTestDht(dht), now: () => self.clock, renewMs: 60_000, renewFastMs: 5_000, dropMs: 180_000 });
     rec.am.onPubsubDelivery((_t, _j, msgId) => rec.got.push(msgId));
     if (typeof rec.am.onPubsubKill === 'function') rec.am.onPubsubKill((_t, msgId) => rec.kills.push(msgId));
     this.nodes.set(idBig, rec);
