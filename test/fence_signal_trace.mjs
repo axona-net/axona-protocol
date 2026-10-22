@@ -92,6 +92,11 @@ const cand = (n) => ({ candidate: `candidate:${n} 1 UDP 1 192.0.2.${n} 5000${n} 
     await O.mesh.onSignal('c9', answer.payload); await tick();
     const ans = O.logs.find((l) => l.ev === 'answer-recv');
     check('L2 the dialing side logs answer-recv with the attempt and its age', ans?.ctx.from === 'c9' && ans?.ctx.attempt === stO.attempt && Number.isFinite(ans?.ctx.ms) && ans.ctx.ms >= 0, JSON.stringify(ans));
+    const applied = O.logs.find((l) => l.ev === 'answer-applied');
+    check('L2b answer-applied follows answer-recv, after setRemoteDescription, with the queued count', applied && O.logs.indexOf(applied) > O.logs.indexOf(ans) && applied.ctx.attempt === stO.attempt && applied.ctx.queued === 2 && stO.pc.added.length === 2, JSON.stringify(applied));
+    const sentLog = O.logs.find((l) => l.ev === 'offer-sent');
+    check('L4 offer-sent binds the dialer\'s PC incarnation to the wire attempt id (the join key with offer-recv)', sentLog?.ctx.inc === stO.inc && sentLog?.ctx.attempt === offer.payload.attempt && rec?.ctx.attempt === sentLog?.ctx.attempt, JSON.stringify(sentLog));
+    check('L5 no trace line carries an SDP body', !O.logs.concat(R.logs).some((l) => ['offer-recv', 'offer-sent', 'answer-recv', 'answer-applied', 'first-remote-candidate'].includes(l.ev) && JSON.stringify(l.ctx).includes('v=0')));
     // A drop must still be traced: an offer refused for a missing attempt id logs offer-recv first.
     const P = mkMesh(PolyfillPC);
     P.mesh._attemptPolicy = { requireFor: () => true };

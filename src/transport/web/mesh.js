@@ -1046,6 +1046,8 @@ export class MeshManager {
         this._log('answer-recv', { from, inc: peer.inc, attempt: peer.attempt ?? null, ms: Date.now() - peer.since });   // signal trace (4.120.0)
         await peer.pc.setRemoteDescription({ type: 'answer', sdp: payload.sdp });
         if (this._peers.get(from) !== peer) return;   // continuation: the attempt ended while we awaited
+        // Signal trace (4.120.0): the answer TOOK (answer-recv only says it arrived).
+        this._log('answer-applied', { from, inc: peer.inc, attempt: peer.attempt ?? null, ms: Date.now() - peer.since, queued: peer.pendingCandidates.length });
         await this._flushPendingCandidates(peer);
       } else if (payload.kind === 'sdp-reject') {
         // G5: the responder refused our offer for capacity. Binds to the
@@ -1491,6 +1493,10 @@ export class MeshManager {
       // state it started under must still be the key's current one.
       if (this._peers.get(peerId) !== state) { this._log('offer-continuation-stale', { peerId, attempt: state.attempt }); return; }
       this._sendSignal(peerId, { kind: 'sdp-offer', sdp: offer.sdp, attempt: state.attempt });
+      // Signal trace (4.120.0): the dialer's join key — this PC's incarnation
+      // (which every later pc-state/teardown carries) bound to the wire attempt
+      // id (which the answering side's offer-recv carries). No SDP is logged.
+      this._log('offer-sent', { peerId, inc: state.inc, attempt: state.attempt ?? null, ms: Date.now() - state.since });
       this._ledger?.negotiating(state.inc);   // row 3: first frame out
     } catch (err) {
       this._log('offer-create-failed', { peerId, err: err.message });
