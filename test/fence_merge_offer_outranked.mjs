@@ -5,11 +5,13 @@
 //
 // Before: _onMergeOffer logged merge-offer-loses and sent nothing back. The
 // offerer's sweep reads an unanswered, reached offer as a LEGACY winner and
-// demotes the claim that outranks W toward W (merge-legacy-fallback): 8
-// fallbacks against 994 merge-step5 rounds on the 4.122.0 fleet
-// (ops/signal-trace-20261023), and the hand-fork scene of
-// fence_merge_sim_partition whenever the fork names the true root before the
-// true root offers. After: W answers REPLAYACK disposition 'outranked'; the
+// demotes the claim that outranks W toward W (merge-legacy-fallback). The
+// fleet logs (ops/signal-trace-20261023) hold 6 fallbacks against 598
+// merge-step5 rounds in a 4.121.0 window and 2 against 396 in a 4.122.0
+// window, not separated into this silence and lost routes. (The hand-fork
+// scene of fence_merge_sim_partition fails when W's route to the fork
+// dead-ends; an answer cannot help there.) After: W answers REPLAYACK
+// disposition 'outranked'; the
 // offerer closes the offer, keeps its claim, drops the candidate, and W's own
 // offer runs the round the relation calls for.
 //
