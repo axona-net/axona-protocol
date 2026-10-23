@@ -20,21 +20,21 @@ const w = frameWiring(defs);
 const REQUEST = ['dht:lookup_step', 'dht:lookahead_probe', 'dht:local_probe', 'dht:find_closest_set', 'dht:route_msg'];
 const NOTIFY = ['dht:reinforce', 'dht:triadic_introduce', 'dht:hop_cache', 'dht:lateral_spread', 'dht:presence', 'dht:peer-leaving'];
 
-check('T1. exactly 11 rows, all minted (defineRow-valid), versionRange {4,4}; request legs are REQUEST_RESPONSE, notification legs ONE_WAY',
-  rows.length === 11 && rows.every((r) => r.versionRange.min === 4 && r.versionRange.max === 4)
+check('T1. exactly 13 rows (11 + 4.123.0 lookup_walk, lookup_done), all minted (defineRow-valid), versionRange {4,4}; request legs are REQUEST_RESPONSE, notification legs ONE_WAY',
+  rows.length === 13 && rows.every((r) => r.versionRange.min === 4 && r.versionRange.max === 4)
   && REQUEST.every((t) => byType[t].kind === 'REQUEST_RESPONSE')
   && NOTIFY.every((t) => byType[t].kind === 'ONE_WAY'));
 check('T1b. each request leg carries the TransportRpcRef channel subject — REQUEST_RESPONSE with empty requires + transportScope "request-return" (the reply obligation, Aster ASTER-E2-CHANNEL-SUBJECT)',
   REQUEST.every((t) => byType[t].correlation?.kind === 'TransportRpcRef'
     && byType[t].correlation.requires.length === 0 && byType[t].correlation.transportScope === 'request-return'));
-check('T2. 5 request legs + 6 notification legs (from the raw defs\' transportKind)',
-  defs.filter((d) => d.transportKind === 'request').length === 5 && defs.filter((d) => d.transportKind === 'notification').length === 6);
+check('T2. 6 request legs + 7 notification legs (from the raw defs\' transportKind)',
+  defs.filter((d) => d.transportKind === 'request').length === 6 && defs.filter((d) => d.transportKind === 'notification').length === 7);
 check('T3. owningService planes: DhtRouting (5 routing legs), SynaptomeLearning (5), PeerLifecycle (1)',
   REQUEST.every((t) => byType[t].owningService === 'DhtRouting')
   && ['dht:reinforce', 'dht:triadic_introduce', 'dht:hop_cache', 'dht:lateral_spread', 'dht:presence'].every((t) => byType[t].owningService === 'SynaptomeLearning')
   && byType['dht:peer-leaving'].owningService === 'PeerLifecycle');
-check('W1. wiring: 11 bare-wire keys; each value carries { wire, transportKind }; no composite keys',
-  w.size === 11 && [...w.entries()].every(([k, v]) => v.wire === k && (v.transportKind === 'request' || v.transportKind === 'notification')));
+check('W1. wiring: 13 bare-wire keys; each value carries { wire, transportKind }; no composite keys',
+  w.size === 13 && [...w.entries()].every(([k, v]) => v.wire === k && (v.transportKind === 'request' || v.transportKind === 'notification')));
 
 // registerFrame binds every B5 wire via the BARE wire (transportKind OMITTED). B5
 // is single-primitive and bare-keyed, so under the STRICT composite/bare partition
@@ -51,8 +51,8 @@ for (const d of defs) {
   // composite keys) and refuses. No bare-row-of-matching-kind fallback.
   if (threw(() => registerFrame(recv, d.wire, () => {}, { registry: reg, transportKind: d.transportKind }))) suppliedRefused++;
 }
-check('R1. registerFrame binds all 11 wires via the BARE wire when transportKind is OMITTED', boundOk === 11, `\n   ${boundOk}/11`);
-check('R1b. a SUPPLIED transportKind — even the row\'s OWN kind — refuses on all 11 wires (strict composite-only; B5 is bare-keyed, no fallback)', suppliedRefused === 11, `\n   ${suppliedRefused}/11`);
+check('R1. registerFrame binds all 13 wires via the BARE wire when transportKind is OMITTED', boundOk === 13, `\n   ${boundOk}/13`);
+check('R1b. a SUPPLIED transportKind — even the row\'s OWN kind — refuses on all 13 wires (strict composite-only; B5 is bare-keyed, no fallback)', suppliedRefused === 13, `\n   ${suppliedRefused}/13`);
 check('R2. an undeclared wire is refused', threw(() => registerFrame(recv, 'not_a_dht_wire', () => {}, { registry: reg })));
 // STRICT COMPOSITE-ONLY (Aster 2795636a cond.2 + correction a767b880): a supplied
 // transportKind takes the composite key ONLY; a miss refuses with NO bare-row
@@ -82,7 +82,7 @@ check('R5. a malformed transportKind is rejected', threw(() => registerFrame(rec
     try { boom('Z'); } catch (e) { rethrew = e.message === `boom:${d.wire}`; }
     if (!rethrew) allRethrow = false;
   }
-  check('D1. flag-off: EVERY B5 leg (all 11 wires) runs its handler VERBATIM (return identical)', allVerbatim);
+  check('D1. flag-off: EVERY B5 leg (all 13 wires) runs its handler VERBATIM (return identical)', allVerbatim);
   check('D2. flag-off: a throwing handler on every leg rethrows VERBATIM', allRethrow);
   check('D3. flag-off: ZERO traces emitted across all legs and invocations (inert wrap, byte-identical)', tr.length === 0, `traces=${tr.length}`);
 }

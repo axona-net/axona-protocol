@@ -463,11 +463,11 @@ for (const [name, body] of Object.entries(ctxNeg)) {
   const METH = { methods: new Set(['onRequest', 'onNotification', 'onRoutedMessage']) };
   const migd = discover(files, METH);
   const b5doors = migd.doors.filter((d) => d.boundary === 'B5');
-  const B5_REQUEST = ['lookup_step', 'lookahead_probe', 'local_probe', 'find_closest_set', 'route_msg'];
-  const B5_NOTIFY  = ['reinforce', 'triadic_introduce', 'hop_cache', 'lateral_spread', 'presence', 'peer-leaving'];
+  const B5_REQUEST = ['lookup_step', 'lookup_walk', 'lookahead_probe', 'local_probe', 'find_closest_set', 'route_msg'];
+  const B5_NOTIFY  = ['reinforce', 'triadic_introduce', 'hop_cache', 'lateral_spread', 'presence', 'peer-leaving', 'lookup_done'];
   const B5_WIRES = [...B5_REQUEST, ...B5_NOTIFY];
-  check('P6. MIGRATED B5: the default table discovers EXACTLY 11 B5 doors, all in AxonaPeer._installRoutingHandlers on this._b5door, bare-keyed (transportKind OMITTED → null), covering the 5 request + 6 notification wires — the B3 mesh:signal door in the SAME method (this._b3door) is NOT miscounted',
-    b5doors.length === 11
+  check('P6. MIGRATED B5: the default table discovers EXACTLY 13 B5 doors (4.123.0 added lookup_walk + lookup_done), all in AxonaPeer._installRoutingHandlers on this._b5door, bare-keyed (transportKind OMITTED → null), covering the 6 request + 7 notification wires — the B3 mesh:signal door in the SAME method (this._b3door) is NOT miscounted',
+    b5doors.length === 13
     && b5doors.every((d) => d.context === 'AxonaPeer._installRoutingHandlers' && d.registry === 'this._b5door' && d.transportKind === null)
     && B5_WIRES.every((w) => b5doors.some((d) => d.wire === w))
     && b5doors.every((d) => d.wire !== 'mesh:signal')
