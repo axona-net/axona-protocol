@@ -45,7 +45,7 @@ let passed = 0, failed = 0;
 const check = (label, ok, extra = '') => { console.log(`  ${ok ? '✓' : '✗'} ${label}${ok ? '' : ' ' + extra}`); ok ? passed++ : failed++; };
 const wait = (ms) => new Promise(r => setTimeout(r, ms));
 const J = (v) => JSON.stringify(v, (k, x) => (typeof x === 'bigint' ? x.toString(16).slice(0, 8) : x));
-const EXPECTED = 32;
+const EXPECTED = 34;
 process.on('exit', (code) => { if (code === 0 && passed + failed < EXPECTED) { console.log(`  ✗ exited after ${passed + failed} of ${EXPECTED} checks`); process.exitCode = 1; } });
 
 const ARMED = (extra = {}) => ({
@@ -204,6 +204,21 @@ const stopAll = async (...xs) => { for (const x of xs) { try { await x.peer.stop
     const lf = pexLogs(A).at(-1);
     check('A4 a throwing ask is counted askFailed, logged ok:false, and the next ask waits a full T_pex', A.peer._pexStats.askFailed === 1 && lf.ok === false && A.peer._fillLast?.pex?.state === 'failed' && A.peer._pexNextAt > Date.now() + 200, J({ lf, st: A.peer._pexStats }));
     A.ctl.sendOverride = null;
+    // A4b 4.127.0: a channel that answers "no handler" (a peer before the frame) is marked incapable and the SAME tick asks another.
+    const B3 = await makePeer(net, ON, 2, 5);
+    await link(A, B3);
+    const noHandlerFor = new Set([B.big, B2.big]);
+    A.ctl.sendOverride = async (p, type, body) => { if (type === 'peer_exchange' && noHandlerFor.has(p)) throw new Error(`remote handler error: no handler for 'peer_exchange'`); return A.sim.send(p, type, body); };
+    const asksBefore = A.peer._pexStats.asks, logsBefore = pexLogs(A).length;
+    A.peer._pexAskedAt.set(B3.big, Date.now());   // B3 is the most recently asked, so B and B2 (older) are picked first
+    await wait(320); await tick(A);
+    const tail = pexLogs(A).slice(logsBefore);
+    check('A4b two channels answering "no handler" are marked incapable and the tick goes on to the third, which answers — all in ONE tick',
+      A.peer._pexStats.incapable === 2 && A.peer._fillLast?.pex?.state === 'answered' && A.peer._fillLast?.pex?.peer === B3.hex.slice(0, 12) && A.peer._pexStats.asks - asksBefore === 3 && tail.filter((l) => l.incapable === true).length === 2, J({ st: A.peer._pexStats, last: A.peer._fillLast?.pex, tail }));
+    await wait(320); await tick(A);
+    check('A4c the incapable channels are not asked again while the window holds; the capable one is', A.peer._pexStats.incapable === 2 && A.peer._fillLast?.pex?.peer === B3.hex.slice(0, 12) && A.peer._pexIncapable.size === 2, J({ st: A.peer._pexStats, last: A.peer._fillLast?.pex }));
+    A.ctl.sendOverride = null;
+    await A.sim.closeConnection(B3.hex); A.node.synaptome.delete(B3.big);
     // A5 the peer-off answer is observed as such.
     const Boff = await makePeer(net, OFF, 2, 4);
     await A.sim.closeConnection(B.hex); await A.sim.closeConnection(B2.hex); A.node.synaptome.delete(B.big); A.node.synaptome.delete(B2.big);

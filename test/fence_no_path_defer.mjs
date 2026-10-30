@@ -57,7 +57,7 @@ let passed = 0, failed = 0;
 const check = (label, ok, extra = '') => { console.log(`  ${ok ? '✓' : '✗'} ${label}${ok ? '' : ' ' + extra}`); ok ? passed++ : failed++; };
 const wait = (ms) => new Promise(r => setTimeout(r, ms));
 const J = (v) => JSON.stringify(v, (k, x) => (typeof x === 'bigint' ? x.toString(16).slice(0, 8) : x));
-const EXPECTED = 38;
+const EXPECTED = 46;
 process.on('exit', (code) => { if (code === 0 && passed + failed < EXPECTED) { console.log(`  ✗ exited after ${passed + failed} of ${EXPECTED} checks`); process.exitCode = 1; } });
 
 const ARMED = { synaptomeMaintain: { kNear: 5, maxPerTick: 3, kCache: 8, pPending: 2, directoryMs: 600000, noPathMs: 100 }, attemptGuard: {}, admissionGate: { kNear: 5, sparseFloor: 2, closeGraceMs: 60000 } };
@@ -190,6 +190,7 @@ const stopAll = async (...xs) => { for (const x of xs) { try { await x.peer.stop
     // N6 the listener receiving reason 'no-path' (defensive): no mark, no guard change.
     A.node._deadPeers.delete(S);
     A.peer._fillCache.delete(S);   // drop the cooling entry so the dial goes out again
+    A.peer._attemptGuard.pathDelivered(S);   // and the guard's path backoff (4.127.0), so the dial is allowed
     await dialOut(A, S);
     A.ctl.negCb(S, 'no-path', 'inc-1');
     check('N6 a negotiation-failed event with reason no-path writes no mark and ends no token (the kernel kept its own books)', !A.node._deadPeers.has(S) && guardState(A, S).inflight === true, J({ marked: A.node._deadPeers.has(S), g: guardState(A, S) }));
@@ -208,6 +209,28 @@ const stopAll = async (...xs) => { for (const x of xs) { try { await x.peer.stop
     await offer(C, U, { reach: false });
     check('N8 when the mesh has nothing to retire (aborted false) the token is still released and the candidate requeued', C.ctl.aborts.length === 1 && noPathLogs(C)[0]?.aborted === false && guardState(C, U).inflight === false && C.peer._fillCache.has(U), J({ l: noPathLogs(C)[0], g: guardState(C, U) }));
     await stopAll(A, B, C);
+  }
+
+  // ── P. 4.127.0: the backoff gates EVERY dial site; it doubles; delivery resets it ──
+  {
+    const net = new SimNetwork();
+    const A = await makePeer(net, ON, 6, 1);
+    const S = stranger(A.big, 109);
+    await dialOut(A, S);
+    await offer(A, S, { reach: false });
+    const c1 = noPathLogs(A).at(-1).cooldownMs;
+    const dialsBefore = A.ctl.relay.length;
+    const out = await A.peer._considerCandidate(S, 'lateral');
+    check('P1 a NON-fill dial site (_considerCandidate from a lookup/lateral source) is refused while the path backoff holds: skip, no relay dial', out === 'skip' && A.ctl.relay.length === dialsBefore && A.peer._attemptGuard.noPathOf(S) === 1, J({ out, dials: A.ctl.relay.length - dialsBefore, n: A.peer._attemptGuard.noPathOf(S) }));
+    A.peer._attemptGuard._state.get(S.toString(16).padStart(66, '0').slice(2)).pathUntil = 0;   // let the next dial out without waiting
+    A.peer._fillCache.get(S).noPathUntil = 0;
+    await dialOut(A, S);
+    await offer(A, S, { reach: false });
+    const c2 = noPathLogs(A).at(-1).cooldownMs;
+    check('P2 the second consecutive non-delivery doubles the cooldown (noPath 2; second draw in [½,1½] of 2× the base 100)', A.peer._attemptGuard.noPathOf(S) === 2 && c2 >= 100 && c2 <= 300 && c1 >= 50 && c1 <= 150 && A.peer._fillCache.get(S).noPathUntil > Date.now() + 90, J({ c1, c2, n: A.peer._attemptGuard.noPathOf(S) }));
+    await offer(A, S, { reach: true, route: async () => ({ consumed: true, hops: 2 }) });
+    check('P3 a DELIVERED offer resets the backoff', A.peer._attemptGuard.noPathOf(S) === 0 && A.peer._attemptGuard.pathUntilOf(S) === 0, J({ n: A.peer._attemptGuard.noPathOf(S) }));
+    await stopAll(A);
   }
 
   // ── B. ON, NOT confirmed ─────────────────────────────────────────────
@@ -257,7 +280,7 @@ const stopAll = async (...xs) => { for (const x of xs) { try { await x.peer.stop
     const T = stranger(B.big, 108);
     const draws = [];
     for (let i = 0; i < 12; i++) { B.ctl.relay.length = 0; B.peer._fillCache.delete(T); await dialOut(B, T); await offer(B, T, { reach: false }); draws.push(noPathLogs(B).at(-1).cooldownMs); B.peer._fillCache.delete(T); }
-    check('C5 the cooldown is drawn in [T/2, 3T/2] of noPathMs and is not constant', draws.every((d) => d >= 50 && d <= 150) && new Set(draws).size > 1, J(draws));
+    check('C5 the cooldown DOUBLES per consecutive non-delivery with a [½,1½] draw each step and caps at noPathMaxMs (100 × 2^i, cap 600000)', draws.every((d, i) => { const step = Math.min(600000, 100 * Math.pow(2, i)); return d >= step * 0.5 - 1 && d <= step * 1.5 + 1; }) && new Set(draws).size > 1, J(draws));
     await stopAll(A, B);
   }
 
@@ -278,6 +301,25 @@ const stopAll = async (...xs) => { for (const x of xs) { try { await x.peer.stop
     check('G5 ON: a bind clears the entry as before', on.expiredOf(id) === false && on.attemptsOf(id) === 0 && on.allow(id, 1097) === true);
     const p = mk(true); exhaust(p, 2000); p.onFreshRecord(id, 2010);
     check('G6 a fresh presence record still refills the whole budget at once', p.expiredOf(id) === false && p.allow(id, 2011) === true);
+    // 4.127.0: the PATH backoff
+    const b = new AttemptGuard({ maxAttempts: 4, baseMs: 1, refillWindowMs: 40 });
+    const d1 = b.deferPath(id, 3000, { baseMs: 100, maxMs: 1000, jitter: false });
+    const d2 = b.deferPath(id, 3000, { baseMs: 100, maxMs: 1000, jitter: false });
+    const d3 = b.deferPath(id, 3000, { baseMs: 100, maxMs: 1000, jitter: false });
+    const d5 = (b.deferPath(id, 3000, { baseMs: 100, maxMs: 1000, jitter: false }), b.deferPath(id, 3000, { baseMs: 100, maxMs: 1000, jitter: false }));
+    check('G7 deferPath DOUBLES per consecutive non-delivery (100, 200, 400 …) and is capped at maxMs (1000 at the fifth)', d1 === 100 && d2 === 200 && d3 === 400 && d5 === 1000 && b.noPathOf(id) === 5, JSON.stringify([d1, d2, d3, d5, b.noPathOf(id)]));
+    check('G8 allow() refuses while the path backoff holds, for ANY asker, and allows once it has passed', b.allow(id, 3999) === false && b.allow(id, 4000) === true);
+    b.pathDelivered(id);
+    const emptied = b._state.size === 0;   // read BEFORE allow(), which creates an entry on first sight
+    check('G9 a delivered offer resets the backoff (count 0, no hold) and drops an entry with nothing else pending', b.noPathOf(id) === 0 && b.pathUntilOf(id) === 0 && emptied && b.allow(id, 3001) === true);
+    const c = new AttemptGuard({ maxAttempts: 4, baseMs: 1 });
+    c.deferPath(id, 5000, { baseMs: 100, maxMs: 1000, jitter: false }); c.deferPath(id, 5000, { baseMs: 100, maxMs: 1000, jitter: false });
+    const kk = c.begin(id, 5300); c.end(id, true, 5301, kk);
+    check('G10 a BIND clears the backoff with the entry; a fresh presence record clears it too', c.noPathOf(id) === 0 && c.allow(id, 5302) === true && (() => { const f = new AttemptGuard({}); f.deferPath(id, 1, { baseMs: 100, maxMs: 1000 }); const kq = f.begin(id, 2); f.onFreshRecord(id, 3); return f.noPathOf(id) === 0 && f.pathUntilOf(id) === 0 && f.inflightOf(id) === true && typeof kq === 'number'; })());
+    const j = new AttemptGuard({});
+    const draws = new Set(); for (let i = 0; i < 12; i++) { const g = new AttemptGuard({}); draws.add(g.deferPath(id, 1, { baseMs: 100, maxMs: 1000 })); }
+    check('G11 the jittered draw is in [½, 1½] of the step and not constant', [...draws].every((x) => x >= 50 && x <= 150) && draws.size > 1, JSON.stringify([...draws]));
+    void j;
   }
 
   // ── M. the real mesh and composite ───────────────────────────────────
