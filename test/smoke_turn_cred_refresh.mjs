@@ -14,9 +14,20 @@
 //     silent give-up.
 //   - GRADUATED / disconnected node: re-dial (no live socket, no in-flight
 //     work to lose) — heals the backbone relays behind the flood.
+//     4.108.0: a graduate ABOVE the mesh floor comes back for the credential
+//     ONLY — client-hello `intent: 'turn-refresh'`, the welcome's credential
+//     installed, the socket released by the node itself with 4200 one
+//     macrotask later, graduated again. It never returns to `open`; a thin
+//     graduate re-bootstraps in full (fence_turn_refresh_graduated B4).
 //
 // Scenarios:
-//   A  graduated node re-dials before expiry, mesh untouched
+//   A  graduated node re-dials before expiry for the credential only: intent
+//      sent, fresh credential installed, socket released with 4200, graduated
+//      again — and a hello the bridge still sends on that socket, whose verify
+//      is in flight when the socket closes, is DROPPED (the state stays
+//      graduated; it does not flip to `open` with no socket). Before this
+//      guard the scenario expected `open`, which 4.108.0 retired, and passed
+//      only when the close happened to land inside the verify.
 //   B  held-open node refreshes IN-BAND: sends turn-refresh, applies the
 //      `turn` reply, socket NOT closed, no new socket, re-arms
 //   C  held-open, bridge never replies → RETRIES to the cap, then defers:
@@ -64,6 +75,7 @@ class FakeWS {
   }
   close(code, reason) {
     if (this.readyState === 3) return;
+    this.closedWith = { code, reason };
     this.readyState = 3;
     this._fire('close', { code, reason });
   }
@@ -86,16 +98,19 @@ function feedWelcome(sock, turn) {
   sock.deliver({ type: 'welcome', connId: CONN_ID, serverNonce: SERVER_NONCE,
                  version: '4.60.1', kernelVersion: '4.60.1', turn });
 }
-async function feedBridgeHello(sock) {
+async function bridgeHelloFrame() {
   const cbv   = cbvFromNonces(SERVER_NONCE, CONN_ID, 'bridge');
   const hello = await buildAuthHello({ identity: bridgeIdent, cbv });
-  sock.deliver({ type: 'axona', payload: { k: 'ntf', type: 'hello', body: hello } });
+  return { type: 'axona', payload: { k: 'ntf', type: 'hello', body: hello } };
 }
+async function feedBridgeHello(sock) { sock.deliver(await bridgeHelloFrame()); }
 async function connectOpen(identity, turn, extra = {}) {
+  const events = [];   // the transport's log, for the checks that read an event
   const t = webTransport({
     bridgeUrl: 'wss://test.example', identity, WebSocketImpl: FakeWS,
     handshakeTimeoutMs: 2000, reconnectInitialMs: 20, reconnectMaxMs: 20,
     graduationMeshFloor: 3, graduationRecheckMs: 100000,
+    log: (e, c) => events.push({ e, c }),
     ...extra,
   });
   const startP = t.start();
@@ -104,7 +119,7 @@ async function connectOpen(identity, turn, extra = {}) {
   feedWelcome(sock, turn);
   await feedBridgeHello(sock);
   await startP;
-  return { t, sock };
+  return { t, sock, events };
 }
 
 async function main() {
@@ -115,10 +130,11 @@ async function main() {
   // A cred "expiring in 5s" collapses fireIn to the 1s floor (safety default 5m),
   // so the first refresh fires ~1s after welcome in every scenario.
 
-  // ── A. Graduated node re-dials before expiry, mesh untouched ────────
+  // ── A. Graduated node re-dials before expiry for the credential ONLY ──
   liveSockets = [];
   {
-    const { t, sock } = await connectOpen(alice, turnCred(5));
+    const { t, sock, events } = await connectOpen(alice, turnCred(5));
+    const has = (e) => events.some((x) => x.e === e);
     check('A: open on first connect', t.bridgeState === 'open');
     t.webrtc.boundPeers = () => [1n, 2n, 3n];
     const nAtGrad = liveSockets.length;
@@ -129,8 +145,29 @@ async function main() {
     const s2 = t.socket;
     const reFrame = s2 && s2.sent[0] ? JSON.parse(s2.sent[0]) : null;
     check('A: the re-dial re-sent client-hello', reFrame && reFrame.type === 'client-hello');
-    feedWelcome(s2, turnCred(5)); await feedBridgeHello(s2); await sleep(5);
-    check('A: back to open with a fresh credential', t.bridgeState === 'open');
+    check('A: ... with intent turn-refresh (4.108.0 credential-only re-dial)', reFrame && reFrame.intent === 'turn-refresh');
+    // The welcome carries the fresh credential; the node installs it and
+    // releases the socket itself one macrotask later (turn-refresh-redial-complete).
+    const fresh = turnCred(5);
+    const helloFrame = await bridgeHelloFrame();   // built BEFORE the welcome: no await below
+    const eventsBeforeWelcome = events.length;
+    feedWelcome(s2, fresh);
+    check('A: the fresh credential was installed from the welcome',
+      events.slice(eventsBeforeWelcome).some((x) => x.e === 'turn-config' && x.c?.username === fresh.username));
+    check('A: the node took the credential-only completion path', has('turn-refresh-redial-complete'));
+    // A bridge that still sends its hello on this socket (one without the
+    // intent) lands it while the socket is closing: welcome, hello and close
+    // in ONE tick, so the hello's async verify is in flight across the close
+    // — the ordering the node's own deferred 4200 produces at random.
+    s2.deliver(helloFrame);
+    s2.close(4200, 'released by bridge');
+    await sleep(20);
+    check('A: the socket was released with 4200', s2.closedWith?.code === 4200 && s2.readyState === 3);
+    check('A: graduated again, not open — the re-dial was for the credential only',
+      t.bridgeState === 'graduated' && t.socket === null);
+    check('A: the hello whose verify straddled the close was dropped, not bound',
+      has('auth-bridge-late-hello-dropped') && events.filter((x) => x.e === 'auth-bridge-complete').length === 1);
+    check('A: no re-dial storm — exactly the two sockets', liveSockets.length === nAtGrad + 1);
     await t.stop();
   }
 

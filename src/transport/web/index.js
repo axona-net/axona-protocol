@@ -1133,6 +1133,20 @@ export function webTransport({
       const cbv = bridgeCbv();
       if (!cbv) { log('auth-bridge-no-cbv', { label }); return; }
       const res = await verifyAuthHello(body, { cbv });
+      // The verify awaited; the socket that carried this hello may have closed
+      // meanwhile (the close handler clears bridgeServerNonce, so bridgeCbv()
+      // no longer matches the cbv captured above, or is null). A late result
+      // must not bind the bridge peer on a dead connection, answer with a
+      // hello-ack nobody will read, or report 'open' with no socket. Seen on
+      // the 4.108.0 credential-only re-dial: the node releases the socket one
+      // macrotask after the welcome; a bridge that still sent its hello on
+      // that socket had the verify in flight across the close, and the node
+      // read 'open' while graduated with socket null (smoke_turn_cred_refresh
+      // scenario A passed only on that race).
+      if (!socketOpen || bridgeCbv() !== cbv) {
+        log('auth-bridge-late-hello-dropped', { label, socketOpen });
+        return;
+      }
       if (!res.ok) {
         log('auth-bridge-rejected', { label, reason: res.reason });
         // A proto mismatch means the bridge speaks a version this

@@ -886,7 +886,7 @@
     {
       "file": "smoke_turn_cred_refresh.mjs",
       "class": "default",
-      "reason": "4.60.0. Fences #44 TURN credential refresh before TTL lapse: in-band held-open refresh, graduated re-dial, strict expiry parse."
+      "reason": "4.60.0. Fences #44 TURN credential refresh before TTL lapse: in-band held-open refresh, graduated re-dial, strict expiry parse. 4.127.0: scenario A is the 4.108.0 credential-only re-dial (intent, fresh credential, 4200, graduated again) and fences the late-hello guard — a bridge hello whose verify straddles the socket close is dropped, never bound as `open` with no socket."
     },
     {
       "file": "smoke_unpub.js",
