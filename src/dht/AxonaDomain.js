@@ -94,6 +94,13 @@ const DEFAULTS = Object.freeze({
   // whatever this flag says (an older node ignores the field). Env
   // SIGNAL_RETURN_ROUTE=1 arms it where process.env exists.
   SIGNAL_RETURN_ROUTE: false,
+  // Closer-Born Relay Inherits the Root v0.6 (David 2026-11-03 "go ahead with
+  // the return routes"): a pub/sub request that may earn a reply (SUB,
+  // MERGE_OFFER, PULLUP) keeps SIGNAL_RPATH_MAX path ids instead of
+  // PATH_MEMORY, so the holder can reverse a 9-16 hop walk. The manager's
+  // `returnRoute` option records and uses the reversed path. Env RETURN_ROUTE=1
+  // arms both where process.env exists.
+  RETURN_ROUTE:        false,
   // P3 of Mesh Partition Self-Heal v0.2 (axona-docs 87a608a; David 2026-10-30
   // "Build P3 and P2, default off"): an offer the mesh COULD NOT DELIVER is a
   // deferral, not a failure of the identity. Confirmed non-delivery is the
@@ -166,7 +173,7 @@ export class AxonaDomain {
     }
     // P2/P3 arming, the same rule: the env speaks only when the option is not
     // given AND the variable is set; =0 is a control arm, unset is the default.
-    for (const flag of ['NO_PATH_DEFER', 'PEER_EXCHANGE', 'SIGNAL_RETURN_ROUTE']) {
+    for (const flag of ['NO_PATH_DEFER', 'PEER_EXCHANGE', 'SIGNAL_RETURN_ROUTE', 'RETURN_ROUTE']) {
       if (opts[flag] == null) {
         const e = envNum(flag, null);
         if (e !== null) this[flag] = e === 1;

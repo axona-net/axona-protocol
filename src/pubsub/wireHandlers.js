@@ -257,6 +257,7 @@ export const wireHandlersMethods = {
   },
 
   async _onSub(payload, meta) {
+    this._noteReturn(meta, [meta?.originId, payload?.subscriberId]);   // return route (Closer-Born v0.6)
     const d = this._topicDecision(payload, meta);
     if (d === 'forward') return;
     if (d === 'reroute') { this._reroute(T.SUB, payload); return 'consumed'; }
@@ -918,6 +919,7 @@ export const wireHandlersMethods = {
   // adopting history must not resurrect a killed message).
   _onPullUp(payload, meta) {
     if (meta.targetId !== this.nodeId) return;
+    this._noteReturn(meta, [meta?.originId, payload?.parentId]);       // return route (Closer-Born v0.6)
     if (typeof payload.corr === 'string') { this._mergeAnswerPull(payload, meta); return 'consumed'; }   // dual-root 4(d) step 3
     this._syncAnswerPull(payload);
     return 'consumed';

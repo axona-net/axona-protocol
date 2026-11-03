@@ -181,6 +181,8 @@ const RELAY_REACH_TTL_MS = 5000;
 // longest reverse path honoured (the R3 path memory bounds what arrives).
 const SIGNAL_RETURN_TTL_MS = 60_000;
 const SIGNAL_RETURN_CAP    = 256;
+// Pub/sub requests whose reply returns by their route (RETURN_ROUTE).
+const RETURN_ROUTE_REQUESTS = new Set(['pubsub:sub', 'pubsub:mergeoffer', 'pubsub:pullup']);
 const SIGNAL_RPATH_MAX     = 16;
 // 4.123.0 acked lookup walk: _lookupStep's return when it handed the walk on.
 const WALK_FORWARDED = Symbol('lookup-walk-forwarded');
@@ -1434,7 +1436,8 @@ export class AxonaPeer extends DHT {
         // ids so a 9-to-16-hop offer still names its offerer at the terminal;
         // every other frame keeps PATH_MEMORY, unchanged.
         const pathMem0 = Number(domain.PATH_MEMORY) > 0 ? Number(domain.PATH_MEMORY) : 8;
-        const pathMem = type === 'mesh:signal' ? Math.max(pathMem0, SIGNAL_RPATH_MAX) : pathMem0;
+        const longPath = type === 'mesh:signal' || (domain.RETURN_ROUTE && RETURN_ROUTE_REQUESTS.has(type));
+        const pathMem = longPath ? Math.max(pathMem0, SIGNAL_RPATH_MAX) : pathMem0;
         const downstream = await node.transport.send(nextHopId, 'route_msg', {
           type, payload, targetId: toHex(targetBig), hops: hops + 1, originId,
           path: [...pathHex.slice(-(pathMem - 1)), toHex(meId)],          // R3

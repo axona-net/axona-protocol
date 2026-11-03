@@ -392,6 +392,7 @@ export const mergeMachineMethods = {
   // ── step 2 (W): the OFFER arrives; evaluate the relation, then pull ────
   _onMergeOffer(payload, meta) {
     if (meta.targetId !== this.nodeId) return;
+    this._noteReturn(meta, [meta?.originId, payload?.loser]);          // return route (Closer-Born v0.6)
     if (!this._mergeCapable) return 'consumed';
     let topicBig; try { topicBig = idBig(payload.topicId); } catch { return 'consumed'; }
     const loser = lc(payload.loser);

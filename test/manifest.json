@@ -1167,6 +1167,11 @@
       "note": "Closer-Born Relay Inherits the Root Part 3e step 6 under cutover, Orion CUT-1/CUT-2 (council c0a842d2). C1: a refused-capacity answer clears the candidate and the next verify offers again; handover completes. C3: a winner re-minted mid-round is offered again at once under a new corr with its new epoch. Controls C2/C4 off = legacy. Mutants: transient clause dropped -> C1 red; record-then-abort order under cutover -> C3 red."
     },
     {
+      "file": "fence_return_routes.mjs",
+      "class": "default",
+      "note": "Closer-Born Relay Inherits the Root v0.6 return routes for pub/sub (David 2026-11-03 'go ahead with the return routes'). Real AxonaPeers on a one-way sim island: PULLUP, SUB (re-sent by an intermediate) and MERGE_OFFER leave a breadcrumb; REPLAYUP/REPLAYACK/replies return by the reverse hops; 12-hop walk keeps 16 ids with domain RETURN_ROUTE; broken hop falls back; expiry; defaults off. Mutants (7): breadcrumb ignored, each of three notes removed, named node not appended, pubsub keeps PATH_MEMORY, no fallback -> each red."
+    },
+    {
       "file": "fence_signal_return_route.mjs",
       "class": "default",
       "note": "Closer-Born Relay Inherits the Root v0.4 build order step 1, the reply route of finding 80fe76eb (David 2026-11-03 \"go ahead with the reply route\"). Real AxonaPeers over the sim transport, bound-only; chain O -> H1 -> H2 -> H3 -> H4 -> T with channels open both ways and synapses forward only; after the offer crosses, every backward entry the offer taught is removed (the island: reachable, not routable). R0 control (SIGNAL_RETURN_ROUTE off): T's answer is not sent (reach lookup-no), O hears nothing. R1 on: the answer returns along the reverse of the offer's own hops (each hop honours the next `rpath` id while its channel is open, else greedy) and O receives it, reach return-route, delivered, 5 hops. R2 a gone reverse hop: no throw, fellBack 1, the own lookup still decides. R3 an expired breadcrumb is not used. R4 default OFF. Mutants (all red at R1): the terminal's _deliverRouted meta without `path`; the hop's rpath honour removed; the reverse() removed; the originator ignoring opts.rpath."

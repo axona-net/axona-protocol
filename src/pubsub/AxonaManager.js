@@ -72,6 +72,8 @@ import { tombstoneAuthWiringMethods, makeTombstoneAuthority } from './tombstoneA
 import { mergeMachineMethods }  from './mergeMachine.js';
 import { topicLifetimeMethods } from './topicLifetime.js';
 import buildBoundary1Registry from './boundary1Registry.js';
+// Return routes (Closer-Born v0.6): breadcrumb lifetime, map bound, path ids kept.
+const RETURN_ROUTE_TTL_MS = 60_000, RETURN_ROUTE_CAP = 256, RETURN_RPATH_MAX = 16;
 import { shadowEnabled } from '../registry/index.js';
 import { envNum, envStr } from '../utils/env.js';
 
@@ -113,7 +115,8 @@ export class AxonaManager {
     identity = null,               // node TRANSPORT identity {pubkey, sign} — signs D1 INGEST-ACK proofs
     tombstoneAuth = false,         // REF-1.1 S2.0c Phase 3: DEFAULT-OFF shadow wiring of the tombstone authorization core (observe-only; no behavior change)
     frameRegistry = false,         // REF-1.1 S2: DEFAULT-OFF Boundary-1 frame-contract registry (shadow-wraps the 19 routed handlers; observe-only; byte-identical flag-off)
-    cutover = null,                // Closer-Born Relay Inherits the Root v0.4 Part 3e (David 2026-11-03 "go ahead with the cutover state machine"): DEFAULT OFF; null = env CUTOVER
+    cutover = null,
+    returnRoute = null,            // Closer-Born v0.6 return routes (David 2026-11-03 "go ahead with the return routes"): DEFAULT OFF; null = env RETURN_ROUTE                // Closer-Born Relay Inherits the Root v0.4 Part 3e (David 2026-11-03 "go ahead with the cutover state machine"): DEFAULT OFF; null = env CUTOVER
     mergeCapable = null,           // dual-root reconciliation (axona-docs 14a6bd8): DEFAULT-ON since 4.118.0; null = env MERGE_CAPABLE, else MERGE_CAPABLE_DEFAULT
     topicLifetime = null,          // Topic Lifetime (axona-docs 11288d7): DEFAULT-ON since 4.118.0; null = env TOPIC_LIFETIME, else TOPIC_LIFETIME_DEFAULT
     ..._legacy   // accepted-and-ignored clean-break tunables (pickRelayPeer, rootSetSize, …)
@@ -330,6 +333,16 @@ export class AxonaManager {
     // are separate words from David; neither is this option's default.
     this._mergeCapable    = !!(mergeCapable ?? envNum('MERGE_CAPABLE', MERGE_CAPABLE_DEFAULT));
     this._cutover         = !!(cutover ?? envNum('CUTOVER', 0));
+    // RETURN ROUTES (Closer-Born Relay Inherits the Root v0.6, 3a/3d/Part 7).
+    // A SUB, MERGE_OFFER or PULLUP that arrives leaves a breadcrumb: the
+    // reverse of the hops it came over, keyed by its route originator and by
+    // the requester it names. A frame this node then routes to that node goes
+    // back along those hops (each hop honours the next id only while a channel
+    // to it is open, else greedy), and the own lookup is the fallback. The
+    // breadcrumb is a hint: authority rests on signed envelopes and corr.
+    this._returnRoute     = !!(returnRoute ?? envNum('RETURN_ROUTE', 0));
+    this._retRoutes       = new Map();
+    this._returnRouteStats = { recorded: 0, used: 0, delivered: 0, fellBack: 0 };
     // TOPIC LIFETIME (axona-docs architecture/Axona-Topic-Lifetime-v0.1.md v0.9
     // @ 11288d7; David "Build" 2026-10-20). OFF by default. Armed (option
     // `topicLifetime` or env TOPIC_LIFETIME=1): a standby appointment is a lease
@@ -418,13 +431,50 @@ export class AxonaManager {
   // A caller that ignores the result is safe; a caller that reads it gets the truth.
   _route(targetBig, type, payload) {
     const fail = (e) => ({ consumed: false, error: String((e && e.message) || e), transportError: true });
+    const opts = { fromId: idHex(this.nodeId), viaHopBudget: VIA_HOP_BUDGET };
+    const send = (o) => Promise.resolve(this.dht.routeMessage(targetBig, type, payload, o)).catch(fail);
     try {
-      return Promise.resolve(
-        this.dht.routeMessage(targetBig, type, payload, { fromId: idHex(this.nodeId), viaHopBudget: VIA_HOP_BUDGET }),
-      ).catch(fail).then((r) => this._tallyRoute(targetBig, r));
+      const rpath = this._returnRoute ? this._returnFor(targetBig) : null;
+      if (!rpath) return send(opts).then((r) => this._tallyRoute(targetBig, r));
+      // The return route first; a reply it does not deliver goes by the own
+      // lookup. A duplicate is safe: replies are idempotent by msgId or corr.
+      const RS = this._returnRouteStats; RS.used++;
+      return send({ ...opts, rpath }).then((r) => {
+        if (r && r.consumed) { RS.delivered++; return r; }
+        RS.fellBack++;
+        return send(opts);
+      }).then((r) => this._tallyRoute(targetBig, r));
     } catch (e) {
       return Promise.resolve(this._tallyRoute(targetBig, fail(e)));   // synchronous throw out of routeMessage
     }
+  }
+
+  /** Record the reverse of an arriving request's hops for each node it names. */
+  _noteReturn(meta, keys) {
+    if (!this._returnRoute || !meta || !Array.isArray(meta.path) || !meta.path.length) return;
+    const base = meta.path.filter((h) => typeof h === 'string' && isHexId(h)).slice(-RETURN_RPATH_MAX).reverse();
+    if (!base.length) return;
+    const self = lc(idHex(this.nodeId)), exp = this._now() + RETURN_ROUTE_TTL_MS;
+    for (const k of keys) {
+      if (typeof k !== 'string' || !isHexId(k)) continue;
+      const key = lc(k);
+      if (key === self) continue;
+      // The named node goes last when the path does not end there (a SUB re-sent
+      // by an intermediate, or a path cut short): honoured only where a channel
+      // to it is open, else that hop's own routing finishes the last leg.
+      const rpath = lc(base[base.length - 1]) === key ? base : [...base.slice(0, RETURN_RPATH_MAX - 1), key];
+      this._retRoutes.delete(key);
+      this._retRoutes.set(key, { rpath, exp });
+      this._returnRouteStats.recorded++;
+      while (this._retRoutes.size > RETURN_ROUTE_CAP) this._retRoutes.delete(this._retRoutes.keys().next().value);
+    }
+  }
+  _returnFor(targetBig) {
+    let key; try { key = lc(idHex(targetBig)); } catch { return null; }
+    const r = this._retRoutes.get(key);
+    if (!r) return null;
+    if (r.exp <= this._now()) { this._retRoutes.delete(key); return null; }
+    return r.rpath;
   }
 
   // OBSERVABILITY (#58 D3): routing reports failure by RESOLVING {consumed:false}
