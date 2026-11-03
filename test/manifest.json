@@ -1192,6 +1192,11 @@
       "note": "Orion 867c3048 HR-1/2 on the 3d hint refresh and RI-1/2 on 3c. H1 a local guess that is the bridge is dropped (row dropped:bridge); H2/H3 the heal SUB after a refresh names the hint, control stays greedy; R1 the verify's visited set is deduped and ranked before the 16 bound; R2 a neverRoot manager does not consume REPLICATE; R3 a refusing seated candidate is not re-picked for RENEW_MS after its refusal is recorded, then is. Mutants: bridge guess kept, heal always greedy, bounded before ranked, bridge consumes REPLICATE, refusal not read, refusal never recorded -> each red."
     },
     {
+      "file": "fence_cbr_6bg_findings.mjs",
+      "class": "default",
+      "note": "Orion 12a4f349 on the 6b gate: 6BG-1 a second holder must hold the loser's CURRENT high-water (an hw-0 standby no longer releases step 5); 6BG-2a the export is pinned while step 5 waits and unpinned when the round aborts; 6BG-2b a deferred step 5 whose round went stale (epoch moved, not root, gate gone) does nothing ('merge-step5-stale'). Mutants: lag floor again, no pin on defer, not unpinned on abort, no stale guard -> each red."
+    },
+    {
       "file": "fence_cbr_6b_gate.mjs",
       "class": "default",
       "note": "Closer-Born v0.6 Part 6b as the GATE (David 2026-11-03 \"go ahead with 6b as the gate\"), successorGate + cutover: an app-process winner says so on its staged pull (ephemeral, fdHost); the loser accepts the terminal ack but holds step 5 (demote, release, promotion) until a backup other than the winner, not on the winner's host, is current; _step5Tick (refreshTick) runs it; past the lease the round aborts and the loser keeps the root. G1 deferred; G1b the winner itself never counts; G2 a second holder releases it; G3 same-host holder never counts, round aborts; G4 service winner and G5 gate off: no deferral. Mutants: no gate, winner host not excluded, winner not excluded, tick never runs, winner never says ephemeral -> each red."

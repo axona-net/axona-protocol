@@ -90,8 +90,18 @@ export const successorGateMethods = {
   // 6b GATE (the loser's side): a SECOND holder for an ephemeral winner — a
   // current successor of this root that is not the winner and not on the
   // winner's host.
+  // 6BG-1 (Orion 12a4f349): the second holder must hold what this root holds
+  // NOW, not "one renewal of lag": with a cache younger than RENEW_MS the lag
+  // rule's floor is 0, and an empty standby (hw 0) passed.
   _secondHolderCurrent(role, m) {
-    return this._currentSuccessorsWhere(role, { excludeHex: lc(String(m.winner)), excludeHost: m.winnerHost ?? null }).length > 0;
+    const now = this._now(), need = this._highWater(role);
+    const winner = lc(String(m.winner)), host = m.winnerHost ?? null;
+    for (const [hex, s] of (role.successors ?? [])) {
+      if (hex === winner || now - s.at > RENEW_MS || s.hw < need) continue;
+      if (host && s.host && s.host === host) continue;
+      return true;
+    }
+    return false;
   },
 
   // Per refreshTick: a step 5 deferred for want of a second holder runs once
@@ -102,6 +112,15 @@ export const successorGateMethods = {
       for (const [corr, m] of (role.sync?.openMerges ?? [])) {
         if (!m.deferred) continue;
         const { leaseOk } = m.deferred;
+        // 6BG-2 (Orion 12a4f349): the round must still be the one deferred —
+        // this node root at the loser epoch, the round bound, its gate open.
+        if (!role.isRoot || (role.epoch | 0) !== (m.loserEpoch | 0) || m.state !== 'bound' || role.merge?.gate?.corr !== corr) {
+          m.deferred = null;
+          this._log('warn', 'merge-step5-stale', { topic: idHex(t).slice(0, 12), corr: corr.slice(0, 8), isRoot: !!role.isRoot });
+          this._mergeUnpinDeferred(role, m);
+          this._mergeCloseCorr(role, corr);
+          continue;
+        }
         if (leaseOk() && !this._secondHolderCurrent(role, m)) continue;
         m.deferred = null;
         if (this._secondHolderCurrent(role, m)) this._log('info', 'merge-step5-released', { topic: idHex(t).slice(0, 12), corr: corr.slice(0, 8) });

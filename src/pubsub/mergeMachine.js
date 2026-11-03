@@ -165,6 +165,7 @@ export const mergeMachineMethods = {
   _mergeAbort(role, why, extra = {}) {
     if (!role?.merge?.gate) return false;
     const corr = role.merge.gate.corr;
+    this._mergeUnpinDeferred(role, role.sync.openMerges?.get(corr));   // 6BG-2: a deferred round's pins go with it
     this._log('warn', 'merge-abort', { topic: idHex(role.topicId).slice(0, 12), why, corr: corr.slice(0, 8), ...extra });
     this._mergeCloseCorr(role, corr);
     // 3e step 6 (cutover): an aborted round is RETRIED. The standing candidate
@@ -173,6 +174,13 @@ export const mergeMachineMethods = {
     // good. Clearing it lets the next trigger issue a new OFFER with a new corr.
     if (this._cutover && role.merge.candidate) role.merge.candidate = null;
     return this._mergeGateClear(role, why, extra);
+  },
+  /** 6BG-2: release the pins a deferred step 5 took, unless completion now owns them. */
+  _mergeUnpinDeferred(role, m) {
+    if (!m?.deferPinned || role.merge?.completing) return;
+    for (const id of m.manifest.bodies) role.merge.pins.delete(id);
+    for (const id of m.manifest.dels) role.merge.pins.delete(id);
+    m.deferPinned = false;
   },
   /** A corr this node ended (abort, refusal, completion) stays closed: a late PULLUP under it is stale, never a fresh open. Bounded. */
   _mergeCloseCorr(role, corr) {
@@ -810,6 +818,13 @@ export const mergeMachineMethods = {
     // still bounds the round: past it, step 5 aborts and this node keeps the root.
     if (this._successorGate && m.ephemeral && !this._secondHolderCurrent(role, m)) {
       if (!m.deferred) this._log('info', 'merge-step5-deferred', { topic: idHex(topicBig).slice(0, 12), corr: corr.slice(0, 8), winner: m.winner.slice(0, 10), why: 'no-second-holder' });
+      // 6BG-2 (Orion 12a4f349): the export is pinned while it waits, or its
+      // bodies and tombstones could expire at this live root before step 5.
+      if (!m.deferPinned) {
+        for (const id of m.manifest.bodies) role.merge.pins.add(id);
+        for (const id of m.manifest.dels) role.merge.pins.add(id);
+        m.deferPinned = true;
+      }
       m.deferred = { leaseOk };
       return 'consumed';
     }
