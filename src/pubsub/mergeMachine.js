@@ -374,7 +374,7 @@ export const mergeMachineMethods = {
     for (const [corr, m] of role.sync.openMerges) {
       if (m.winner === c.id) {
         if (m.loserEpoch >= (role.epoch | 0)) return false;    // standing offer to this winner at this incarnation
-        role.sync.openMerges.delete(corr);                      // superseded by a higher loserEpoch
+        this._mergeCloseCorr(role, corr);                       // superseded by a higher loserEpoch (HB-2: closed, not merely deleted)
       }
     }
     const corr = randomNonce() + randomNonce();
@@ -391,8 +391,13 @@ export const mergeMachineMethods = {
     };
     // Part 7 identity binding: a loser with a node identity signs the claim
     // (handoffBinding.js), so a hop cannot add it to an old loser's offer.
+    // HB-2 (Orion 3046d876): signing is async; an offer whose round was
+    // superseded or closed meanwhile is not sent.
     const sent = (this._cutover && this._nodeIdentity)
-      ? this._signHandoff(offer, lc(c.id)).then((b) => this._route(idBig(c.id), T.MERGE_OFFER, { ...offer, ...(b || {}) }))
+      ? this._signHandoff(offer, lc(c.id)).then((b) => {
+          if (this.axonRoles.get(topicBig) !== role || !role.isRoot || role.sync.openMerges.get(corr) !== rec) return { consumed: false };
+          return this._route(idBig(c.id), T.MERGE_OFFER, { ...offer, ...(b || {}) });
+        })
       : this._route(idBig(c.id), T.MERGE_OFFER, offer);
     // Did the offer reach anyone? A failed verdict means W is unreachable, not
     // legacy: the sweep then drops the record instead of falling back.
@@ -423,7 +428,9 @@ export const mergeMachineMethods = {
     if ((!role || !role.isRoot) && this._cutover && this._handoffBinding && payload.handoff === 1) {
       this._verifyHandoff(payload, loser).then((bound) => {
         const r = this.axonRoles.get(topicBig);
-        if (r?.isRoot) return;   // became root meanwhile: the next verify reconciles
+        // HB-1 (Orion 3046d876): became root meanwhile: the offer is evaluated
+        // root to root (outranked or pull), never dropped in silence.
+        if (r?.isRoot) { this._onMergeOffer(payload, meta); return; }
         if (bound && this._stageOffer(topicBig, r, loser, payload)) return;
         if (!bound) this._log('warn', 'merge-stage-unbound', { topic: idHex(topicBig).slice(0, 12), corr: String(payload.corr).slice(0, 8), loser: loser.slice(0, 10), signed: typeof payload.handoffSig === 'string' });
         notRoot(r);

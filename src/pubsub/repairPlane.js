@@ -714,6 +714,7 @@ export const repairPlaneMethods = {
   async _emptyRootProbe(topicBig) {
     const pre = this.axonRoles.get(topicBig);
     if (!pre || !pre.isRoot || pre.cache.length) return;      // filled meanwhile / demoted / gone
+    if (this._probeBudgetSpent(pre, topicBig)) return;        // HP-2 (Orion 3046d876): 3a's budget before any lookup
     if (pre.sync.probeTries >= EMPTY_ROOT_PROBE_MAX) return;
     if (pre.sync.probeInflight) return;                        // (a): one try at a time; its verdicts decide whether it counted
     pre.sync.probeInflight = true; pre.sync.probeAt = this._now();
@@ -755,7 +756,9 @@ export const repairPlaneMethods = {
     }
     // Re-check after the awaits: a REPLAYUP/HANDOFF may have landed meanwhile.
     const role = this.axonRoles.get(topicBig);
-    if (!role || !role.isRoot || role.cache.length || !cand.size) return;
+    if (!role || !role.isRoot || role.cache.length) return;
+    if (this._probeBudgetSpent(role, topicBig)) return;   // HP-2: also when nobody is left to ask
+    if (!cand.size) return;
     // Candidate hardening (#364-A2, diagnosis 2026-07-21): the probe chain
     // itself is sound (smoke_ghost_read: ungraceful root death heals from
     // backups) — live failures came from WHERE the probes went. Two rules:
@@ -795,6 +798,11 @@ export const repairPlaneMethods = {
     }
     const live = this.axonRoles.get(topicBig);
     if (!live || !live.isRoot) return;                      // demoted or gone while the pulls were out
+    // HP-1 (Orion 3046d876): a target the pull never reached cannot answer
+    // no-role; it must not hold the refund hostage. Reached targets only.
+    if (out && declares && reached > 0) {
+      results.forEach((r, i) => { const v = (r.status === 'fulfilled') ? r.value : null; if (!(v && typeof v === 'object' && v.consumed === true)) out.targets.delete(lc(idHex(sends[i].b))); });
+    }
     if (declares && reached === 0) {
       // DEFERRED: not counted against EMPTY_ROOT_PROBE_MAX, targets stay eligible,
       // the sweep re-arms it once the node can route or after a wait.
