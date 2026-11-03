@@ -331,6 +331,15 @@ export const mergeMachineMethods = {
   _mergeWinnerReminted(f, gotEpoch) {
     const role = this.axonRoles.get(f.topicBig);
     if (!role?.merge?.gate || role.merge.gate.corr !== f.merge.corr) return;
+    if (this._cutover) {
+      // CUT-1 (Orion c0a842d2): under cutover the abort clears the candidate,
+      // so recording it first lost the new epoch and nothing was offered
+      // again. Abort, then nominate the re-minted winner afresh: a new OFFER
+      // under a new corr carries the new epoch.
+      this._mergeAbort(role, 'winner-reminted', { got: gotEpoch | 0, want: f.epoch });
+      this._mergeCandidate(f.topicBig, f.rootHex, gotEpoch | 0, 'reminted');
+      return;
+    }
     role.merge.candidate = { id: f.rootHex, epoch: gotEpoch | 0, source: 'reminted', at: this._now() };   // the next OFFER carries the new epoch
     this._mergeAbort(role, 'winner-reminted', { got: gotEpoch | 0, want: f.epoch });
   },
@@ -629,7 +638,11 @@ export const mergeMachineMethods = {
       // A winner that holds no claim is no candidate: drop the record so the
       // next trigger evaluates afresh instead of re-offering to a child. A
       // winner our claim outranks is no candidate either: it offers to us.
-      if ((payload.disposition === 'not-root' || payload.disposition === 'outranked') && role.merge?.candidate?.id === m.winner) role.merge.candidate = null;
+      // CUT-2 (Orion c0a842d2): under cutover a TRANSIENT refusal clears it
+      // too, or the standing candidate refuses its own re-nomination and the
+      // two roots stand for good.
+      const transient = this._cutover && (payload.disposition === 'refused-capacity' || payload.disposition === 'refused-timing');
+      if ((payload.disposition === 'not-root' || payload.disposition === 'outranked' || transient) && role.merge?.candidate?.id === m.winner) role.merge.candidate = null;
       return 'consumed';
     }
     const six = three && (payload.winnerEpoch | 0) === (m.winnerEpoch | 0) && (payload.loserEpoch | 0) === (m.loserEpoch | 0);
