@@ -5,7 +5,7 @@
     "onNotification",
     "onRoutedMessage"
   ],
-  "treeHash": "852036ff06b5e68d112d800a3ab82ef479eadf4a",
+  "treeHash": "d105ceb588cf7388baf659d76a38f0bb37a7915d",
   "filesScanned": 87,
   "summary": {
     "migration-target": 48,
@@ -148,7 +148,7 @@
     },
     {
       "file": "dht/AxonaPeer.js",
-      "line": 1476,
+      "line": 1481,
       "callee": "registerFrame",
       "receiver": "this._b3door",
       "wire": "mesh:signal",
@@ -157,22 +157,12 @@
     },
     {
       "file": "dht/AxonaPeer.js",
-      "line": 4622,
+      "line": 4638,
       "callee": "onMessage",
       "receiver": "def",
       "wire": "—",
       "classification": "public-api-out-of-scope",
       "boundary": "—"
-    },
-    {
-      "file": "dht/AxonaPeer.js",
-      "line": 4635,
-      "callee": "registerFrame",
-      "receiver": "this._b6door",
-      "wire": "axona:direct",
-      "classification": "migration-target",
-      "boundary": "B6",
-      "transportKind": "request"
     },
     {
       "file": "dht/AxonaPeer.js",
@@ -182,11 +172,21 @@
       "wire": "axona:direct",
       "classification": "migration-target",
       "boundary": "B6",
+      "transportKind": "request"
+    },
+    {
+      "file": "dht/AxonaPeer.js",
+      "line": 4667,
+      "callee": "registerFrame",
+      "receiver": "this._b6door",
+      "wire": "axona:direct",
+      "classification": "migration-target",
+      "boundary": "B6",
       "transportKind": "notification"
     },
     {
       "file": "dht/AxonaPeer.js",
-      "line": 5195,
+      "line": 5211,
       "callee": "onDirectMessage",
       "receiver": "peer",
       "wire": "<type>",
@@ -195,7 +195,7 @@
     },
     {
       "file": "dht/AxonaPeer.js",
-      "line": 5237,
+      "line": 5253,
       "callee": "registerFrame",
       "receiver": "peer._b6door",
       "wire": "__tunneled_direct__",
@@ -205,7 +205,7 @@
     },
     {
       "file": "dht/AxonaPeer.js",
-      "line": 6968,
+      "line": 6984,
       "callee": "onDirectMessage",
       "receiver": "def",
       "wire": "—",

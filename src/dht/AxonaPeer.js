@@ -1359,6 +1359,7 @@ export class AxonaPeer extends DHT {
         hopCount: hops,
         isTerminal: isTerminal && capable,
         path: pathHex,
+        originId: typeof originId === 'string' ? originId : null,
       });
 
       if (result === 'consumed') {
@@ -1413,7 +1414,7 @@ export class AxonaPeer extends DHT {
       }
 
       if (_rsOn && connOk && !connOk(nextHopId)) {
-        _rsTried.add(nextHopId); _rsN += 1; viaNext = null;
+        _rsTried.add(nextHopId); _rsN += 1; viaNext = null; rpathRest = null;
         const n = _rsPick();
         this._emitLog?.('info', 'lookup-reselect', { kind: 'route', hop: hops, dead: toHex(nextHopId).slice(0, 12), next: n !== null ? toHex(n).slice(0, 12) : null, why: 'dead-after-await', reselects: _rsN });
         if (n !== null) { nextHopId = n; continue; }
@@ -1429,7 +1430,11 @@ export class AxonaPeer extends DHT {
       try {
         // Wire payload targetId is hex (v1.5 contract).
         if (_hopLt) _fSendT = Date.now();
-        const pathMem = Number(domain.PATH_MEMORY) > 0 ? Number(domain.PATH_MEMORY) : 8;
+        // SRR-2 (Orion 34db5e6d): a signal frame keeps up to SIGNAL_RPATH_MAX
+        // ids so a 9-to-16-hop offer still names its offerer at the terminal;
+        // every other frame keeps PATH_MEMORY, unchanged.
+        const pathMem0 = Number(domain.PATH_MEMORY) > 0 ? Number(domain.PATH_MEMORY) : 8;
+        const pathMem = type === 'mesh:signal' ? Math.max(pathMem0, SIGNAL_RPATH_MAX) : pathMem0;
         const downstream = await node.transport.send(nextHopId, 'route_msg', {
           type, payload, targetId: toHex(targetBig), hops: hops + 1, originId,
           path: [...pathHex.slice(-(pathMem - 1)), toHex(meId)],          // R3
@@ -1451,7 +1456,7 @@ export class AxonaPeer extends DHT {
           for (const mid of _hopMids) this._axonaManager._txLedger({ msgId: mid, edgeAttemptId: _hopId, from: toHex(node.id), to: toHex(nextHopId), hopIdx: hops + 1, enqueueT: _fEnqT, sendAttemptT: _fSendT, ..._oc });
         }
         if (_rsOn && isEdgeLoss(e)) {
-          _rsTried.add(nextHopId); _rsN += 1; viaNext = null;
+          _rsTried.add(nextHopId); _rsN += 1; viaNext = null; rpathRest = null;
           const n = _rsPick();
           this._emitLog?.('info', 'lookup-reselect', { kind: 'route', hop: hops, dead: toHex(nextHopId).slice(0, 12), next: n !== null ? toHex(n).slice(0, 12) : null, why: 'send-threw', reselects: _rsN });
           if (n !== null) { nextHopId = n; continue; }
@@ -1478,12 +1483,23 @@ export class AxonaPeer extends DHT {
       // SIGNAL RETURN ROUTE: keep the reverse of the hops this signal came
       // over, keyed by its sender, so the answer and candidates can go back
       // the way the offer arrived (the request's route is proof of a route).
-      if (Array.isArray(meta.path) && meta.path.length && typeof payload?.from === 'string' && isHexId(payload.from)) {
-        const rp = meta.path.filter((h) => typeof h === 'string' && isHexId(h)).slice(-SIGNAL_RPATH_MAX).reverse();
+      // SRR-3 (Orion 34db5e6d): only an OFFER leaves a breadcrumb, and only
+      // when the frame's originator is the offer's own sender; a candidate or
+      // a frame whose originator differs never overwrites it. This is
+      // consistency, not authentication: route_msg hops are unsigned, the
+      // answer is bound by DTLS, and nothing here confers authority.
+      const from = typeof payload?.from === 'string' && isHexId(payload.from) ? payload.from.toLowerCase() : null;
+      if (from && payload?.signal?.kind === 'sdp-offer'
+          && typeof meta.originId === 'string' && meta.originId.toLowerCase() === from
+          && Array.isArray(meta.path) && meta.path.length) {
+        let rp = meta.path.filter((h) => typeof h === 'string' && isHexId(h)).slice(-SIGNAL_RPATH_MAX).reverse();
+        // An older hop may have cut the path short of the offerer; the
+        // offerer goes last, honoured only where a channel to it is open.
+        if (rp[rp.length - 1]?.toLowerCase() !== from) rp = [...rp.slice(0, SIGNAL_RPATH_MAX - 1), from];
         if (rp.length) {
           this._sigReturn ??= new Map();
-          this._sigReturn.delete(payload.from.toLowerCase());
-          this._sigReturn.set(payload.from.toLowerCase(), { rpath: rp, exp: Date.now() + SIGNAL_RETURN_TTL_MS });
+          this._sigReturn.delete(from);
+          this._sigReturn.set(from, { rpath: rp, exp: Date.now() + SIGNAL_RETURN_TTL_MS });
           capOldest(this._sigReturn, SIGNAL_RETURN_CAP);
         }
       }
@@ -6658,7 +6674,7 @@ export class AxonaPeer extends DHT {
       catch { /* fall through; send may still route via the bridge/relay sink */ }
     }
     if (_rsOn && _rsConn && !_rsConn(nextHopId)) {
-      _rsTried.add(nextHopId); _rsN += 1; viaNext = null;
+      _rsTried.add(nextHopId); _rsN += 1; viaNext = null; rpathRest = null;
       const n = _rsPick();
       this._emitLog?.('info', 'lookup-reselect', { kind: 'origin', hop: 0, dead: toHex(nextHopId).slice(0, 12), next: n !== null ? toHex(n).slice(0, 12) : null, why: 'dead-after-await', reselects: _rsN });
       if (n !== null) { nextHopId = n; continue; }
@@ -6700,7 +6716,7 @@ export class AxonaPeer extends DHT {
         for (const mid of _hopMids) this._axonaManager._txLedger({ msgId: mid, edgeAttemptId: _hopId, from: toHex(originNode.id), to: toHex(nextHopId), hopIdx: 1, enqueueT: _enqT, sendAttemptT: _sendT, ..._oc });
       }
       if (_rsOn && isEdgeLoss(e)) {
-        _rsTried.add(nextHopId); _rsN += 1; viaNext = null;
+        _rsTried.add(nextHopId); _rsN += 1; viaNext = null; rpathRest = null;
         const n = _rsPick();
         this._emitLog?.('info', 'lookup-reselect', { kind: 'origin', hop: 0, dead: toHex(nextHopId).slice(0, 12), next: n !== null ? toHex(n).slice(0, 12) : null, why: 'send-threw', reselects: _rsN });
         if (n !== null) { nextHopId = n; continue; }
