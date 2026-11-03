@@ -442,6 +442,10 @@ export class AxonaManager {
       return send({ ...opts, rpath }).then((r) => {
         if (r && r.consumed) { RS.delivered++; return r; }
         RS.fellBack++;
+        // RR-3 (Orion ab295b9b): a breadcrumb that failed once is dropped, so a
+        // broken reverse path is walked at most once, not for its whole TTL.
+        const k = lc(idHex(targetBig));
+        if (this._retRoutes.get(k)?.rpath === rpath) this._retRoutes.delete(k);
         return send(opts);
       }).then((r) => this._tallyRoute(targetBig, r));
     } catch (e) {
@@ -454,17 +458,24 @@ export class AxonaManager {
     if (!this._returnRoute || !meta || !Array.isArray(meta.path) || !meta.path.length) return;
     const base = meta.path.filter((h) => typeof h === 'string' && isHexId(h)).slice(-RETURN_RPATH_MAX).reverse();
     if (!base.length) return;
-    const self = lc(idHex(this.nodeId)), exp = this._now() + RETURN_ROUTE_TTL_MS;
+    const now = this._now(), self = lc(idHex(this.nodeId)), exp = now + RETURN_ROUTE_TTL_MS;
+    const seen = new Set();
     for (const k of keys) {
       if (typeof k !== 'string' || !isHexId(k)) continue;
       const key = lc(k);
-      if (key === self) continue;
-      // The named node goes last when the path does not end there (a SUB re-sent
-      // by an intermediate, or a path cut short): honoured only where a channel
-      // to it is open, else that hop's own routing finishes the last leg.
-      const rpath = lc(base[base.length - 1]) === key ? base : [...base.slice(0, RETURN_RPATH_MAX - 1), key];
+      if (key === self || seen.has(key)) continue;        // RR-1: one write per node
+      seen.add(key);
+      // ANCHORED: the path ends at the node itself (it sent this request). A
+      // node merely NAMED in an unsigned field (subscriberId, loser, parentId)
+      // goes last, honoured only where a channel to it is open, else that
+      // hop's own routing finishes the last leg; such an entry never replaces
+      // a fresh anchored one (RR-1, Orion ab295b9b).
+      const anchored = lc(base[base.length - 1]) === key;
+      const prev = this._retRoutes.get(key);
+      if (!anchored && prev?.anchored && prev.exp > now) continue;
+      const rpath = anchored ? base : [...base.slice(0, RETURN_RPATH_MAX - 1), key];
       this._retRoutes.delete(key);
-      this._retRoutes.set(key, { rpath, exp });
+      this._retRoutes.set(key, { rpath, exp, anchored });
       this._returnRouteStats.recorded++;
       while (this._retRoutes.size > RETURN_ROUTE_CAP) this._retRoutes.delete(this._retRoutes.keys().next().value);
     }

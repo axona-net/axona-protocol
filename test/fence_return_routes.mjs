@@ -23,6 +23,12 @@
 //      reply does not cross.
 //   P5 a broken reverse hop: the return route falls back once, nothing
 //      throws. P6 an expired breadcrumb is not used. P7 defaults are OFF.
+// Orion ab295b9b (RR-1..3):
+//   P8 RR-1: a direct PULLUP records once; a SUB from H2 merely NAMING O does
+//      not replace O's fresh anchored breadcrumb.
+//   P9 RR-2: relays that only forward a SUB keep no breadcrumb.
+//   P10 RR-3: a breadcrumb that fell back is dropped.
+//   P11 RR-2: a REPLAYUP arriving refreshes the receiver's way back to its sender.
 // Run: node test/fence_return_routes.mjs
 // =====================================================================
 import { AxonaPeer }                from '../src/dht/AxonaPeer.js';
@@ -34,7 +40,7 @@ import { createNodeIdentity }       from '../src/identity/index.js';
 import { fromHex, clz264 }          from '../src/utils/hexid.js';
 
 let passed = 0, failed = 0;
-const N_CHECKS = 10;
+const N_CHECKS = 14;
 const check = (label, ok, extra = '') => { console.log(`  ${ok ? '✓' : '✗'} ${label}${ok ? '' : ' ' + extra}`); ok ? passed++ : failed++; };
 const J = (v) => JSON.stringify(v, (k, x) => typeof x === 'bigint' ? x.toString(16).slice(0, 12) : x);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -114,6 +120,8 @@ const key = (p) => p.hex.toLowerCase();
     const r = await replayUpTo(w, w.O);
     check('P2 on, a SUB re-sent by H1 naming O: the breadcrumb for O runs H4..H1 then O', bc.length === 5 && bc[3]?.toLowerCase() === key(H1) && bc[4]?.toLowerCase() === key(w.O), J(bc.map((h) => h.slice(0, 8))));
     check('P2 … and T\'s reply reaches O through H1', r?.consumed === true && r?.hops === 5 && w.T.am._returnRouteStats.delivered >= 1 && w.T.am._returnRouteStats.fellBack === 0, J({ r, RS: w.T.am._returnRouteStats }));
+    const relays = w.nodes.slice(2, -1).map((p) => p.am._retRoutes.size);
+    check('P9 RR-2: the relays that only forwarded the SUB (H2..H4) keep no breadcrumb', relays.every((n) => n === 0), J(relays));
     await stopAll(w);
   }
   {
@@ -144,6 +152,7 @@ const key = (p) => p.hex.toLowerCase();
     let threw = false, r = null; try { r = await replayUpTo(w, w.O); } catch { threw = true; }
     const RS = w.T.am._returnRouteStats;
     check('P5 a gone reverse hop: no throw, the return route fell back once, the own lookup decided', !threw && RS.used === 1 && RS.fellBack === 1 && r?.consumed !== true, J({ threw, RS, r }));
+    check('P10 RR-3: the breadcrumb that fell back is dropped', !w.T.am._retRoutes.has(key(w.O)), J([...w.T.am._retRoutes.keys()].map((k) => k.slice(0, 8))));
     await stopAll(w);
   }
   {
@@ -153,6 +162,19 @@ const key = (p) => p.hex.toLowerCase();
     island(w);
     const r = await replayUpTo(w, w.O);
     check('P6 an expired breadcrumb is not used (behaves as the control)', w.T.am._returnRouteStats.used === 0 && r?.consumed !== true, J({ RS: w.T.am._returnRouteStats, r }));
+    await stopAll(w);
+  }
+  {
+    const w = await build({ rr: true });
+    await pullup(w);
+    const first = w.T.am._retRoutes.get(key(w.O));
+    const rec1 = w.T.am._returnRouteStats.recorded;
+    await w.nodes[2].am._route(w.T.big, 'pubsub:sub', { topicId: TOPIC, subscriberId: w.O.hex, since: 'all' });
+    const after = w.T.am._retRoutes.get(key(w.O));
+    check('P8 RR-1: a direct PULLUP records O once, and a SUB from H2 naming O leaves O\'s anchored breadcrumb as it was', rec1 === 1 && first?.anchored === true && after === first, J({ rec1, anchored: first?.anchored, same: after === first, rp: after?.rpath?.map((h) => h.slice(0, 6)) }));
+    await w.O.am._route(w.T.big, 'pubsub:replayup', { topicId: TOPIC, msgs: [] });
+    const fresh = w.T.am._retRoutes.get(key(w.O));
+    check('P11 RR-2: a REPLAYUP from O refreshes T\'s anchored way back to O', fresh && fresh !== first && fresh.anchored === true && fresh.rpath.length === 5, J({ fresh: !!fresh, same: fresh === first }));
     await stopAll(w);
   }
   {

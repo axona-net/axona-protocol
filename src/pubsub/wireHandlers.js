@@ -257,9 +257,11 @@ export const wireHandlersMethods = {
   },
 
   async _onSub(payload, meta) {
-    this._noteReturn(meta, [meta?.originId, payload?.subscriberId]);   // return route (Closer-Born v0.6)
     const d = this._topicDecision(payload, meta);
     if (d === 'forward') return;
+    // Return route (Closer-Born v0.6). Below the forward test (RR-2, Orion
+    // ab295b9b): a relay that only passes the SUB on keeps no breadcrumb.
+    this._noteReturn(meta, [meta?.originId, payload?.subscriberId]);
     if (d === 'reroute') { this._reroute(T.SUB, payload); return 'consumed'; }
 
     const topicBig = idBig(payload.topicId);
@@ -933,6 +935,7 @@ export const wireHandlersMethods = {
   // pump so a storm of pushes can't starve mesh liveness.
   async _onReplayUp(payload, meta) {
     if (meta.targetId !== this.nodeId) return;
+    this._noteReturn(meta, [meta?.originId]);   // RR-2: each page of a pull refreshes the puller's way back to its source
     // DEPENDENCY (row 4): none. A child's history pushed up to its root
     // installs no role toward the child; nothing is owed when it drains.
     // One enqueue (the duty gate pins exactly two callers in this file): a frame
