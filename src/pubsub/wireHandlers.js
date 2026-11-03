@@ -333,6 +333,7 @@ export const wireHandlersMethods = {
     const since = Number.isFinite(payload.since) ? payload.since : 0;
     const seat = this._seatKindOf(payload);   // Topic Lifetime 4.3: reader | child(n) | standby
 
+    this._noteStandingSub(role, payload);   // 6c: a standing lease, the root's own renewal included (standingLease only)
     // The root's own renewal self-loops here. Don't seat self as a subscriber
     // (no self-fan); just replay locally if the app subscribes.
     if (idBig(subHex) === this.nodeId) {

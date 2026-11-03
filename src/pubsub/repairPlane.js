@@ -313,7 +313,7 @@ export const repairPlaneMethods = {
         && !this.mySubscriptions.has(t) && !this._hostedTopics.has(t)
         && this._roleIdleMs(role, now) > this._roleIdleTtlMs;
       // A root with a fresh metrics lease keeps publishing snapshots (read below).
-      const metricsLeased = role.isRoot && role.metricsOn > now;
+      const metricsLeased = role.isRoot && (role.metricsOn > now || this._standingLeased(role, now));   // 6c: a standing lease is held exactly as the metrics lease is
       // EMPTY-ROLE GRACE (David 2026-10-19, "address the root issue with unreaped
       // topics raised by Aster"). Measured on sfo3 grizzly1 over seven days of
       // 4.114.1: the reapers fire exactly as specified — 1,315 idle root reaps,

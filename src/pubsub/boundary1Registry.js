@@ -60,11 +60,11 @@ function rowDefs() {
       evidence: EvidenceLevel.ROUTED, proves: Proves.ROUTING, outcome: 'RoutingOutcome', terminalOutcome: 'LEASE_ESTABLISHED',
       retry: Retry.IDEMPOTENT, topicProfile: PROFILE, eventIdScheme: NA, replayCursorType: 'HIGHWATER', orderingModel: 'ARRIVAL',
       authGuard: NA, admissionGuard: NA, placementGuard: 'regionOk+admitRole+meshBareSelfRootGuard',
-      projection: { payload: ['topicId', 'subscriberId', 'since', 'latest', 'hw', 'lw', 'merge', 'standby', 'demand', 'gen', 'attach', 'unpinned', 'fd'] },   // fd: 6b, the sender's failure domain { kind, host } (successorGate only)   // unpinned: 3d, the sender holds no pin (attachEcho; Orion 3D-2)   // attach: the attachment nonce the reply echoes (Topic Lifetime 4.1, armed only)   // merge: the completion block while a loser is completing (dual-root 4(d)); standby/demand/gen: the seat declaration (Topic Lifetime 4.3, armed only)root 4(d))
+      projection: { payload: ['topicId', 'subscriberId', 'since', 'latest', 'hw', 'lw', 'merge', 'standby', 'demand', 'gen', 'attach', 'unpinned', 'fd', 'standing'] },   // standing: 6c, the lease (ms) a standing subscription asks for   // fd: 6b, the sender's failure domain { kind, host } (successorGate only)   // unpinned: 3d, the sender holds no pin (attachEcho; Orion 3D-2)   // attach: the attachment nonce the reply echoes (Topic Lifetime 4.1, armed only)   // merge: the completion block while a loser is completing (dual-root 4(d)); standby/demand/gen: the seat declaration (Topic Lifetime 4.3, armed only)root 4(d))
       schema: { require: ['topicId', 'subscriberId'], types: { topicId: 'string', subscriberId: 'string', standby: 'boolean', demand: 'number', gen: 'obj', attach: 'string', unpinned: 'boolean', fd: 'obj' } },
       idempotency: { from: ['topicId', 'subscriberId'] },
       capabilityRange: { profile: PROFILE },
-      errorContract: ['refuse-region', 'refuse-role-budget', 'merge-stale', 'refuse-dismantling'], traceFields: ['topicId', 'subscriberId'], budget: budget(13),
+      errorContract: ['refuse-region', 'refuse-role-budget', 'merge-stale', 'refuse-dismantling'], traceFields: ['topicId', 'subscriberId'], budget: budget(14),
       note: 'establishes/renews a delivery lease routed toward topicId; advertises the subscriber replay cursor (hw/lw)',
     }),
     ({
@@ -368,12 +368,12 @@ function rowDefs() {
       evidence: EvidenceLevel.RETAINED, proves: Proves.RETENTION, outcome: 'RetentionOutcome', terminalOutcome: 'REPLICA_UNION_APPLIED',
       retry: Retry.NATURAL, topicProfile: PROFILE, eventIdScheme: 'MSGID_CONTENT_V1', replayCursorType: NA, orderingModel: 'UNION_IDEMPOTENT',
       authGuard: 'verifyEnvelope', admissionGuard: NA, placementGuard: NA,
-      projection: { payload: ['topicId', 'from', 'msgs', 'dels', 'gen', 'issuedAt'] },   // gen/issuedAt: the appointment's generation + issue stamp (Topic Lifetime 4.4, armed only)
+      projection: { payload: ['topicId', 'from', 'msgs', 'dels', 'gen', 'issuedAt', 'standingRemainingMs'] },   // standingRemainingMs: 6c, the lease a promoted backup inherits   // gen/issuedAt: the appointment's generation + issue stamp (Topic Lifetime 4.4, armed only)
       schema: { require: ['topicId'], types: { topicId: 'string', from: 'string', msgs: 'arr', dels: 'arr', gen: 'obj', issuedAt: 'number' } },
       // No correlation and no conversation: a cohort spray keyed by an unsigned `from` is not an authenticated holder
       // subject and has no request/response pairing (F3). COUNT_HIGHWATER_HINT is rate gating, never an equality proof.
       capabilityRange: { profile: PROFILE, summaryStrategy: 'COUNT_HIGHWATER_HINT' },
-      errorContract: ['drop-bad-envelope-entry'], traceFields: ['topicId'], budget: budget(6),
+      errorContract: ['drop-bad-envelope-entry'], traceFields: ['topicId'], budget: budget(7),
       note: 'cohort spray to K-closest; empty msgs+dels = liveness keepalive; union ingest is order-independent',
     }),
 

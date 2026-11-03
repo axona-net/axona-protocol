@@ -74,6 +74,7 @@ import { topicLifetimeMethods } from './topicLifetime.js';
 import { successorGateMethods } from './successorGate.js';
 import { holderProbeMethods } from './holderProbe.js';
 import { handoffBindingMethods } from './handoffBinding.js';
+import { standingLeaseMethods } from './standingLease.js';
 import buildBoundary1Registry from './boundary1Registry.js';
 // Return routes (Closer-Born v0.6): breadcrumb lifetime, map bound, path ids kept.
 const RETURN_ROUTE_TTL_MS = 60_000, RETURN_ROUTE_CAP = 256, RETURN_RPATH_MAX = 16;
@@ -121,6 +122,7 @@ export class AxonaManager {
     cutover = null,
     hintRefresh = null,            // Closer-Born v0.6 3d hint refresh (David 2026-11-03): DEFAULT OFF; null = env HINT_REFRESH
     replicaInherit = null,         // Closer-Born v0.6 3c (David 2026-11-03 "go ahead with 3c"): DEFAULT OFF; null = env REPLICA_INHERIT
+    standingLease = null,          // Closer-Born v0.6 6c (David 2026-11-03 "go ahead with 6c"): DEFAULT OFF; null = env STANDING_LEASE
     handoffBinding = null,         // Closer-Born v0.6 Part 7 (David 2026-11-03 "go ahead with the handoff identity binding"): DEFAULT OFF; null = env HANDOFF_BINDING
     holderProbe = null,            // Closer-Born v0.6 3a (David 2026-11-03 "go ahead with 3a"): DEFAULT OFF; null = env HOLDER_PROBE
     successorGate = null,          // Closer-Born v0.6 6b (David 2026-11-03 "go ahead with 6b"): DEFAULT OFF; null = env SUCCESSOR_GATE
@@ -386,6 +388,9 @@ export class AxonaManager {
     // HANDOFF BINDING (handoffBinding.js): a candidate stages only on an offer
     // whose `handoff` the loser signed with the key its node id hashes.
     this._handoffBinding  = !!(handoffBinding ?? envNum('HANDOFF_BINDING', 0));
+    // 6c STANDING LEASE (standingLease.js): a standing topic's root is kept
+    // alive across the gap between a vanished holder and the next fresh read.
+    this._standingLease   = !!(standingLease ?? envNum('STANDING_LEASE', 0));
     { const env = (typeof process !== 'undefined' && process.env) ? process.env : {};
       const k = processKind ?? env.PROCESS_KIND ?? 'service';
       this._processKind = (k === 'app') ? 'app' : 'service';
@@ -1569,6 +1574,8 @@ export class AxonaManager {
       ...(this._attachEcho && !((this._upstream.get(topicBig) || []).length) ? { unpinned: true } : {}),
       // 6b: the sender's failure domain, so a root can tell a successor on its own host.
       ...(this._successorGate ? { fd: this._fdBlock() } : {}),
+      // 6c: the standing lease this subscription or relay role carries upward.
+      ...((st) => (st > 0 ? { standing: st } : {}))(this._standingForSub(role, sub)),
       // COMPLETION IS CORRELATED (dual-root 4(d)): while this loser is completing a
       // handover, every SUB carries the merge block; an ordinary renewal completes nothing.
       ...(role?.merge?.completing ? { merge: { corr: role.merge.completing.corr, winner: role.merge.completing.winner, winnerEpoch: role.merge.completing.winnerEpoch, loserEpoch: role.merge.completing.loserEpoch, hash: role.merge.completing.hash } } : {}),
@@ -1648,6 +1655,7 @@ export class AxonaManager {
       createdAt: this._now(),
       since, lastRenewSent: this._now(), interval: this.renewFastMs,
       replayLatest: !!opts.replayLatest,
+      standing: !!opts.standing,   // 6c: this subscription declares a standing lease (standingLease only)
     });
     // If this node already HOLDS the topic's cache (it is the root, or a
     // cache-bearing relay), no wire replay can serve it: the outgoing SUB
@@ -2058,6 +2066,7 @@ Object.assign(
   successorGateMethods,  // Closer-Born v0.6 6b: an app-held root counts its current successors — behind successorGate
   holderProbeMethods,    // Closer-Born v0.6 3a: holder-first empty-root probe with role-less NACKs — behind holderProbe
   handoffBindingMethods, // Closer-Born v0.6 Part 7: the loser signs `handoff`; an armed candidate verifies — behind handoffBinding
+  standingLeaseMethods,  // Closer-Born v0.6 6c: a standing topic's root lease — behind standingLease
 );
 
 export default AxonaManager;

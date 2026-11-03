@@ -26,7 +26,7 @@
 // there. It joins the engine only if it earns its way in.
 // =====================================================================
 
-import { T, METRICS_LEASE_MS, APPOINTMENT_SKEW_MS } from './constants.js';
+import { T, METRICS_LEASE_MS, APPOINTMENT_SKEW_MS, STANDING_LEASE_MAX_MS } from './constants.js';
 import { idHex, idBig, lc, isHexId } from './ids.js';
 import { makeRole } from './rootClaim.js';
 
@@ -197,6 +197,8 @@ export const syncEngineMethods = {
     // backup's inherited value rather than letting a last-seen expiry outlive demand.
     if (full && this._replicateSubs && role.isRoot) {
       payload.metricsRemainingMs = role.metricsOn > this._now() ? (role.metricsOn - this._now()) : 0;
+      // 6c: the standing lease rides the same full push, so a promoted backup keeps it.
+      if (this._standingLease) payload.standingRemainingMs = role.standingUntil > this._now() ? (role.standingUntil - this._now()) : 0;
     }
     // TOPIC LIFETIME (4.1, 4.4; armed only): a REPLICATE names the generation it
     // appoints to and carries its own issue stamp, so the receiver can drop a
@@ -371,6 +373,10 @@ export const syncEngineMethods = {
       // remaining can never arm a longer-than-legal lease (Aster guard 1). Receiver-now
       // + remaining adds at most handoff transit, bounded by latency not clock offset —
       // soft-state tolerance, not exact expiry preservation. Never acted on as a backup.
+      if (this._standingLease && Number.isFinite(payload.standingRemainingMs)) {
+        const rs = Math.min(Math.max(0, payload.standingRemainingMs), STANDING_LEASE_MAX_MS);
+        role._inheritedStandingUntil = rs > 0 ? (this._now() + rs) : 0;   // 6c: adopted on promotion (rootClaim._set)
+      }
       if (this._replicateSubs && Number.isFinite(payload.metricsRemainingMs)) {
         const rem = Math.min(Math.max(0, payload.metricsRemainingMs), METRICS_LEASE_MS);
         role._inheritedMetricsOn = rem > 0 ? (this._now() + rem) : 0;

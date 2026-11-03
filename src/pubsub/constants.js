@@ -426,6 +426,12 @@ export const ROOT_VERIFY_BATCH    = 3;          // max verify lookups launched p
 // second requester's METRICSON short-circuits (the root already knows). The lease
 // self-expires when the last metric subscriber stops renewing → metrics turn off,
 // no orphan load.
+// 6c (Closer-Born v0.6, standingLease only): a standing subscription asks for
+// this lease on each SUB; a root holds at most the MAX. Product parameters,
+// set 2026-11-03 on David's "go ahead with 6c": hours, not minutes, because
+// the gap they bridge is a vanished holder to the next fresh read.
+export const STANDING_LEASE_MS     = 6 * 3_600_000;    // 6 h
+export const STANDING_LEASE_MAX_MS = 24 * 3_600_000;   // 24 h
 export const METRICS_LEASE_MS = 70_000;   // root keeps publishing this long after the last METRICSON (~= dropMs; renewed by the subscriber's refresh tick)
 export const METRICS_PUB_MS   = 20_000;   // snapshot cadence at the root while the lease is fresh
 export const METRICS_COALESCE_MS = 8_000; // a path node re-forwards METRICSON upstream at most this often (fan-in dedup; still keeps the root's lease alive)
