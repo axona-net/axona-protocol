@@ -3050,6 +3050,7 @@ export class AxonaPeer extends DHT {
         subscriptions.push({
           topic:       sub.topicName,
           since:       sub._opts?.since ?? null,
+          standing:    !!sub._opts?.standing,   // 6c: an app re-subscribing from pendingSubscriptions keeps its lease
         });
       }
     }
@@ -4126,7 +4127,9 @@ export class AxonaPeer extends DHT {
     // restructured around, turning an optimal path into a poor one on resubscribe.
     // (The PUBLISH path still warms — see peer.pub — because a one-shot PUB has no
     // renewal to re-route it.)
-    am.pubsubSubscribe(topicIdBig, { replayLatest: opts.since === 'latest' });
+    // 6c (Orion 6C-1): a standing lease is declared while ANY local subscription
+    // to the topic asks for one.
+    am.pubsubSubscribe(topicIdBig, { replayLatest: opts.since === 'latest', standing: [...this._subscriptions.get(topicIdBig)].some((s) => !!s._opts?.standing) });
 
     // Demand-driven metrics: subscribing to a metricTopic(dataId) turns metrics ON
     // for the underlying DATA topic — a renewable METRICSON lease routed to that
@@ -4349,6 +4352,13 @@ export class AxonaPeer extends DHT {
     const set = this._subscriptions.get(key);
     if (set) {
       set.delete(sub);
+      if (set.size > 0) {
+        // 6c (Orion 6C-1): the lease follows the subscriptions that remain.
+        try {
+          const ms = this._requireAxonaManager('unsubscribe').mySubscriptions.get(key);
+          if (ms) ms.standing = [...set].some((s) => !!s._opts?.standing);
+        } catch { /* unsubscribe is best-effort */ }
+      }
       if (set.size === 0) {
         this._subscriptions.delete(key);
         try {

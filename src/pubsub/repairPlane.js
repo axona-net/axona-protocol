@@ -308,12 +308,15 @@ export const repairPlaneMethods = {
       // the same seat the dead reaper would have taken, just later.
       const backupSeat = role.backupOf !== null || this._backupTopics.has(t);
       const custodyAlive = this._custodyAlive(role, now);   // dual-root 4(d) v0.14: never reaped while it holds
+      // A root with a fresh metrics lease keeps publishing snapshots (read below).
+      // 6c (Orion 6C-2): a standing root publishes nothing, so the 24 h idle
+      // reaper must read the lease too; a metrics root never reached it only
+      // because its snapshots refresh lastTs.
+      const metricsLeased = role.isRoot && (role.metricsOn > now || this._standingLeased(role, now));   // 6c: a standing lease is held exactly as the metrics lease is
       const idleReap = this._roleIdleTtlMs > 0 && role.cache.length === 0
-        && !backupSeat && !custodyAlive && !role.dismantling
+        && !backupSeat && !custodyAlive && !role.dismantling && !metricsLeased
         && !this.mySubscriptions.has(t) && !this._hostedTopics.has(t)
         && this._roleIdleMs(role, now) > this._roleIdleTtlMs;
-      // A root with a fresh metrics lease keeps publishing snapshots (read below).
-      const metricsLeased = role.isRoot && (role.metricsOn > now || this._standingLeased(role, now));   // 6c: a standing lease is held exactly as the metrics lease is
       // EMPTY-ROLE GRACE (David 2026-10-19, "address the root issue with unreaped
       // topics raised by Aster"). Measured on sfo3 grizzly1 over seven days of
       // 4.114.1: the reapers fire exactly as specified — 1,315 idle root reaps,

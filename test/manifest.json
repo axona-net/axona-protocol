@@ -1202,6 +1202,11 @@
       "note": "Closer-Born v0.6 Part 6c (David 2026-11-03 \"go ahead with 6c\"), option standingLease / env STANDING_LEASE, default off: a subscription made with { standing: true } declares STANDING_LEASE_MS on its SUB; a holder keeps standingUntil (bounded by STANDING_LEASE_MAX_MS); a leased root is exempt from the empty-role reaper and the Topic Lifetime termination sweep; a full REPLICATE carries standingRemainingMs and a promoted backup inherits it. S1..S6. Mutants: reaper not exempt, termination not exempt, SUB lease not noted, no cap, SUB never declares, not replicated, not inherited -> each red."
     },
     {
+      "file": "fence_cbr_6c_findings.mjs",
+      "class": "default",
+      "note": "Orion d8fe2183 on 6c: 6C-1 peer.sub { standing: true } reaches the manager and the wire SUB, and the lease follows the subscriptions that remain after one stops (C1a/C1b); 6C-2 the 24 h idle reaper spares a leased root, control reaped (C2a/C2b); 6C-3 an uncompleted SUB does not lease a stager, and the registry types standing / standingRemainingMs as number (C3a/C3b); C4 the root's own self-looped standing renewal still leases it. Mutants: sub drops standing, no recompute on stop, idle reaper ignores the lease, lease noted before the staging return, types missing, self-loop not noted -> each red."
+    },
+    {
       "file": "fence_cbr_6b_gate.mjs",
       "class": "default",
       "note": "Closer-Born v0.6 Part 6b as the GATE (David 2026-11-03 \"go ahead with 6b as the gate\"), successorGate + cutover: an app-process winner says so on its staged pull (ephemeral, fdHost); the loser accepts the terminal ack but holds step 5 (demote, release, promotion) until a backup other than the winner, not on the winner's host, is current; _step5Tick (refreshTick) runs it; past the lease the round aborts and the loser keeps the root. G1 deferred; G1b the winner itself never counts; G2 a second holder releases it; G3 same-host holder never counts, round aborts; G4 service winner and G5 gate off: no deferral. Mutants: no gate, winner host not excluded, winner not excluded, tick never runs, winner never says ephemeral -> each red."

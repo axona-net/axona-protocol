@@ -333,10 +333,10 @@ export const wireHandlersMethods = {
     const since = Number.isFinite(payload.since) ? payload.since : 0;
     const seat = this._seatKindOf(payload);   // Topic Lifetime 4.3: reader | child(n) | standby
 
-    this._noteStandingSub(role, payload);   // 6c: a standing lease, the root's own renewal included (standingLease only)
     // The root's own renewal self-loops here. Don't seat self as a subscriber
     // (no self-fan); just replay locally if the app subscribes.
     if (idBig(subHex) === this.nodeId) {
+      this._noteStandingSub(role, payload);   // 6c: the root's own standing renewal (standingLease only)
       if (this.mySubscriptions.has(topicBig)) this._replayLocal(role, since, !!payload.latest);
       return 'consumed';
     }
@@ -369,6 +369,10 @@ export const wireHandlersMethods = {
     // 3B-4 / 3B-4a (Orion 620dbf95): a role created only to stage seats no one,
     // whatever the SUB's shape. A completed round has already promoted it.
     if (role.staging?.created && !role.isRoot) return 'consumed';
+    // 6c: a standing lease (standingLease only). After the staging return, so a
+    // stager is not leased by an uncompleted SUB and a completing SUB is noted
+    // on the promoted root (6C-3, Orion d8fe2183).
+    this._noteStandingSub(role, payload);
     const myHw = this._highWater(role);
     if (Number.isFinite(payload.hw) && payload.hw > myHw) {
       this._syncPull(idBig(subHex), topicBig, 'REPLAY_UP', { sinceHw: myHw });
