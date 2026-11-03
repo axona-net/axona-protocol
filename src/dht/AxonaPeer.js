@@ -176,6 +176,12 @@ const LOCAL_PROBE_MAX   = 8;
 // finding 6) stays cached, so per-ICE-candidate signal frames within one
 // negotiation don't each pay a full lookup.
 const RELAY_REACH_TTL_MS = 5000;
+// Signal return route: how long a received offer's reversed hops stay usable
+// for the answer and candidates, how many breadcrumbs a node keeps, and the
+// longest reverse path honoured (the R3 path memory bounds what arrives).
+const SIGNAL_RETURN_TTL_MS = 60_000;
+const SIGNAL_RETURN_CAP    = 256;
+const SIGNAL_RPATH_MAX     = 16;
 // 4.123.0 acked lookup walk: _lookupStep's return when it handed the walk on.
 const WALK_FORWARDED = Symbol('lookup-walk-forwarded');
 // B1: a send failure that says the EDGE is gone (no route, no channel, peer
@@ -1301,7 +1307,19 @@ export class AxonaPeer extends DHT {
       if (msg.via != null) { try { viaId = asId(msg.via); } catch { viaId = null; } }
       let nextHopId = null;
       let viaNext   = null;
-      if (viaId !== null) {
+      // SIGNAL RETURN ROUTE: a reply carrying the reverse of its request's
+      // hops goes to the next of them while a channel to it is open; the first
+      // unavailable entry drops the rest and the hop selects greedily.
+      let rpathRest = null;
+      if (Array.isArray(msg.rpath) && msg.rpath.length) {
+        const RS = (this._returnRouteStats ??= { honoured: 0, unavailable: 0, originated: 0, delivered: 0, fellBack: 0 });
+        let rp = null; try { rp = asId(msg.rpath[0]); } catch { rp = null; }
+        const rpOk = rp !== null && rp !== meId && !exclude.has(rp)
+          && !(deadSet && deadSet.has(rp))
+          && (connOk ? connOk(rp) : node.synaptome.has(rp));
+        if (rpOk) { nextHopId = rp; rpathRest = msg.rpath.slice(1, SIGNAL_RPATH_MAX); RS.honoured++; } else { RS.unavailable++; }
+      }
+      if (nextHopId === null && viaId !== null) {
         const viaOk = viaId !== meId && !exclude.has(viaId)
           && !(deadSet && deadSet.has(viaId))
           && (connOk ? connOk(viaId) : node.synaptome.has(viaId));
@@ -1340,6 +1358,7 @@ export class AxonaPeer extends DHT {
         targetId: targetBig,
         hopCount: hops,
         isTerminal: isTerminal && capable,
+        path: pathHex,
       });
 
       if (result === 'consumed') {
@@ -1415,6 +1434,7 @@ export class AxonaPeer extends DHT {
           type, payload, targetId: toHex(targetBig), hops: hops + 1, originId,
           path: [...pathHex.slice(-(pathMem - 1)), toHex(meId)],          // R3
           ...(viaNext != null ? { via: toHex(viaNext) } : {}),             // R2
+          ...(rpathRest && rpathRest.length ? { rpath: rpathRest } : {}),  // signal return route
           ...(_hopLt ? { hopAttemptId: _hopId } : {}),
         });
         if (_hopLt) {
@@ -1455,6 +1475,18 @@ export class AxonaPeer extends DHT {
     // axona-docs/implementation/Peer-Relayed-Signaling-v0.1.md §3.1.
     registerFrame(this, 'mesh:signal', async (payload, meta) => {
       if (meta.targetId !== node.id) return null;       // not us — forward
+      // SIGNAL RETURN ROUTE: keep the reverse of the hops this signal came
+      // over, keyed by its sender, so the answer and candidates can go back
+      // the way the offer arrived (the request's route is proof of a route).
+      if (Array.isArray(meta.path) && meta.path.length && typeof payload?.from === 'string' && isHexId(payload.from)) {
+        const rp = meta.path.filter((h) => typeof h === 'string' && isHexId(h)).slice(-SIGNAL_RPATH_MAX).reverse();
+        if (rp.length) {
+          this._sigReturn ??= new Map();
+          this._sigReturn.delete(payload.from.toLowerCase());
+          this._sigReturn.set(payload.from.toLowerCase(), { rpath: rp, exp: Date.now() + SIGNAL_RETURN_TTL_MS });
+          capOldest(this._sigReturn, SIGNAL_RETURN_CAP);
+        }
+      }
       const t = node.transport;
       if (t && typeof t.deliverMeshSignal === 'function'
           && payload && typeof payload.from === 'string') {
@@ -6543,7 +6575,16 @@ export class AxonaPeer extends DHT {
     const originNode = this._node;
     const originId   = opts.fromId ?? nodeIdToHex(originNode.id);
 
-    let nextHopId = this._greedyNextHopToward(targetId);
+    // SIGNAL RETURN ROUTE (originator): the first reverse hop is taken only
+    // while a channel to it is open; the rest rides the frame as `rpath`.
+    let nextHopId = null, rpathRest = null;
+    if (Array.isArray(opts.rpath) && opts.rpath.length && typeof originNode.transport?.isConnected === 'function') {
+      try {
+        const f = asId(opts.rpath[0]);
+        if (f !== originNode.id && originNode.transport.isConnected(f)) { nextHopId = f; rpathRest = opts.rpath.slice(1, SIGNAL_RPATH_MAX); }
+      } catch { /* unreadable entry: no return route */ }
+    }
+    if (nextHopId === null) nextHopId = this._greedyNextHopToward(targetId);
     let viaNext   = null;
     let isTerminal = nextHopId === null;
     if (isTerminal) {
@@ -6643,6 +6684,7 @@ export class AxonaPeer extends DHT {
         type, payload, targetId: toHex(targetId), hops: 1, originId,
         path: [toHex(originNode.id)],                                     // R3
         ...(viaNext != null ? { via: toHex(viaNext) } : {}),              // R2
+        ...(rpathRest && rpathRest.length ? { rpath: rpathRest } : {}),   // signal return route
         ...(_hopLt ? { hopAttemptId: _hopId } : {}),
       });
       if (_hopLt) {
@@ -6705,6 +6747,22 @@ export class AxonaPeer extends DHT {
     const pre = this._relayReach ? this._relayReach.get(toBig.toString(16)) : null;
     const wasCached = !!(pre && (t0 - pre.ts) < RELAY_REACH_TTL_MS);
     const origin = (ctx) => { if (traced) this._emitLog?.('info', 'relay-signal-origin', { to: String(toHexId).slice(0, 12), kind: signal.kind, attempt: signal.attempt ?? null, ms: Date.now() - t0, ...ctx }); };
+    // SIGNAL RETURN ROUTE: a node whose offer reached us has a route TO us;
+    // the reverse of its hops is tried first, and the own lookup stays the
+    // fallback. Behind SIGNAL_RETURN_ROUTE (default off).
+    if (this._domain?.SIGNAL_RETURN_ROUTE && this._sigReturn) {
+      const key = String(toHexId).toLowerCase();
+      const ret = this._sigReturn.get(key);
+      if (ret && ret.exp > t0) {
+        const RS = (this._returnRouteStats ??= { honoured: 0, unavailable: 0, originated: 0, delivered: 0, fellBack: 0 });
+        RS.originated++;
+        try {
+          const r = await this.routeMessage(toBig, 'mesh:signal', { from: toHex(this._node.id), signal }, { rpath: ret.rpath });
+          if (r && r.consumed) { RS.delivered++; origin({ reach: 'return-route', result: 'delivered', hops: r.hops ?? null, tries: 1 }); return; }
+        } catch { /* fall back to the own lookup */ }
+        RS.fellBack++;
+      } else if (ret) { this._sigReturn.delete(key); }
+    }
     if (!(await this._relayReachable(toBig))) {
       this._domain?._emit?.({ type: 'mesh-signal-unreachable', to: toHexId });
       // 4.122.0: name WHY the lookup said no (David: "Log why each lookup fails").

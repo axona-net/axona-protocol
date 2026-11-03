@@ -84,6 +84,16 @@ const DEFAULTS = Object.freeze({
   // OFF = the 4.124.0 order. Env LOOKUP_RESELECT=1 arms it where process.env
   // exists (relays); apps and seats take the default.
   LOOKUP_RESELECT:     false,
+  // Closer-Born Relay Inherits the Root v0.4 build order step 1, the reply
+  // route of axona-bot finding 80fe76eb (David 2026-11-03 "go ahead with the
+  // reply route"): an answer or candidate toward a node whose offer we just
+  // received returns along the reverse of the offer's own hops (each hop
+  // honours the next id only while a channel to it is open, else greedy),
+  // and the answerer's own lookup is the fallback, not the gate. ON: the
+  // originator sends `rpath`; every hop honours an `rpath` it receives
+  // whatever this flag says (an older node ignores the field). Env
+  // SIGNAL_RETURN_ROUTE=1 arms it where process.env exists.
+  SIGNAL_RETURN_ROUTE: false,
   // P3 of Mesh Partition Self-Heal v0.2 (axona-docs 87a608a; David 2026-10-30
   // "Build P3 and P2, default off"): an offer the mesh COULD NOT DELIVER is a
   // deferral, not a failure of the identity. Confirmed non-delivery is the
@@ -156,7 +166,7 @@ export class AxonaDomain {
     }
     // P2/P3 arming, the same rule: the env speaks only when the option is not
     // given AND the variable is set; =0 is a control arm, unset is the default.
-    for (const flag of ['NO_PATH_DEFER', 'PEER_EXCHANGE']) {
+    for (const flag of ['NO_PATH_DEFER', 'PEER_EXCHANGE', 'SIGNAL_RETURN_ROUTE']) {
       if (opts[flag] == null) {
         const e = envNum(flag, null);
         if (e !== null) this[flag] = e === 1;
