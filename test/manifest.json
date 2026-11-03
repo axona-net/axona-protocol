@@ -1167,6 +1167,11 @@
       "note": "Closer-Born Relay Inherits the Root Part 3e step 6 under cutover, Orion CUT-1/CUT-2 (council c0a842d2). C1: a refused-capacity answer clears the candidate and the next verify offers again; handover completes. C3: a winner re-minted mid-round is offered again at once under a new corr with its new epoch. Controls C2/C4 off = legacy. Mutants: transient clause dropped -> C1 red; record-then-abort order under cutover -> C3 red."
     },
     {
+      "file": "fence_cbr_merge_across_island.mjs",
+      "class": "default",
+      "note": "Closer-Born v0.6 end to end: a whole merge round (MERGE_OFFER forward; PULLUP, REPLAYUP, REPLAYACK back) crosses a one-way island held for the whole run on real AxonaPeers. X1 returnRoute + cutover on: W one root with L's three bodies, L demoted by merge-step5. X2 returnRoute off: the offer reaches W, nothing crosses back, L still root. The verify walk's result is given (the real walk stops short of W on this island: separate finding). Mutant: _route ignores the breadcrumb -> X1 red."
+    },
+    {
       "file": "fence_return_routes.mjs",
       "class": "default",
       "note": "Closer-Born Relay Inherits the Root v0.6 return routes for pub/sub (David 2026-11-03 'go ahead with the return routes'). Real AxonaPeers on a one-way sim island: PULLUP, SUB (re-sent by an intermediate) and MERGE_OFFER leave a breadcrumb; REPLAYUP/REPLAYACK/replies return by the reverse hops; 12-hop walk keeps 16 ids with domain RETURN_ROUTE; broken hop falls back; expiry; defaults off. Mutants (7): breadcrumb ignored, each of three notes removed, named node not appended, pubsub keeps PATH_MEMORY, no fallback -> each red."
