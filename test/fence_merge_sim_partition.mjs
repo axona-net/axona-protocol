@@ -124,6 +124,12 @@ const all = [...A, ...B];
   // The packet promises the union, not the owner: the true root demotes INTO the fork through a round, the fork
   // holds everything, and the fork's later offer to the (now non-root) true root is answered not-root, so the fork
   // keeps its claim with the candidate cleared instead of misreading silence as a legacy winner.
+  // THE MESH WHOLE: every pair linked, so every W<->fork route is one hop. Under the partition topology (two
+  // triangles, one bridge A0-B0) W reaches A[2] only when A0 is W's XOR-closest neighbour toward it; with random
+  // ids B1 or B2 is closer in about one run in four, the greedy walk ends there terminal (no unvisited closer
+  // node), W's offer and its 'outranked' answer are never delivered, and the fork's offer times out into the
+  // legacy fallback: H1/H2 then failed on id order, not on the machine.
+  for (let i = 0; i < all.length; i++) for (let j = i + 1; j < all.length; j++) if (!all[i].node.synaptome.has(all[j].big)) await link(all[i], all[j]);
   const forked = A[2];
   const fr = forked.am._rootClaim.become(T, 'sub-terminal');     // epoch above W's
   const fenv = await buildEnvelope({ topic: desc, message: { side: 'fork', k: 3 }, seq: 3, identity: author, ts: Date.now() });
