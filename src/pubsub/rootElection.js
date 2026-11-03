@@ -446,6 +446,15 @@ export const rootElectionMethods = {
             const d = b ^ t;
             if (cD === null || d < cD) { cD = d; cBig = b; }
           }
+          // 3c: the root keeps what this verify visited, for the replica pick.
+          if (this._replicaInherit) {
+            const live0 = this.axonRoles.get(t);
+            if (live0?.isRoot) {
+              const ids = [];
+              for (const id of path) { let b; try { b = idBig(id); } catch { continue; } if (b !== this.nodeId && b !== bridge) ids.push(lc(idHex(b))); if (ids.length >= 16) break; }
+              live0.verifySeen = { at: this._now(), ids };
+            }
+          }
           if (cBig === null) return;                              // nobody but self was visited: confirmed
           if (cD >= (this.nodeId ^ t)) return;                    // nothing strictly closer visited → keep the claim
           const live = this.axonRoles.get(t);

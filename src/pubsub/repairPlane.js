@@ -971,13 +971,14 @@ export const repairPlaneMethods = {
       // The closest reachable nodes fill the replica cohort, whatever their region.
       // findKClosest already returns them closest-first; region is a placement hint
       // folded into the id, never a selection gate.
-      want = cand.slice(0, this._rootReplicas);
+      want = this._replicaInherit ? this._inheritCohort(t, role, cand, bridge) : cand.slice(0, this._rootReplicas);
     } else {
       // Case 4: neighbours() throwing used to propagate out of a function that
       // catches everywhere else. Caught here so it lands as UNKNOWN rather than
       // as a rejection some caller has to re-interpret.
       try { want = this._nearestReachable(t, this._rootReplicas, bridge); }     // sim/fallback: neighbour-based
       catch { want = []; discoveryFailed = true; }
+      if (this._replicaInherit) want = this._inheritCohort(t, role, want, bridge);
     }
     const wantSet = new Set(want);
     for (const hex of [...role.replicas.keys()]) if (!wantSet.has(hex)) role.replicas.delete(hex);   // retire those no longer in the cohort
@@ -1108,6 +1109,46 @@ export const repairPlaneMethods = {
     // present one.
     if (full) { role.sync.sig = sig; role.sync.lastFullAt = now; }
     return out;
+  },
+
+  // 3c REPLICAS INHERIT (Closer-Born v0.6; David 2026-11-03 "go ahead with
+  // 3c"; option replicaInherit). The candidate set is condition C1's: the
+  // nodes that hold a role for the topic (this root's seated subscribers,
+  // whatever their kind) plus the nodes its walks visited, beside the
+  // discovery list. Closest first; the farthest current replica is displaced
+  // by any closer candidate and, no longer pushed to, lapses on its standby
+  // lease. Never self, never the bridge.
+  _inheritCohort(t, role, discovered, bridge) {
+    const K = this._rootReplicas;
+    if (K <= 0) return [];
+    const skip = new Set();
+    for (const b of [bridge, (typeof this._closerBornBridge === 'function') ? this._closerBornBridge() : null]) {
+      if (b != null) { try { skip.add(lc(idHex(idBig(b)))); } catch { /* */ } }
+    }
+    const selfHex = lc(idHex(this.nodeId));
+    const pool = new Map();   // hex -> source
+    const add = (id, src) => {
+      let hex; try { hex = lc(idHex(idBig(id))); } catch { return; }
+      if (hex === selfHex || skip.has(hex) || pool.has(hex)) return;
+      pool.set(hex, src);
+    };
+    for (const id of (Array.isArray(discovered) ? discovered : [])) add(id, 'discovered');
+    for (const h of (role.subscribers?.keys?.() ?? [])) add(h, 'seated');
+    const seen = role.verifySeen;
+    if (seen && (this._now() - seen.at) <= 2 * ROOT_VERIFY_MS) for (const h of seen.ids) add(h, 'walked');
+    const ranked = [...pool.keys()].sort((a, b) => ((idBig(a) ^ t) < (idBig(b) ^ t) ? -1 : 1));
+    const want = ranked.slice(0, K);
+    const before = [...(role.replicas?.keys?.() ?? [])];
+    const entering = want.filter((h) => !role.replicas?.has(h));
+    if (entering.length && before.length) {
+      this._log('info', 'replica-inherit', {
+        topic: idHex(t).slice(0, 12),
+        in: entering.map((h) => `${h.slice(0, 10)}:${pool.get(h)}`),
+        out: before.filter((h) => !want.includes(h)).map((h) => h.slice(0, 10)),
+        pool: pool.size,
+      });
+    }
+    return want;
   },
 
   _nearestReachable(tBig, n, bridge) {
