@@ -107,13 +107,15 @@ console.log('fence_merge_authority_single_path: 4(d) — every claim-shedding pa
     if (!f.endsWith('.js') || f === 'rootClaim.js') continue;
     const src = readFileSync(new URL(f, dir), 'utf8');
     const lines = src.split('\n');
-    const ranges = [bodyRange(lines, /^  _mergeCandidate\(/), bodyRange(lines, /^  _onReplayAck\(/), bodyRange(lines, /^  _mergeSweep\(/)].filter(Boolean);
+    // Step 5 moved from _onReplayAck's body into _mergeStep5 (6b gate,
+    // David 2026-11-03), so a deferred round can run it from _step5Tick.
+    const ranges = [bodyRange(lines, /^  _mergeCandidate\(/), bodyRange(lines, /^  _mergeStep5\(/), bodyRange(lines, /^  _mergeSweep\(/)].filter(Boolean);
     lines.forEach((line, i) => {
       if (!/\.demote\(/.test(line) || /^\s*\/\//.test(line)) return;
       if (ranges.some(([a, b]) => i > a && i < b)) inside++; else offenders.push(`${f}:${i + 1}`);
     });
   }
-  check('8 structural: the only .demote( calls outside rootClaim.js are the direct branch inside _mergeCandidate, step 5 inside _onReplayAck, and the legacy fallback inside _mergeSweep (each minting the token it needs)', offenders.length === 0 && inside === 3, `offenders=${offenders.join(' ')} inside=${inside}`);
+  check('8 structural: the only .demote( calls outside rootClaim.js are the direct branch inside _mergeCandidate, step 5 inside _mergeStep5, and the legacy fallback inside _mergeSweep (each minting the token it needs)', offenders.length === 0 && inside === 3, `offenders=${offenders.join(' ')} inside=${inside}`);
 }
 
 console.log(`\nfence_merge_authority_single_path: ${passed} passed, ${failed} failed`);

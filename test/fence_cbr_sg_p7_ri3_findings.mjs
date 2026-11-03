@@ -55,6 +55,11 @@ for (const lHost of ['host-a', 'host-b']) {
   const gate = { successorGate: true, processKind: 'app' };
   const S = await scene(`cbr-sg1-${lHost}`, { wOpts: { ...gate, hostTag: 'host-a' }, lOpts: { ...gate, hostTag: lHost } });
   await S.stamp(S.L, 1); await S.stamp(S.L, 2);
+  // The 6b gate (fence_cbr_6b_gate): an app winner takes the root only once a
+  // second holder of L's is current. A backup X on a third host renews first.
+  const X = idHex(S.L.id ^ 0x55n);
+  await S.L.handlers.get('pubsub:sub')({ topicId: idHex(S.Lt.topicId), via: [], subscriberId: X, since: 0, hw: S.L.am._highWater(S.lRole), lw: 0, standby: true, fd: { kind: 'service', host: 'host-x' } }, { targetId: S.L.id, isTerminal: true, hopCount: 1, fromId: X });
+  await S.fab.settle();
   await S.trigger();
   const w = S.wr();
   S.W.am._successorTick();

@@ -241,12 +241,12 @@ function rowDefs() {
       evidence: EvidenceLevel.ROUTED, proves: Proves.ROUTING, outcome: 'RoutingOutcome', terminalOutcome: 'REPLAY_SENT',
       retry: Retry.NATURAL, topicProfile: PROFILE, eventIdScheme: NA, replayCursorType: 'HIGHWATER', orderingModel: 'ARRIVAL',
       authGuard: NA, admissionGuard: NA, placementGuard: NA,
-      projection: { payload: ['topicId', 'sinceHw', 'parentId', 'corr', 'winnerEpoch', 'cursor', 'timing', 'staged', 'handoff', 'probe'] },   // probe: 3a, the try's nonce a role-less node echoes in its NACK   // staged/handoff: a staged pull and its capability (Closer-Born 3b, Part 7)   // corr/winnerEpoch/cursor/timing: a merge pull (dual-root 4(d))
+      projection: { payload: ['topicId', 'sinceHw', 'parentId', 'corr', 'winnerEpoch', 'cursor', 'timing', 'staged', 'handoff', 'probe', 'ephemeral', 'fdHost'] },   // ephemeral/fdHost: 6b gate, an app-process winner and its host   // probe: 3a, the try's nonce a role-less node echoes in its NACK   // staged/handoff: a staged pull and its capability (Closer-Born 3b, Part 7)   // corr/winnerEpoch/cursor/timing: a merge pull (dual-root 4(d))
       schema: { require: ['topicId', 'parentId'], types: { topicId: 'string', parentId: 'string', corr: 'string' } },
       // catch-up conversation; parentId is the return destination the REPLAYUP is routed back to (its routing target).
       conversation: { role: REQ, opposite: 'pubsub:replayup', pairing: [{ local: 'topicId', remote: 'topicId' }, { local: 'parentId', remote: 'targetId' }] },
       capabilityRange: { profile: PROFILE },
-      errorContract: ['no-newer-history', 'merge-stale', 'merge-cursor-invalid', 'refused-timing', 'refused-export-bound'], traceFields: ['topicId', 'parentId'], budget: budget(10),
+      errorContract: ['no-newer-history', 'merge-stale', 'merge-cursor-invalid', 'refused-timing', 'refused-export-bound'], traceFields: ['topicId', 'parentId'], budget: budget(12),
       note: 'catch-up trigger to the parent holder from cursor sinceHw; answered by REPLAYUP routed back to parentId',
     }),
     ({

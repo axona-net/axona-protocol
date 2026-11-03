@@ -71,16 +71,43 @@ export const successorGateMethods = {
 
   // The current successors of a root, by the rule in the header.
   _currentSuccessors(role) {
+    return this._currentSuccessorsWhere(role, { excludeHex: null, excludeHost: this._hostTag });
+  },
+  _currentSuccessorsWhere(role, { excludeHex = null, excludeHost = null } = {}) {
     const now = this._now();
     const need = this._highWaterAgo(role, RENEW_MS);
     const out = [];
     for (const [hex, s] of (role.successors ?? [])) {
+      if (excludeHex && hex === excludeHex) continue;
       if (now - s.at > RENEW_MS) continue;
       if (s.hw < need) continue;
-      if (this._hostTag && s.host && s.host === this._hostTag) continue;
+      if (excludeHost && s.host && s.host === excludeHost) continue;
       out.push(hex);
     }
     return out;
+  },
+
+  // 6b GATE (the loser's side): a SECOND holder for an ephemeral winner — a
+  // current successor of this root that is not the winner and not on the
+  // winner's host.
+  _secondHolderCurrent(role, m) {
+    return this._currentSuccessorsWhere(role, { excludeHex: lc(String(m.winner)), excludeHost: m.winnerHost ?? null }).length > 0;
+  },
+
+  // Per refreshTick: a step 5 deferred for want of a second holder runs once
+  // one is current; past the lease, _mergeStep5 aborts and the root stays.
+  _step5Tick() {
+    if (!this._successorGate) return;
+    for (const [t, role] of this.axonRoles) {
+      for (const [corr, m] of (role.sync?.openMerges ?? [])) {
+        if (!m.deferred) continue;
+        const { leaseOk } = m.deferred;
+        if (leaseOk() && !this._secondHolderCurrent(role, m)) continue;
+        m.deferred = null;
+        if (this._secondHolderCurrent(role, m)) this._log('info', 'merge-step5-released', { topic: idHex(t).slice(0, 12), corr: corr.slice(0, 8) });
+        this._mergeStep5(role, t, corr, m, leaseOk);
+      }
+    }
   },
 
   // Per refreshTick, each root this node holds. Only an 'app' node is gated.

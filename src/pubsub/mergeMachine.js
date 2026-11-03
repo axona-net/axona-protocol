@@ -547,7 +547,7 @@ export const mergeMachineMethods = {
   _mergePull(topicBig, role, corr, cursor) {
     const p = role.sync.openPulls.get(corr);
     if (!p) return;
-    this._emitPullUp(idBig(p.loser), { topicId: idHex(topicBig), corr, parentId: idHex(this.nodeId), winnerEpoch: role.epoch | 0, cursor, sinceHw: 0, timing: { ...p.timing }, ...(role.staging?.corr === corr ? { staged: true, handoff: 1 } : {}) });
+    this._emitPullUp(idBig(p.loser), { topicId: idHex(topicBig), corr, parentId: idHex(this.nodeId), winnerEpoch: role.epoch | 0, cursor, sinceHw: 0, timing: { ...p.timing }, ...(role.staging?.corr === corr ? { staged: true, handoff: 1, ...(this._successorGate && this._processKind === 'app' ? { ephemeral: 1, ...(this._hostTag ? { fdHost: this._hostTag } : {}) } : {}) } : {}) });
   },
 
   // ── step 3 (L): the bound PULLUP, the cut, the header, the frames ──────
@@ -602,6 +602,9 @@ export const mergeMachineMethods = {
       // completion by the SUB high-water pull. The gate stays for the round's
       // bookkeeping and forwards nothing.
       if (this._cutover && payload.staged === true) gate.staged = true;   // Part 7: handoff checked above, before the cut
+      // 6b gate: the winner says it is an app process (ephemeral) and names its host.
+      m.ephemeral = payload.ephemeral === 1;
+      m.winnerHost = (typeof payload.fdHost === 'string') ? payload.fdHost.slice(0, 32) : null;
       const bodies = role.cache.slice().sort((a, b) => a.publishTs - b.publishTs || (a.msgId < b.msgId ? -1 : a.msgId > b.msgId ? 1 : 0))
         .map((c) => ({ json: c.json, publishTs: c.publishTs, msgId: c.msgId, seq: c.seq, bytes: c.bytes }));
       const dels = this._activeDels(role).sort((a, b) => a.killTs - b.killTs || (a.msgId < b.msgId ? -1 : a.msgId > b.msgId ? 1 : 0))
@@ -798,9 +801,25 @@ export const mergeMachineMethods = {
       this._mergeAbort(role, 'ack-short');
       return 'consumed';
     }
-    // STEP 5, synchronous from here to the flip: re-check the lease, pin the
-    // export, mint the token, demote with it. The SUB demote() sends is an
-    // ordinary renewal; completion is claimed AFTER the flip, below.
+    // 6b GATE (Closer-Born v0.6; David 2026-11-03 "go ahead with 6b as the
+    // gate"; successorGate): an EPHEMERAL winner (an app process) takes the
+    // root only once a second holder is current. The loser holds step 5 —
+    // the demote, the release, the winner's promotion — until one of its own
+    // backups other than the winner, on another host, renewed within RENEW_MS
+    // at or above this root's high-water; _step5Tick re-runs it. The lease
+    // still bounds the round: past it, step 5 aborts and this node keeps the root.
+    if (this._successorGate && m.ephemeral && !this._secondHolderCurrent(role, m)) {
+      if (!m.deferred) this._log('info', 'merge-step5-deferred', { topic: idHex(topicBig).slice(0, 12), corr: corr.slice(0, 8), winner: m.winner.slice(0, 10), why: 'no-second-holder' });
+      m.deferred = { leaseOk };
+      return 'consumed';
+    }
+    return this._mergeStep5(role, topicBig, corr, m, leaseOk);
+  },
+
+  // STEP 5, synchronous from here to the flip: re-check the lease, pin the
+  // export, mint the token, demote with it. The SUB demote() sends is an
+  // ordinary renewal; completion is claimed AFTER the flip, below.
+  _mergeStep5(role, topicBig, corr, m, leaseOk) {
     if (!leaseOk()) { this._log('warn', 'merge-ack-expired', { topic: idHex(topicBig).slice(0, 12), corr: corr.slice(0, 8), at: 'commit' }); this._mergeAbort(role, 'ack-expired'); return 'consumed'; }
     for (const id of m.manifest.bodies) role.merge.pins.add(id);
     for (const id of m.manifest.dels) role.merge.pins.add(id);

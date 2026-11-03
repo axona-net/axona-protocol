@@ -198,6 +198,7 @@ export const repairPlaneMethods = {
     //         cache to its ROOT_REPLICAS nearest neighbours so a successor is always
     //         warm.
     this._successorTick();            // 6b (successorGate): an app-held root with no current successor re-seats before this push
+    this._step5Tick();                // 6b gate: a handover to an ephemeral winner completes once a second holder is current
     this._replicateRoots();
     this._emptyRootProbeSweep(now);   // v4.24.0: empty self-roots re-pull the cohort (bounded)
     // TOPIC LIFETIME (axona-docs 11288d7; behind TOPIC_LIFETIME): the standby

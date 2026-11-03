@@ -1192,6 +1192,11 @@
       "note": "Orion 867c3048 HR-1/2 on the 3d hint refresh and RI-1/2 on 3c. H1 a local guess that is the bridge is dropped (row dropped:bridge); H2/H3 the heal SUB after a refresh names the hint, control stays greedy; R1 the verify's visited set is deduped and ranked before the 16 bound; R2 a neverRoot manager does not consume REPLICATE; R3 a refusing seated candidate is not re-picked for RENEW_MS after its refusal is recorded, then is. Mutants: bridge guess kept, heal always greedy, bounded before ranked, bridge consumes REPLICATE, refusal not read, refusal never recorded -> each red."
     },
     {
+      "file": "fence_cbr_6b_gate.mjs",
+      "class": "default",
+      "note": "Closer-Born v0.6 Part 6b as the GATE (David 2026-11-03 \"go ahead with 6b as the gate\"), successorGate + cutover: an app-process winner says so on its staged pull (ephemeral, fdHost); the loser accepts the terminal ack but holds step 5 (demote, release, promotion) until a backup other than the winner, not on the winner's host, is current; _step5Tick (refreshTick) runs it; past the lease the round aborts and the loser keeps the root. G1 deferred; G1b the winner itself never counts; G2 a second holder releases it; G3 same-host holder never counts, round aborts; G4 service winner and G5 gate off: no deferral. Mutants: no gate, winner host not excluded, winner not excluded, tick never runs, winner never says ephemeral -> each red."
+    },
+    {
       "file": "fence_cbr_6b_successor_gate.mjs",
       "class": "default",
       "note": "Closer-Born v0.6 Part 6b hold the root only with a current successor (David 2026-11-03 \"go ahead with 6b\"), option successorGate / env SUCCESSOR_GATE, default off; processKind service|app, hostTag. An app-held root reports degraded: no-successor while no successor (replica, standby seat, or the loser of a staged handover it won) is current: SUB within RENEW_MS, hw at or above the root's high-water as of RENEW_MS ago, host tag not its own. Re-seat = a FULL push on entering, then at most one per RENEW_MS. Real AxonaManager, _onSub, refreshTick, _stagePromote. G1..G10b. Mutants: service gated, same host counts, no freshness, lag ignored, readers eligible, loser not seeded, no fd on SUB, re-seat every tick, no re-seat, degraded never clears -> each red."
