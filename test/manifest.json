@@ -1212,6 +1212,11 @@
       "note": "Closer-Born v0.6 Part 3d (David 2026-11-03 'go ahead with 3d'), option attachEcho / env ATTACH_ECHO, default off: a caught-up renewal carrying an attach nonce or marked unpinned is answered with a (possibly empty) DELIVER; a pinned unarmed renewal stays silent; an unpinned sender marks its SUB unpinned:true; end to end a subscriber that lost its pin re-pins on its next renewal (off: stays unpinned). Mutants: no echo, unpinned ignored at root, sender never marks -> each red."
     },
     {
+      "file": "fence_cbr_3a_holder_probe.mjs",
+      "class": "default",
+      "note": "Closer-Born v0.6 Part 3a (David 2026-11-03 \"go ahead with 3a\") with the Part 7 probe budget, option holderProbe / env HOLDER_PROBE, default off: a probe PULLUP carries a nonce; a role-less node answers REPLAYACK no-role; a try every target of which NACKed is refunded and those nodes are not asked again; candidates rank evidence (a SUB that advertised history) first, then the lookup path, then neighbours; HOLDER_PROBE_FRAMES / HOLDER_PROBE_WINDOW_MS bound the probe, then degraded no-holder-found (once), cleared by holder-found. E1/E2 on vs off; N1..N5. Mutants: evidence unused, role-less silent, NACK ignored, no refund, role-less re-asked, budget never spent, degraded every time, holder-found never clears -> each red."
+    },
+    {
       "file": "fence_cbr_3b_roleless_winner.mjs",
       "class": "default",
       "note": "Closer-Born v0.6 Part 3b under cutover (David 2026-11-03 'go ahead with 3b'): a closer node with no root role (or a CHILD) offered the win STAGES, pulls, and takes ROOT only on the loser's merge-bearing SUB, at max(known, loserEpoch)+1 (CB-2); a staged role serves nothing (SUB/PUB to the incumbent by name) and L stamps through the round (late write reaches W by the SUB high-water pull); pull timeout discards a created stager; second contender refused busy; verify skips the bridge (CB-1). Off: not-root as today. Mutants: no staging, never promoted, staged role serves (forward loop), no discard, no busy, bridge nominated, staged gate blocks L (forward loop), no CB-2 epoch -> each red."

@@ -241,12 +241,12 @@ function rowDefs() {
       evidence: EvidenceLevel.ROUTED, proves: Proves.ROUTING, outcome: 'RoutingOutcome', terminalOutcome: 'REPLAY_SENT',
       retry: Retry.NATURAL, topicProfile: PROFILE, eventIdScheme: NA, replayCursorType: 'HIGHWATER', orderingModel: 'ARRIVAL',
       authGuard: NA, admissionGuard: NA, placementGuard: NA,
-      projection: { payload: ['topicId', 'sinceHw', 'parentId', 'corr', 'winnerEpoch', 'cursor', 'timing', 'staged', 'handoff'] },   // staged/handoff: a staged pull and its capability (Closer-Born 3b, Part 7)   // corr/winnerEpoch/cursor/timing: a merge pull (dual-root 4(d))
+      projection: { payload: ['topicId', 'sinceHw', 'parentId', 'corr', 'winnerEpoch', 'cursor', 'timing', 'staged', 'handoff', 'probe'] },   // probe: 3a, the try's nonce a role-less node echoes in its NACK   // staged/handoff: a staged pull and its capability (Closer-Born 3b, Part 7)   // corr/winnerEpoch/cursor/timing: a merge pull (dual-root 4(d))
       schema: { require: ['topicId', 'parentId'], types: { topicId: 'string', parentId: 'string', corr: 'string' } },
       // catch-up conversation; parentId is the return destination the REPLAYUP is routed back to (its routing target).
       conversation: { role: REQ, opposite: 'pubsub:replayup', pairing: [{ local: 'topicId', remote: 'topicId' }, { local: 'parentId', remote: 'targetId' }] },
       capabilityRange: { profile: PROFILE },
-      errorContract: ['no-newer-history', 'merge-stale', 'merge-cursor-invalid', 'refused-timing', 'refused-export-bound'], traceFields: ['topicId', 'parentId'], budget: budget(9),
+      errorContract: ['no-newer-history', 'merge-stale', 'merge-cursor-invalid', 'refused-timing', 'refused-export-bound'], traceFields: ['topicId', 'parentId'], budget: budget(10),
       note: 'catch-up trigger to the parent holder from cursor sinceHw; answered by REPLAYUP routed back to parentId',
     }),
     ({
@@ -292,11 +292,11 @@ function rowDefs() {
       evidence: EvidenceLevel.RETAINED, proves: Proves.RETENTION, outcome: 'RetentionOutcome', terminalOutcome: 'EXPORT_RETAINED',
       retry: Retry.NONE, topicProfile: PROFILE, eventIdScheme: 'CORR_ID', replayCursorType: NA, orderingModel: 'NONE',
       authGuard: NA, admissionGuard: NA, placementGuard: NA,
-      projection: { payload: ['topicId', 'corr', 'winner', 'winnerEpoch', 'loser', 'loserEpoch', 'retained', 'delsActive', 'hash', 'disposition'], meta: ['targetId'] },
+      projection: { payload: ['topicId', 'corr', 'winner', 'winnerEpoch', 'loser', 'loserEpoch', 'retained', 'delsActive', 'hash', 'disposition', 'from'], meta: ['targetId'] },   // from: 3a, the node answering no-role
       schema: { require: ['topicId', 'corr'], types: { topicId: 'string', corr: 'string' } },
       conversation: { role: RESP, opposite: 'pubsub:mergeoffer', pairing: [{ local: 'topicId', remote: 'topicId' }, { local: 'corr', remote: 'corr' }] },
       capabilityRange: { profile: PROFILE },
-      errorContract: ['refused-capacity', 'refused-timing', 'not-root', 'outranked', 'merge-ack-short', 'merge-ack-expired', 'merge-stale'], traceFields: ['topicId', 'corr'], budget: budget(11),
+      errorContract: ['refused-capacity', 'refused-timing', 'not-root', 'outranked', 'merge-ack-short', 'merge-ack-expired', 'merge-stale', 'no-role'], traceFields: ['topicId', 'corr'], budget: budget(12),
       note: 'dual-root 4(d) step 4: the winner\'s TERMINAL ack of the whole export under corr (counts against the manifest + hash) or a refusal; step 5 at the loser matches all six fields and the retention check',
     }),
     ({

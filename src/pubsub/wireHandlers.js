@@ -364,6 +364,7 @@ export const wireHandlersMethods = {
     // completion above, so the loser's completing SUB, which promotes this
     // stager, also records the loser's host (SG-1, Orion 7af4822f).
     this._noteSuccessorSub(role, subHex, payload, seat);
+    this._noteProbeEvidence(role, subHex, payload);   // 3a: who this SUB says holds history (holderProbe only)
     // 3B-4 / 3B-4a (Orion 620dbf95): a role created only to stage seats no one,
     // whatever the SUB's shape. A completed round has already promoted it.
     if (role.staging?.created && !role.isRoot) return 'consumed';
@@ -938,6 +939,7 @@ export const wireHandlersMethods = {
     if (meta.targetId !== this.nodeId) return;
     this._noteReturn(meta, [meta?.originId, payload?.parentId]);       // return route (Closer-Born v0.6)
     if (typeof payload.corr === 'string') { this._mergeAnswerPull(payload, meta); return 'consumed'; }   // dual-root 4(d) step 3
+    if (this._answerRolelessPull(payload)) return 'consumed';   // 3a: a role-less node NACKs a probe (holderProbe only)
     this._syncAnswerPull(payload);
     return 'consumed';
   },

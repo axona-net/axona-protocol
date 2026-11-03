@@ -494,6 +494,11 @@ export const EMPTY_ROOT_PROBE_DELAY_MS    = 800;    // wait before first probe (
 export const EMPTY_ROOT_PROBE_MAX         = 3;      // total probes per role while empty
 export const EMPTY_ROOT_PROBE_INTERVAL_MS = 5_000;  // min gap between probes (via refreshTick)
 export const EMPTY_ROOT_PROBE_FANOUT      = 4;      // candidates contacted per probe
+// 3a + Part 7 (Closer-Born v0.6, holderProbe only): a try every target of which
+// answered no-role is refunded, so the try cap no longer bounds the probe;
+// this budget does. Pulls per role, and time from the first try.
+export const HOLDER_PROBE_FRAMES         = 32;
+export const HOLDER_PROBE_WINDOW_MS      = 300_000;
 
 // ── Leave-handoff confirmation (v4.24.0) ─────────────────────────────────────
 // The graceful-leave HANDOFF was fire-and-forget: a failed heir delivery

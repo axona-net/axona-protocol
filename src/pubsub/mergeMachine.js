@@ -726,6 +726,7 @@ export const mergeMachineMethods = {
   // ── step 5 (L): the terminal ack; the lease; the flip with the token ───
   _onReplayAck(payload, meta) {
     if (meta.targetId !== this.nodeId) return;
+    if (payload?.disposition === 'no-role') { this._onProbeNack(payload); return 'consumed'; }   // 3a: a probe NACK, not a merge frame
     let topicBig; try { topicBig = idBig(payload.topicId); } catch { return 'consumed'; }
     const role = this.axonRoles.get(topicBig);
     const corr = payload.corr;

@@ -669,7 +669,11 @@ export const repairPlaneMethods = {
   // the tick (the 4.18.1 lesson).
   _emptyRootProbeSweep(now) {
     for (const [t, role] of this.axonRoles) {
-      if (!role.isRoot || role.cache.length) continue;
+      if (!role.isRoot || role.cache.length) {
+        if (role.holderDegraded && role.cache.length) { role.holderDegraded = null; this._log('info', 'holder-found', { topic: idHex(t).slice(0, 12), cache: role.cache.length }); }
+        continue;
+      }
+      if (role.holderDegraded === 'no-holder-found') continue;   // 3a: the probe budget is spent
       if (role.sync.probeInflight) continue;
       if (role.sync.probeTries >= EMPTY_ROOT_PROBE_MAX) continue;
       if (role.sync.probeDeferred) {
@@ -730,7 +734,8 @@ export const repairPlaneMethods = {
     //  · local findKClosest: cheap, but a cold node's thin table may know nobody
     //  · iterative lookup PATH: the traversal's hops; its tail is the closest
     //    node the network routed through before us = the likely prior holder
-    const cand = new Set();
+    const cand = new Set(), pathSet = new Set();
+    for (const h of (pre?.sync?.probeEvidence ?? [])) { try { const b = idBig(h); if (b !== this.nodeId) cand.add(b); } catch { /* */ } }   // 3a: evidence first
     if (typeof this.dht.findKClosest === 'function') {
       try {
         for (const id of (await this.dht.findKClosest(topicBig, EMPTY_ROOT_PROBE_FANOUT + 1)) || []) {
@@ -744,7 +749,7 @@ export const repairPlaneMethods = {
         const r = await this.dht.lookup(topicBig);
         for (const id of (r && Array.isArray(r.path) ? r.path : [])) {
           let b; try { b = idBig(id); } catch { continue; }
-          if (b !== this.nodeId) cand.add(b);
+          if (b !== this.nodeId) { cand.add(b); pathSet.add(b); }
         }
       } catch { /* best-effort */ }
     }
@@ -763,12 +768,16 @@ export const repairPlaneMethods = {
     //    remain (a responder would have filled the cache and ended probing).
     if (!(role.sync.probed instanceof Set)) role.sync.probed = new Set();
     const reach = (b) => { try { return typeof this._isReachableId === 'function' && this._isReachableId(lc(idHex(b))); } catch { return false; } };
-    const ordered = [...cand].sort((a, b) => (reach(b) ? 1 : 0) - (reach(a) ? 1 : 0));
+    if (this._probeBudgetSpent(role, topicBig)) return;   // 3a: the probe stops; degraded: no-holder-found
+    const ordered = this._holderProbe ? this._orderProbeCandidates(role, cand, pathSet, reach)
+      : [...cand].sort((a, b) => (reach(b) ? 1 : 0) - (reach(a) ? 1 : 0));
     const fresh = ordered.filter((b) => !role.sync.probed.has(b));
     const targets = (fresh.length ? fresh : ordered).slice(0, EMPTY_ROOT_PROBE_FANOUT);
+    if (!targets.length) return;
+    const out = this._holderProbe ? this._openProbeTry(role, targets) : null;
     const sends = [];
     for (const b of targets) {
-      try { sends.push({ b, p: Promise.resolve(this._syncPullAwait(b, topicBig, 'EMPTY_ROOT_PROBE', { sinceHw: 0 })) }); }
+      try { sends.push({ b, p: Promise.resolve(this._syncPullAwait(b, topicBig, 'EMPTY_ROOT_PROBE', { sinceHw: 0, probe: out?.nonce ?? null })) }); }
       catch { /* best-effort */ }
     }
     const n = sends.length;
@@ -796,7 +805,16 @@ export const repairPlaneMethods = {
         { topic: idHex(topicBig).slice(0, 12), fanout: n, deferrals: live.sync.probeDeferrals });
       return;
     }
+    // 3a: a try every target of which already answered no-role is not
+    // counted; one whose NACKs complete later is refunded (_onProbeNack).
+    if (out && live.sync.probeOut === out && out.nacked.size === out.targets.size) {
+      live.sync.probeDeferred = false;
+      for (const x of sends) live.sync.probed.add(x.b);
+      this._log('info', 'empty-root-probe-refunded', { topic: idHex(topicBig).slice(0, 12), nacked: out.nacked.size, tries: live.sync.probeTries | 0 });
+      return;
+    }
     live.sync.probeTries++;
+    if (out) out.counted = true;
     live.sync.probeDeferred = false;
     for (const x of sends) live.sync.probed.add(x.b);
     this._log('info', 'empty-root-probe',

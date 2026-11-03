@@ -72,6 +72,7 @@ import { tombstoneAuthWiringMethods, makeTombstoneAuthority } from './tombstoneA
 import { mergeMachineMethods }  from './mergeMachine.js';
 import { topicLifetimeMethods } from './topicLifetime.js';
 import { successorGateMethods } from './successorGate.js';
+import { holderProbeMethods } from './holderProbe.js';
 import buildBoundary1Registry from './boundary1Registry.js';
 // Return routes (Closer-Born v0.6): breadcrumb lifetime, map bound, path ids kept.
 const RETURN_ROUTE_TTL_MS = 60_000, RETURN_ROUTE_CAP = 256, RETURN_RPATH_MAX = 16;
@@ -119,6 +120,7 @@ export class AxonaManager {
     cutover = null,
     hintRefresh = null,            // Closer-Born v0.6 3d hint refresh (David 2026-11-03): DEFAULT OFF; null = env HINT_REFRESH
     replicaInherit = null,         // Closer-Born v0.6 3c (David 2026-11-03 "go ahead with 3c"): DEFAULT OFF; null = env REPLICA_INHERIT
+    holderProbe = null,            // Closer-Born v0.6 3a (David 2026-11-03 "go ahead with 3a"): DEFAULT OFF; null = env HOLDER_PROBE
     successorGate = null,          // Closer-Born v0.6 6b (David 2026-11-03 "go ahead with 6b"): DEFAULT OFF; null = env SUCCESSOR_GATE
     processKind = null,            // 6b: 'service' (default) | 'app' (a tab, a seat whose host app quits); null = env PROCESS_KIND
     hostTag = null,                // 6b: opaque failure-domain tag the embedder names (<= 32 chars); null = env HOST_TAG, else none
@@ -376,6 +378,9 @@ export class AxonaManager {
     // 6b SUCCESSOR GATE (successorGate.js): an 'app' process holding a root
     // reports degraded: no-successor while no replica is current, and re-seats.
     this._successorGate   = !!(successorGate ?? envNum('SUCCESSOR_GATE', 0));
+    // 3a HOLDER PROBE (holderProbe.js): role-less nodes NACK a probe, the probe
+    // asks holders first, and a frame/time budget bounds it.
+    this._holderProbe     = !!(holderProbe ?? envNum('HOLDER_PROBE', 0));
     { const env = (typeof process !== 'undefined' && process.env) ? process.env : {};
       const k = processKind ?? env.PROCESS_KIND ?? 'service';
       this._processKind = (k === 'app') ? 'app' : 'service';
@@ -2046,6 +2051,7 @@ Object.assign(
   mergeMachineMethods,   // dual-root reconciliation 4(d) (axona-docs 14a6bd8): the cut, the gate, the forward to the winner — behind mergeCapable
   topicLifetimeMethods,  // Topic Lifetime (axona-docs 11288d7): standby lease, termination, thin-branch step-down — behind topicLifetime
   successorGateMethods,  // Closer-Born v0.6 6b: an app-held root counts its current successors — behind successorGate
+  holderProbeMethods,    // Closer-Born v0.6 3a: holder-first empty-root probe with role-less NACKs — behind holderProbe
 );
 
 export default AxonaManager;

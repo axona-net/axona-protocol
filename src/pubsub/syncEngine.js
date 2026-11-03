@@ -128,14 +128,14 @@ export const syncEngineMethods = {
   // produces ({consumed, …}, or undefined from a non-reporting adapter) and
   // never rejects (_route contains that). The empty-root probe awaits it so a
   // try that reached nobody is not counted as a try.
-  _syncPullAwait(targetBig, topicBig, policyName, { sinceHw = 0, lw = null, role = null } = {}) {
+  _syncPullAwait(targetBig, topicBig, policyName, { sinceHw = 0, lw = null, role = null, probe = null } = {}) {
     if (policyName === 'SPLIT_UNION') {
       const peerHex = lc(idHex(targetBig));
       const prev = role.sync.pulledLw.get(peerHex);
       if (!(prev === undefined || lw < prev)) return false;
       role.sync.pulledLw.set(peerHex, lw);
     }
-    return this._emitPullUp(targetBig, { topicId: idHex(topicBig), sinceHw, parentId: idHex(this.nodeId) });
+    return this._emitPullUp(targetBig, { topicId: idHex(topicBig), sinceHw, parentId: idHex(this.nodeId), ...(typeof probe === 'string' ? { probe } : {}) });   // probe: 3a, a role-less target NACKs
   },
   // THE ONE PULLUP EMISSION SITE and THE ONE REPLAYUP EMISSION SITE
   // (smoke_emission_sites pins each verb to one `_route` in this engine). The
