@@ -472,9 +472,20 @@ export const mergeMachineMethods = {
   _stagingIntercept(topicBig, type, payload) {
     const role = this.axonRoles.get(topicBig);
     const st = role?.staging;
-    if (!st || !st.created || role.isRoot) return false;
+    if (!st || role.isRoot) return false;
+    // 3B-1 (Orion 06b0739f): PUB and KILL stop at EVERY staged non-root role;
+    // a CHILD or BACKUP stager keeps seating and renewing its own SUBs.
+    if (type === T.SUB && !st.created) return false;
     if (type === T.SUB && payload.merge && lc(payload.subscriberId) === st.loser) return false;
-    this._send(type, { ...payload, via: [st.loser] });
+    // 3B-3: a frame this stager already forwarded came back (the loser is
+    // gone or unreachable): it ends here, once, instead of bouncing until
+    // the pull times out. The publisher's own flight retries.
+    if (typeof payload.stageFwd === 'string') {
+      this._log('info', 'merge-stage-return', { topic: idHex(topicBig).slice(0, 12), type });
+      this._undeliverable(type, topicBig, 'merge-stage-return');
+      return true;
+    }
+    this._send(type, { ...payload, via: [st.loser], stageFwd: st.corr.slice(0, 16) });
     return true;
   },
   /** 3b: a staged round that ends without completion; a role created only to stage is discarded. */

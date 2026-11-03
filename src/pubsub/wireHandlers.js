@@ -359,7 +359,12 @@ export const wireHandlersMethods = {
     // HANDOVER COMPLETION (dual-root 4(d)): only a SUB carrying the merge block
     // that matches an acked pull on all five fields completes; everything else
     // is an ordinary renewal here.
-    if (payload.merge && typeof payload.merge === 'object') this._mergeCompleteOnSub(role, subHex, payload);
+    if (payload.merge && typeof payload.merge === 'object') {
+      const completed = this._mergeCompleteOnSub(role, subHex, payload);
+      // 3B-4: a merge SUB that did not complete never seats the loser on a
+      // role created only to stage.
+      if (!completed && role.staging?.created && !role.isRoot) return 'consumed';
+    }
     const myHw = this._highWater(role);
     if (Number.isFinite(payload.hw) && payload.hw > myHw) {
       this._syncPull(idBig(subHex), topicBig, 'REPLAY_UP', { sinceHw: myHw });
@@ -1473,6 +1478,7 @@ export const wireHandlersMethods = {
     const topicBig = idBig(payload.topicId);
     if (this._holdIntercept(topicBig, T.KILL, payload)) return 'consumed';   // step-down hold (4.102.0)
     if (this._mergeGateIntercept(topicBig, T.KILL, payload)) return 'consumed';   // merge gate (dual-root 4(d))
+    if (this._stagingIntercept(topicBig, T.KILL, payload)) return 'consumed';   // 3B-2: a staged role takes no tombstone
     // Root-beacon last-mile correction (KILL) — same one-shot semantics as PUB:
     // a kill landing on a near-miss node must reach the true root, not mint a
     // competing root that the rest of the tree never consults.

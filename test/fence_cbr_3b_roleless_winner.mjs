@@ -22,16 +22,22 @@
 //   B7 CB-1: the verify never nominates the bridge.
 //   B8 a write L stamps while W is staged reaches W after completion (the
 //      SUB high-water pull), and W ends root holding it.
+// Orion 06b0739f (3B-1..4):
+//   B9  a CHILD stager handed a bare PUB forwards it to L (no self-reroute spin).
+//   B10 a KILL reaching a stager is applied at L, never at the stager.
+//   B11 the loser dies mid-stage: a PUB at the stager ends once, no bounce.
+//   B12 a merge SUB that does not complete never seats L on a created stager.
 // Run: node test/fence_cbr_3b_roleless_winner.mjs
 // =====================================================================
 import { Fabric, freshId, realTopic, author, idHex } from './lib/mergeFixture.mjs';
 import { buildEnvelope } from '../src/pubsub/envelope.js';
 import { ROOT_VERIFY_FIRST_MS, MERGE_TIMEOUT_MS } from '../src/pubsub/constants.js';
 import { makeRole } from '../src/pubsub/rootClaim.js';
+import { buildKill } from '../src/pubsub/kill.js';
 
 let passed = 0, failed = 0;
 const check = (label, ok, extra = '') => { console.log(`  ${ok ? '✓' : '✗'} ${label}${ok ? '' : ' ' + extra}`); ok ? passed++ : failed++; };
-process.on('exit', (code) => { if (code === 0 && passed + failed < 9) { console.log(`  ✗ exited after ${passed + failed} of 9 checks`); process.exitCode = 1; } });
+process.on('exit', (code) => { if (code === 0 && passed + failed < 13) { console.log(`  ✗ exited after ${passed + failed} of 13 checks`); process.exitCode = 1; } });
 
 async function scene(name, { cutover = true, wRole = 'none' } = {}) {
   const Lt = await realTopic(name);
@@ -161,6 +167,56 @@ console.log('fence_cbr_3b_roleless_winner: a closer node with no root role stage
   check('B8 a write stamped at L during the staged round reaches W after completion; W is root with all three',
     !!held && atL && !!w?.isRoot && [...ids, late].every((id) => w.cacheIds.has(id)) && !S.lRole.isRoot,
     JSON.stringify({ held: !!held, atL, w: !!w?.isRoot, has: [...ids, late].map((id) => !!w?.cacheIds?.has(id)), l: S.lRole.isRoot }));
+}
+const held = async (name, wRole) => {
+  const S = await scene(name, { wRole });
+  const ids = [await S.stamp(S.L, 1), await S.stamp(S.L, 2)];
+  S.fab.tap = (j) => (j.type === 'pubsub:replayack' ? null : j);
+  await S.trigger();
+  return { S, ids };
+};
+const pubAt = async (S, n, k) => {
+  const env = await buildEnvelope({ topic: S.Lt.desc, message: { k }, seq: k, identity: author, ts: S.fab.clock + 50 + k });
+  let threw = null;
+  try { await n.handlers.get('pubsub:pub')({ topicId: idHex(S.Lt.topicId), json: JSON.stringify(env) }, S.meta(n)); await S.fab.settle(); } catch (e) { threw = String(e?.message || e); }
+  return { env, threw };
+};
+{
+  const { S } = await held('cbr-3b-child-pub', 'child');
+  const staged = S.wr();
+  const { env, threw } = await pubAt(S, S.W, 21);
+  check('B9 3B-1: a CHILD stager handed a bare PUB forwards it to L, which stamps it; no spin',
+    staged && !staged.isRoot && !!staged.staging && !threw && S.lRole.cacheIds.has(env.msgId) && !staged.cacheIds.has(env.msgId),
+    JSON.stringify({ staging: !!staged?.staging, threw, atL: S.lRole.cacheIds.has(env.msgId) }));
+}
+{
+  const { S, ids } = await held('cbr-3b-kill', 'none');
+  const k = await buildKill({ topicId: idHex(S.Lt.topicId), msgId: ids[0], ts: S.fab.clock + 60, seq: 1, identity: author });
+  let threw = null;
+  try { await S.W.handlers.get('pubsub:kill')({ topicId: idHex(S.Lt.topicId), kill: k }, S.meta(S.W)); await S.fab.settle(); } catch (e) { threw = String(e?.message || e); }
+  const w = S.wr();
+  check('B10 3B-2: a KILL reaching a stager is applied at L, never at the stager',
+    !threw && !!S.lRole.tombstones?.get(ids[0]) && !(w?.tombstones?.get(ids[0])),
+    JSON.stringify({ threw, atL: !!S.lRole.tombstones?.get(ids[0]), atW: !!w?.tombstones?.get(ids[0]) }));
+}
+{
+  const { S } = await held('cbr-3b-loser-gone', 'none');
+  S.L.alive = false;
+  const { env, threw } = await pubAt(S, S.W, 22);
+  const w = S.wr();
+  check('B11 3B-3: the loser gone mid-stage, a PUB at the stager ends once (merge-stage-return), no bounce, never stamped at W',
+    !threw && S.W.logs.filter((l) => l.ev === 'pubsub:merge-stage-return').length === 1 && !(w?.cacheIds?.has(env.msgId)),
+    JSON.stringify({ threw, returns: S.W.logs.filter((l) => l.ev === 'pubsub:merge-stage-return').length }));
+}
+{
+  const { S } = await held('cbr-3b-bad-merge-sub', 'none');
+  const sub = { topicId: idHex(S.Lt.topicId), subscriberId: idHex(S.L.id), via: [idHex(S.W.id)], since: 0, merge: { corr: 'deadbeefdeadbeef', winner: idHex(S.W.id), winnerEpoch: 0, loserEpoch: S.lRole.epoch | 0, hash: 'x' } };
+  await S.W.handlers.get('pubsub:sub')(sub, S.meta(S.W));
+  await S.fab.settle();
+  const w = S.wr();
+  check('B12 3B-4: a merge SUB that does not complete never seats L on a created stager',
+    !!w && !w.isRoot && !w.subscribers.has(idHex(S.L.id).toLowerCase()),
+    JSON.stringify({ w: !!w, root: w?.isRoot, subs: w ? [...w.subscribers.keys()].map((k) => k.slice(0, 8)) : null }));
 }
 console.log(`\nfence_cbr_3b_roleless_winner: ${passed} passed, ${failed} failed`);
 process.exit(failed ? 1 : 0);
