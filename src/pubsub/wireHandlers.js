@@ -373,7 +373,7 @@ export const wireHandlersMethods = {
       // or to this pull from a log, instead of argued from the count of entries.
       if (sent !== false) this._log('info', 'split-union-pull', { topic: idHex(topicBig).slice(0, 12), from: subHex.slice(0, 12), policy: 'SPLIT_UNION', lw: payload.lw, myLw: this._lowWater(role) });
     }
-    this._accept(role, subHex, since, !!payload.latest, seat, typeof payload.attach === 'string' ? payload.attach : null);
+    this._accept(role, subHex, since, !!payload.latest, seat, typeof payload.attach === 'string' ? payload.attach : null, payload.unpinned === true);
     return 'consumed';
   },
 
@@ -400,7 +400,7 @@ export const wireHandlersMethods = {
   // A reader SUB and a child SUB with n > 0 stamp lastDemandAt; a standby SUB
   // never does. A standby seat is never delegated to a child: it exists to be
   // at the root.
-  _accept(role, subHex, since, latest = false, seat = null, attach = null) {
+  _accept(role, subHex, since, latest = false, seat = null, attach = null, unpinned = false) {
     const kind = seat?.kind || 'reader';
     const demand = seat ? (seat.demand | 0) : 1;
     const stampsDemand = kind === 'reader' || (kind === 'child' && demand > 0);
@@ -409,7 +409,10 @@ export const wireHandlersMethods = {
       existing.lastRenewed = this._now();
       existing.kind = kind; existing.demand = demand;
       if (stampsDemand) role.lastDemandAt = this._now();
-      this._replayTo(role, subHex, since, false, latest, attach);
+      // 3d: an attach-bearing or unpinned renewal is always answered, so the
+      // subscriber re-pins to the node actually serving it.
+      const echo = this._attachEcho && (!!attach || unpinned);
+      this._replayTo(role, subHex, since, echo, latest, attach);
       return;
     }
     if (role.subscribers.size >= this.maxDirect && kind !== 'standby') {    // overloaded → delegate

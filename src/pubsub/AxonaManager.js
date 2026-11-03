@@ -116,6 +116,7 @@ export class AxonaManager {
     tombstoneAuth = false,         // REF-1.1 S2.0c Phase 3: DEFAULT-OFF shadow wiring of the tombstone authorization core (observe-only; no behavior change)
     frameRegistry = false,         // REF-1.1 S2: DEFAULT-OFF Boundary-1 frame-contract registry (shadow-wraps the 19 routed handlers; observe-only; byte-identical flag-off)
     cutover = null,
+    attachEcho = null,             // Closer-Born v0.6 3d (David 2026-11-03 "go ahead with 3d"): DEFAULT OFF; null = env ATTACH_ECHO
     returnRoute = null,            // Closer-Born v0.6 return routes (David 2026-11-03 "go ahead with the return routes"): DEFAULT OFF; null = env RETURN_ROUTE                // Closer-Born Relay Inherits the Root v0.4 Part 3e (David 2026-11-03 "go ahead with the cutover state machine"): DEFAULT OFF; null = env CUTOVER
     mergeCapable = null,           // dual-root reconciliation (axona-docs 14a6bd8): DEFAULT-ON since 4.118.0; null = env MERGE_CAPABLE, else MERGE_CAPABLE_DEFAULT
     topicLifetime = null,          // Topic Lifetime (axona-docs 11288d7): DEFAULT-ON since 4.118.0; null = env TOPIC_LIFETIME, else TOPIC_LIFETIME_DEFAULT
@@ -341,6 +342,13 @@ export class AxonaManager {
     // to it is open, else greedy), and the own lookup is the fallback. The
     // breadcrumb is a hint: authority rests on signed envelopes and corr.
     this._returnRoute     = !!(returnRoute ?? envNum('RETURN_ROUTE', 0));
+    // 3d SUBSCRIBERS FOLLOW THE ROOT (Closer-Born v0.6). A caught-up renewal
+    // produced no DELIVER, so a subscriber that lost its pin, or whose pin
+    // named a node that has since handed off, never heard the echo that pins
+    // it. Armed: a renewal carrying an attachment nonce, or marked unpinned by
+    // its sender, is always answered with a DELIVER (empty when there is no
+    // history) that echoes the nonce. A pinned unarmed renewal stays silent.
+    this._attachEcho      = !!(attachEcho ?? envNum('ATTACH_ECHO', 0));
     this._retRoutes       = new Map();
     this._returnRouteStats = { recorded: 0, used: 0, delivered: 0, fellBack: 0 };
     // TOPIC LIFETIME (axona-docs architecture/Axona-Topic-Lifetime-v0.1.md v0.9
@@ -1514,6 +1522,9 @@ export class AxonaManager {
       hw: role ? this._highWater(role) : 0,   // a cache-bearing relay advertises its history (§6)
       lw: role ? this._lowWater(role) : 0,    // …and its OLDEST stamp, so a root missing the pre-transition half pulls it
       latest,
+      // 3d: an unpinned sender says so; via alone cannot (an unpinned SUB with a
+      // warm hint names it in via, exactly as a pinned SUB names its pin).
+      ...(this._attachEcho && !((this._upstream.get(topicBig) || []).length) ? { unpinned: true } : {}),
       // COMPLETION IS CORRELATED (dual-root 4(d)): while this loser is completing a
       // handover, every SUB carries the merge block; an ordinary renewal completes nothing.
       ...(role?.merge?.completing ? { merge: { corr: role.merge.completing.corr, winner: role.merge.completing.winner, winnerEpoch: role.merge.completing.winnerEpoch, loserEpoch: role.merge.completing.loserEpoch, hash: role.merge.completing.hash } } : {}),
