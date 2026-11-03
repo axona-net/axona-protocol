@@ -29,6 +29,13 @@
 //   P9 RR-2: relays that only forward a SUB keep no breadcrumb.
 //   P10 RR-3: a breadcrumb that fell back is dropped.
 //   P11 RR-2: a REPLAYUP arriving refreshes the receiver's way back to its sender.
+// Reads (David 2026-11-03 "go ahead with the return routes for reads"), on an
+// island held for the whole run (the answer leaves the moment the PULL lands):
+//   P12 on: O's PULL reaches T, which holds the message; T's PULLRESP comes
+//       back by the return route and resolves O's pending read.
+//   P12 off (control): the same read never resolves.
+//   P13 on: a replica H2 on the way holds the message and answers early; its
+//       PULLRESP comes back to O by the return route, and T never answers.
 // Run: node test/fence_return_routes.mjs
 // =====================================================================
 import { AxonaPeer }                from '../src/dht/AxonaPeer.js';
@@ -40,7 +47,7 @@ import { createNodeIdentity }       from '../src/identity/index.js';
 import { fromHex, clz264 }          from '../src/utils/hexid.js';
 
 let passed = 0, failed = 0;
-const N_CHECKS = 14;
+const N_CHECKS = 17;
 const check = (label, ok, extra = '') => { console.log(`  ${ok ? '✓' : '✗'} ${label}${ok ? '' : ' ' + extra}`); ok ? passed++ : failed++; };
 const J = (v) => JSON.stringify(v, (k, x) => typeof x === 'bigint' ? x.toString(16).slice(0, 12) : x);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -90,6 +97,32 @@ const TOPIC = 'ab'.repeat(33);
 const pullup = (w) => w.O.am._route(w.T.big, 'pubsub:pullup', { topicId: TOPIC, sinceHw: 0, parentId: w.O.hex });
 const replayUpTo = (w, to) => w.T.am._route(to.big, 'pubsub:replayup', { topicId: TOPIC, msgs: [] });
 const key = (p) => p.hex.toLowerCase();
+// An island held for the whole run: no node keeps or learns a routing entry
+// that points back toward O's side (channels stay open).
+function holdIsland(w) {
+  for (let i = 1; i < w.nodes.length; i++) {
+    const behind = new Set(w.nodes.slice(0, i).map((p) => p.big));
+    for (const map of [w.nodes[i].node.synaptome, w.nodes[i].node.incomingSynapses]) {
+      if (!map || typeof map.set !== 'function') continue;
+      for (const b of behind) map.delete(b);
+      const set = map.set.bind(map);
+      map.set = (k, v) => (behind.has(k) ? map : set(k, v));
+    }
+  }
+}
+const holdMsg = (p) => {
+  const t = BigInt('0x' + TOPIC);
+  const role = p.am.axonRoles.get(t) || p.am._rootClaim.become(t, 'sub-terminal');
+  if (!role.cacheIds.has('m-read-1')) { role.cache.push({ msgId: 'm-read-1', publishTs: 1, json: '{"k":1}', bytes: 7 }); role.cacheIds.add('m-read-1'); }
+  return role;
+};
+async function read(w, corrId) {
+  let got = null;
+  w.O.am._pending.set(corrId, { resolve: (x) => { got = x; }, timer: null, requesterId: w.O.big });
+  await w.O.am._route(w.T.big, 'pubsub:pull', { topicId: TOPIC, corrId, requesterId: w.O.hex, postHash: 'm-read-1' });
+  await sleep(50);
+  return got;
+}
 
 (async () => {
   console.log('fence_return_routes: a pub/sub reply returns by the reverse of its request\'s hops');
@@ -175,6 +208,26 @@ const key = (p) => p.hex.toLowerCase();
     await w.O.am._route(w.T.big, 'pubsub:replayup', { topicId: TOPIC, msgs: [] });
     const fresh = w.T.am._retRoutes.get(key(w.O));
     check('P11 RR-2: a REPLAYUP from O refreshes T\'s anchored way back to O', fresh && fresh !== first && fresh.anchored === true && fresh.rpath.length === 5, J({ fresh: !!fresh, same: fresh === first }));
+    await stopAll(w);
+  }
+  for (const rr of [true, false]) {
+    const w = await build({ rr });
+    holdMsg(w.T);
+    holdIsland(w);
+    const got = await read(w, 'c-read-' + rr);
+    if (rr) check('P12 on: T answers O\'s read and the PULLRESP comes back by the return route', !!got && got.kind === 'response' && w.T.am._returnRouteStats.delivered >= 1, JSON.stringify({ got: got?.kind, RS: w.T.am._returnRouteStats }));
+    else check('P12 off (control): the same read never resolves', got === null, JSON.stringify({ got }));
+    await stopAll(w);
+  }
+  {
+    const w = await build({ rr: true });
+    const H2 = w.nodes[2];
+    holdMsg(w.T); holdMsg(H2);
+    holdIsland(w);
+    const got = await read(w, 'c-read-early');
+    check('P13 on: a replica on the way (H2) answers early; its PULLRESP returns by the return route; T never answers',
+      !!got && got.kind === 'response' && H2.am._returnRouteStats.delivered >= 1 && w.T.am._returnRouteStats.used === 0,
+      JSON.stringify({ got: got?.kind, H2: H2.am._returnRouteStats, T: w.T.am._returnRouteStats }));
     await stopAll(w);
   }
   {

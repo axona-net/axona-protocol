@@ -1591,18 +1591,23 @@ export const wireHandlersMethods = {
     if (role && role.cache.length) {
       const hit = payload.postHash ? role.cache.find(c => c.msgId === payload.postHash)
                                    : role.cache[role.cache.length - 1];
-      if (hit) { this._answerPull(payload, hit); return 'consumed'; }
+      if (hit) { this._answerPull(payload, hit, meta); return 'consumed'; }
     }
     const d = this._topicDecision(payload, meta);
     if (d === 'forward') return;
     if (d === 'reroute') { this._reroute(T.PULL, payload); return 'consumed'; }
     // Terminus (root/closest) fall-through: answer if we hold it, else a genuine null.
     const hit = role ? (payload.postHash ? role.cache.find(c => c.msgId === payload.postHash) : role.cache[role.cache.length - 1]) : null;
-    this._answerPull(payload, hit || null);
+    this._answerPull(payload, hit || null, meta);
     return 'consumed';
   },
 
-  _answerPull(payload, hit) {
+  _answerPull(payload, hit, meta = null) {
+    // Return route (Closer-Born v0.6, David 2026-11-03 "go ahead with the return
+    // routes for reads"): the node that ANSWERS a read records the way back, at
+    // the replica's early answer and at the terminus alike; a relay that only
+    // forwards the PULL keeps nothing. The PULLRESP below then takes it.
+    this._noteReturn(meta, [meta?.originId, payload?.requesterId]);
     const resp = { corrId: payload.corrId, json: hit ? hit.json : null, publishTs: hit ? hit.publishTs : null, requesterId: payload.requesterId };
     if (idBig(payload.requesterId) === this.nodeId) this._onPullResp(resp, { targetId: this.nodeId });
     else this._route(idBig(payload.requesterId), T.PULLRESP, resp);

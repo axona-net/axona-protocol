@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // =====================================================================
-// characterize_findk_chain_reach.mjs — why the verify "walk" stops two hops
+// fence_findk_chain_reach.mjs — why the verify "walk" stops two hops
 // in (axona-bot 5c51da7a, re Orion 0cba73ba).
 //
 // On standalone peers the dht adapter's lookup() is findKClosest(target, 4)
@@ -16,7 +16,7 @@
 //   C2 give L a channel to H2 as well: the lookup now names H3; reach grows
 //      by one per channel, not by the chain's routing.
 // This pins today's behaviour; it changes nothing.
-// Run: node test/characterize_findk_chain_reach.mjs
+// Run: node test/fence_findk_chain_reach.mjs
 // =====================================================================
 import { AxonaPeer }                from '../src/dht/AxonaPeer.js';
 import { AxonaDomain }              from '../src/dht/AxonaDomain.js';
@@ -68,7 +68,7 @@ async function build(name) {
 const stop = async (w) => { for (const p of w.raw) { try { p.am.stop?.(); } catch { /* */ } try { await p.peer.stop?.(); } catch { /* */ } try { await p.transport.stop(); } catch { /* */ } } };
 const ids = (r) => (r?.path || []).map((x) => (typeof x === 'bigint' ? x : BigInt('0x' + x)));
 
-console.log('characterize_findk_chain_reach: the standalone lookup reaches only what the asker can ask');
+console.log('fence_findk_chain_reach: the standalone lookup reaches only what the asker can ask');
 {
   const w = await build('findk-chain-1');
   const [L, H1, H2, , W] = w.nodes;
@@ -89,5 +89,5 @@ console.log('characterize_findk_chain_reach: the standalone lookup reaches only 
     p.includes(H3.big), JSON.stringify({ path: p.map(short), chain: w.nodes.map((n) => short(n.big)) }));
   await stop(w);
 }
-console.log(`\ncharacterize_findk_chain_reach: ${passed} passed, ${failed} failed`);
+console.log(`\nfence_findk_chain_reach: ${passed} passed, ${failed} failed`);
 process.exit(failed ? 1 : 0);

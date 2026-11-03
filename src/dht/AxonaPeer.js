@@ -182,7 +182,7 @@ const RELAY_REACH_TTL_MS = 5000;
 const SIGNAL_RETURN_TTL_MS = 60_000;
 const SIGNAL_RETURN_CAP    = 256;
 // Pub/sub requests whose reply returns by their route (RETURN_ROUTE).
-const RETURN_ROUTE_REQUESTS = new Set(['pubsub:sub', 'pubsub:mergeoffer', 'pubsub:pullup', 'pubsub:replayup']);
+const RETURN_ROUTE_REQUESTS = new Set(['pubsub:sub', 'pubsub:mergeoffer', 'pubsub:pullup', 'pubsub:replayup', 'pubsub:pull']);
 const SIGNAL_RPATH_MAX     = 16;
 // 4.123.0 acked lookup walk: _lookupStep's return when it handed the walk on.
 const WALK_FORWARDED = Symbol('lookup-walk-forwarded');
