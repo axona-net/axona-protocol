@@ -116,6 +116,7 @@ export class AxonaManager {
     tombstoneAuth = false,         // REF-1.1 S2.0c Phase 3: DEFAULT-OFF shadow wiring of the tombstone authorization core (observe-only; no behavior change)
     frameRegistry = false,         // REF-1.1 S2: DEFAULT-OFF Boundary-1 frame-contract registry (shadow-wraps the 19 routed handlers; observe-only; byte-identical flag-off)
     cutover = null,
+    hintRefresh = null,            // Closer-Born v0.6 3d hint refresh (David 2026-11-03): DEFAULT OFF; null = env HINT_REFRESH
     verifyWalk = null,             // Closer-Born v0.6 farther-reaching verify (David 2026-11-03): DEFAULT OFF; null = env VERIFY_WALK
     attachEcho = null,             // Closer-Born v0.6 3d (David 2026-11-03 "go ahead with 3d"): DEFAULT OFF; null = env ATTACH_ECHO
     returnRoute = null,            // Closer-Born v0.6 return routes (David 2026-11-03 "go ahead with the return routes"): DEFAULT OFF; null = env RETURN_ROUTE                // Closer-Born Relay Inherits the Root v0.4 Part 3e (David 2026-11-03 "go ahead with the cutover state machine"): DEFAULT OFF; null = env CUTOVER
@@ -356,6 +357,10 @@ export class AxonaManager {
     // (dht.walk, hop-by-hop over each hop's own channels) and nominates the
     // closest node either one visited.
     this._verifyWalk      = !!(verifyWalk ?? envNum('VERIFY_WALK', 0));
+    // 3d HINT REFRESH: a subscriber unattached past ROOT_CLAIM_MS asks the
+    // network for the root even when a local neighbour looks closer
+    // (rootElection._rootHint_).
+    this._hintRefresh     = !!(hintRefresh ?? envNum('HINT_REFRESH', 0));
     this._retRoutes       = new Map();
     this._returnRouteStats = { recorded: 0, used: 0, delivered: 0, fellBack: 0 };
     // TOPIC LIFETIME (axona-docs architecture/Axona-Topic-Lifetime-v0.1.md v0.9

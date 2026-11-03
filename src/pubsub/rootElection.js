@@ -288,6 +288,35 @@ export const rootElectionMethods = {
                 if (r && Array.isArray(r.path) && r.path.length) id = r.path[r.path.length - 1];
               } catch { /* keep the local result — greedy stays in effect */ }
             }
+            // 3d HINT REFRESH (Closer-Born v0.6; David 2026-11-03 "go ahead with
+            // 3d's hint refresh"; option hintRefresh). The network was asked
+            // only when the local closest was null or self, so a subscriber
+            // whose neighbour looks closer kept that guess however long it
+            // stayed unattached. Past the claim window unattached, ask the
+            // network (the DHT walk where the adapter has one, else the
+            // lookup) and take the closest node it visited when that is closer
+            // than the local guess and than this node.
+            const since = this._unattachedSince?.get(topicBig);
+            if (this._hintRefresh && since != null && this._now() - since >= ROOT_CLAIM_MS
+                && (typeof this.dht.walk === 'function' || typeof this.dht.lookup === 'function')) {
+              try {
+                const r = await (typeof this.dht.walk === 'function' ? this.dht.walk(topicBig) : this.dht.lookup(topicBig));
+                const path = (r && Array.isArray(r.path)) ? r.path : [];
+                let cur = null; try { cur = id != null ? idBig(id) : null; } catch { cur = null; }
+                let best = null, bd = this.nodeId ^ topicBig;
+                if (cur != null && cur !== this.nodeId && (cur ^ topicBig) < bd) { best = cur; bd = cur ^ topicBig; }
+                for (const p of path) {
+                  let b; try { b = idBig(p); } catch { continue; }
+                  if (b === this.nodeId) continue;
+                  const d = b ^ topicBig;
+                  if (d < bd) { bd = d; best = b; }
+                }
+                if (best != null && best !== cur) {
+                  this._log('info', 'hint-refresh', { topic: idHex(topicBig).slice(0, 12), from: localHex ? localHex.slice(0, 10) : null, to: lc(idHex(best)).slice(0, 10), visited: path.length });
+                  id = best;
+                }
+              } catch { /* keep the local result */ }
+            }
             // Self-closest → leave the hint null so we route greedily toward the
             // bare topic id and become root as the terminus (don't via-pin to self).
             let hex = null;
