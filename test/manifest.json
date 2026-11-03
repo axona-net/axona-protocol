@@ -1172,6 +1172,11 @@
       "note": "Orion 7af4822f: SG-1 the loser's completing SUB records its host on the winner (noted after merge completion): S1 same host -> not counted, W degraded; S2 other host -> current. P7-1 a staged-without-handoff refusal closes the corr and clears the candidate so the next verify offers again (also the timing-refusal path under cutover). RI-3 role.inheritRefused is swept past RENEW_MS. Mutants: note before completion, candidate not cleared, corr deleted not closed, no sweep -> each red."
     },
     {
+      "file": "fence_cbr_handoff_binding.mjs",
+      "class": "default",
+      "note": "Closer-Born v0.6 Part 7 handoff identity binding (David 2026-11-03), option handoffBinding / env HANDOFF_BINDING, default off: a cutover loser with a node identity signs AXONA_HANDOFF_CAP_V1 | corr | topic | loser | winner | loserEpoch; an armed candidate stages only when the signature verifies and the key hashes into the loser's node id (rootPubMatchesNodeHash). Real Ed25519 identities on the merge Fabric. B1 real round; B2 old loser + handoff added in flight refused / B2c binding off stages (the hazard); B3 wrong key; B4 corr changed; B5 correct hand-built offer stages; B6 armed loser with no identity unsigned, refused. Mutants: bare claim trusted, no key-to-id binding, corr not signed, loser never signs -> each red."
+    },
+    {
       "file": "fence_cbr_part7_capability_gate.mjs",
       "class": "default",
       "note": "Closer-Born v0.6 Part 7 capability gate (David 2026-11-03 \"go ahead with Part 7\"): a cutover-armed loser's MERGE_OFFER carries handoff: 1; a role-less candidate stages only from such a loser (else refuses not-root, merge-stage-legacy); its staged PULLUP carries staged + handoff; the loser refuses a staged pull without handoff before any cut (merge-stale staged-without-handoff). P1 armed W / legacy L; P2 both armed; P3 legacy W / armed L; P4 offer field armed vs legacy; P5a handoff stripped in flight; P5b intact. Mutants: candidate ignores capability, loser never advertises, stager pull omits handoff, loser runs a staged pull without handoff, advertised even unarmed -> each red."

@@ -5,8 +5,8 @@
     "onNotification",
     "onRoutedMessage"
   ],
-  "treeHash": "f5d4229c634ad35549c79c1431c16f54c46687fc",
-  "filesScanned": 89,
+  "treeHash": "bd5fd7e05ace56be599ddb4f4da15dbedb54c617",
+  "filesScanned": 90,
   "summary": {
     "migration-target": 48,
     "registration-helper": 0,

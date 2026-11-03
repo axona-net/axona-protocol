@@ -280,11 +280,11 @@ function rowDefs() {
       evidence: EvidenceLevel.ROUTED, proves: Proves.ROUTING, outcome: 'RoutingOutcome', terminalOutcome: 'MERGE_PULL_STARTED',
       retry: Retry.NATURAL, topicProfile: PROFILE, eventIdScheme: 'CORR_ID', replayCursorType: NA, orderingModel: 'NONE',
       authGuard: NA, admissionGuard: 'mergeTimingLimits', placementGuard: 'claimWins',
-      projection: { payload: ['topicId', 'corr', 'loser', 'loserEpoch', 'hw', 'lw', 'count', 'timing', 'handoff'] },   // handoff: the loser runs the staged handover (Closer-Born Part 7)
+      projection: { payload: ['topicId', 'corr', 'loser', 'loserEpoch', 'hw', 'lw', 'count', 'timing', 'handoff', 'handoffSig', 'handoffPub'] },   // handoffSig/handoffPub: the loser's signature over the claim (Part 7 binding)   // handoff: the loser runs the staged handover (Closer-Born Part 7)
       schema: { require: ['topicId', 'corr', 'loser'], types: { topicId: 'string', corr: 'string', loser: 'string' } },
       conversation: { role: REQ, opposite: 'pubsub:replayack', pairing: [{ local: 'topicId', remote: 'topicId' }, { local: 'corr', remote: 'corr' }] },
       capabilityRange: { profile: PROFILE },
-      errorContract: ['refused-timing', 'merge-offer-loses'], traceFields: ['topicId', 'corr'], budget: budget(9),
+      errorContract: ['refused-timing', 'merge-offer-loses'], traceFields: ['topicId', 'corr'], budget: budget(11),
       note: 'dual-root 4(d) step 1: the loser offers its claim; the winner evaluates the Part 3 relation and timing, then pulls under corr',
     }),
     ({

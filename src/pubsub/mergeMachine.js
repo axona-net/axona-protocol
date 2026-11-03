@@ -381,14 +381,19 @@ export const mergeMachineMethods = {
     const timing = this._mergeTiming();
     role.sync.openMerges.set(corr, { winner: c.id, winnerEpoch: c.epoch | 0, loserEpoch: role.epoch | 0, state: 'offered', snapshot: null, manifest: null, lastCursorSent: null, offeredAt: this._now(), boundAt: 0, tB: 0, timing });
     const rec = role.sync.openMerges.get(corr);
-    const sent = this._route(idBig(c.id), T.MERGE_OFFER, {
+    const offer = {
       topicId: idHex(topicBig), corr, loser: idHex(this.nodeId), loserEpoch: role.epoch | 0,
       hw: this._highWater(role), lw: this._lowWater(role), count: role.cache.length, timing,
       // Part 7 capability gate: this loser runs the staged handover (3e), so a
       // candidate with no root role may stage from it. An old loser sends no
       // `handoff`, and a new candidate then refuses not-root as before.
       ...(this._cutover ? { handoff: 1 } : {}),
-    });
+    };
+    // Part 7 identity binding: a loser with a node identity signs the claim
+    // (handoffBinding.js), so a hop cannot add it to an old loser's offer.
+    const sent = (this._cutover && this._nodeIdentity)
+      ? this._signHandoff(offer, lc(c.id)).then((b) => this._route(idBig(c.id), T.MERGE_OFFER, { ...offer, ...(b || {}) }))
+      : this._route(idBig(c.id), T.MERGE_OFFER, offer);
     // Did the offer reach anyone? A failed verdict means W is unreachable, not
     // legacy: the sweep then drops the record instead of falling back.
     Promise.resolve(sent).then((r) => { const v = dispatchVerdict(r, this.dht?.verdictsSupported); rec.reached = v === 'failed' ? false : true; });
@@ -405,16 +410,28 @@ export const mergeMachineMethods = {
     const loser = lc(payload.loser);
     if (!isHexId(loser) || typeof payload.corr !== 'string' || idBig(loser) === this.nodeId) return 'consumed';
     const role = this.axonRoles.get(topicBig);
-    if ((!role || !role.isRoot) && this._cutover && this._stageOffer(topicBig, role, loser, payload)) return 'consumed';   // 3b
-    if (!role || !role.isRoot) {
-      // NOT A ROOT HERE: answer, never stay silent. Silence reads as a legacy
-      // winner at the loser (the fallback) and would demote it toward a node
-      // that holds no claim — seen on the sim when a hand-forked root at a
-      // higher epoch had already absorbed the true root and then named it.
+    // NOT A ROOT HERE: answer, never stay silent. Silence reads as a legacy
+    // winner at the loser (the fallback) and would demote it toward a node
+    // that holds no claim — seen on the sim when a hand-forked root at a
+    // higher epoch had already absorbed the true root and then named it.
+    const notRoot = (r) => {
       this._log('info', 'merge-offer-not-root', { topic: idHex(topicBig).slice(0, 12), from: loser.slice(0, 10) });
-      this._route(idBig(loser), T.REPLAYACK, { topicId: payload.topicId, corr: payload.corr, winner: idHex(this.nodeId), winnerEpoch: role?.epoch | 0, loser, loserEpoch: Number.isInteger(payload.loserEpoch) ? payload.loserEpoch : 0, disposition: 'not-root' });
+      this._route(idBig(loser), T.REPLAYACK, { topicId: payload.topicId, corr: payload.corr, winner: idHex(this.nodeId), winnerEpoch: r?.epoch | 0, loser, loserEpoch: Number.isInteger(payload.loserEpoch) ? payload.loserEpoch : 0, disposition: 'not-root' });
+    };
+    // Part 7 identity binding: an armed candidate stages only when the loser
+    // itself signed `handoff` (async verify; the role is re-read after it).
+    if ((!role || !role.isRoot) && this._cutover && this._handoffBinding && payload.handoff === 1) {
+      this._verifyHandoff(payload, loser).then((bound) => {
+        const r = this.axonRoles.get(topicBig);
+        if (r?.isRoot) return;   // became root meanwhile: the next verify reconciles
+        if (bound && this._stageOffer(topicBig, r, loser, payload)) return;
+        if (!bound) this._log('warn', 'merge-stage-unbound', { topic: idHex(topicBig).slice(0, 12), corr: String(payload.corr).slice(0, 8), loser: loser.slice(0, 10), signed: typeof payload.handoffSig === 'string' });
+        notRoot(r);
+      }, () => notRoot(this.axonRoles.get(topicBig)));
       return 'consumed';
     }
+    if ((!role || !role.isRoot) && this._cutover && this._stageOffer(topicBig, role, loser, payload)) return 'consumed';   // 3b
+    if (!role || !role.isRoot) { notRoot(role); return 'consumed'; }
     const loserEpoch = Number.isInteger(payload.loserEpoch) ? payload.loserEpoch : 0;
     // THE RELATION FIRST: W pulls only from a claim it wins over. If the
     // offered claim wins over W's own, W is the loser and offers instead.
