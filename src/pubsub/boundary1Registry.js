@@ -241,12 +241,12 @@ function rowDefs() {
       evidence: EvidenceLevel.ROUTED, proves: Proves.ROUTING, outcome: 'RoutingOutcome', terminalOutcome: 'REPLAY_SENT',
       retry: Retry.NATURAL, topicProfile: PROFILE, eventIdScheme: NA, replayCursorType: 'HIGHWATER', orderingModel: 'ARRIVAL',
       authGuard: NA, admissionGuard: NA, placementGuard: NA,
-      projection: { payload: ['topicId', 'sinceHw', 'parentId', 'corr', 'winnerEpoch', 'cursor', 'timing'] },   // corr/winnerEpoch/cursor/timing: a merge pull (dual-root 4(d))
+      projection: { payload: ['topicId', 'sinceHw', 'parentId', 'corr', 'winnerEpoch', 'cursor', 'timing', 'staged', 'handoff'] },   // staged/handoff: a staged pull and its capability (Closer-Born 3b, Part 7)   // corr/winnerEpoch/cursor/timing: a merge pull (dual-root 4(d))
       schema: { require: ['topicId', 'parentId'], types: { topicId: 'string', parentId: 'string', corr: 'string' } },
       // catch-up conversation; parentId is the return destination the REPLAYUP is routed back to (its routing target).
       conversation: { role: REQ, opposite: 'pubsub:replayup', pairing: [{ local: 'topicId', remote: 'topicId' }, { local: 'parentId', remote: 'targetId' }] },
       capabilityRange: { profile: PROFILE },
-      errorContract: ['no-newer-history', 'merge-stale', 'merge-cursor-invalid', 'refused-timing', 'refused-export-bound'], traceFields: ['topicId', 'parentId'], budget: budget(7),
+      errorContract: ['no-newer-history', 'merge-stale', 'merge-cursor-invalid', 'refused-timing', 'refused-export-bound'], traceFields: ['topicId', 'parentId'], budget: budget(9),
       note: 'catch-up trigger to the parent holder from cursor sinceHw; answered by REPLAYUP routed back to parentId',
     }),
     ({
@@ -280,11 +280,11 @@ function rowDefs() {
       evidence: EvidenceLevel.ROUTED, proves: Proves.ROUTING, outcome: 'RoutingOutcome', terminalOutcome: 'MERGE_PULL_STARTED',
       retry: Retry.NATURAL, topicProfile: PROFILE, eventIdScheme: 'CORR_ID', replayCursorType: NA, orderingModel: 'NONE',
       authGuard: NA, admissionGuard: 'mergeTimingLimits', placementGuard: 'claimWins',
-      projection: { payload: ['topicId', 'corr', 'loser', 'loserEpoch', 'hw', 'lw', 'count', 'timing'] },
+      projection: { payload: ['topicId', 'corr', 'loser', 'loserEpoch', 'hw', 'lw', 'count', 'timing', 'handoff'] },   // handoff: the loser runs the staged handover (Closer-Born Part 7)
       schema: { require: ['topicId', 'corr', 'loser'], types: { topicId: 'string', corr: 'string', loser: 'string' } },
       conversation: { role: REQ, opposite: 'pubsub:replayack', pairing: [{ local: 'topicId', remote: 'topicId' }, { local: 'corr', remote: 'corr' }] },
       capabilityRange: { profile: PROFILE },
-      errorContract: ['refused-timing', 'merge-offer-loses'], traceFields: ['topicId', 'corr'], budget: budget(8),
+      errorContract: ['refused-timing', 'merge-offer-loses'], traceFields: ['topicId', 'corr'], budget: budget(9),
       note: 'dual-root 4(d) step 1: the loser offers its claim; the winner evaluates the Part 3 relation and timing, then pulls under corr',
     }),
     ({

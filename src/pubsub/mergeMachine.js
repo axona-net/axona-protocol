@@ -384,6 +384,10 @@ export const mergeMachineMethods = {
     const sent = this._route(idBig(c.id), T.MERGE_OFFER, {
       topicId: idHex(topicBig), corr, loser: idHex(this.nodeId), loserEpoch: role.epoch | 0,
       hw: this._highWater(role), lw: this._lowWater(role), count: role.cache.length, timing,
+      // Part 7 capability gate: this loser runs the staged handover (3e), so a
+      // candidate with no root role may stage from it. An old loser sends no
+      // `handoff`, and a new candidate then refuses not-root as before.
+      ...(this._cutover ? { handoff: 1 } : {}),
     });
     // Did the offer reach anyone? A failed verdict means W is unreachable, not
     // legacy: the sweep then drops the record instead of falling back.
@@ -450,6 +454,11 @@ export const mergeMachineMethods = {
   // offer was answered here.
   _stageOffer(topicBig, role, loser, payload) {
     if (this._neverRoot || (typeof this.saturated === 'function' && this.saturated())) return false;
+    // Part 7 capability gate (David 2026-11-03 "go ahead with Part 7"): stage
+    // only from a loser that advertises the staged handover. An old loser
+    // forwards writes to a winner that cannot stamp (no staged-gate
+    // exemption), so its offer takes the existing path: refused not-root.
+    if (payload.handoff !== 1) { this._log('info', 'merge-stage-legacy', { topic: idHex(topicBig).slice(0, 12), corr: String(payload.corr).slice(0, 8), loser: String(loser).slice(0, 10) }); return false; }
     const custody = (payload.count | 0) > 0 || Number.isFinite(payload.hw);
     if (!custody) return false;
     let loserBig; try { loserBig = idBig(loser); } catch { return false; }
@@ -514,7 +523,7 @@ export const mergeMachineMethods = {
   _mergePull(topicBig, role, corr, cursor) {
     const p = role.sync.openPulls.get(corr);
     if (!p) return;
-    this._emitPullUp(idBig(p.loser), { topicId: idHex(topicBig), corr, parentId: idHex(this.nodeId), winnerEpoch: role.epoch | 0, cursor, sinceHw: 0, timing: { ...p.timing }, ...(role.staging?.corr === corr ? { staged: true } : {}) });
+    this._emitPullUp(idBig(p.loser), { topicId: idHex(topicBig), corr, parentId: idHex(this.nodeId), winnerEpoch: role.epoch | 0, cursor, sinceHw: 0, timing: { ...p.timing }, ...(role.staging?.corr === corr ? { staged: true, handoff: 1 } : {}) });
   },
 
   // ── step 3 (L): the bound PULLUP, the cut, the header, the frames ──────
@@ -547,6 +556,15 @@ export const mergeMachineMethods = {
         return;
       }
       if (!role.isRoot || role.merge?.gate || role.merge?.completing) { this._log('warn', 'merge-stale', { topic: idHex(topicBig).slice(0, 12), corr: corr.slice(0, 8), why: role.isRoot ? 'busy' : 'not-root' }); return; }
+      // Part 7: a staged pull without the capability is refused, never run
+      // unstaged: the winner IS staged and cannot stamp, so an unstaged gate
+      // would forward writes it never accepts. The winner's pull times out,
+      // its stage is abandoned, and this node keeps the root.
+      if (this._cutover && payload.staged === true && payload.handoff !== 1) {
+        this._log('warn', 'merge-stale', { topic: idHex(topicBig).slice(0, 12), corr: corr.slice(0, 8), why: 'staged-without-handoff' });
+        role.sync.openMerges.delete(corr);
+        return;
+      }
       m.winnerEpoch = winnerEpoch;
       // CUT + GATE, then the export, all in this synchronous run.
       const gate = this._mergeCut(topicBig, { winner: requester, winnerEpoch, corr });
@@ -555,7 +573,7 @@ export const mergeMachineMethods = {
       // keeps stamping through the round; writes after the cut reach W after
       // completion by the SUB high-water pull. The gate stays for the round's
       // bookkeeping and forwards nothing.
-      if (this._cutover && payload.staged === true) gate.staged = true;
+      if (this._cutover && payload.staged === true) gate.staged = true;   // Part 7: handoff checked above, before the cut
       const bodies = role.cache.slice().sort((a, b) => a.publishTs - b.publishTs || (a.msgId < b.msgId ? -1 : a.msgId > b.msgId ? 1 : 0))
         .map((c) => ({ json: c.json, publishTs: c.publishTs, msgId: c.msgId, seq: c.seq, bytes: c.bytes }));
       const dels = this._activeDels(role).sort((a, b) => a.killTs - b.killTs || (a.msgId < b.msgId ? -1 : a.msgId > b.msgId ? 1 : 0))
