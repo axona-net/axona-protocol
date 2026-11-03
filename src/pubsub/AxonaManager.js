@@ -113,6 +113,7 @@ export class AxonaManager {
     identity = null,               // node TRANSPORT identity {pubkey, sign} — signs D1 INGEST-ACK proofs
     tombstoneAuth = false,         // REF-1.1 S2.0c Phase 3: DEFAULT-OFF shadow wiring of the tombstone authorization core (observe-only; no behavior change)
     frameRegistry = false,         // REF-1.1 S2: DEFAULT-OFF Boundary-1 frame-contract registry (shadow-wraps the 19 routed handlers; observe-only; byte-identical flag-off)
+    cutover = null,                // Closer-Born Relay Inherits the Root v0.4 Part 3e (David 2026-11-03 "go ahead with the cutover state machine"): DEFAULT OFF; null = env CUTOVER
     mergeCapable = null,           // dual-root reconciliation (axona-docs 14a6bd8): DEFAULT-ON since 4.118.0; null = env MERGE_CAPABLE, else MERGE_CAPABLE_DEFAULT
     topicLifetime = null,          // Topic Lifetime (axona-docs 11288d7): DEFAULT-ON since 4.118.0; null = env TOPIC_LIFETIME, else TOPIC_LIFETIME_DEFAULT
     ..._legacy   // accepted-and-ignored clean-break tunables (pickRelayPeer, rootSetSize, …)
@@ -328,6 +329,7 @@ export class AxonaManager {
     // refused without the release token the machine mints. Release and arming
     // are separate words from David; neither is this option's default.
     this._mergeCapable    = !!(mergeCapable ?? envNum('MERGE_CAPABLE', MERGE_CAPABLE_DEFAULT));
+    this._cutover         = !!(cutover ?? envNum('CUTOVER', 0));
     // TOPIC LIFETIME (axona-docs architecture/Axona-Topic-Lifetime-v0.1.md v0.9
     // @ 11288d7; David "Build" 2026-10-20). OFF by default. Armed (option
     // `topicLifetime` or env TOPIC_LIFETIME=1): a standby appointment is a lease

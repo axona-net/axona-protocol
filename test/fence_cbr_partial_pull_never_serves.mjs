@@ -28,7 +28,8 @@ let passed = 0, failed = 0;
 const check = (label, ok, extra = '') => { console.log(`  ${ok ? '✓' : '✗'} ${label}${ok ? '' : ' ' + extra}`); ok ? passed++ : failed++; };
 console.log('fence_cbr_partial_pull_never_serves: 3e — a timed-out pull never leaves two serving roots');
 
-const S = await splitScene('cbr-partial-pull');
+const CUT = process.env.CUTOVER_OFF ? {} : { cutover: true };
+const S = await splitScene('cbr-partial-pull', { wOpts: CUT, lOpts: CUT });
 const l1 = await S.stamp(S.Ln, 1, 4000), l2 = await S.stamp(S.Ln, 2, 4000), l3 = await S.stamp(S.Ln, 3, 4000);
 let seenCorrReplies = 0;
 S.fab.tap = (j) => {

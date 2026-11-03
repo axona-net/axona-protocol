@@ -2,68 +2,78 @@
 // =====================================================================
 // fence_cbr_sub_fill_is_not_authority.mjs — Closer-Born Relay Inherits the
 // Root v0.4, Parts 3e and I3 (axona-docs e38601e; David "go ahead with the
-// second fence" 2026-11-03).
+// cutover state machine" 2026-11-03).
 //
 // Live case (2026-11-03, ops/evidence/council-split-20261102): an
-// axona.chat client holding council's history as a root at epoch 1 reached
-// slot 19, the closer relay that is born root and empty on every fresh
-// read. Slot 19 ended up holding 79 bodies with no merge-admitted row and a
-// timed-out merge pull, then served them as a second root while Aster's
-// seat stayed root with the live stream. Fence 1 showed the merge pull keeps
-// nothing on a timeout, so the fill came another way.
+// axona.chat client C, a root for council at epoch 1, found slot 19 (W,
+// closer, born root and empty) on its verify and offered the merge; W's pull
+// timed out (01:41:17Z); W nonetheless ended holding C's 79 bodies with no
+// merge-admitted row. Aster's seat A, root at epoch 2 with the live stream,
+// stayed a separate root: A and W cannot reach each other.
 //
-// Mechanism under test (wireHandlers.js _onSub): a SUB whose hw is above
-// the root's own makes the root pull the delta from that SUBSCRIBER
-// (REPLAY_UP), with no log line, no corr and no terminal ack.
+// CORRECTION (2026-11-03): the first version of this fence had C send W a
+// SUB carrying hw while C stayed root. The kernel never does that: a root
+// SUBs a closer node only after demoting toward it, and the demotion here is
+// the merge machine's LEGACY FALLBACK (an offer unanswered past
+// MERGE_OFFER_TIMEOUT_MS demotes L; its next SUB carries hw; the winner pulls
+// by REPLAY_UP, no corr, no merge row). So the live fill is C merging into
+// the closer W by the fallback, and the remaining split is A against W, cut
+// both ways, which the packet's condition C2 excludes from what any cutover
+// can heal (it needs a route in at least one direction; that is the reply
+// route's job across the island, a separate fence).
 //
-// Scene: W (closest) born root empty; A (farther) root, stamps three, the
-// live root; C (client) root holding a copy of A's three. The A<->W link is
-// cut both ways, as across the islands. C sends W a SUB carrying C's hw.
-// Then A stamps a fourth.
-// Invariant asserted once 3e lands: W does not become an independent
-// serving root on a subscriber's fill; either W stages and hands the role
-// back to the history's root, or the later body reaches W.
-// Measured on v4.128.0 (9e66eb5), 2026-11-03: W 0 -> 3 bodies by the SUB
-// path with no merge or split-union line (check 0 holds: the live slot-19
-// fill reproduced); A stamps a fourth, W never receives it, both stay root
-// (check 1 RED). EXPECTED RED until 3e; not in test/manifest.json until green.
+// Scene: W closest, born root empty; C farther, root, stamps three; A a
+// third root stamping its own; A<->W cut both ways (the island). C's verify
+// visits W and the machine runs: once with the first corr reply dropped (the
+// live timeout), then a re-verify.
+//   F1 (cutover on): exactly one root among C and W; W holds C's three; C is
+//      W's child; the handover completed by the correlated machine (a
+//      merge-acked row at W), never by the legacy fallback.
+//   F2 (control, cutover off): the same scene ends by the legacy fallback
+//      (C logs merge-legacy-fallback) or with two roots: today's path.
+//   F3 recorded, not asserted: A stays a separate root (C2: no route either
+//      way between A and W).
 // Run: node test/fence_cbr_sub_fill_is_not_authority.mjs
 // =====================================================================
-import { splitScene, Fabric, freshId, idHex } from './lib/mergeFixture.mjs';
+import { splitScene, freshId, idHex } from './lib/mergeFixture.mjs';
+import { MERGE_TIMEOUT_MS, MERGE_OFFER_TIMEOUT_MS } from '../src/pubsub/constants.js';
 
 let passed = 0, failed = 0;
 const check = (label, ok, extra = '') => { console.log(`  ${ok ? '✓' : '✗'} ${label}${ok ? '' : ' ' + extra}`); ok ? passed++ : failed++; };
-console.log('fence_cbr_sub_fill_is_not_authority: 3e/I3 — a subscriber\'s REPLAY_UP fill never makes a second serving root');
+console.log('fence_cbr_sub_fill_is_not_authority: 3e — a closer born-empty root inherits by the correlated machine, never by the legacy fallback');
 
-const S = await splitScene('cbr-sub-fill');
-const A = S.Ln, aRole = S.lRole, W = S.W, wRole = S.wRole;   // A = the live root (farther), W = closer, born empty
-const a1 = await S.stamp(A, 1), a2 = await S.stamp(A, 2), a3 = await S.stamp(A, 3);
+async function run(cutover) {
+  const opts = cutover ? { cutover: true } : {};
+  const S = await splitScene(`cbr-sub-fill-${cutover}`, { wOpts: opts, lOpts: opts });
+  const C = S.Ln, cRole = S.lRole, W = S.W, wRole = S.wRole;
+  const c1 = await S.stamp(C, 1, 4000), c2 = await S.stamp(C, 2, 4000), c3 = await S.stamp(C, 3, 4000);
+  let aId; do { aId = await freshId(); } while ((aId ^ S.Lt.topicId) < (S.wId ^ S.Lt.topicId));
+  const A = S.fab.addNode(aId, opts); const aRole = A.rc.become(S.Lt.topicId, 'sub-terminal');
+  const cut = (j) => { const f = j.meta?.fromId ? BigInt('0x' + j.meta.fromId) : null; return (f === aId && j.dest === S.wId) || (f === S.wId && j.dest === aId); };
+  let corrReplies = 0;
+  S.fab.tap = (j) => { if (cut(j)) return null; if (j.type === 'pubsub:replayup' && typeof j.payload?.corr === 'string' && ++corrReplies > 1) return null; return j; };
+  await S.trigger();
+  S.fab.tap = (j) => cut(j) ? null : j;
+  S.fab.clock += Math.max(MERGE_TIMEOUT_MS, MERGE_OFFER_TIMEOUT_MS) + 1;
+  for (const n of [W, C, A]) n.am._mergeSweep(S.fab.clock);
+  await S.fab.settle();
+  await S.trigger();
+  const ev = (n) => n.logs.map((l) => l.ev.replace('pubsub:', ''));
+  return { S, C, W, A, cRole, wRole, aRole, ids: [c1, c2, c3], ev };
+}
 
-// C: a client holding a copy of A's history as its own root (the chat tab, epoch 1)
-let cId; do { cId = await freshId(); } while ((cId ^ S.Lt.topicId) < (S.wId ^ S.Lt.topicId));
-const C = S.fab.addNode(cId);
-const cRole = C.rc.become(S.Lt.topicId, 'sub-terminal');
-for (const e of aRole.cache) { cRole.cache.push({ ...e }); cRole.cacheIds.add(e.msgId); }
+const on = await run(true);
+console.log('  probe (on):  W', on.ev(on.W).filter((e) => /merge/.test(e)).join(','), '| C', on.ev(on.C).filter((e) => /merge/.test(e)).slice(-5).join(','));
+const roots = [on.cRole.isRoot, on.wRole.isRoot].filter(Boolean).length;
+check('F1 exactly one root among C and W', roots === 1, `roots=${roots}`);
+check('F1 … W is that root and holds C\'s three', on.wRole.isRoot && on.ids.every((id) => on.wRole.cacheIds.has(id)), `W root ${on.wRole.isRoot} cache ${on.wRole.cache.length}`);
+check('F1 … by the correlated machine (merge-acked at W), never the legacy fallback at C', on.ev(on.W).includes('merge-acked') && !on.ev(on.C).includes('merge-legacy-fallback'), on.ev(on.C).filter((e) => /merge/.test(e)).join(','));
 
-// The islands: nothing passes between A and W in either direction.
-S.fab.tap = (j) => {
-  const from = j.meta?.fromId ? BigInt('0x' + j.meta.fromId) : null;
-  if ((from === S.lId && j.dest === S.wId) || (from === S.wId && j.dest === S.lId)) return null;
-  return j;
-};
+const off = await run(false);
+console.log('  probe (off): W', off.ev(off.W).filter((e) => /merge/.test(e)).join(','), '| C', off.ev(off.C).filter((e) => /merge/.test(e)).slice(-5).join(','));
+const offRoots = [off.cRole.isRoot, off.wRole.isRoot].filter(Boolean).length;
+check('F2 control (off): today\'s path — two roots, or the handover by the legacy fallback', offRoots === 2 || off.ev(off.C).includes('merge-legacy-fallback'), `roots=${offRoots}`);
 
-const before = { w: wRole.cache.length, merges: W.logs.filter((l) => /merge|split-union/.test(l.ev)).length };
-const subHw = C.am._highWater(cRole), subLw = C.am._lowWater(cRole);
-await W.handlers.get('pubsub:sub')({ topicId: idHex(S.Lt.topicId), via: [], subscriberId: idHex(cId), since: 0, hw: subHw, lw: subLw }, { targetId: S.Lt.topicId, isTerminal: true, hopCount: 1, fromId: idHex(cId) });
-await S.fab.settle();
-const filled = [a1, a2, a3].filter((id) => wRole.cacheIds.has(id)).length;
-const mergeLines = W.logs.filter((l) => /merge|split-union/.test(l.ev)).length - before.merges;
-console.log(`  probe: W cache ${before.w} -> ${wRole.cache.length}, A's bodies at W ${filled}/3, new merge/split-union lines at W ${mergeLines}, W isRoot ${wRole.isRoot}`);
-
-const a4 = await S.stamp(A, 4);
-console.log(`  probe: after A stamps a fourth: A cache ${aRole.cache.length} root ${aRole.isRoot} | W cache ${wRole.cache.length} root ${wRole.isRoot} has a4 ${wRole.cacheIds.has(a4)}`);
-
-check('0 scene: the fill happened by the subscriber path, silently (A\'s three at W, no merge or split-union line)', filled === 3 && mergeLines === 0, `filled=${filled} mergeLines=${mergeLines}`);
-check('1 W is not an independent serving root over a subscriber-filled copy while A stamps', !(wRole.isRoot && aRole.isRoot && filled > 0 && !wRole.cacheIds.has(a4)), 'two roots; W serves a frozen copy');
+console.log(`  F3 recorded: A is a separate root (C2, cut both ways): on ${on.aRole.isRoot}, off ${off.aRole.isRoot}`);
 console.log(`\nfence_cbr_sub_fill_is_not_authority: ${passed} passed, ${failed} failed`);
 process.exit(failed ? 1 : 0);

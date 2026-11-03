@@ -1148,15 +1148,18 @@
     },
     {
       "file": "fence_cbr_partial_pull_never_serves.mjs",
-      "class": "quarantined",
-      "reason": "RED against a known unfixed defect (Closer-Born Relay Inherits the Root v0.4, Part 3e step 6): a timed-out merge pull keeps nothing, the loser aborts and clears its gate, a re-verify never re-offers, two roots stand. Turns green when 3e lands; then moved to default.",
-      "hold": "3e cutover state machine not built (branch closer-born-root; David's word 2026-11-03)"
+      "class": "default",
+      "note": "Closer-Born Relay Inherits the Root v0.4 Part 3e step 6 (David 2026-11-03 \"go ahead with the cutover state machine\"), manager option `cutover`. A winner's merge pull times out (every corr reply after the first dropped); the loser aborts. Today the standing candidate refuses its own re-nomination and the re-verify offers nothing: two roots for good (CUTOVER_OFF=1 is the red control). With cutover the abort clears the candidate, the re-verify offers with a new corr, the winner pulls everything, acks, the loser demotes; one root, and the loser's later body reaches it. Mutant: the candidate clear on abort removed -> check 1 red."
     },
     {
       "file": "fence_cbr_sub_fill_is_not_authority.mjs",
-      "class": "quarantined",
-      "reason": "RED against a known unfixed defect (Closer-Born Relay Inherits the Root v0.4, Parts 3e and I3): a SUB carrying a higher high-water fills a born-empty closer root by REPLAY_UP with no merge line, and it serves the frozen copy as a second root (the 2026-11-03 slot-19 fill reproduced). Turns green when 3e lands; then moved to default.",
-      "hold": "3e cutover state machine not built (branch closer-born-root; David's word 2026-11-03)"
+      "class": "default",
+      "note": "Closer-Born Relay Inherits the Root v0.4 Parts 3e and I3, the 2026-11-03 slot-19 case: client root C offers to the closer born-empty W, the first pull times out, A is a third root cut from W both ways. Corrected scene (the first version had a root SUB with hw without demoting, which the kernel never does; the live fill is the legacy fallback's demote-and-SUB). On (cutover): one root among C and W, W holds C's three, by a correlated merge-acked, never the legacy fallback. Off: two roots or the fallback. A recorded as a separate root (condition C2: no route either way; the cross-island route is a separate fence). Mutant: the candidate clear on abort removed -> F1 red."
+    },
+    {
+      "file": "fence_cbr_silence_never_wins.mjs",
+      "class": "default",
+      "note": "Closer-Born Relay Inherits the Root v0.4 Part 3e step 6: silence is never a winner. Every MERGE_OFFER dropped, the offer timeout passes. Off (control): the legacy fallback demotes L toward a winner that never answered. On (cutover): L stays root, merge-offer-timeout logged with cutover true, the candidate clears, the re-verify offers again and the handover completes. Mutant: the cutover branch in _mergeSweep removed -> S1 red."
     },
     {
       "file": "fence_signal_return_route.mjs",

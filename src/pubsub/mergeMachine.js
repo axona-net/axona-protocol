@@ -167,6 +167,11 @@ export const mergeMachineMethods = {
     const corr = role.merge.gate.corr;
     this._log('warn', 'merge-abort', { topic: idHex(role.topicId).slice(0, 12), why, corr: corr.slice(0, 8), ...extra });
     this._mergeCloseCorr(role, corr);
+    // 3e step 6 (cutover): an aborted round is RETRIED. The standing candidate
+    // would otherwise refuse its own re-nomination (a claim never wins over
+    // itself) and the next verify would offer nothing, leaving two roots for
+    // good. Clearing it lets the next trigger issue a new OFFER with a new corr.
+    if (this._cutover && role.merge.candidate) role.merge.candidate = null;
     return this._mergeGateClear(role, why, extra);
   },
   /** A corr this node ended (abort, refusal, completion) stays closed: a late PULLUP under it is stale, never a fresh open. Bounded. */
@@ -193,7 +198,13 @@ export const mergeMachineMethods = {
       for (const [corr, m] of role.sync.openMerges || []) {
         if (m.state === 'offered' && now - m.offeredAt >= MERGE_OFFER_TIMEOUT_MS) {
           this._mergeCloseCorr(role, corr);
-          if (m.reached === false || !role.isRoot || role.merge?.gate) {
+          if (this._cutover) {
+            // 3e step 6 (cutover): silence is never a winner. The round closes,
+            // the candidate is cleared so the next verify offers again, and L
+            // keeps its root; no demotion toward a node that never answered.
+            this._log('warn', 'merge-offer-timeout', { topic: idHex(role.topicId).slice(0, 12), corr: corr.slice(0, 8), winner: m.winner.slice(0, 10), reached: m.reached ?? null, cutover: true });
+            if (role.merge?.candidate?.id === m.winner) role.merge.candidate = null;
+          } else if (m.reached === false || !role.isRoot || role.merge?.gate) {
             this._log('warn', 'merge-offer-timeout', { topic: idHex(role.topicId).slice(0, 12), corr: corr.slice(0, 8), winner: m.winner.slice(0, 10), reached: m.reached ?? null });
           } else {
             this._log('warn', 'merge-legacy-fallback', { topic: idHex(role.topicId).slice(0, 12), corr: corr.slice(0, 8), winner: m.winner.slice(0, 10), cache: role.cache.length });
