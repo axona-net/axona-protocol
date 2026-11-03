@@ -60,11 +60,11 @@ function rowDefs() {
       evidence: EvidenceLevel.ROUTED, proves: Proves.ROUTING, outcome: 'RoutingOutcome', terminalOutcome: 'LEASE_ESTABLISHED',
       retry: Retry.IDEMPOTENT, topicProfile: PROFILE, eventIdScheme: NA, replayCursorType: 'HIGHWATER', orderingModel: 'ARRIVAL',
       authGuard: NA, admissionGuard: NA, placementGuard: 'regionOk+admitRole+meshBareSelfRootGuard',
-      projection: { payload: ['topicId', 'subscriberId', 'since', 'latest', 'hw', 'lw', 'merge', 'standby', 'demand', 'gen', 'attach', 'unpinned'] },   // unpinned: 3d, the sender holds no pin (attachEcho; Orion 3D-2)   // attach: the attachment nonce the reply echoes (Topic Lifetime 4.1, armed only)   // merge: the completion block while a loser is completing (dual-root 4(d)); standby/demand/gen: the seat declaration (Topic Lifetime 4.3, armed only)root 4(d))
-      schema: { require: ['topicId', 'subscriberId'], types: { topicId: 'string', subscriberId: 'string', standby: 'boolean', demand: 'number', gen: 'obj', attach: 'string', unpinned: 'boolean' } },
+      projection: { payload: ['topicId', 'subscriberId', 'since', 'latest', 'hw', 'lw', 'merge', 'standby', 'demand', 'gen', 'attach', 'unpinned', 'fd'] },   // fd: 6b, the sender's failure domain { kind, host } (successorGate only)   // unpinned: 3d, the sender holds no pin (attachEcho; Orion 3D-2)   // attach: the attachment nonce the reply echoes (Topic Lifetime 4.1, armed only)   // merge: the completion block while a loser is completing (dual-root 4(d)); standby/demand/gen: the seat declaration (Topic Lifetime 4.3, armed only)root 4(d))
+      schema: { require: ['topicId', 'subscriberId'], types: { topicId: 'string', subscriberId: 'string', standby: 'boolean', demand: 'number', gen: 'obj', attach: 'string', unpinned: 'boolean', fd: 'obj' } },
       idempotency: { from: ['topicId', 'subscriberId'] },
       capabilityRange: { profile: PROFILE },
-      errorContract: ['refuse-region', 'refuse-role-budget', 'merge-stale', 'refuse-dismantling'], traceFields: ['topicId', 'subscriberId'], budget: budget(12),
+      errorContract: ['refuse-region', 'refuse-role-budget', 'merge-stale', 'refuse-dismantling'], traceFields: ['topicId', 'subscriberId'], budget: budget(13),
       note: 'establishes/renews a delivery lease routed toward topicId; advertises the subscriber replay cursor (hw/lw)',
     }),
     ({

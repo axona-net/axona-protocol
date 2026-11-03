@@ -339,6 +339,7 @@ export const wireHandlersMethods = {
       if (this.mySubscriptions.has(topicBig)) this._replayLocal(role, since, !!payload.latest);
       return 'consumed';
     }
+    this._noteSuccessorSub(role, subHex, payload, seat);   // 6b: a successor's hw and failure domain (successorGate only)
     // Durability (§6 stamped-replay-up): if this subscriber holds stamped
     // history I lack, ask it to replay its cache UP to me. Two detectable shapes:
     //  · NEWER (hw above mine) — I am a fresh root after the old one died, or a

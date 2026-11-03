@@ -1167,6 +1167,11 @@
       "note": "Closer-Born Relay Inherits the Root Part 3e step 6 under cutover, Orion CUT-1/CUT-2 (council c0a842d2). C1: a refused-capacity answer clears the candidate and the next verify offers again; handover completes. C3: a winner re-minted mid-round is offered again at once under a new corr with its new epoch. Controls C2/C4 off = legacy. Mutants: transient clause dropped -> C1 red; record-then-abort order under cutover -> C3 red."
     },
     {
+      "file": "fence_cbr_6b_successor_gate.mjs",
+      "class": "default",
+      "note": "Closer-Born v0.6 Part 6b hold the root only with a current successor (David 2026-11-03 \"go ahead with 6b\"), option successorGate / env SUCCESSOR_GATE, default off; processKind service|app, hostTag. An app-held root reports degraded: no-successor while no successor (replica, standby seat, or the loser of a staged handover it won) is current: SUB within RENEW_MS, hw at or above the root's high-water as of RENEW_MS ago, host tag not its own. Re-seat = a FULL push on entering, then at most one per RENEW_MS. Real AxonaManager, _onSub, refreshTick, _stagePromote. G1..G10b. Mutants: service gated, same host counts, no freshness, lag ignored, readers eligible, loser not seeded, no fd on SUB, re-seat every tick, no re-seat, degraded never clears -> each red."
+    },
+    {
       "file": "fence_cbr_3c_replica_inherit.mjs",
       "class": "default",
       "note": "Closer-Born v0.6 Part 3c replicas inherit (David 2026-11-03 \"go ahead with 3c\"), option replicaInherit / env REPLICA_INHERIT, default off: the root's backup cohort is the K closest of discovery + its seated subscribers (any kind) + its last verify's visited nodes (fresh within 2*ROOT_VERIFY_MS); never self or the bridge. Real _replicateRole via refreshTick, _syncPush stubbed. R1/R3 seated N picked over D2 (neighbours, findKClosest); R2 off control; R4 fresh verify set; R5 stale set ignored; R6 bridge never; R7 farther seat displaces nobody; R8 replica-inherit row + displaced D2 pushed no more; R9/R10 the verify records its visited set only when armed. Mutants: no seated source, no walked source, no freshness, bridge not skipped, no distance sort, verify never records, armed pick unused -> each red."

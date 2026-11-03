@@ -71,6 +71,7 @@ import { writeFlightMethods }   from './writeFlight.js';
 import { tombstoneAuthWiringMethods, makeTombstoneAuthority } from './tombstoneAuthWiring.js';
 import { mergeMachineMethods }  from './mergeMachine.js';
 import { topicLifetimeMethods } from './topicLifetime.js';
+import { successorGateMethods } from './successorGate.js';
 import buildBoundary1Registry from './boundary1Registry.js';
 // Return routes (Closer-Born v0.6): breadcrumb lifetime, map bound, path ids kept.
 const RETURN_ROUTE_TTL_MS = 60_000, RETURN_ROUTE_CAP = 256, RETURN_RPATH_MAX = 16;
@@ -118,6 +119,9 @@ export class AxonaManager {
     cutover = null,
     hintRefresh = null,            // Closer-Born v0.6 3d hint refresh (David 2026-11-03): DEFAULT OFF; null = env HINT_REFRESH
     replicaInherit = null,         // Closer-Born v0.6 3c (David 2026-11-03 "go ahead with 3c"): DEFAULT OFF; null = env REPLICA_INHERIT
+    successorGate = null,          // Closer-Born v0.6 6b (David 2026-11-03 "go ahead with 6b"): DEFAULT OFF; null = env SUCCESSOR_GATE
+    processKind = null,            // 6b: 'service' (default) | 'app' (a tab, a seat whose host app quits); null = env PROCESS_KIND
+    hostTag = null,                // 6b: opaque failure-domain tag the embedder names (<= 32 chars); null = env HOST_TAG, else none
     verifyWalk = null,             // Closer-Born v0.6 farther-reaching verify (David 2026-11-03): DEFAULT OFF; null = env VERIFY_WALK
     attachEcho = null,             // Closer-Born v0.6 3d (David 2026-11-03 "go ahead with 3d"): DEFAULT OFF; null = env ATTACH_ECHO
     returnRoute = null,            // Closer-Born v0.6 return routes (David 2026-11-03 "go ahead with the return routes"): DEFAULT OFF; null = env RETURN_ROUTE                // Closer-Born Relay Inherits the Root v0.4 Part 3e (David 2026-11-03 "go ahead with the cutover state machine"): DEFAULT OFF; null = env CUTOVER
@@ -369,6 +373,14 @@ export class AxonaManager {
     // closer than the farthest replica takes the slot; the displaced backup
     // stops receiving REPLICATE and lapses on its standby lease.
     this._replicaInherit  = !!(replicaInherit ?? envNum('REPLICA_INHERIT', 0));
+    // 6b SUCCESSOR GATE (successorGate.js): an 'app' process holding a root
+    // reports degraded: no-successor while no replica is current, and re-seats.
+    this._successorGate   = !!(successorGate ?? envNum('SUCCESSOR_GATE', 0));
+    { const env = (typeof process !== 'undefined' && process.env) ? process.env : {};
+      const k = processKind ?? env.PROCESS_KIND ?? 'service';
+      this._processKind = (k === 'app') ? 'app' : 'service';
+      const h = hostTag ?? env.HOST_TAG ?? null;
+      this._hostTag = (typeof h === 'string' && h.length) ? h.slice(0, 32) : null; }
     this._retRoutes       = new Map();
     this._returnRouteStats = { recorded: 0, used: 0, delivered: 0, fellBack: 0 };
     // TOPIC LIFETIME (axona-docs architecture/Axona-Topic-Lifetime-v0.1.md v0.9
@@ -1545,6 +1557,8 @@ export class AxonaManager {
       // 3d: an unpinned sender says so; via alone cannot (an unpinned SUB with a
       // warm hint names it in via, exactly as a pinned SUB names its pin).
       ...(this._attachEcho && !((this._upstream.get(topicBig) || []).length) ? { unpinned: true } : {}),
+      // 6b: the sender's failure domain, so a root can tell a successor on its own host.
+      ...(this._successorGate ? { fd: this._fdBlock() } : {}),
       // COMPLETION IS CORRELATED (dual-root 4(d)): while this loser is completing a
       // handover, every SUB carries the merge block; an ordinary renewal completes nothing.
       ...(role?.merge?.completing ? { merge: { corr: role.merge.completing.corr, winner: role.merge.completing.winner, winnerEpoch: role.merge.completing.winnerEpoch, loserEpoch: role.merge.completing.loserEpoch, hash: role.merge.completing.hash } } : {}),
@@ -2031,6 +2045,7 @@ Object.assign(
   tombstoneAuthWiringMethods,  // REF-1.1 S2.0c Phase 3: DEFAULT-OFF shadow observers (no-op unless the tombstoneAuth flag is set)
   mergeMachineMethods,   // dual-root reconciliation 4(d) (axona-docs 14a6bd8): the cut, the gate, the forward to the winner — behind mergeCapable
   topicLifetimeMethods,  // Topic Lifetime (axona-docs 11288d7): standby lease, termination, thin-branch step-down — behind topicLifetime
+  successorGateMethods,  // Closer-Born v0.6 6b: an app-held root counts its current successors — behind successorGate
 );
 
 export default AxonaManager;

@@ -509,6 +509,7 @@ export const mergeMachineMethods = {
     role.formedAt = this._now(); role.lastVerify = 0;
     this._announceRoot(role.topicId);
     this._log('info', 'merge-stage-promoted', { topic: idHex(role.topicId).slice(0, 12), corr: corr.slice(0, 8), epoch: role.epoch, created: st.created });
+    this._noteLoserSuccessor(role, p.loser);   // 6b: the loser served the whole pull (successorGate only)
   },
   _mergePull(topicBig, role, corr, cursor) {
     const p = role.sync.openPulls.get(corr);

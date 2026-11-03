@@ -197,6 +197,7 @@ export const repairPlaneMethods = {
     // 1b-rep. Singleton-root replication (warm backup roots) — push each root's full
     //         cache to its ROOT_REPLICAS nearest neighbours so a successor is always
     //         warm.
+    this._successorTick();            // 6b (successorGate): an app-held root with no current successor re-seats before this push
     this._replicateRoots();
     this._emptyRootProbeSweep(now);   // v4.24.0: empty self-roots re-pull the cohort (bounded)
     // TOPIC LIFETIME (axona-docs 11288d7; behind TOPIC_LIFETIME): the standby
