@@ -116,6 +116,7 @@ export class AxonaManager {
     tombstoneAuth = false,         // REF-1.1 S2.0c Phase 3: DEFAULT-OFF shadow wiring of the tombstone authorization core (observe-only; no behavior change)
     frameRegistry = false,         // REF-1.1 S2: DEFAULT-OFF Boundary-1 frame-contract registry (shadow-wraps the 19 routed handlers; observe-only; byte-identical flag-off)
     cutover = null,
+    verifyWalk = null,             // Closer-Born v0.6 farther-reaching verify (David 2026-11-03): DEFAULT OFF; null = env VERIFY_WALK
     attachEcho = null,             // Closer-Born v0.6 3d (David 2026-11-03 "go ahead with 3d"): DEFAULT OFF; null = env ATTACH_ECHO
     returnRoute = null,            // Closer-Born v0.6 return routes (David 2026-11-03 "go ahead with the return routes"): DEFAULT OFF; null = env RETURN_ROUTE                // Closer-Born Relay Inherits the Root v0.4 Part 3e (David 2026-11-03 "go ahead with the cutover state machine"): DEFAULT OFF; null = env CUTOVER
     mergeCapable = null,           // dual-root reconciliation (axona-docs 14a6bd8): DEFAULT-ON since 4.118.0; null = env MERGE_CAPABLE, else MERGE_CAPABLE_DEFAULT
@@ -349,6 +350,12 @@ export class AxonaManager {
     // its sender, is always answered with a DELIVER (empty when there is no
     // history) that echoes the nonce. A pinned unarmed renewal stays silent.
     this._attachEcho      = !!(attachEcho ?? envNum('ATTACH_ECHO', 0));
+    // FARTHER-REACHING VERIFY (Closer-Born v0.6, "What would make this wrong"):
+    // the root self-verify's lookup on standalone peers is findKClosest, which
+    // reaches two channel-hops. Armed, the verify also runs the DHT walk
+    // (dht.walk, hop-by-hop over each hop's own channels) and nominates the
+    // closest node either one visited.
+    this._verifyWalk      = !!(verifyWalk ?? envNum('VERIFY_WALK', 0));
     this._retRoutes       = new Map();
     this._returnRouteStats = { recorded: 0, used: 0, delivered: 0, fellBack: 0 };
     // TOPIC LIFETIME (axona-docs architecture/Axona-Topic-Lifetime-v0.1.md v0.9

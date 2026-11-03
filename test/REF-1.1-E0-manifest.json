@@ -5,7 +5,7 @@
     "onNotification",
     "onRoutedMessage"
   ],
-  "treeHash": "cccf11b028cd8b5b20a2df58e683c93404cfb7cf",
+  "treeHash": "64dfc9e2f6010333c10501bc54f24fdef82c8a51",
   "filesScanned": 87,
   "summary": {
     "migration-target": 48,
@@ -195,7 +195,7 @@
     },
     {
       "file": "dht/AxonaPeer.js",
-      "line": 5256,
+      "line": 5266,
       "callee": "registerFrame",
       "receiver": "peer._b6door",
       "wire": "__tunneled_direct__",
@@ -205,7 +205,7 @@
     },
     {
       "file": "dht/AxonaPeer.js",
-      "line": 6987,
+      "line": 6997,
       "callee": "onDirectMessage",
       "receiver": "def",
       "wire": "—",

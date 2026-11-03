@@ -365,8 +365,18 @@ export const rootElectionMethods = {
       if (!due) continue;
       role.lastVerify = now; launched++;
       this._verifyInflight.add(t);
+      const walkToo = this._verifyWalk && typeof this.dht.walk === 'function';
       Promise.resolve()
-        .then(() => this.dht.lookup(t))
+        .then(() => (walkToo
+          // Both, in parallel; the visited sets are united, and the closest
+          // node either one visited is the candidate below.
+          ? Promise.allSettled([this.dht.lookup(t), this.dht.walk(t)]).then(([a, b]) => {
+              const pa = a.status === 'fulfilled' && Array.isArray(a.value?.path) ? a.value.path : [];
+              const pb = b.status === 'fulfilled' && Array.isArray(b.value?.path) ? b.value.path : [];
+              if (pb.length) this._log('info', 'verify-walk', { topic: idHex(t).slice(0, 12), kclosest: pa.length, walk: pb.length, hops: b.value?.hops ?? null });
+              return { path: [...pa, ...pb] };
+            })
+          : this.dht.lookup(t)))
         .then((r) => {
           this._verifyInflight.delete(t);
           // THE TERMINUS IS THE CLOSEST NODE THE WALK VISITED, NOT ITS LAST HOP

@@ -5235,6 +5235,16 @@ export class AxonaPeer extends DHT {
           return { found: true, path, hops: path.length - 1, time: 0 };
         } catch { return { found: false, path: [], hops: 0, time: 0 }; }
       },
+      // The DHT WALK (peer.lookup, lookup_walk): each hop forwards over ITS OWN
+      // channels, so it reaches past the asker's neighbours' neighbours, which
+      // findKClosest above cannot (it asks only peers this node holds a channel
+      // to). Used by the root self-verify under the manager option verifyWalk
+      // (Closer-Born v0.6, David 2026-11-03 "go ahead with the farther-reaching
+      // verify"); `path` lists the visited nodes.
+      walk: async (targetIdBig) => {
+        if (typeof targetIdBig !== 'bigint') return null;
+        try { return await peer.lookup(targetIdBig); } catch { return null; }
+      },
     };
 
     // REF-1.1 E3b.4 (SEAL — Aster boundary ruling 39012d73 / option 1): the
