@@ -879,6 +879,7 @@ export class AxonaManager {
   // is promoted here — without this it would reroute bare-topic publishes to
   // itself forever. Rules + defer gate live in the state machine.
   _maybePromoteRoot(role, payload, meta) {
+    if (role?.staging) return;   // 3b: a staged role becomes root only on its completion, never by a terminal SUB/PUB
     this._rootClaim.promote(role, payload, meta);
   }
 

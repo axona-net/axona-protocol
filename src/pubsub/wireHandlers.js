@@ -266,6 +266,7 @@ export const wireHandlersMethods = {
 
     const topicBig = idBig(payload.topicId);
     if (this._holdIntercept(topicBig, T.SUB, payload)) return 'consumed';   // step-down hold (4.102.0)
+    if (this._stagingIntercept(topicBig, T.SUB, payload)) return 'consumed';   // 3b: a staged role serves nothing
     // Root-beacon last-mile correction (SUB). A stranded subscribe must not
     // (re)root a near-miss node while a strictly-closer live NEIGHBOUR root is
     // beaconing — defer the seat to that root. Without this only PUB carried the
@@ -593,6 +594,7 @@ export const wireHandlersMethods = {
     const topicBig = idBig(payload.topicId);
     if (this._holdIntercept(topicBig, T.PUB, payload)) return 'consumed';   // step-down hold (4.102.0)
     if (this._mergeGateIntercept(topicBig, T.PUB, payload)) return 'consumed';   // merge gate (dual-root 4(d)): forwarded to W by name, or a returned forward
+    if (this._stagingIntercept(topicBig, T.PUB, payload)) return 'consumed';   // 3b: a staged role stamps nothing
     // Root-beacon last-mile correction. At this point I'm the acting target for
     // the publish (bare-topic terminus, or via-pinned to me). If a fresh beacon
     // names a different root genuinely CLOSER to the topic than me, forward to it
@@ -640,6 +642,9 @@ export const wireHandlersMethods = {
   // fall-through can return here in a split) and never stamped here.
   _cutDisposition(topicBig, type, payload) {
     const role = this.axonRoles.get(topicBig);
+    // 3b: in a staged round L keeps stamping; a write caught by the cut is
+    // re-run here by name, past the new generation, never sent to the stager.
+    if (role?.merge?.gate?.staged && role.isRoot) { this._send(type, { ...payload, via: [idHex(this.nodeId)] }); return; }
     if (role?.merge?.gate) { this._mergeGateForward(topicBig, type, payload, role, role.merge.gate); return; }
     const up = this._upstream.get(topicBig);
     if (up && up[0]) { this._forwardToRoot(topicBig, type, payload, lc(up[0])); return; }

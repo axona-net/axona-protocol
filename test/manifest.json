@@ -1167,6 +1167,11 @@
       "note": "Closer-Born Relay Inherits the Root Part 3e step 6 under cutover, Orion CUT-1/CUT-2 (council c0a842d2). C1: a refused-capacity answer clears the candidate and the next verify offers again; handover completes. C3: a winner re-minted mid-round is offered again at once under a new corr with its new epoch. Controls C2/C4 off = legacy. Mutants: transient clause dropped -> C1 red; record-then-abort order under cutover -> C3 red."
     },
     {
+      "file": "fence_cbr_3b_roleless_winner.mjs",
+      "class": "default",
+      "note": "Closer-Born v0.6 Part 3b under cutover (David 2026-11-03 'go ahead with 3b'): a closer node with no root role (or a CHILD) offered the win STAGES, pulls, and takes ROOT only on the loser's merge-bearing SUB, at max(known, loserEpoch)+1 (CB-2); a staged role serves nothing (SUB/PUB to the incumbent by name) and L stamps through the round (late write reaches W by the SUB high-water pull); pull timeout discards a created stager; second contender refused busy; verify skips the bridge (CB-1). Off: not-root as today. Mutants: no staging, never promoted, staged role serves (forward loop), no discard, no busy, bridge nominated, staged gate blocks L (forward loop), no CB-2 epoch -> each red."
+    },
+    {
       "file": "characterize_findk_chain_reach.mjs",
       "class": "default",
       "note": "Characterization (no behaviour change): on standalone peers dht.lookup is findKClosest(target, 4), which probes only peers the asker has an open channel to. On a bound-only chain L->H1->H2->H3->W it returns L,H1,H2 and never names W (the stop seen in fence_cbr_merge_across_island, with or without the island); a channel L->H2 extends reach to H3. axona-bot 5c51da7a re Orion 0cba73ba."

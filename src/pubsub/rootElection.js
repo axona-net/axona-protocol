@@ -378,10 +378,14 @@ export const rootElectionMethods = {
           // read hop 41, which was farther than self, so the claim stood. Reading
           // the closest visited node ends that split on the first verify.
           const path = (r && Array.isArray(r.path)) ? r.path : [];
+          // CB-1 (Orion 34db5e6d, packet 3b): under cutover the verify never
+          // nominates the bridge, which holds no root and no backup.
+          const bridge = this._cutover && typeof this.dht.bridgeId === 'function' ? this.dht.bridgeId() : null;
           let cBig = null, cD = null;
           for (const id of path) {
             let b; try { b = idBig(id); } catch { continue; }
             if (b === this.nodeId) continue;
+            if (bridge != null && b === bridge) continue;
             const d = b ^ t;
             if (cD === null || d < cD) { cD = d; cBig = b; }
           }
@@ -390,7 +394,9 @@ export const rootElectionMethods = {
           const live = this.axonRoles.get(t);
           if (!live || !live.isRoot) return;                      // already demoted meanwhile
           const hex = lc(idHex(cBig));
-          this._rootBeacons.set(t, { root: hex, at: this._now(), exp: this._now() + 2 * ROOT_VERIFY_MS, verified: true });
+          // 3b: under cutover no beacon is planted for a nominee before it
+          // accepts; the handover itself re-points this node.
+          if (!this._cutover) this._rootBeacons.set(t, { root: hex, at: this._now(), exp: this._now() + 2 * ROOT_VERIFY_MS, verified: true });
           this._rootVerifyCandidate(t, hex);
         })
         .catch(() => this._verifyInflight.delete(t));
