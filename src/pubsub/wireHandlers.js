@@ -1104,6 +1104,9 @@ export const wireHandlersMethods = {
   // time-sliced pump. Role state is read at PROCESSING time, not arrival time.
   async _onReplicate(payload, meta) {
     if (meta.targetId !== this.nodeId) return;          // routed to me as the backup
+    // RI-2 (Orion 867c3048): a bridge never holds a backup (_neverRoot). Not
+    // consumed, so the sender credits no replica and its verdict is 'failed'.
+    if (this._neverRoot) return;
     // Root-side: UNION_AT_ROOT (keep the claim, converge to the union). Else:
     // enter the BACKUP nature. Both are the REPLICATE policy hooks in
     // _syncIngest; the body drains through the time-sliced pump (I-11).

@@ -1092,9 +1092,11 @@ export const repairPlaneMethods = {
     for (const { hex, verdict } of await Promise.all(sent)) {
       if (verdict === 'consumed') {
         out.verified++;
+        role.inheritRefused?.delete(hex);
         role.replicas.set(hex, { at: now, via: 'consumed' });        // the ONLY crediting path
         continue;
       }
+      if (this._replicaInherit) (role.inheritRefused ??= new Map()).set(hex, now);   // RI-2: read only by _inheritCohort
       out[verdict]++;
       out.failures.push({ id: hex.slice(0, 12), v: verdict });   // WHO the push failed to + its dispatch verdict — replication-failure attribution (#45/#432/#397)
       role.attempted.set(hex, { at: now, via: verdict });
@@ -1134,9 +1136,15 @@ export const repairPlaneMethods = {
       pool.set(hex, src);
     };
     for (const id of (Array.isArray(discovered) ? discovered : [])) add(id, 'discovered');
-    for (const h of (role.subscribers?.keys?.() ?? [])) add(h, 'seated');
+    // RI-2 (Orion 867c3048): a seated or walked candidate whose last push
+    // failed (a remote bridge refuses REPLICATE) is not re-picked for RENEW_MS,
+    // so it cannot hold a cohort slot that never credits. Discovery keeps its
+    // existing semantics.
+    const refused = role.inheritRefused;
+    const fresh = (h) => !(refused && refused.has(h) && (this._now() - refused.get(h)) < RENEW_MS);
+    for (const h of (role.subscribers?.keys?.() ?? [])) if (fresh(lc(h))) add(h, 'seated');
     const seen = role.verifySeen;
-    if (seen && (this._now() - seen.at) <= 2 * ROOT_VERIFY_MS) for (const h of seen.ids) add(h, 'walked');
+    if (seen && (this._now() - seen.at) <= 2 * ROOT_VERIFY_MS) for (const h of seen.ids) if (fresh(h)) add(h, 'walked');
     const ranked = [...pool.keys()].sort((a, b) => ((idBig(a) ^ t) < (idBig(b) ^ t) ? -1 : 1));
     const want = ranked.slice(0, K);
     const before = [...(role.replicas?.keys?.() ?? [])];
@@ -1561,6 +1569,7 @@ export const repairPlaneMethods = {
 
   stop() {
     if (this._timer) { clearInterval(this._timer); this._timer = null; }
+    this._verifyInflight?.clear?.();   // VW-2 note (Orion 867c3048): a verify settling after a standalone stop acts on nothing
     for (const h of this._burstTimers) clearTimeout(h);
     this._burstTimers.clear();
   },

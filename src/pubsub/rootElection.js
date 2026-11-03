@@ -297,6 +297,7 @@ export const rootElectionMethods = {
             // lookup) and take the closest node it visited when that is closer
             // than the local guess and than this node.
             const since = this._unattachedSince?.get(topicBig);
+            let refreshed = false;
             if (this._hintRefresh && since != null && this._now() - since >= ROOT_CLAIM_MS
                 && (typeof this.dht.walk === 'function' || typeof this.dht.lookup === 'function')) {
               try {
@@ -305,16 +306,19 @@ export const rootElectionMethods = {
                 let cur = null; try { cur = id != null ? idBig(id) : null; } catch { cur = null; }
                 const bridge = this._closerBornBridge();   // VW-1: never the bridge
                 let best = null, bd = this.nodeId ^ topicBig;
-                if (cur != null && cur !== this.nodeId && (cur ^ topicBig) < bd) { best = cur; bd = cur ^ topicBig; }
+                // HR-1 (Orion 867c3048): the local guess may itself be the bridge.
+                const curIsBridge = cur != null && bridge != null && cur === bridge;
+                if (cur != null && cur !== this.nodeId && !curIsBridge && (cur ^ topicBig) < bd) { best = cur; bd = cur ^ topicBig; }
                 for (const p of path) {
                   let b; try { b = idBig(p); } catch { continue; }
                   if (b === this.nodeId || (bridge != null && b === bridge)) continue;
                   const d = b ^ topicBig;
                   if (d < bd) { bd = d; best = b; }
                 }
-                if (best != null && best !== cur) {
-                  this._log('info', 'hint-refresh', { topic: idHex(topicBig).slice(0, 12), from: localHex ? localHex.slice(0, 10) : null, to: lc(idHex(best)).slice(0, 10), visited: path.length });
-                  id = best;
+                if ((best != null && best !== cur) || curIsBridge) {
+                  this._log('info', 'hint-refresh', { topic: idHex(topicBig).slice(0, 12), from: localHex ? localHex.slice(0, 10) : null, to: best != null ? lc(idHex(best)).slice(0, 10) : null, visited: path.length, ...(curIsBridge ? { dropped: 'bridge' } : {}) });
+                  id = best;   // null when the walk found nothing better than the dropped bridge: route greedily
+                  refreshed = best != null;
                 }
               } catch { /* keep the local result */ }
             }
@@ -334,7 +338,10 @@ export const rootElectionMethods = {
             // neuromorphic restructuring on the very next renewal.
             if (hex && this.mySubscriptions.has(topicBig) &&
                 !(this._upstream.get(topicBig) || []).length) {
-              this._emitSubscribe(topicBig, []);
+              // HR-2 (Orion 867c3048): a hint the refresh found came from a
+              // noCache walk (VW-3) that warmed no hop cache, so a greedy SUB
+              // strands at the same local minimum; name the hint instead.
+              this._emitSubscribe(topicBig, refreshed ? [hex] : []);
             }
             // Heal (publish/kill): a stranded publish/kill is RE-SENT toward the
             // true root by the persistent retry loop in refreshTick (until the
@@ -450,8 +457,12 @@ export const rootElectionMethods = {
           if (this._replicaInherit) {
             const live0 = this.axonRoles.get(t);
             if (live0?.isRoot) {
-              const ids = [];
-              for (const id of path) { let b; try { b = idBig(id); } catch { continue; } if (b !== this.nodeId && b !== bridge) ids.push(lc(idHex(b))); if (ids.length >= 16) break; }
+              // RI-1 (Orion 867c3048): dedup, never self or the bridge, CLOSEST
+              // first, then the bound; the raw path is in traversal order.
+              const skip = this._closerBornBridge();
+              const seen = new Map();
+              for (const id of path) { let b; try { b = idBig(id); } catch { continue; } if (b === this.nodeId || (skip != null && b === skip)) continue; seen.set(b, true); }
+              const ids = [...seen.keys()].sort((a, b) => ((a ^ t) < (b ^ t) ? -1 : 1)).slice(0, 16).map((b) => lc(idHex(b)));
               live0.verifySeen = { at: this._now(), ids };
             }
           }

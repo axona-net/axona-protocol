@@ -292,6 +292,7 @@ export const syncEngineMethods = {
         return;
       }
       if (!this._rootReplicas) return;                  // backup duty disabled on this node
+      if (this._neverRoot) return;                      // RI-2: a bridge never holds a backup
       let from = null;
       if (payload.from && isHexId(lc(payload.from))) from = lc(payload.from);
       else if (meta?.fromId != null) { try { from = lc(idHex(idBig(meta.fromId))); } catch { /* */ } }
