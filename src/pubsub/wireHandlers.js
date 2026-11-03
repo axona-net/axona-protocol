@@ -359,12 +359,10 @@ export const wireHandlersMethods = {
     // HANDOVER COMPLETION (dual-root 4(d)): only a SUB carrying the merge block
     // that matches an acked pull on all five fields completes; everything else
     // is an ordinary renewal here.
-    if (payload.merge && typeof payload.merge === 'object') {
-      const completed = this._mergeCompleteOnSub(role, subHex, payload);
-      // 3B-4: a merge SUB that did not complete never seats the loser on a
-      // role created only to stage.
-      if (!completed && role.staging?.created && !role.isRoot) return 'consumed';
-    }
+    if (payload.merge && typeof payload.merge === 'object') this._mergeCompleteOnSub(role, subHex, payload);
+    // 3B-4 / 3B-4a (Orion 620dbf95): a role created only to stage seats no one,
+    // whatever the SUB's shape. A completed round has already promoted it.
+    if (role.staging?.created && !role.isRoot) return 'consumed';
     const myHw = this._highWater(role);
     if (Number.isFinite(payload.hw) && payload.hw > myHw) {
       this._syncPull(idBig(subHex), topicBig, 'REPLAY_UP', { sinceHw: myHw });

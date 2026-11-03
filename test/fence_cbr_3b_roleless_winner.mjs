@@ -27,6 +27,7 @@
 //   B10 a KILL reaching a stager is applied at L, never at the stager.
 //   B11 the loser dies mid-stage: a PUB at the stager ends once, no bounce.
 //   B12 a merge SUB that does not complete never seats L on a created stager.
+//   B13 3B-4a: nor does a SUB naming L with a malformed (non-object) merge.
 // Run: node test/fence_cbr_3b_roleless_winner.mjs
 // =====================================================================
 import { Fabric, freshId, realTopic, author, idHex } from './lib/mergeFixture.mjs';
@@ -37,7 +38,7 @@ import { buildKill } from '../src/pubsub/kill.js';
 
 let passed = 0, failed = 0;
 const check = (label, ok, extra = '') => { console.log(`  ${ok ? '✓' : '✗'} ${label}${ok ? '' : ' ' + extra}`); ok ? passed++ : failed++; };
-process.on('exit', (code) => { if (code === 0 && passed + failed < 13) { console.log(`  ✗ exited after ${passed + failed} of 13 checks`); process.exitCode = 1; } });
+process.on('exit', (code) => { if (code === 0 && passed + failed < 14) { console.log(`  ✗ exited after ${passed + failed} of 14 checks`); process.exitCode = 1; } });
 
 async function scene(name, { cutover = true, wRole = 'none' } = {}) {
   const Lt = await realTopic(name);
@@ -217,6 +218,16 @@ const pubAt = async (S, n, k) => {
   check('B12 3B-4: a merge SUB that does not complete never seats L on a created stager',
     !!w && !w.isRoot && !w.subscribers.has(idHex(S.L.id).toLowerCase()),
     JSON.stringify({ w: !!w, root: w?.isRoot, subs: w ? [...w.subscribers.keys()].map((k) => k.slice(0, 8)) : null }));
+}
+{
+  const { S } = await held('cbr-3b-bad-merge-shape', 'none');
+  const sub = { topicId: idHex(S.Lt.topicId), subscriberId: idHex(S.L.id), via: [idHex(S.W.id)], since: 0, merge: true };
+  await S.W.handlers.get('pubsub:sub')(sub, S.meta(S.W));
+  await S.fab.settle();
+  const w = S.wr();
+  check('B13 3B-4a: a SUB naming L with merge:true never seats L on a created stager',
+    !!w && !w.isRoot && !w.subscribers.has(idHex(S.L.id).toLowerCase()),
+    JSON.stringify({ w: !!w, subs: w ? [...w.subscribers.keys()].map((k) => k.slice(0, 8)) : null }));
 }
 console.log(`\nfence_cbr_3b_roleless_winner: ${passed} passed, ${failed} failed`);
 process.exit(failed ? 1 : 0);
