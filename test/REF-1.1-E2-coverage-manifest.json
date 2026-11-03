@@ -4,8 +4,18 @@
   "count": 48,
   "sites": [
     {
-      "identity": "dht/AxonaPeer.js:1019|lookup_done|notification|this._b5door",
-      "callSite": "dht/AxonaPeer.js:1019",
+      "identity": "dht/AxonaPeer.js:1000|lookup_walk|request|this._b5door",
+      "callSite": "dht/AxonaPeer.js:1000",
+      "primitive": "registerFrame",
+      "receiver": "this._b5door",
+      "wire": "lookup_walk",
+      "transportKind": "request",
+      "boundary": "B5",
+      "rowType": "dht:lookup_walk"
+    },
+    {
+      "identity": "dht/AxonaPeer.js:1021|lookup_done|notification|this._b5door",
+      "callSite": "dht/AxonaPeer.js:1021",
       "primitive": "registerFrame",
       "receiver": "this._b5door",
       "wire": "lookup_done",
@@ -14,8 +24,8 @@
       "rowType": "dht:lookup_done"
     },
     {
-      "identity": "dht/AxonaPeer.js:1025|lookahead_probe|request|this._b5door",
-      "callSite": "dht/AxonaPeer.js:1025",
+      "identity": "dht/AxonaPeer.js:1027|lookahead_probe|request|this._b5door",
+      "callSite": "dht/AxonaPeer.js:1027",
       "primitive": "registerFrame",
       "receiver": "this._b5door",
       "wire": "lookahead_probe",
@@ -24,8 +34,8 @@
       "rowType": "dht:lookahead_probe"
     },
     {
-      "identity": "dht/AxonaPeer.js:1040|reinforce|notification|this._b5door",
-      "callSite": "dht/AxonaPeer.js:1040",
+      "identity": "dht/AxonaPeer.js:1042|reinforce|notification|this._b5door",
+      "callSite": "dht/AxonaPeer.js:1042",
       "primitive": "registerFrame",
       "receiver": "this._b5door",
       "wire": "reinforce",
@@ -34,8 +44,8 @@
       "rowType": "dht:reinforce"
     },
     {
-      "identity": "dht/AxonaPeer.js:1068|triadic_introduce|notification|this._b5door",
-      "callSite": "dht/AxonaPeer.js:1068",
+      "identity": "dht/AxonaPeer.js:1070|triadic_introduce|notification|this._b5door",
+      "callSite": "dht/AxonaPeer.js:1070",
       "primitive": "registerFrame",
       "receiver": "this._b5door",
       "wire": "triadic_introduce",
@@ -44,8 +54,8 @@
       "rowType": "dht:triadic_introduce"
     },
     {
-      "identity": "dht/AxonaPeer.js:1077|hop_cache|notification|this._b5door",
-      "callSite": "dht/AxonaPeer.js:1077",
+      "identity": "dht/AxonaPeer.js:1079|hop_cache|notification|this._b5door",
+      "callSite": "dht/AxonaPeer.js:1079",
       "primitive": "registerFrame",
       "receiver": "this._b5door",
       "wire": "hop_cache",
@@ -54,8 +64,8 @@
       "rowType": "dht:hop_cache"
     },
     {
-      "identity": "dht/AxonaPeer.js:1078|lateral_spread|notification|this._b5door",
-      "callSite": "dht/AxonaPeer.js:1078",
+      "identity": "dht/AxonaPeer.js:1080|lateral_spread|notification|this._b5door",
+      "callSite": "dht/AxonaPeer.js:1080",
       "primitive": "registerFrame",
       "receiver": "this._b5door",
       "wire": "lateral_spread",
@@ -64,8 +74,8 @@
       "rowType": "dht:lateral_spread"
     },
     {
-      "identity": "dht/AxonaPeer.js:1089|presence|notification|this._b5door",
-      "callSite": "dht/AxonaPeer.js:1089",
+      "identity": "dht/AxonaPeer.js:1091|presence|notification|this._b5door",
+      "callSite": "dht/AxonaPeer.js:1091",
       "primitive": "registerFrame",
       "receiver": "this._b5door",
       "wire": "presence",
@@ -74,8 +84,8 @@
       "rowType": "dht:presence"
     },
     {
-      "identity": "dht/AxonaPeer.js:1136|peer-leaving|notification|this._b5door",
-      "callSite": "dht/AxonaPeer.js:1136",
+      "identity": "dht/AxonaPeer.js:1138|peer-leaving|notification|this._b5door",
+      "callSite": "dht/AxonaPeer.js:1138",
       "primitive": "registerFrame",
       "receiver": "this._b5door",
       "wire": "peer-leaving",
@@ -84,8 +94,8 @@
       "rowType": "dht:peer-leaving"
     },
     {
-      "identity": "dht/AxonaPeer.js:1171|local_probe|request|this._b5door",
-      "callSite": "dht/AxonaPeer.js:1171",
+      "identity": "dht/AxonaPeer.js:1173|local_probe|request|this._b5door",
+      "callSite": "dht/AxonaPeer.js:1173",
       "primitive": "registerFrame",
       "receiver": "this._b5door",
       "wire": "local_probe",
@@ -94,8 +104,8 @@
       "rowType": "dht:local_probe"
     },
     {
-      "identity": "dht/AxonaPeer.js:1195|find_closest_set|request|this._b5door",
-      "callSite": "dht/AxonaPeer.js:1195",
+      "identity": "dht/AxonaPeer.js:1197|find_closest_set|request|this._b5door",
+      "callSite": "dht/AxonaPeer.js:1197",
       "primitive": "registerFrame",
       "receiver": "this._b5door",
       "wire": "find_closest_set",
@@ -104,8 +114,8 @@
       "rowType": "dht:find_closest_set"
     },
     {
-      "identity": "dht/AxonaPeer.js:1224|peer_exchange|request|this._b5door",
-      "callSite": "dht/AxonaPeer.js:1224",
+      "identity": "dht/AxonaPeer.js:1226|peer_exchange|request|this._b5door",
+      "callSite": "dht/AxonaPeer.js:1226",
       "primitive": "registerFrame",
       "receiver": "this._b5door",
       "wire": "peer_exchange",
@@ -114,8 +124,8 @@
       "rowType": "dht:peer_exchange"
     },
     {
-      "identity": "dht/AxonaPeer.js:1254|route_msg|request|this._b5door",
-      "callSite": "dht/AxonaPeer.js:1254",
+      "identity": "dht/AxonaPeer.js:1256|route_msg|request|this._b5door",
+      "callSite": "dht/AxonaPeer.js:1256",
       "primitive": "registerFrame",
       "receiver": "this._b5door",
       "wire": "route_msg",
@@ -124,8 +134,8 @@
       "rowType": "dht:route_msg"
     },
     {
-      "identity": "dht/AxonaPeer.js:1484|mesh:signal|routed|this._b3door",
-      "callSite": "dht/AxonaPeer.js:1484",
+      "identity": "dht/AxonaPeer.js:1486|mesh:signal|routed|this._b3door",
+      "callSite": "dht/AxonaPeer.js:1486",
       "primitive": "registerFrame",
       "receiver": "this._b3door",
       "wire": "mesh:signal",
@@ -134,8 +144,8 @@
       "rowType": "mesh:signal-routed"
     },
     {
-      "identity": "dht/AxonaPeer.js:4654|axona:direct|request|this._b6door",
-      "callSite": "dht/AxonaPeer.js:4654",
+      "identity": "dht/AxonaPeer.js:4674|axona:direct|request|this._b6door",
+      "callSite": "dht/AxonaPeer.js:4674",
       "primitive": "registerFrame",
       "receiver": "this._b6door",
       "wire": "axona:direct",
@@ -144,8 +154,8 @@
       "rowType": "direct:axona-direct-request"
     },
     {
-      "identity": "dht/AxonaPeer.js:4670|axona:direct|notification|this._b6door",
-      "callSite": "dht/AxonaPeer.js:4670",
+      "identity": "dht/AxonaPeer.js:4690|axona:direct|notification|this._b6door",
+      "callSite": "dht/AxonaPeer.js:4690",
       "primitive": "registerFrame",
       "receiver": "this._b6door",
       "wire": "axona:direct",
@@ -154,8 +164,8 @@
       "rowType": "direct:axona-direct-notify"
     },
     {
-      "identity": "dht/AxonaPeer.js:5266|__tunneled_direct__|routed|peer._b6door",
-      "callSite": "dht/AxonaPeer.js:5266",
+      "identity": "dht/AxonaPeer.js:5290|__tunneled_direct__|routed|peer._b6door",
+      "callSite": "dht/AxonaPeer.js:5290",
       "primitive": "registerFrame",
       "receiver": "peer._b6door",
       "wire": "__tunneled_direct__",
@@ -172,16 +182,6 @@
       "transportKind": "request",
       "boundary": "B5",
       "rowType": "dht:lookup_step"
-    },
-    {
-      "identity": "dht/AxonaPeer.js:999|lookup_walk|request|this._b5door",
-      "callSite": "dht/AxonaPeer.js:999",
-      "primitive": "registerFrame",
-      "receiver": "this._b5door",
-      "wire": "lookup_walk",
-      "transportKind": "request",
-      "boundary": "B5",
-      "rowType": "dht:lookup_walk"
     },
     {
       "identity": "pubsub/wireHandlers.js:54|pubsub:sub|routed|this._frameDoor",

@@ -988,6 +988,7 @@ export class AxonaPeer extends DHT {
         trace:       payload.trace,
         queried,
         totalTimeMs: payload.totalTimeMs,
+        noCache:     payload.noCache === true,
       });
     }, { registry: this._b5door });
 
@@ -1007,6 +1008,7 @@ export class AxonaPeer extends DHT {
         trace:       payload.trace,
         queried,
         totalTimeMs: payload.totalTimeMs,
+        noCache:     payload.noCache === true,
       };
       const walkId = payload.walkId;
       setTimeout(() => {
@@ -1551,9 +1553,21 @@ export class AxonaPeer extends DHT {
     this._gracePending.clear();
   }
 
+  // VW-2 (Orion 7908492c): a walk this node originated settles at stop/leave
+  // with reason 'stopped', so its 12 s deadline timer no longer outlives the
+  // node and no caller awaits a walk that can no longer return. Idempotent.
+  _settleWalksPending() {
+    if (!this._walksPending) return;
+    for (const finish of [...this._walksPending.values()]) {
+      try { finish(this._lookupResult(finish.ctx, false, { reason: 'stopped' })); } catch { /* best-effort */ }
+    }
+    this._walksPending.clear();
+  }
+
   async stop() {
     if (!this._started) return;
     this._clearGracePending();
+    this._settleWalksPending();
     if (this._engineListenerUnsub) {
       this._engineListenerUnsub();
       this._engineListenerUnsub = null;
@@ -2634,6 +2648,7 @@ export class AxonaPeer extends DHT {
     // transport (Aster review 1c11a94e finding 2). stop() repeats the call
     // harmlessly on an empty map.
     this._clearGracePending();
+    this._settleWalksPending();
 
     // (1) drain FIRST, while the transport is still fully alive: wait for
     // in-flight publishes/kills to CONFIRM (the pendingPub implicit-ack
@@ -3653,7 +3668,7 @@ export class AxonaPeer extends DHT {
   // lookup() reads/writes `this._engine.X` for those cross-peer
   // concerns.  Phase 5 splits the rest of the shared state.
 
-  async lookup(targetKey) {
+  async lookup(targetKey, opts = null) {
     const node   = this._node;
     const domain = this._domain;
     if (!node || !node.alive) return null;
@@ -3672,6 +3687,11 @@ export class AxonaPeer extends DHT {
       trace:       [],
       queried:     new Set([node.id]),
       totalTimeMs: 0,
+      // VW-3 (Orion 7908492c): a walk toward a TOPIC id must not hop-cache the
+      // target, which is no node: below cap that dials the topic id, at cap it
+      // counts a vitality-swap-skipped row naming it. Carried on the wire, so
+      // every hop on a kernel that reads it skips the cache too.
+      noCache:     opts?.noCache === true,
     };
     // 4.123.0: the acked walk by default; LOOKUP_WALK false = the recursive walk.
     const result = domain.LOOKUP_WALK ? await this._lookupWalkOrigin(ctx0) : await this._lookupStep(ctx0);
@@ -5113,6 +5133,10 @@ export class AxonaPeer extends DHT {
       // exclude it from the reachable-closest test in its root-claim fallback, the
       // same way findKClosest/routeMessage already skip it.
       bridgeId: () => null,   // EXPERIMENT 2026-09-19 (David): the bridge is an ordinary DHT node
+      // VW-1 (Orion 7908492c): the transport's real bridge id, read only by the
+      // closer-born paths (CB-1 under cutover, the 3d hint refresh), which never
+      // nominate the bridge. bridgeId above stays null for every other path.
+      bridgeNodeId: () => { try { const b = node.transport?.bridgeNodeIdBig; return (b != null) ? asId(b) : null; } catch { return null; } },
       // Per-channel write-flight-ack capability (4.62.2 R13/R15/R17), read by
       // pickCapableAdjacent for D0 delegation. The web transport sets this from a
       // verified CAP_ATTEST; transports without a mesh (sim/node-WS/bridge) expose
@@ -5243,7 +5267,7 @@ export class AxonaPeer extends DHT {
       // verify"); `path` lists the visited nodes.
       walk: async (targetIdBig) => {
         if (typeof targetIdBig !== 'bigint') return null;
-        try { return await peer.lookup(targetIdBig); } catch { return null; }
+        try { return await peer.lookup(targetIdBig, { noCache: true }); } catch { return null; }
       },
     };
 
@@ -7208,7 +7232,7 @@ export class AxonaPeer extends DHT {
     };
     if (!reselect) chargeStep();
 
-    if (!hopCached) {
+    if (!hopCached && !ctx.noCache) {
       hopCached = true;
       if (node.id !== targetKey && !node.synaptome.has(targetKey)) {
         const stratum = clz264(node.id ^ targetKey);
@@ -7306,13 +7330,15 @@ export class AxonaPeer extends DHT {
           path:        [...ctx.path, nextId],
           trace:       [...ctx.trace, { fromId: node.id, synapse: nextSyn }],
           queried:     new Set([...ctx.queried, nextId]),
-          totalTimeMs: ctx.totalTimeMs + stepLatency }
+          totalTimeMs: ctx.totalTimeMs + stepLatency,
+          ...(ctx.noCache ? { noCache: true } : {}) }
       : { sourceId, targetKey,
           hops:        ctx.hops,
           path:        ctx.path,
           trace:       ctx.trace,
           queried:     ctx.queried,
-          totalTimeMs: ctx.totalTimeMs };
+          totalTimeMs: ctx.totalTimeMs,
+          ...(ctx.noCache ? { noCache: true } : {}) };
     // B1: the step is charged when the send has issued, not before.
     const commit = () => { if (!reselect) return; chargeStep(); if (node.id !== sourceId) this._recordTransit(sourceId, nextId); };
 
@@ -7367,7 +7393,9 @@ export class AxonaPeer extends DHT {
     }, domain.LOOKUP_WALK_DEADLINE_MS ?? 12000);
     // NOT unref'd: a pending lookup must always settle. An unref'd deadline let
     // a process with nothing else running exit with the lookup still open.
-    this._walksPending.set(walkId, (result) => { clearTimeout(timer); this._walksPending.delete(walkId); settle(result); });
+    const finish = (result) => { clearTimeout(timer); this._walksPending.delete(walkId); settle(result); };
+    finish.ctx = ctx;
+    this._walksPending.set(walkId, finish);
     const first = await this._lookupStep(ctx, { walkId });
     if (first !== WALK_FORWARDED) this._walksPending.get(walkId)?.(first);
     return done;

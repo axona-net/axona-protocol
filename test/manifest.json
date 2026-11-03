@@ -1172,6 +1172,11 @@
       "note": "Closer-Born v0.6 Part 3d hint refresh (David 2026-11-03), option hintRefresh / env HINT_REFRESH, default off: a subscriber unattached past ROOT_CLAIM_MS asks the network (DHT walk where available) and takes the closest visited node when it beats the local guess and itself. Real AxonaPeers, bound-only chain: K1 on -> hint W; K2 off -> nearer node; K3 just unattached -> no refresh. Mutants: never refreshes, no claim window, lookup only -> each red."
     },
     {
+      "file": "fence_cbr_vw_findings.mjs",
+      "class": "default",
+      "note": "Orion 7908492c VW-1..3 on c8ebe2e verifyWalk and the 3d hint refresh. Real AxonaPeers, bound-only chain. VW-1: adapter bridgeNodeId reads the transport bridge id; A1 hint refresh and A2 verify under cutover never nominate the bridge. VW-2: B1 a walk with a lost lookup_done settles 'stopped' at peer.stop(); B2 a verify whose inflight entry was cleared nominates nobody (B3 control nominates). VW-3: C1 dht.walk (noCache, carried on the wire) never dials the topic id (C2 control: plain lookup does). Mutants: bridgeNodeId null, stop without settle, no inflight guard, hopCache ignores noCache, noCache not read from the frame -> each red."
+    },
+    {
       "file": "fence_cbr_verify_walk.mjs",
       "class": "default",
       "note": "Closer-Born v0.6 farther-reaching verify (David 2026-11-03), option verifyWalk / env VERIFY_WALK, default off: the root self-verify also runs the DHT walk (dht.walk = peer.lookup) and nominates the closest node either it or findKClosest visited. Real AxonaPeers on a bound-only chain: V1 on nominates W past two channel-hops; V2 off nominates H2; V3 with cutover + returnRoute, W ends the one root with L's bodies, no stubbed lookup. Mutants: verify ignores the walk, adapter has no walk -> V1/V3 red."

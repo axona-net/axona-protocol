@@ -303,11 +303,12 @@ export const rootElectionMethods = {
                 const r = await (typeof this.dht.walk === 'function' ? this.dht.walk(topicBig) : this.dht.lookup(topicBig));
                 const path = (r && Array.isArray(r.path)) ? r.path : [];
                 let cur = null; try { cur = id != null ? idBig(id) : null; } catch { cur = null; }
+                const bridge = this._closerBornBridge();   // VW-1: never the bridge
                 let best = null, bd = this.nodeId ^ topicBig;
                 if (cur != null && cur !== this.nodeId && (cur ^ topicBig) < bd) { best = cur; bd = cur ^ topicBig; }
                 for (const p of path) {
                   let b; try { b = idBig(p); } catch { continue; }
-                  if (b === this.nodeId) continue;
+                  if (b === this.nodeId || (bridge != null && b === bridge)) continue;
                   const d = b ^ topicBig;
                   if (d < bd) { bd = d; best = b; }
                 }
@@ -374,6 +375,18 @@ export const rootElectionMethods = {
     } catch { /* greedy fallback; background heal still applies */ }
   },
 
+  // The bridge's node id for the closer-born paths, which never nominate it
+  // (CB-1; the 3d hint refresh). The adapter's bridgeNodeId when it has one,
+  // else bridgeId; null when neither knows.
+  _closerBornBridge() {
+    let b = null;
+    try {
+      b = (typeof this.dht.bridgeNodeId === 'function') ? this.dht.bridgeNodeId()
+        : (typeof this.dht.bridgeId === 'function') ? this.dht.bridgeId() : null;
+    } catch { b = null; }
+    try { return (b != null) ? idBig(b) : null; } catch { return null; }
+  },
+
   // Root self-verification (see the ROOT_VERIFY_* constants). Launch up to
   // BATCH iterative lookups per tick, NON-BLOCKING, for roots due a check. A
   // strictly-closer live node ⇒ this claim is spurious (or was overtaken):
@@ -407,6 +420,9 @@ export const rootElectionMethods = {
             })
           : this.dht.lookup(t)))
         .then((r) => {
+          // VW-2 (Orion 7908492c): a verify that settles after peer.stop() or
+          // leave() (both clear _verifyInflight) acts on nothing.
+          if (!this._verifyInflight.has(t)) return;
           this._verifyInflight.delete(t);
           // THE TERMINUS IS THE CLOSEST NODE THE WALK VISITED, NOT ITS LAST HOP
           // (dual-root packet (b), axona-docs 14a6bd8). The walk is greedy with no
@@ -419,7 +435,9 @@ export const rootElectionMethods = {
           const path = (r && Array.isArray(r.path)) ? r.path : [];
           // CB-1 (Orion 34db5e6d, packet 3b): under cutover the verify never
           // nominates the bridge, which holds no root and no backup.
-          const bridge = this._cutover && typeof this.dht.bridgeId === 'function' ? this.dht.bridgeId() : null;
+          // VW-1 (Orion 7908492c): read the transport's real bridge id; bridgeId()
+          // is null on a real AxonaPeer (David's 2026-09-19 experiment).
+          const bridge = this._cutover ? this._closerBornBridge() : null;
           let cBig = null, cD = null;
           for (const id of path) {
             let b; try { b = idBig(id); } catch { continue; }
