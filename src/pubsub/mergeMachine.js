@@ -552,7 +552,8 @@ export const mergeMachineMethods = {
       // THE BIND. Timing must equal what was offered, as numbers.
       if (!sameTiming(payload.timing, m.timing)) {
         this._log('warn', 'merge-refused-timing', { topic: idHex(topicBig).slice(0, 12), corr: corr.slice(0, 8), offered: m.timing, echoed: payload.timing ?? null });
-        role.sync.openMerges.delete(corr);
+        this._mergeCloseCorr(role, corr);
+        if (this._cutover && role.merge?.candidate?.id === m.winner) role.merge.candidate = null;   // P7-1: the same stuck candidate
         return;
       }
       if (!role.isRoot || role.merge?.gate || role.merge?.completing) { this._log('warn', 'merge-stale', { topic: idHex(topicBig).slice(0, 12), corr: corr.slice(0, 8), why: role.isRoot ? 'busy' : 'not-root' }); return; }
@@ -562,7 +563,10 @@ export const mergeMachineMethods = {
       // its stage is abandoned, and this node keeps the root.
       if (this._cutover && payload.staged === true && payload.handoff !== 1) {
         this._log('warn', 'merge-stale', { topic: idHex(topicBig).slice(0, 12), corr: corr.slice(0, 8), why: 'staged-without-handoff' });
-        role.sync.openMerges.delete(corr);
+        // P7-1 (Orion 7af4822f): close the round AND clear the candidate, or
+        // the sweep never sees this corr and no later verify offers again.
+        this._mergeCloseCorr(role, corr);
+        if (role.merge?.candidate?.id === m.winner) role.merge.candidate = null;
         return;
       }
       m.winnerEpoch = winnerEpoch;

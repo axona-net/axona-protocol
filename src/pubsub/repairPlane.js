@@ -1141,7 +1141,8 @@ export const repairPlaneMethods = {
     // so it cannot hold a cohort slot that never credits. Discovery keeps its
     // existing semantics.
     const refused = role.inheritRefused;
-    const fresh = (h) => !(refused && refused.has(h) && (this._now() - refused.get(h)) < RENEW_MS);
+    if (refused) for (const [h, at] of [...refused]) if (this._now() - at >= RENEW_MS) refused.delete(h);   // RI-3 (Orion 7af4822f): bounded under churn
+    const fresh = (h) => !(refused && refused.has(h));
     for (const h of (role.subscribers?.keys?.() ?? [])) if (fresh(lc(h))) add(h, 'seated');
     const seen = role.verifySeen;
     if (seen && (this._now() - seen.at) <= 2 * ROOT_VERIFY_MS) for (const h of seen.ids) if (fresh(h)) add(h, 'walked');

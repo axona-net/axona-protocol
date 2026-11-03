@@ -339,7 +339,6 @@ export const wireHandlersMethods = {
       if (this.mySubscriptions.has(topicBig)) this._replayLocal(role, since, !!payload.latest);
       return 'consumed';
     }
-    this._noteSuccessorSub(role, subHex, payload, seat);   // 6b: a successor's hw and failure domain (successorGate only)
     // Durability (§6 stamped-replay-up): if this subscriber holds stamped
     // history I lack, ask it to replay its cache UP to me. Two detectable shapes:
     //  · NEWER (hw above mine) — I am a fresh root after the old one died, or a
@@ -361,6 +360,10 @@ export const wireHandlersMethods = {
     // that matches an acked pull on all five fields completes; everything else
     // is an ordinary renewal here.
     if (payload.merge && typeof payload.merge === 'object') this._mergeCompleteOnSub(role, subHex, payload);
+    // 6b: a successor's hw and failure domain (successorGate only). After the
+    // completion above, so the loser's completing SUB, which promotes this
+    // stager, also records the loser's host (SG-1, Orion 7af4822f).
+    this._noteSuccessorSub(role, subHex, payload, seat);
     // 3B-4 / 3B-4a (Orion 620dbf95): a role created only to stage seats no one,
     // whatever the SUB's shape. A completed round has already promoted it.
     if (role.staging?.created && !role.isRoot) return 'consumed';
