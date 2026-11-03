@@ -117,6 +117,10 @@ export const successorGateMethods = {
         if (!role.isRoot || (role.epoch | 0) !== (m.loserEpoch | 0) || m.state !== 'bound' || role.merge?.gate?.corr !== corr) {
           m.deferred = null;
           this._log('warn', 'merge-step5-stale', { topic: idHex(t).slice(0, 12), corr: corr.slice(0, 8), isRoot: !!role.isRoot });
+          // 6BG-3 (Orion a7e17f28): if this round's gate is still open, abort it
+          // (unpin, close the corr, clear the candidate and the gate) so the next
+          // round is not refused 'busy' until the sweep times the gate out.
+          if (role.merge?.gate?.corr === corr) { this._mergeAbort(role, 'step5-stale'); continue; }
           this._mergeUnpinDeferred(role, m);
           this._mergeCloseCorr(role, corr);
           continue;

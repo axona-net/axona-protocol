@@ -11,13 +11,14 @@
 //     F2 pinned during deferral; F3 unpinned after the abort.
 //     F4 L's epoch moves while deferred: a holder renews, step 5 does NOT
 //        run ('merge-step5-stale'); L stays root, W is not root.
+//   6BG-3 (Orion a7e17f28) F5 the stale round's gate and candidate clear at once.
 // Run: node test/fence_cbr_6bg_findings.mjs
 // =====================================================================
 import { Fabric, freshId, realTopic, author, idHex } from './lib/mergeFixture.mjs';
 import { buildEnvelope } from '../src/pubsub/envelope.js';
 import { ROOT_VERIFY_FIRST_MS, MERGE_TIMEOUT_MS } from '../src/pubsub/constants.js';
 
-const EXPECT = 4;
+const EXPECT = 5;
 let passed = 0, failed = 0;
 const check = (label, ok, extra = '') => { console.log(`  ${ok ? '✓' : '✗'} ${label}${ok ? '' : ' ' + extra}`); ok ? passed++ : failed++; };
 process.on('exit', (code) => { if (code === 0 && passed + failed < EXPECT) { console.log(`  ✗ exited after ${passed + failed} of ${EXPECT} checks`); process.exitCode = 1; } });
@@ -75,6 +76,7 @@ const renew = async (S, hw) => { await S.L.handlers.get('pubsub:sub')({ topicId:
   await S.trigger();
   S.lRole.epoch = (S.lRole.epoch | 0) + 1;   // the loser re-incarnated while the old round waited
   S.fab.clock += 1000; await renew(S, S.L.am._highWater(S.lRole)); await S.L.am.refreshTick(); await settleMore(S.fab);
-  check('F4 6BG-2b a stale deferral does nothing: no step 5, L stays root, W not root', S.lRole.isRoot && !S.wr()?.isRoot && S.ev(S.L).includes('merge-step5-stale') && !S.ev(S.L).includes('merge-step5'), JSON.stringify({ l: S.lRole.isRoot, w: !!S.wr()?.isRoot, ev: S.ev(S.L).filter((x) => /step5/.test(x)) })); }
+  check('F4 6BG-2b a stale deferral does nothing: no step 5, L stays root, W not root', S.lRole.isRoot && !S.wr()?.isRoot && S.ev(S.L).includes('merge-step5-stale') && !S.ev(S.L).includes('merge-step5'), JSON.stringify({ l: S.lRole.isRoot, w: !!S.wr()?.isRoot, ev: S.ev(S.L).filter((x) => /step5/.test(x)) }));
+  check('F5 6BG-3 the stale round\'s gate and candidate are cleared at once, not left for the sweep', !S.lRole.merge?.gate && !S.lRole.merge?.candidate, JSON.stringify({ gate: !!S.lRole.merge?.gate, candidate: !!S.lRole.merge?.candidate })); }
 console.log(`\nfence_cbr_6bg_findings: ${passed} passed, ${failed} failed`);
 process.exit(failed ? 1 : 0);
