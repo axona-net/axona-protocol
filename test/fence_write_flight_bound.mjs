@@ -146,5 +146,35 @@ const promotionsOf = (sends, id, from = 0) => sends.slice(from)
     `promo ${promo.length}`);
 }
 
+// ── B5 (Orion WF-1). A HELD node whose closer neighbours are all excluded ──
+// promotes to SELF; its own ingest re-forwards through the hold, opening a new
+// flight. That flight must inherit the chain, or the cap never bites.
+const tick = () => new Promise((r) => setImmediate(r));
+for (const [label, mkWrite, type] of [
+  ['fresh-ts PUB', (c) => pub('m-held-fresh', c.t), T.PUB],
+  ['missing-ts PUB', () => pub('m-held-nots'), T.PUB],
+  ['KILL', () => ({ topicId: idHex(TOPIC), kill: { msgId: 'k-held' } }), T.KILL],
+]) {
+  const { am, clock, sends, logs } = mk([N[0], N[1]]);
+  am._stepDownHold.set(TOPIC, { to: hx(N[0]), at: clock.t, lastLog: 0 });
+  am._forwardToRoot(TOPIC, type, mkWrite(clock), hx(N[0]));
+  const start = sends.length;
+  for (let i = 0; i < 12; i++) { evictOnce(am, clock); await tick(); await tick(); }
+  const resent = sends.slice(start).filter((s) => s.type === type).length;
+  ok(`B5 ${label}: a held node's chain stays bounded (≤ FLIGHT_MAX_PROMOTIONS re-sends)`, resent <= FLIGHT_MAX_PROMOTIONS,
+    `re-sends ${resent}: ${sends.slice(start).filter((s) => s.type === type).map((s) => String(s.payload.via?.[0]).slice(-4)).join(',')}`);
+  ok(`B5 ${label}: the chain ends and no flight is left open`,
+    am._writeFlights.size === 0 && logs.some((l) => l.evt === 'pubsub:write-flight-ended'), `flights ${am._writeFlights.size}`);
+}
+
+// ── B6. the chain ledger is bounded by size and by age ──────────────────────
+{
+  const { am, clock } = mk();
+  for (let i = 0; i < 1100; i++) am._flightChainNote(`k${i}`, { promotions: 1, tried: [] });
+  ok('B6a the ledger keeps at most 1024 chains, oldest out', am._flightChains.size === 1024 && !am._flightChains.has('k0') && am._flightChains.has('k1099'));
+  clock.t += 3_600_000;
+  ok('B6b an expired chain is not inherited', am._flightChainGet('k1099') === null);
+}
+
 console.log(fail ? `\n${fail} FAILED of ${n + fail}` : `\nall ${n} passed`);
 process.exit(fail ? 1 : 0);

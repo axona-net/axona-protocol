@@ -59,6 +59,14 @@ export const ROOT_TOMBSTONE_TTL_MS = Math.max(600_000, BEACON_TTL_MS * 12);
 // per topic let the second eviction re-admit the first root (2026-11-04,
 // axona-win svc-15, Orion c2735cc0).
 export const FLIGHT_MAX_PROMOTIONS = 4;
+// The chain ledger (Orion WF-1): a promotion records the write's chain by its
+// correlation key, and every later _flightOpen for the SAME write inherits it,
+// whichever path re-forwards it — a held node's own ingest re-forwards through
+// _holdIntercept, a reroute, a merge gate. Without it, promotion to SELF on a
+// held node opened a fresh flight at promotions 0 and the cap never bit.
+// Bounded by size (oldest out) and by age.
+const FLIGHT_CHAIN_MAX = 1024;
+const FLIGHT_CHAIN_TTL_MS = ROOT_TOMBSTONE_TTL_MS;
 
 const corrKey = (topicHex, msgId, op) => `${lc(topicHex)}|${msgId}|${op}`;
 const flightKey = (topicBig, rootHex, epoch) => `${topicBig.toString(16)}|${lc(rootHex)}|${epoch}`;
@@ -122,10 +130,11 @@ export const writeFlightMethods = {
       entry = { type, payload, msgId, op, attemptId: (attemptId ? lc(attemptId) : rand16hex()), promotions: 0, tried: [] };
       f.entries.set(ck, entry);
     }
-    if (chain) {
-      const p = Number.isInteger(chain.promotions) ? chain.promotions : 0;
+    for (const c of [chain, this._flightChainGet(ck)]) {
+      if (!c) continue;
+      const p = Number.isInteger(c.promotions) ? c.promotions : 0;
       if (p > entry.promotions) entry.promotions = p;
-      for (const r of (chain.tried || [])) { const h = lc(r); if (!entry.tried.includes(h)) entry.tried.push(h); }
+      for (const r of (c.tried || [])) { const h = lc(r); if (!entry.tried.includes(h)) entry.tried.push(h); }
     }
     return { ackTo: f.ackTo, flightNonce: f.flightNonce, attemptId: entry.attemptId };
   },
@@ -346,7 +355,9 @@ export const writeFlightMethods = {
     }
     if (best === this.nodeId) {
       // Closest live holder is US — ingest through the normal terminal path.
-      for (const e of f.entries.values()) {
+      // The ledger carries the chain into any flight that ingest re-opens.
+      for (const [ck, e] of f.entries) {
+        this._flightChainNote(ck, { promotions: e.promotions + 1, tried: [...e.tried, f.rootHex] });
         const handler = e.type === T.KILL ? this._onKill : this._onPub;
         Promise.resolve(handler.call(this, e.payload, { fromId: idHex(this.nodeId), isTerminal: true })).catch(() => {});
       }
@@ -361,15 +372,31 @@ export const writeFlightMethods = {
     // reads it); the new flight generation gets its own flightNonce. A second
     // flapper thus gets the same receipt-bound treatment, bounded by its own
     // rounds cap.
-    for (const e of f.entries.values()) {
-      const m = this._flightOpen(f.topicBig, bestHex, e.type, e.payload, e.attemptId, null,
-        { promotions: e.promotions + 1, tried: [...e.tried, f.rootHex] });
+    for (const [ck, e] of f.entries) {
+      const chain = { promotions: e.promotions + 1, tried: [...e.tried, f.rootHex] };
+      this._flightChainNote(ck, chain);
+      const m = this._flightOpen(f.topicBig, bestHex, e.type, e.payload, e.attemptId, null, chain);
       if (!m) { this._send(e.type, { ...e.payload, via: [bestHex] }); continue; }  // malformed — forward unstamped, unsigned recovery
       this._send(e.type, { ...e.payload, via: [bestHex], ackTo: m.ackTo, flightNonce: m.flightNonce, attemptId: m.attemptId });
     }
     this._log('info', 'write-flight-promoted', {
       topic: idHex(f.topicBig).slice(0, 12), to: bestHex.slice(0, 12),
     });
+  },
+
+  // ── the chain ledger (4.129.1, Orion WF-1) ───────────────────────────
+  _flightChainNote(ck, chain) {
+    if (!this._flightChains) this._flightChains = new Map();
+    this._flightChains.delete(ck);                       // re-insert: newest last
+    this._flightChains.set(ck, { promotions: chain.promotions, tried: [...chain.tried], exp: this._now() + FLIGHT_CHAIN_TTL_MS });
+    while (this._flightChains.size > FLIGHT_CHAIN_MAX) this._flightChains.delete(this._flightChains.keys().next().value);
+  },
+
+  _flightChainGet(ck) {
+    const c = this._flightChains?.get(ck);
+    if (!c) return null;
+    if (this._now() >= c.exp) { this._flightChains.delete(ck); return null; }
+    return c;
   },
 
   // Tombstone check for the closer-root gate: a beacon naming a tombstoned
