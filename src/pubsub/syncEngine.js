@@ -321,6 +321,17 @@ export const syncEngineMethods = {
           this._grantsRefused++;
           this._log('info', 'grant-refused', { topic, why: 'left-record', gen: gen.root.slice(0, 10), epoch: gen.epoch });
           return;
+        } else if (!(gen.epoch >= 1)) {
+          // 4.130.0 (Orion SCW-1, cca38450): every root incarnation mints
+          // epoch >= 1 (rootClaim._set / become); a grant naming epoch 0 or no
+          // epoch is malformed. Admitted, it would turn off claimWins' epoch
+          // order on this backup: a closer epoch-0 grant usurps a higher-epoch
+          // principal and locks it out for the lease, and three roots can
+          // cycle. Checked here, not in _genValid, so the current principal's
+          // malformed grant is not read as a legacy renewal either.
+          this._grantsRefused++;
+          this._log('info', 'grant-refused', { topic, why: 'invalid-epoch', gen: gen.root.slice(0, 10), epoch: gen.epoch });
+          return;
         } else if (!Number.isFinite(payload.issuedAt)) {
           // A gen-bearing grant with NO issue stamp cannot be aged and is not a
           // legacy renewal either (Aster c5adedec TL-B03): refused, created or renewed.

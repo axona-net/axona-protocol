@@ -219,6 +219,10 @@ export const mergeMachineMethods = {
             if (role.merge?.candidate?.id === m.winner) role.merge.candidate = null;
           } else if (m.reached === false || !role.isRoot || role.merge?.gate) {
             this._log('warn', 'merge-offer-timeout', { topic: idHex(role.topicId).slice(0, 12), corr: corr.slice(0, 8), winner: m.winner.slice(0, 10), reached: m.reached ?? null });
+            // 4.130.0 (Orion SCW-2, cca38450): an offer whose route FAILED is
+            // retried on the next trigger (above), so it must not leave the
+            // candidate behind: _mergeCandidate refuses the same winner again.
+            if (m.reached === false && !role.merge?.gate && role.merge?.candidate?.id === m.winner) role.merge.candidate = null;
           } else {
             this._log('warn', 'merge-legacy-fallback', { topic: idHex(role.topicId).slice(0, 12), corr: corr.slice(0, 8), winner: m.winner.slice(0, 10), cache: role.cache.length });
             role.merge.releaseToken = randomNonce() + randomNonce();
@@ -624,6 +628,9 @@ export const mergeMachineMethods = {
         this._log('warn', 'refused-export-bound', { topic: idHex(topicBig).slice(0, 12), corr: corr.slice(0, 8), bytes, bound: EXPORT_BYTES_MAX });
         this._mergeCloseCorr(role, corr);
         this._mergeGateClear(role, 'export-bound');
+        // 4.130.0 (Orion SCW-3): free the candidate so a later trigger retries
+        // once TTL expiry has shrunk the cache under the bound.
+        if (role.merge?.candidate) role.merge.candidate = null;
         this._emitReplayUp(idBig(requester), { topicId: payload.topicId, corr, loserEpoch: role.epoch | 0, refused: 'export-bound', msgs: [], dels: [] });
         return;
       }
