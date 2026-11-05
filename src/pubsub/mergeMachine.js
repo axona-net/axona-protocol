@@ -172,7 +172,12 @@ export const mergeMachineMethods = {
     // would otherwise refuse its own re-nomination (a claim never wins over
     // itself) and the next verify would offer nothing, leaving two roots for
     // good. Clearing it lets the next trigger issue a new OFFER with a new corr.
-    if (this._cutover && role.merge.candidate) role.merge.candidate = null;
+    // 4.130.0: on EVERY abort, not only under cutover. _mergeCandidate is
+    // _mergeOffer's only caller, and it refuses the same winner again (a claim
+    // never wins over itself), so with the candidate kept an aborted round was
+    // never retried and two roots stood for good (2026-11-04: Orion's seat and
+    // win svc-04 on 89c699443362 / 89c37667cd05, Orion 1f81ed10).
+    if (role.merge.candidate) role.merge.candidate = null;
     return this._mergeGateClear(role, why, extra);
   },
   /** 6BG-2: release the pins a deferred step 5 took, unless completion now owns them. */
@@ -342,17 +347,13 @@ export const mergeMachineMethods = {
   _mergeWinnerReminted(f, gotEpoch) {
     const role = this.axonRoles.get(f.topicBig);
     if (!role?.merge?.gate || role.merge.gate.corr !== f.merge.corr) return;
-    if (this._cutover) {
-      // CUT-1 (Orion c0a842d2): under cutover the abort clears the candidate,
-      // so recording it first lost the new epoch and nothing was offered
-      // again. Abort, then nominate the re-minted winner afresh: a new OFFER
-      // under a new corr carries the new epoch.
-      this._mergeAbort(role, 'winner-reminted', { got: gotEpoch | 0, want: f.epoch });
-      this._mergeCandidate(f.topicBig, f.rootHex, gotEpoch | 0, 'reminted');
-      return;
-    }
-    role.merge.candidate = { id: f.rootHex, epoch: gotEpoch | 0, source: 'reminted', at: this._now() };   // the next OFFER carries the new epoch
+    // CUT-1 (Orion c0a842d2): the abort clears the candidate, so recording it
+    // first lost the new epoch and nothing was offered again. Abort, then
+    // nominate the re-minted winner afresh: a new OFFER under a new corr
+    // carries the new epoch. Since 4.130.0 every abort clears the candidate,
+    // so this order holds with cutover off as well as on.
     this._mergeAbort(role, 'winner-reminted', { got: gotEpoch | 0, want: f.epoch });
+    this._mergeCandidate(f.topicBig, f.rootHex, gotEpoch | 0, 'reminted');
   },
   /** A merge flight passed INGEST_ACK_MS with no ack from W: the round ends. */
   _mergeFlightSilent(f) {

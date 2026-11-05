@@ -15,7 +15,7 @@
 // and nothing was offered.
 //   C3 (on): after W re-mints mid-round, L offers again at once under a new
 //      corr carrying W's new epoch.
-//   C4 (off, control): the legacy path keeps the record and waits.
+//   C4 (off): since 4.130.0 the same as C3 — every abort clears the candidate.
 // Mutants (2026-11-03): drop the transient clause (C1 red); restore the
 // record-then-abort order under cutover (C3 red).
 // Run: node test/fence_cbr_cutover_retries.mjs
@@ -73,8 +73,11 @@ check('C3 on: after W re-mints mid-round L offers again at once, new corr, W\'s 
   r1.corr0 && r1.offers === 2 && r1.last?.winnerEpoch === r1.got && r1.last?.corr !== r1.corr0.slice(0, 8),
   JSON.stringify({ corr0: r1.corr0?.slice(0, 8), offers: r1.offers, last: r1.last, got: r1.got }));
 const r0 = await reminted(false);
-check('C4 off (control): the legacy path keeps the re-minted record and offers nothing yet',
-  r0.corr0 && r0.offers === 1 && r0.cand?.epoch === r0.got,
-  JSON.stringify({ offers: r0.offers, cand: r0.cand }));
+// 4.130.0 (fence_standby_claimwins B): every abort clears the candidate, so the
+// re-mint path aborts and nominates afresh with cutover off too. C4 was the
+// legacy control (record kept, nothing offered); it now matches C3.
+check('C4 off (4.130.0): after W re-mints mid-round L offers again at once, new corr, W\'s new epoch',
+  r0.corr0 && r0.offers === 2 && r0.last?.winnerEpoch === r0.got && r0.last?.corr !== r0.corr0.slice(0, 8),
+  JSON.stringify({ corr0: r0.corr0?.slice(0, 8), offers: r0.offers, last: r0.last, got: r0.got }));
 console.log(`\nfence_cbr_cutover_retries: ${passed} passed, ${failed} failed`);
 process.exit(failed ? 1 : 0);

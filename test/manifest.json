@@ -1672,6 +1672,11 @@
       "note": "Topic Lifetime 4.1/4.2/4.4: a standby appointment is a lease on the root's REPLICATE (L = DROP_MS); the backup's own SUB never moves lastReplicaAt; an empty backup lapses with no election and no further SUB; a lapse ends the appointment and nothing else (a body or tombstone keeps the 4.94.0 election path, a reader keeps its seat); the grant rule (apparent age ≤ D + S = 75 s; Aster's 181 s traces perfect and skewed); LEFT record refuses only the generation it names; a wall-clock jump beyond S holds grants for one D; a generation-less grant renews only from the current principal and never creates a role; armed REPLICATE carries gen + issuedAt, unarmed carries neither and never lapses. 38 checks."
     },
     {
+      "file": "fence_standby_claimwins.mjs",
+      "class": "default",
+      "note": "4.130.0 (David 2026-11-05 \"go ahead and build the kernel fix\"; Orion 1f81ed10, verified axona.bot e3636c1e): two live roots on one topic no longer churn their backups, and an aborted merge round is retried without cutover. A1 inside a live standby lease a farther root's grant is refused (grant-refused why outranked); A2 a 20-grant alternating two-root storm (the 2026-11-04 svc-09 7,356-flip shape) leaves the principal fixed, zero re-principaled; A3 a higher epoch and A4 a closer root still re-principal; A5 after STANDBY_LEASE_MS a surviving farther root appoints; B cutover OFF: _mergeAbort clears role.merge.candidate so the same winner is offered again. The 4.129.1 files fail 5 of 13 (20 flips; offers stays 1). Mutants: no claimWins guard, guard ignores the lease, candidate cleared only under cutover -> each red."
+    },
+    {
       "file": "fence_child_step_down.mjs",
       "class": "default",
       "note": "Topic Lifetime 4.7 (David: '2 subscribers and 90 seconds'): a child below 2 readers for 90 s after a 90 s stay REHOMEs its readers to its upstream, tells its parent (UNSUB steppedDown → 300 s cooldown), writes LEFT and retires; hysteresis (demand at the floor clears, a new child is not judged before its stay); a backup and an unreachable upstream are never stepped down; REHOME keeps the app's subscription and re-pins to the named upstream, ignored from a non-upstream; the parent does not re-promote a cooled node; unarmed = nothing. 24 checks."

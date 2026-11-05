@@ -192,8 +192,14 @@ console.log('\n[B10] grants move forward only (Aster 0cfdd82d): a still-fresh ol
   check('…so the old (R1, 1) notice does not retire it', ctx.held(TP(18)) && ctx.am._backupTopics.has(TP(18)));
   await replicate(ctx, TP(18), R2, { gen: gen(R2, 1), issuedAt: ctx.clock.t - 60_000 });
   check('a DIFFERENT root\'s grant issued a minute before the current appointment (beyond S) is refused (obsolete-grant)', role.backupOf === lc(idHex(R1)) && ctx.log('grant-refused').some((r) => r.ctx.why === 'obsolete-grant'));
+  // 4.130.0 (fence_standby_claimwins): inside a live lease a different root
+  // re-principals only if it OUTRANKS the current principal. (R2, 1) does not
+  // outrank (R1, 2); (R2, 3) does. Before 4.130.0 any later grant re-principaled,
+  // which let two live roots flip every backup on each tick.
   await replicate(ctx, TP(18), R2, { gen: gen(R2, 1), issuedAt: ctx.clock.t + 1000 });
-  check('a different root\'s grant issued after it re-principals, as today', role.backupOf === lc(idHex(R2)) && role.standbyGen.root === lc(idHex(R2)));
+  check('a different, lower-epoch root\'s later grant is refused inside the lease (outranked)', role.backupOf === lc(idHex(R1)) && ctx.log('grant-refused').some((r) => r.ctx.why === 'outranked'));
+  await replicate(ctx, TP(18), R2, { gen: gen(R2, 3), issuedAt: ctx.clock.t + 2000 });
+  check('a different root that outranks (higher epoch) re-principals', role.backupOf === lc(idHex(R2)) && role.standbyGen.root === lc(idHex(R2)) && role.standbyGen.epoch === 3);
 }
 
 console.log('\n[U1] unarmed: a REPLICATE carries no gen or issuedAt, any grant appoints, and no lease ever lapses (4.116.0)');

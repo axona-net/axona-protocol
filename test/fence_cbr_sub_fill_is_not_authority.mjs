@@ -29,8 +29,10 @@
 //   F1 (cutover on): exactly one root among C and W; W holds C's three; C is
 //      W's child; the handover completed by the correlated machine (a
 //      merge-acked row at W), never by the legacy fallback.
-//   F2 (control, cutover off): the same scene ends by the legacy fallback
-//      (C logs merge-legacy-fallback) or with two roots: today's path.
+//   F2 (cutover off, 4.130.0): the aborted round is offered again, so the
+//      same scene ends with one root by the correlated machine. Through
+//      4.129.1 _mergeAbort kept the candidate without cutover and the scene
+//      stopped at merge-abort with two roots.
 //   F3 recorded, not asserted: A stays a separate root (C2: no route either
 //      way between A and W).
 // Run: node test/fence_cbr_sub_fill_is_not_authority.mjs
@@ -72,7 +74,7 @@ check('F1 … by the correlated machine (merge-acked at W), never the legacy fal
 const off = await run(false);
 console.log('  probe (off): W', off.ev(off.W).filter((e) => /merge/.test(e)).join(','), '| C', off.ev(off.C).filter((e) => /merge/.test(e)).slice(-5).join(','));
 const offRoots = [off.cRole.isRoot, off.wRole.isRoot].filter(Boolean).length;
-check('F2 control (off): today\'s path — two roots, or the handover by the legacy fallback', offRoots === 2 || off.ev(off.C).includes('merge-legacy-fallback'), `roots=${offRoots}`);
+check('F2 cutover off: the aborted round is retried — one root, by the correlated machine', offRoots === 1 && off.wRole.isRoot && off.ev(off.W).includes('merge-acked') && !off.ev(off.C).includes('merge-legacy-fallback'), `roots=${offRoots}`);
 
 console.log(`  F3 recorded: A is a separate root (C2, cut both ways): on ${on.aRole.isRoot}, off ${off.aRole.isRoot}`);
 console.log(`\nfence_cbr_sub_fill_is_not_authority: ${passed} passed, ${failed} failed`);
