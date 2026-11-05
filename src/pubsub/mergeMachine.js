@@ -418,7 +418,10 @@ export const mergeMachineMethods = {
       : this._route(idBig(c.id), T.MERGE_OFFER, offer);
     // Did the offer reach anyone? A failed verdict means W is unreachable, not
     // legacy: the sweep then drops the record instead of falling back.
-    Promise.resolve(sent).then((r) => { const v = dispatchVerdict(r, this.dht?.verdictsSupported); rec.reached = v === 'failed' ? false : true; });
+    // (Orion d9c11a54) 'violation' is no evidence of a reach (dispatch.js: silence
+    // is never evidence), so it counts as not reached; 'unsupported' keeps the
+    // legacy reading for adapters that report no verdicts at all.
+    Promise.resolve(sent).then((r) => { const v = dispatchVerdict(r, this.dht?.verdictsSupported); rec.reached = v === 'consumed' || v === 'unsupported'; });
     this._log('info', 'merge-offer', { topic: idHex(topicBig).slice(0, 12), corr: corr.slice(0, 8), winner: c.id.slice(0, 10), winnerEpoch: c.epoch | 0, loserEpoch: role.epoch | 0, count: role.cache.length });
     return true;
   },

@@ -25,6 +25,8 @@
 //   E   (Aster 80e77561) cutover OFF: an offer whose route is still UNRESOLVED
 //       at the timeout is not a reach: no legacy fallback, the root is kept,
 //       the candidate is cleared and the next nomination offers again
+//   F   (Orion d9c11a54) a route verdict of 'violation' (adapter claims
+//       verdicts, returns nothing) is recorded as NOT reached
 //
 // Run: node test/fence_standby_claimwins.mjs
 import { manager, seed, replicate, gen, idHex, lc, TP, NODE, REG, T0 } from './lib/lifetimeFixture.mjs';
@@ -212,6 +214,23 @@ console.log('\n[E] cutover OFF: an unresolved route at the timeout keeps the roo
   check('the candidate is cleared', role.merge.candidate == null);
   am._mergeCandidate(T, W, 5, 'beacon');
   check('the next nomination offers again', offers === 2, `offers ${offers}`);
+}
+
+console.log("\n[F] a 'violation' route verdict is not a reach");
+{
+  const ctx = manager();
+  const am = ctx.am;
+  const T = TP(12);
+  seed(ctx, T, { isRoot: true, cache: 1 });
+  const role = ctx.role(T);
+  const W = lc(idHex(REG | 0x0800n));
+  if (am.dht) am.dht.verdictsSupported = true;
+  am._route = () => Promise.resolve(undefined);                // claims verdicts, returns nothing
+  am._mergeCandidate(T, W, 5, 'beacon');
+  await new Promise((r) => setImmediate(r));
+  const rec = [...(role.sync.openMerges?.values() || [])].find((m) => m.winner === W);
+  check('an offer was opened through the real _mergeOffer', !!rec);
+  check("the 'violation' verdict is recorded as not reached", rec && rec.reached === false, rec && rec.reached);
 }
 
 console.log(failed ? `\n${failed} FAILED of ${passed + failed}` : `\nall ${passed} passed`);
