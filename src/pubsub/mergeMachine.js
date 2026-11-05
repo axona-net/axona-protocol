@@ -217,12 +217,16 @@ export const mergeMachineMethods = {
             // keeps its root; no demotion toward a node that never answered.
             this._log('warn', 'merge-offer-timeout', { topic: idHex(role.topicId).slice(0, 12), corr: corr.slice(0, 8), winner: m.winner.slice(0, 10), reached: m.reached ?? null, cutover: true });
             if (role.merge?.candidate?.id === m.winner) role.merge.candidate = null;
-          } else if (m.reached === false || !role.isRoot || role.merge?.gate) {
+          } else if (m.reached !== true || !role.isRoot || role.merge?.gate) {
             this._log('warn', 'merge-offer-timeout', { topic: idHex(role.topicId).slice(0, 12), corr: corr.slice(0, 8), winner: m.winner.slice(0, 10), reached: m.reached ?? null });
             // 4.130.0 (Orion SCW-2, cca38450): an offer whose route FAILED is
             // retried on the next trigger (above), so it must not leave the
             // candidate behind: _mergeCandidate refuses the same winner again.
-            if (m.reached === false && !role.merge?.gate && role.merge?.candidate?.id === m.winner) role.merge.candidate = null;
+            // (Aster 80e77561) A route still UNRESOLVED at the timeout is not a
+            // reach: a first-hop channel open can wait 15 s and a send 5 s,
+            // past this 10 s bound. Only a confirmed reach takes the legacy
+            // fallback; an unknown one keeps custody and retries like a failure.
+            if (m.reached !== true && !role.merge?.gate && role.merge?.candidate?.id === m.winner) role.merge.candidate = null;
           } else {
             this._log('warn', 'merge-legacy-fallback', { topic: idHex(role.topicId).slice(0, 12), corr: corr.slice(0, 8), winner: m.winner.slice(0, 10), cache: role.cache.length });
             role.merge.releaseToken = randomNonce() + randomNonce();

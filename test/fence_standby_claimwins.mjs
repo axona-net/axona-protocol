@@ -22,6 +22,9 @@
 //       refused and the backup settles on the epoch-2 root in one move
 //   D   (Orion SCW-2) cutover OFF: an offer whose route FAILED times out, the
 //       candidate is cleared, and the next nomination offers again
+//   E   (Aster 80e77561) cutover OFF: an offer whose route is still UNRESOLVED
+//       at the timeout is not a reach: no legacy fallback, the root is kept,
+//       the candidate is cleared and the next nomination offers again
 //
 // Run: node test/fence_standby_claimwins.mjs
 import { manager, seed, replicate, gen, idHex, lc, TP, NODE, REG, T0 } from './lib/lifetimeFixture.mjs';
@@ -182,6 +185,33 @@ console.log('\n[D] cutover OFF: a failed-route offer times out and is offered ag
   check('the failed-route timeout clears the candidate', role.merge.candidate == null);
   am._mergeCandidate(T, W, 5, 'beacon');
   check('the next nomination of the same winner offers again', offers === 2, `offers ${offers}`);
+}
+
+console.log('\n[E] cutover OFF: an unresolved route at the timeout keeps the root and retries');
+{
+  const ctx = manager();
+  const am = ctx.am;
+  const T = TP(11);
+  seed(ctx, T, { isRoot: true, cache: 1 });
+  const role = ctx.role(T);
+  const W = lc(idHex(REG | 0x0800n));
+  let offers = 0, demotes = 0;
+  const realDemote = am._rootClaim.demote.bind(am._rootClaim);
+  am._rootClaim.demote = (...a) => { demotes++; return realDemote(...a); };
+  am._mergeOffer = () => {
+    offers++;
+    role.sync.openMerges ??= new Map();
+    role.sync.openMerges.set('beef0000beef0000', { winner: W, state: 'offered', offeredAt: ctx.clock.t });   // reached never set
+  };
+  am._mergeCandidate(T, W, 5, 'beacon');
+  check('first nomination offers', offers === 1, `offers ${offers}`);
+  ctx.clock.t += MERGE_OFFER_TIMEOUT_MS + 1;
+  am._mergeSweep(ctx.clock.t);
+  check('no legacy fallback on an unresolved route', !ctx.log('merge-legacy-fallback').length && demotes === 0, `demotes ${demotes}`);
+  check('the node is still root', role.isRoot === true);
+  check('the candidate is cleared', role.merge.candidate == null);
+  am._mergeCandidate(T, W, 5, 'beacon');
+  check('the next nomination offers again', offers === 2, `offers ${offers}`);
 }
 
 console.log(failed ? `\n${failed} FAILED of ${passed + failed}` : `\nall ${passed} passed`);
