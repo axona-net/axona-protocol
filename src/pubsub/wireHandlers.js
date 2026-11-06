@@ -1286,6 +1286,10 @@ export const wireHandlersMethods = {
         if (!ok) { this._log('warn', 'tombstone-unverified-body', { msgId: String(m.msgId).slice(0, 12), kind: tv.kind }); continue; }
         tv = this._tombstoneVerdict(role, m.msgId, m.json, m.publishTs);
         if (tv?.kind === 'suppress') continue;
+        // Provenance (Orion e47eb97c): armed, a stamp-based supersede is taken
+        // only from an ACCEPTED current-generation DELIVER (as TL-B08 credits
+        // custody); a data-only frame from an unpinned sender cannot lift a kill.
+        if (tv?.kind === 'supersede' && decision && !deliverAccepted) { this._log('warn', 'tombstone-unaccepted-deliver', { msgId: String(m.msgId).slice(0, 12) }); continue; }
         if (tv?.kind === 'revoke') this._tombstoneCommit(role, m.msgId, tv);
       }
       // the CURRENT upstream SENT this body: it holds it (Topic Lifetime 4.7, TL-B02/B05). Armed only; the set is bound to the attachment above and pruned with the cache.

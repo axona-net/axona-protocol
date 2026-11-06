@@ -130,6 +130,7 @@ export const topicStoreMethods = {
     for (const [msgId, t] of role.tombstones) {
       if ((t?.exp ?? 0) <= now && !(pins && pins.has(msgId))) role.tombstones.delete(msgId);
     }
+    if (role.superseded) for (const [msgId, s] of role.superseded) if ((s?.exp ?? 0) <= now) role.superseded.delete(msgId);   // 4.131.0: swept with the tombstones (Orion e47eb97c)
   },
 
   // My cache high-water = the newest stamp I hold (or have emitted, as root).
@@ -180,9 +181,17 @@ export const topicStoreMethods = {
     let author = null, sentTs = null, sentSeq = null;
     try { const e = JSON.parse(json); author = e?.signerPubkey ?? null; sentTs = e?.ts; sentSeq = e?.seq; } catch { /* */ }
     if (!author || lc(author) !== lc(tomb.signer)) return { kind: 'revoke', tomb };
+    // The kill's own signed (ts, seq), where this node knows it: authorTs at the
+    // root that verified it, or a retained verified proof. A stamp is the
+    // sender's word (DELIVER, REPLAYUP carry an unsigned publishTs), so where
+    // the author's kill time is known a copy must ALSO be after it on the
+    // author's clock: a validly signed pre-kill body replayed with a forged
+    // stamp stays dead (Orion e47eb97c).
+    const aTs = Number.isFinite(tomb.authorTs) ? tomb.authorTs : (Number.isFinite(tomb.kill?.ts) ? tomb.kill.ts : null);
+    const aSeq = Number.isFinite(tomb.authorTs) ? tomb.authorSeq : tomb.kill?.seq;
     let after = false;
-    if (Number.isFinite(stampTs)) after = Number.isFinite(tomb.killTs) && stampTs > tomb.killTs;
-    else if (Number.isFinite(tomb.authorTs)) after = authorAfter(sentTs, sentSeq, tomb.authorTs, tomb.authorSeq);
+    if (Number.isFinite(stampTs)) after = Number.isFinite(tomb.killTs) && stampTs > tomb.killTs && (aTs === null || authorAfter(sentTs, sentSeq, aTs, aSeq));
+    else if (aTs !== null) after = authorAfter(sentTs, sentSeq, aTs, aSeq);
     return after ? { kind: 'supersede', tomb, stampTs, sentTs } : { kind: 'suppress', tomb };
   },
 
