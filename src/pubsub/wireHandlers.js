@@ -1032,7 +1032,7 @@ export const wireHandlersMethods = {
     this._noteMetricRole(role, env.topic);                               // bound above: stid === role.topicId
     if (m.publishTs > this._now() + FUTURE_TOLERANCE_MS) { this._log('warn', 'drop-future-replayup'); return 'rejected'; } // §5 bad-clock
     if (role.cacheIds.has(m.msgId)) return 'held';                       // already have it
-    if (this._tombstoned(role, m.msgId, m.json)) return 'held';          // killed → don't resurrect via replay-up
+    if (this._tombstoned(role, m.msgId, m.json, m.publishTs)) return 'held';          // killed → don't resurrect via replay-up
     if (!this._cachePush(role, { msgId: m.msgId, publishTs: m.publishTs, json: m.json, seq: m.seq }, cut)) return 'refused';
     // Phase 3 shadow: observe the VERIFIED body (env passed verifyEnvelope + the
     // topic-binding check above) if it survived the cache write. The observer
@@ -1267,7 +1267,7 @@ export const wireHandlersMethods = {
         this._applyKill(role, topicBig, mm, null, (deliverAccepted && decision) ? decision.g : null);
         continue;
       }
-      if (this._tombstoned(role, m.msgId, m.json)) continue;          // killed → suppress (don't cache/deliver/re-fan)
+      if (this._tombstoned(role, m.msgId, m.json, m.publishTs)) continue;          // killed → suppress (don't cache/deliver/re-fan)
       // the CURRENT upstream SENT this body: it holds it (Topic Lifetime 4.7, TL-B02/B05). Armed only; the set is bound to the attachment above and pruned with the cache.
       if (deliverAccepted && role.upstreamHeldFrom === lc(payload.from)) { (role.upstreamHeld ??= new Set()).add(m.msgId); }   // credited only by an ACCEPTED current-generation DELIVER (TL-B08)
       if (role && !role.cacheIds.has(m.msgId)) {       // relay: cache once + re-fan once
@@ -1440,6 +1440,7 @@ export const wireHandlersMethods = {
     }
     if (role && !existing) {
       const tomb = { exp: this._now() + TTL_MS, killTs, signer: proof ? proofSigner : (m.signer ?? null), seq };
+      if (Number.isFinite(m.authorTs)) tomb.authorTs = m.authorTs;   // 4.131.0: the verified kill's own signed ts (direct kill at the root only)
       if (proof) tomb.kill = proof;                    // retain only the bound, caller-verified proof
       // DELETION OWNERSHIP (Topic Lifetime 4.6; Aster b0748c4c X1): a tombstone
       // belongs to the generation that delivered it, so an obligation's end
@@ -1567,7 +1568,7 @@ export const wireHandlersMethods = {
     // Pass the COMPLETE signed kill so _applyKill can retain + transport the proof
     // (blocker b). The root re-stamps ts/seq for replay ordering; the signed kill
     // keeps the author's own ts/seq for verifyKill() at every downstream node.
-    if (this._applyKill(role, topicBig, { msgId: target, killTs: ts, signer: lc(kill.signerPubkey), seq, kill }, cut) === false) {
+    if (this._applyKill(role, topicBig, { msgId: target, killTs: ts, signer: lc(kill.signerPubkey), seq, kill, authorTs: kill.ts }, cut) === false) {
       role.seq = prevSeq; role.lastTs = prevTs; role.lastDemandAt = prevDemandAt;   // the stamp above did not commit
       this._cutDisposition(topicBig, T.KILL, payload);          // forwarded, not ingested: no ack from here
       return 'consumed';

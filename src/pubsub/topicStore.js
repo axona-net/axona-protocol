@@ -143,13 +143,34 @@ export const topicStoreMethods = {
   // enforced. A signer MISMATCH (or an unsigned/anonymous target a signed kill
   // can't own) means the kill was forged or unauthorized → REVOKE the tombstone
   // and accept the message. Returns true to drop the message.
-  _tombstoned(role, msgId, json) {
+  _tombstoned(role, msgId, json, stampTs = null) {
     if (!role) return false;
     const tomb = role.tombstones.get(msgId);
     if (!tomb) return false;
     if (tomb.signer) {
-      let author = null; try { author = JSON.parse(json)?.signerPubkey ?? null; } catch { /* */ }
-      if (author && lc(author) === lc(tomb.signer)) return true;      // authorized kill → stays dead
+      let author = null, sentTs = null;
+      try { const e = JSON.parse(json); author = e?.signerPubkey ?? null; sentTs = e?.ts; } catch { /* */ }
+      if (author && lc(author) === lc(tomb.signer)) {
+        // 4.131.0 (republish after kill): the msgId is content-derived and folds
+        // in neither ts nor seq, so the author sending the SAME message again
+        // after killing it produces the same msgId. A kill retracts the copy
+        // that existed when it was issued; a later publication of the same
+        // content is a new message. Each test compares two stamps from ONE clock:
+        //   a root-stamped copy (replay, fan-out): its publishTs against killTs,
+        //     both from the root's monotone stamp. A pre-kill copy is lower.
+        //   a fresh write at the root (no stamp yet): the envelope ts against the
+        //     kill's own signed ts, both from the author's clock.
+        // Anything else (no stamp, no author kill ts) stays dead, as before.
+        let after = false;
+        if (Number.isFinite(stampTs)) after = Number.isFinite(tomb.killTs) && stampTs > tomb.killTs;
+        else if (Number.isFinite(tomb.authorTs)) after = Number.isFinite(sentTs) && sentTs > tomb.authorTs;
+        if (after) {
+          role.tombstones.delete(msgId);
+          this._log?.('info', 'tombstone-superseded', { msgId: String(msgId).slice(0, 12), stampTs, sentTs, killTs: tomb.killTs, authorTs: tomb.authorTs ?? null });
+          return false;
+        }
+        return true;                                                   // authorized kill → stays dead
+      }
       role.tombstones.delete(msgId);                                   // unauthorized/forged → revoke
       return false;
     }
