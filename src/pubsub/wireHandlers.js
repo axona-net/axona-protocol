@@ -1276,7 +1276,7 @@ export const wireHandlersMethods = {
       // path, so a frame may only remove a tombstone (revoke or supersede) after
       // its envelope verifies and binds to the msgId. The verdict is re-read
       // after the await; a supersede commits only once the body is cached.
-      let tv = this._tombstoneVerdict(role, m.msgId, m.json, m.publishTs);
+      let tv = this._tombstoneVerdict(role, m.msgId, m.json, m.publishTs, { stampTrusted: !!(this._topicLifetime && deliverAccepted) });
       if (tv?.kind === 'suppress') continue;                               // killed → suppress (don't cache/deliver/re-fan)
       if (tv) {
         let ok = false;
@@ -1288,7 +1288,7 @@ export const wireHandlersMethods = {
             && (await deriveTopicIdBig({ region: env.topic?.region, owner: env.topic?.owner, name: env.topic?.name, write: env.topic?.write })) === topicBig;
         } catch { ok = false; }
         if (!ok) { this._log('warn', 'tombstone-unverified-body', { msgId: String(m.msgId).slice(0, 12), kind: tv.kind }); continue; }
-        tv = this._tombstoneVerdict(role, m.msgId, m.json, m.publishTs);
+        tv = this._tombstoneVerdict(role, m.msgId, m.json, m.publishTs, { stampTrusted: !!(this._topicLifetime && deliverAccepted) });
         if (tv?.kind === 'suppress') continue;
         // Provenance (Orion e47eb97c, D1): armed, a supersede is taken only
         // from an ACCEPTED current-generation DELIVER (as TL-B08 credits

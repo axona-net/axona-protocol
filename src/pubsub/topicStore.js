@@ -154,7 +154,7 @@ export const topicStoreMethods = {
   // can't own) means the kill was forged or unauthorized → REVOKE the tombstone
   // and accept the message. Returns true to drop the message.
   _tombstoned(role, msgId, json, stampTs = null) {
-    const v = this._tombstoneVerdict(role, msgId, json, stampTs);
+    const v = this._tombstoneVerdict(role, msgId, json, stampTs, { stampTrusted: true });   // legacy direct callers (fences) vouch for the stamp
     if (v && v.kind !== 'suppress') this._tombstoneCommit(role, msgId, v);
     return v?.kind === 'suppress';
   },
@@ -173,7 +173,7 @@ export const topicStoreMethods = {
   //   a fresh write at the root (no stamp yet): the envelope (ts, seq) against
   //     the kill's own signed (ts, seq), both from the author's clock.
   // Anything else (no stamp, no author kill ts) stays dead.
-  _tombstoneVerdict(role, msgId, json, stampTs = null) {
+  _tombstoneVerdict(role, msgId, json, stampTs = null, { stampTrusted = false } = {}) {
     if (!role) return null;
     const tomb = role.tombstones.get(msgId);
     if (!tomb) return null;
@@ -190,7 +190,14 @@ export const topicStoreMethods = {
     const aTs = Number.isFinite(tomb.authorTs) ? tomb.authorTs : (Number.isFinite(tomb.kill?.ts) ? tomb.kill.ts : null);
     const aSeq = Number.isFinite(tomb.authorTs) ? tomb.authorSeq : tomb.kill?.seq;
     let after = false;
-    if (Number.isFinite(stampTs)) after = Number.isFinite(tomb.killTs) && stampTs > tomb.killTs && (aTs === null || authorAfter(sentTs, sentSeq, aTs, aSeq));
+    // Where the author's kill time is NOT known here (every node but the verifying
+    // root, while tombstoneAuth proof carriage is off by default), a stamp may
+    // lift the kill only when the CALLER vouches for it: an accepted
+    // current-generation DELIVER from this node's upstream (armed). REPLAYUP,
+    // REPLICATE, handoff and unarmed DELIVER re-send old data and keep the
+    // tombstone, as 4.130.0 did (Aster d165d9ce: a promoted backup must not
+    // resurrect a pre-kill body on a claimed stamp).
+    if (Number.isFinite(stampTs)) after = Number.isFinite(tomb.killTs) && stampTs > tomb.killTs && (aTs === null ? stampTrusted === true : authorAfter(sentTs, sentSeq, aTs, aSeq));
     else if (aTs !== null) after = authorAfter(sentTs, sentSeq, aTs, aSeq);
     return after ? { kind: 'supersede', tomb, stampTs, sentTs } : { kind: 'suppress', tomb };
   },

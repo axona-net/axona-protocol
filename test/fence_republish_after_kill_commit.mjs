@@ -18,6 +18,12 @@
 //   R2f  CONTROL armed: the same frame from the pinned upstream supersedes
 //   S    role.superseded is swept with the tombstones at expiry
 // (Orion e47eb97c)
+//   B1   PROOF-LESS tombstone (no author kill time: every node but the verifying
+//        root while tombstoneAuth is off, e.g. a promoted backup): a REPLAYUP of
+//        the signed pre-kill body with a later claimed stamp stays dead
+//   B2   proof-less, UNARMED DELIVER of the same stays dead
+//   B3   proof-less, armed DELIVER from a data-only sender stays dead
+// (Aster d165d9ce; R2f is the proof-less armed accepted-upstream control)
 //
 // Run: node test/fence_republish_after_kill_commit.mjs
 import { AxonaManager } from '../src/pubsub/AxonaManager.js';
@@ -162,6 +168,28 @@ const ROOT_HEX = '89' + '0'.repeat(62) + '01', PIN = '0'.repeat(65) + 'c';
   role.merge ??= {}; role.merge.gate = { staged: false };                       // a gated role: _cachePush refuses
   await am._onDeliver({ topicId: topicHex, from: '0'.repeat(65) + 'a', msgs: [{ msgId: e2.msgId, json: JSON.stringify(e2), publishTs: killTs + 1, seq: 9 }] }, { targetId: 10n });
   check('D3b: a refused cache write on DELIVER keeps the tombstone and delivers nothing', role.tombstones.has(e2.msgId) && !role.cacheIds.has(e2.msgId) && !seen.includes(e2.msgId), JSON.stringify(seen));
+}
+async function proofless({ armed }) {
+  const clock = { t: T0 }; const am = harness(clock, { armed }); const role = am._becomeRoot(topicBig, 'fence');
+  const msg = body();
+  const e1 = await buildEnvelope({ topic: TOPIC, message: msg, identity: alice, ts: clock.t, seq: 1 });
+  role.tombstones.set(e1.msgId, { exp: clock.t + 600_000, killTs: clock.t + 1000, signer: alice.pubkeyHex.toLowerCase(), seq: 2 });   // migrated: no authorTs, no proof
+  return { am, role, e1, killTs: clock.t + 1000 };
+}
+{
+  const { am, role, e1, killTs } = await proofless({ armed: true });
+  const r = await am._ingestStamped(role, { msgId: e1.msgId, json: JSON.stringify(e1), publishTs: killTs + 5000, seq: 9 }, am._cutCapture(role));
+  check('B1: proof-less, REPLAYUP of the signed pre-kill body with a later stamp stays dead', r === 'held' && role.tombstones.has(e1.msgId) && !role.cacheIds.has(e1.msgId), String(r));
+}
+{
+  const { am, role, e1, killTs } = await proofless({ armed: false }); role.isRoot = false;
+  await am._onDeliver({ topicId: topicHex, from: '0'.repeat(65) + 'a', msgs: [{ msgId: e1.msgId, json: JSON.stringify(e1), publishTs: killTs + 5000, seq: 9 }] }, { targetId: 10n });
+  check('B2: proof-less, unarmed DELIVER of it stays dead', role.tombstones.has(e1.msgId) && !role.cacheIds.has(e1.msgId));
+}
+{
+  const { am, role, e1, killTs } = await proofless({ armed: true }); role.isRoot = false;
+  await am._onDeliver({ topicId: topicHex, from: '0'.repeat(65) + 'd', gen: { root: ROOT_HEX, epoch: 1 }, msgs: [{ msgId: e1.msgId, json: JSON.stringify(e1), publishTs: killTs + 5000, seq: 9 }] }, { targetId: 10n });
+  check('B3: proof-less, armed data-only DELIVER of it stays dead', role.tombstones.has(e1.msgId) && !role.cacheIds.has(e1.msgId));
 }
 console.log(failed ? `\n${failed} FAILED of ${passed + failed}` : `\nall ${passed} passed`);
 process.exit(failed ? 1 : 0);
