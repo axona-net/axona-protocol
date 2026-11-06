@@ -1036,6 +1036,10 @@ export const wireHandlersMethods = {
     if (m.publishTs > this._now() + FUTURE_TOLERANCE_MS) { this._log('warn', 'drop-future-replayup'); return 'rejected'; } // §5 bad-clock
     if (role.cacheIds.has(m.msgId)) return 'held';                       // already have it
     const tv = this._tombstoneVerdict(role, m.msgId, m.json, m.publishTs);   // 4.131.0: commit a supersede only after the cache write (Aster R1)
+    if (tv?.kind === 'suppress' && tv.unvouchedNewer) {                  // Orion P2: not held — a HANDOFFACK must not claim it
+      this._log('warn', 'stamped-republish-unvouched', { msgId: String(m.msgId).slice(0, 12), publishTs: m.publishTs, killTs: tv.tomb?.killTs });
+      return 'unvouched';
+    }
     if (tv?.kind === 'suppress') return 'held';                          // killed → don't resurrect via replay-up
     if (!this._cachePush(role, { msgId: m.msgId, publishTs: m.publishTs, json: m.json, seq: m.seq }, cut)) return 'refused';
     if (tv && role.cacheIds.has(m.msgId)) this._tombstoneCommit(role, m.msgId, tv);   // revoke or supersede, only once cached (Orion D3)

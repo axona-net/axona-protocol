@@ -24,6 +24,12 @@
 //   B2   proof-less, UNARMED DELIVER of the same stays dead
 //   B3   proof-less, armed DELIVER from a data-only sender stays dead
 // (Aster d165d9ce; R2f is the proof-less armed accepted-upstream control)
+//   P2   a proof-less heir's stamped batch counts an unvouched newer body as
+//        NOT held, so a HANDOFFACK never claims held === sent for it
+//   P4   a superseded tombstone carrying only a verified proof records the
+//        proof's (ts, seq) in role.superseded (RAK-1a holds on proof-bearing nodes)
+//   P5   the durability ledger re-opens a msgId whose earlier copy is terminal
+// (Orion e862068e)
 //
 // Run: node test/fence_republish_after_kill_commit.mjs
 import { AxonaManager } from '../src/pubsub/AxonaManager.js';
@@ -179,7 +185,7 @@ async function proofless({ armed }) {
 {
   const { am, role, e1, killTs } = await proofless({ armed: true });
   const r = await am._ingestStamped(role, { msgId: e1.msgId, json: JSON.stringify(e1), publishTs: killTs + 5000, seq: 9 }, am._cutCapture(role));
-  check('B1: proof-less, REPLAYUP of the signed pre-kill body with a later stamp stays dead', r === 'held' && role.tombstones.has(e1.msgId) && !role.cacheIds.has(e1.msgId), String(r));
+  check('B1: proof-less, REPLAYUP of the signed pre-kill body with a later stamp stays dead (reported unvouched, not held)', r === 'unvouched' && role.tombstones.has(e1.msgId) && !role.cacheIds.has(e1.msgId), String(r));
 }
 {
   const { am, role, e1, killTs } = await proofless({ armed: false }); role.isRoot = false;
@@ -190,6 +196,34 @@ async function proofless({ armed }) {
   const { am, role, e1, killTs } = await proofless({ armed: true }); role.isRoot = false;
   await am._onDeliver({ topicId: topicHex, from: '0'.repeat(65) + 'd', gen: { root: ROOT_HEX, epoch: 1 }, msgs: [{ msgId: e1.msgId, json: JSON.stringify(e1), publishTs: killTs + 5000, seq: 9 }] }, { targetId: 10n });
   check('B3: proof-less, armed data-only DELIVER of it stays dead', role.tombstones.has(e1.msgId) && !role.cacheIds.has(e1.msgId));
+}
+{
+  const { am, role, e1, killTs } = await proofless({ armed: true });
+  const t = await am._ingestStampedBatch(role, [{ msgId: e1.msgId, json: JSON.stringify(e1), publishTs: killTs + 5000, seq: 9 }], am._cutCapture(role));
+  check('P2: an unvouched newer body is counted rejected, not held', t && t.held === 0 && t.rejected === 1 && role.tombstones.has(e1.msgId), JSON.stringify(t));
+}
+{
+  const clock = { t: T0 }; const am = harness(clock); const role = am._becomeRoot(topicBig, 'fence');
+  const msg = body();
+  const e2 = await buildEnvelope({ topic: TOPIC, message: msg, identity: alice, ts: clock.t + 2000, seq: 3 });
+  const proof = await buildKill({ topicId: topicHex, msgId: e2.msgId, identity: alice, ts: clock.t + 1000, seq: 2 });
+  const tomb = { exp: clock.t + 600_000, killTs: clock.t + 1000, signer: alice.pubkeyHex.toLowerCase(), seq: 2, kill: proof };   // proof-bearing, no authorTs
+  role.tombstones.set(e2.msgId, tomb);
+  const v = am._tombstoneVerdict(role, e2.msgId, JSON.stringify(e2), clock.t + 1500);
+  const committed = v?.kind === 'supersede' && am._tombstoneCommit(role, e2.msgId, v);
+  const sup = role.superseded?.get(e2.msgId);
+  check('P4: a proof-only tombstone records the proof (ts, seq) when superseded', committed && sup?.authorTs === proof.ts && sup?.authorSeq === proof.seq, JSON.stringify({ kind: v?.kind, sup }));
+}
+{
+  const { DurabilityLedger } = await import('../src/pubsub/durability.js');
+  let now = T0; const led = new DurabilityLedger({ now: () => now });
+  const id = 'ab'.repeat(32);
+  led.open(id, topicBig);
+  led._m.get(id).state = 'verified';                                   // the killed copy's obligation ended
+  led.open(id, topicBig);
+  check('P5: a republished msgId re-opens a pending durability obligation', led._m.get(id)?.state === 'pending');
+  led.open(id, topicBig); const at = led._m.get(id).at; now += 1000; led.open(id, topicBig);
+  check('P5 CONTROL: a still-pending obligation is kept, not reset', led._m.get(id).at === at);
 }
 console.log(failed ? `\n${failed} FAILED of ${passed + failed}` : `\nall ${passed} passed`);
 process.exit(failed ? 1 : 0);

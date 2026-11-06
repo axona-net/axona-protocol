@@ -199,7 +199,11 @@ export const topicStoreMethods = {
     // resurrect a pre-kill body on a claimed stamp).
     if (Number.isFinite(stampTs)) after = Number.isFinite(tomb.killTs) && stampTs > tomb.killTs && (aTs === null ? stampTrusted === true : authorAfter(sentTs, sentSeq, aTs, aSeq));
     else if (aTs !== null) after = authorAfter(sentTs, sentSeq, aTs, aSeq);
-    return after ? { kind: 'supersede', tomb, stampTs, sentTs } : { kind: 'suppress', tomb };
+    if (after) return { kind: 'supersede', tomb, stampTs, sentTs };
+    // Orion P2: a proof-less node that refuses a NEWER stamp it cannot vouch for
+    // did not "hold" that body; say so, so a transfer's accounting stays honest.
+    const unvouchedNewer = aTs === null && Number.isFinite(stampTs) && Number.isFinite(tomb.killTs) && stampTs > tomb.killTs;
+    return unvouchedNewer ? { kind: 'suppress', tomb, unvouchedNewer: true } : { kind: 'suppress', tomb };
   },
 
   // Commit a verdict. Re-checks that the tombstone is the one the verdict saw.
@@ -211,10 +215,14 @@ export const topicStoreMethods = {
     // Remember the superseded kill's signed (ts, seq) so a RE-SENT copy of that
     // kill cannot retract the republication (Orion RAK-1a). Kill against kill,
     // one author clock; bounded by the tombstone's own expiry.
-    if (Number.isFinite(tomb.authorTs)) {
+    // Orion P4: the author's kill time comes from authorTs OR a retained verified
+    // proof, exactly as _tombstoneVerdict reads it.
+    const aTs = Number.isFinite(tomb.authorTs) ? tomb.authorTs : (Number.isFinite(tomb.kill?.ts) ? tomb.kill.ts : null);
+    const aSeq = Number.isFinite(tomb.authorTs) ? tomb.authorSeq : tomb.kill?.seq;
+    if (aTs !== null) {
       const sup = (role.superseded ??= new Map());
       sup.delete(msgId);
-      sup.set(msgId, { authorTs: tomb.authorTs, authorSeq: tomb.authorSeq, exp: tomb.exp });
+      sup.set(msgId, { authorTs: aTs, authorSeq: aSeq, exp: tomb.exp });
       if (sup.size > 4096) sup.delete(sup.keys().next().value);
     }
     role.tombstones.delete(msgId);
