@@ -153,46 +153,57 @@ export const topicStoreMethods = {
   // can't own) means the kill was forged or unauthorized → REVOKE the tombstone
   // and accept the message. Returns true to drop the message.
   _tombstoned(role, msgId, json, stampTs = null) {
-    if (!role) return false;
+    const v = this._tombstoneVerdict(role, msgId, json, stampTs);
+    if (v && v.kind !== 'suppress') this._tombstoneCommit(role, msgId, v);
+    return v?.kind === 'suppress';
+  },
+
+  // 4.131.0 (Aster 61bad8a8 R1/R2): the DECISION, with no side effect. Returns
+  // null (no tombstone), {kind:'suppress'}, {kind:'revoke'} (signer mismatch:
+  // the kill was forged/unauthorized) or {kind:'supersede'} (a same-author
+  // republication newer than the kill). Callers commit a revoke/supersede with
+  // _tombstoneCommit ONLY once the body is admitted and cached, and on an
+  // unverified path only after verifyEnvelope: a refused or forged write must
+  // leave the tombstone standing.
+  //
+  // Supersede compares two stamps from ONE clock:
+  //   a root-stamped copy (replay, fan-out): its publishTs against killTs,
+  //     both from the root's monotone stamp. A pre-kill copy is lower.
+  //   a fresh write at the root (no stamp yet): the envelope (ts, seq) against
+  //     the kill's own signed (ts, seq), both from the author's clock.
+  // Anything else (no stamp, no author kill ts) stays dead.
+  _tombstoneVerdict(role, msgId, json, stampTs = null) {
+    if (!role) return null;
     const tomb = role.tombstones.get(msgId);
-    if (!tomb) return false;
-    if (tomb.signer) {
-      let author = null, sentTs = null, sentSeq = null;
-      try { const e = JSON.parse(json); author = e?.signerPubkey ?? null; sentTs = e?.ts; sentSeq = e?.seq; } catch { /* */ }
-      if (author && lc(author) === lc(tomb.signer)) {
-        // 4.131.0 (republish after kill): the msgId is content-derived and folds
-        // in neither ts nor seq, so the author sending the SAME message again
-        // after killing it produces the same msgId. A kill retracts the copy
-        // that existed when it was issued; a later publication of the same
-        // content is a new message. Each test compares two stamps from ONE clock:
-        //   a root-stamped copy (replay, fan-out): its publishTs against killTs,
-        //     both from the root's monotone stamp. A pre-kill copy is lower.
-        //   a fresh write at the root (no stamp yet): the envelope (ts, seq) against
-        //     the kill's own signed (ts, seq), both from the author's clock.
-        // Anything else (no stamp, no author kill ts) stays dead, as before.
-        let after = false;
-        if (Number.isFinite(stampTs)) after = Number.isFinite(tomb.killTs) && stampTs > tomb.killTs;
-        else if (Number.isFinite(tomb.authorTs)) after = authorAfter(sentTs, sentSeq, tomb.authorTs, tomb.authorSeq);
-        if (after) {
-          // Remember the superseded kill's signed (ts, seq) so a RE-SENT copy of
-          // that kill cannot retract the republication (Orion RAK-1a). Kill
-          // against kill, one author clock; bounded by the tombstone's own expiry.
-          if (Number.isFinite(tomb.authorTs)) {
-            const sup = (role.superseded ??= new Map());
-            sup.delete(msgId);
-            sup.set(msgId, { authorTs: tomb.authorTs, authorSeq: tomb.authorSeq, exp: tomb.exp });
-            if (sup.size > 4096) sup.delete(sup.keys().next().value);
-          }
-          role.tombstones.delete(msgId);
-          this._log?.('info', 'tombstone-superseded', { msgId: String(msgId).slice(0, 12), stampTs, sentTs, killTs: tomb.killTs, authorTs: tomb.authorTs ?? null });
-          return false;
-        }
-        return true;                                                   // authorized kill → stays dead
-      }
-      role.tombstones.delete(msgId);                                   // unauthorized/forged → revoke
-      return false;
+    if (!tomb) return null;
+    if (!tomb.signer) return { kind: 'suppress', tomb };              // signer-less tombstone (defensive)
+    let author = null, sentTs = null, sentSeq = null;
+    try { const e = JSON.parse(json); author = e?.signerPubkey ?? null; sentTs = e?.ts; sentSeq = e?.seq; } catch { /* */ }
+    if (!author || lc(author) !== lc(tomb.signer)) return { kind: 'revoke', tomb };
+    let after = false;
+    if (Number.isFinite(stampTs)) after = Number.isFinite(tomb.killTs) && stampTs > tomb.killTs;
+    else if (Number.isFinite(tomb.authorTs)) after = authorAfter(sentTs, sentSeq, tomb.authorTs, tomb.authorSeq);
+    return after ? { kind: 'supersede', tomb, stampTs, sentTs } : { kind: 'suppress', tomb };
+  },
+
+  // Commit a verdict. Re-checks that the tombstone is the one the verdict saw.
+  _tombstoneCommit(role, msgId, v) {
+    if (!role || !v || role.tombstones.get(msgId) !== v.tomb) return false;
+    if (v.kind === 'revoke') { role.tombstones.delete(msgId); return true; }
+    if (v.kind !== 'supersede') return false;
+    const tomb = v.tomb;
+    // Remember the superseded kill's signed (ts, seq) so a RE-SENT copy of that
+    // kill cannot retract the republication (Orion RAK-1a). Kill against kill,
+    // one author clock; bounded by the tombstone's own expiry.
+    if (Number.isFinite(tomb.authorTs)) {
+      const sup = (role.superseded ??= new Map());
+      sup.delete(msgId);
+      sup.set(msgId, { authorTs: tomb.authorTs, authorSeq: tomb.authorSeq, exp: tomb.exp });
+      if (sup.size > 4096) sup.delete(sup.keys().next().value);
     }
-    return true;                                                       // signer-less tombstone (defensive) → suppress
+    role.tombstones.delete(msgId);
+    this._log?.('info', 'tombstone-superseded', { msgId: String(msgId).slice(0, 12), stampTs: v.stampTs, sentTs: v.sentTs, killTs: tomb.killTs, authorTs: tomb.authorTs ?? null });
+    return true;
   },
 
   // ── singleton-root replication (warm backup roots) ───────────────────

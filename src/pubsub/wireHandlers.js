@@ -710,7 +710,9 @@ export const wireHandlersMethods = {
     // settled state — an ack is what stops the writer's flight from probing a
     // root that is doing its job.
     if (role.cacheIds.has(env.msgId)) return { ok: true, msgId: env.msgId, dup: true };
-    if (this._tombstoned(role, env.msgId, json)) return { ok: true, msgId: env.msgId, suppressed: true };
+    const tv = this._tombstoneVerdict(role, env.msgId, json);           // 4.131.0: decide now, commit a supersede only after the cache write (Aster R1)
+    if (tv?.kind === 'suppress') return { ok: true, msgId: env.msgId, suppressed: true };
+    if (tv?.kind === 'revoke') this._tombstoneCommit(role, env.msgId, tv);
 
     // W'S OWN WRITES DURING A ROUND, FAIL CLOSED (dual-root 4(d)): they draw on
     // the reserve admitted with the header; past it the write is refused and
@@ -732,6 +734,7 @@ export const wireHandlersMethods = {
     const seq = ++role.seq;                                              // dense per-topic counter (gap detection)
     const msg = { json, publishTs: ts, msgId: env.msgId, seq };
     this._cachePush(role, { msgId: env.msgId, publishTs: ts, json, seq }, cut);
+    if (tv?.kind === 'supersede' && role.cacheIds.has(env.msgId)) this._tombstoneCommit(role, env.msgId, tv);
     if (role.merge?.reserve) { role.merge.reserve.entries--; role.merge.reserve.bytes -= json.length + 80; }
     // Phase 3 shadow: observe the VERIFIED body (env passed verifyEnvelope above)
     // ONLY if it survived the cache write (an immediate byte-cap eviction must not
@@ -1033,8 +1036,11 @@ export const wireHandlersMethods = {
     this._noteMetricRole(role, env.topic);                               // bound above: stid === role.topicId
     if (m.publishTs > this._now() + FUTURE_TOLERANCE_MS) { this._log('warn', 'drop-future-replayup'); return 'rejected'; } // §5 bad-clock
     if (role.cacheIds.has(m.msgId)) return 'held';                       // already have it
-    if (this._tombstoned(role, m.msgId, m.json, m.publishTs)) return 'held';          // killed → don't resurrect via replay-up
+    const tv = this._tombstoneVerdict(role, m.msgId, m.json, m.publishTs);   // 4.131.0: commit a supersede only after the cache write (Aster R1)
+    if (tv?.kind === 'suppress') return 'held';                          // killed → don't resurrect via replay-up
+    if (tv?.kind === 'revoke') this._tombstoneCommit(role, m.msgId, tv);
     if (!this._cachePush(role, { msgId: m.msgId, publishTs: m.publishTs, json: m.json, seq: m.seq }, cut)) return 'refused';
+    if (tv?.kind === 'supersede' && role.cacheIds.has(m.msgId)) this._tombstoneCommit(role, m.msgId, tv);
     // Phase 3 shadow: observe the VERIFIED body (env passed verifyEnvelope + the
     // topic-binding check above) if it survived the cache write. The observer
     // independently re-binds the topic too (defense in depth). No-op flag-off.
@@ -1268,7 +1274,20 @@ export const wireHandlersMethods = {
         this._applyKill(role, topicBig, mm, null, (deliverAccepted && decision) ? decision.g : null);
         continue;
       }
-      if (this._tombstoned(role, m.msgId, m.json, m.publishTs)) continue;          // killed → suppress (don't cache/deliver/re-fan)
+      // 4.131.0 (Aster 61bad8a8 R2): DELIVER bodies are not verified on this
+      // path, so a frame may only remove a tombstone (revoke or supersede) after
+      // its envelope verifies and binds to the msgId. The verdict is re-read
+      // after the await; a supersede commits only once the body is cached.
+      let tv = this._tombstoneVerdict(role, m.msgId, m.json, m.publishTs);
+      if (tv?.kind === 'suppress') continue;                               // killed → suppress (don't cache/deliver/re-fan)
+      if (tv) {
+        let ok = false;
+        try { const env = JSON.parse(m.json); ok = env?.msgId === m.msgId && (await verifyEnvelope(env))?.ok === true; } catch { ok = false; }
+        if (!ok) { this._log('warn', 'tombstone-unverified-body', { msgId: String(m.msgId).slice(0, 12), kind: tv.kind }); continue; }
+        tv = this._tombstoneVerdict(role, m.msgId, m.json, m.publishTs);
+        if (tv?.kind === 'suppress') continue;
+        if (tv?.kind === 'revoke') this._tombstoneCommit(role, m.msgId, tv);
+      }
       // the CURRENT upstream SENT this body: it holds it (Topic Lifetime 4.7, TL-B02/B05). Armed only; the set is bound to the attachment above and pruned with the cache.
       if (deliverAccepted && role.upstreamHeldFrom === lc(payload.from)) { (role.upstreamHeld ??= new Set()).add(m.msgId); }   // credited only by an ACCEPTED current-generation DELIVER (TL-B08)
       if (role && !role.cacheIds.has(m.msgId)) {       // relay: cache once + re-fan once
@@ -1281,6 +1300,7 @@ export const wireHandlersMethods = {
           } catch { /* undecided: cached as an ordinary topic until a bound body arrives */ }
         }
         this._cachePush(role, { msgId: m.msgId, publishTs: m.publishTs, json: m.json, seq: m.seq });
+        if (tv?.kind === 'supersede' && role.cacheIds.has(m.msgId)) this._tombstoneCommit(role, m.msgId, tv);
         if (Number.isFinite(m.seq) && m.seq > role.seq) role.seq = m.seq;   // keep counter ready if we're promoted to root
         this._fanout(role, m, lc(payload.from));       // exclude the sender (m carries seq)
       }

@@ -1687,6 +1687,11 @@
       "note": "4.131.0 (Orion 7b503240 HOLD: RAK-1a/1b/2/3 + merge retention): every path that can carry an OLDER kill leaves a republished body alone, and a NEWER kill still retracts it. K1a a re-sent pre-republish KILL at the root is acked as settled (no stamp, no seq slot), K1c control: a kill signed after the republication retracts it; K1b a propagated tombstone stamped below the held body is ignored, K1d control: one stamped above still applies; K2 a live subscriber sees pub1, kill1, pub2, kill2 with its since floor at pub2 and a stale kill1 not delivered, K2c controls: a body below its delivered kill stays dropped and exactly-once holds; K3 same-ms kill() then pub() (equal ts, higher seq) is a republication, control: lower seq stays dead; M merge dels retention counts a held republication. 16 checks. Mutants (each fix removed in turn) -> each red."
     },
     {
+      "file": "fence_republish_after_kill_commit.mjs",
+      "class": "default",
+      "note": "4.131.0 (Aster 61bad8a8 HOLD R1/R2): a tombstone is removed only by a write that COMMITS, never by an unverified frame. _tombstoneVerdict decides with no side effect; _tombstoneCommit runs after the cache write. R1a root ingress refused at the merge reserve keeps the tombstone, the pre-kill copy stays suppressed, the admitted republication then supersedes; R1b a stamped replay refused at the cut keeps it; R2a an unsigned same-signer DELIVER frame with a later stamp neither removes it nor is cached; R2b an unsigned other-signer frame cannot revoke it; R2c control: a verified signed republication on DELIVER above killTs supersedes. 8 checks. Mutants: commit before admission (ingress, stamped), DELIVER verify skipped -> each red."
+    },
+    {
       "file": "fence_child_step_down.mjs",
       "class": "default",
       "note": "Topic Lifetime 4.7 (David: '2 subscribers and 90 seconds'): a child below 2 readers for 90 s after a 90 s stay REHOMEs its readers to its upstream, tells its parent (UNSUB steppedDown → 300 s cooldown), writes LEFT and retires; hysteresis (demand at the floor clears, a new child is not judged before its stay); a backup and an unreachable upstream are never stepped down; REHOME keeps the app's subscription and re-pins to the named upstream, ignored from a non-upstream; the parent does not re-promote a cooled node; unarmed = nothing. 24 checks."
