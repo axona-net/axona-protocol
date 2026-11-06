@@ -712,7 +712,6 @@ export const wireHandlersMethods = {
     if (role.cacheIds.has(env.msgId)) return { ok: true, msgId: env.msgId, dup: true };
     const tv = this._tombstoneVerdict(role, env.msgId, json);           // 4.131.0: decide now, commit a supersede only after the cache write (Aster R1)
     if (tv?.kind === 'suppress') return { ok: true, msgId: env.msgId, suppressed: true };
-    if (tv?.kind === 'revoke') this._tombstoneCommit(role, env.msgId, tv);
 
     // W'S OWN WRITES DURING A ROUND, FAIL CLOSED (dual-root 4(d)): they draw on
     // the reserve admitted with the header; past it the write is refused and
@@ -734,7 +733,7 @@ export const wireHandlersMethods = {
     const seq = ++role.seq;                                              // dense per-topic counter (gap detection)
     const msg = { json, publishTs: ts, msgId: env.msgId, seq };
     this._cachePush(role, { msgId: env.msgId, publishTs: ts, json, seq }, cut);
-    if (tv?.kind === 'supersede' && role.cacheIds.has(env.msgId)) this._tombstoneCommit(role, env.msgId, tv);
+    if (tv && role.cacheIds.has(env.msgId)) this._tombstoneCommit(role, env.msgId, tv);   // revoke or supersede, only once admitted and cached (Orion D3)
     if (role.merge?.reserve) { role.merge.reserve.entries--; role.merge.reserve.bytes -= json.length + 80; }
     // Phase 3 shadow: observe the VERIFIED body (env passed verifyEnvelope above)
     // ONLY if it survived the cache write (an immediate byte-cap eviction must not
@@ -1038,9 +1037,8 @@ export const wireHandlersMethods = {
     if (role.cacheIds.has(m.msgId)) return 'held';                       // already have it
     const tv = this._tombstoneVerdict(role, m.msgId, m.json, m.publishTs);   // 4.131.0: commit a supersede only after the cache write (Aster R1)
     if (tv?.kind === 'suppress') return 'held';                          // killed → don't resurrect via replay-up
-    if (tv?.kind === 'revoke') this._tombstoneCommit(role, m.msgId, tv);
     if (!this._cachePush(role, { msgId: m.msgId, publishTs: m.publishTs, json: m.json, seq: m.seq }, cut)) return 'refused';
-    if (tv?.kind === 'supersede' && role.cacheIds.has(m.msgId)) this._tombstoneCommit(role, m.msgId, tv);
+    if (tv && role.cacheIds.has(m.msgId)) this._tombstoneCommit(role, m.msgId, tv);   // revoke or supersede, only once cached (Orion D3)
     // Phase 3 shadow: observe the VERIFIED body (env passed verifyEnvelope + the
     // topic-binding check above) if it survived the cache write. The observer
     // independently re-binds the topic too (defense in depth). No-op flag-off.
@@ -1282,15 +1280,20 @@ export const wireHandlersMethods = {
       if (tv?.kind === 'suppress') continue;                               // killed → suppress (don't cache/deliver/re-fan)
       if (tv) {
         let ok = false;
-        try { const env = JSON.parse(m.json); ok = env?.msgId === m.msgId && (await verifyEnvelope(env))?.ok === true; } catch { ok = false; }
+        // ...and binds to THIS topic: the msgId omits the topic, so the same
+        // signed content on another topic carries the same msgId (Orion D2).
+        try {
+          const env = JSON.parse(m.json);
+          ok = env?.msgId === m.msgId && (await verifyEnvelope(env))?.ok === true
+            && (await deriveTopicIdBig({ region: env.topic?.region, owner: env.topic?.owner, name: env.topic?.name, write: env.topic?.write })) === topicBig;
+        } catch { ok = false; }
         if (!ok) { this._log('warn', 'tombstone-unverified-body', { msgId: String(m.msgId).slice(0, 12), kind: tv.kind }); continue; }
         tv = this._tombstoneVerdict(role, m.msgId, m.json, m.publishTs);
         if (tv?.kind === 'suppress') continue;
-        // Provenance (Orion e47eb97c): armed, a stamp-based supersede is taken
-        // only from an ACCEPTED current-generation DELIVER (as TL-B08 credits
-        // custody); a data-only frame from an unpinned sender cannot lift a kill.
-        if (tv?.kind === 'supersede' && decision && !deliverAccepted) { this._log('warn', 'tombstone-unaccepted-deliver', { msgId: String(m.msgId).slice(0, 12) }); continue; }
-        if (tv?.kind === 'revoke') this._tombstoneCommit(role, m.msgId, tv);
+        // Provenance (Orion e47eb97c, D1): armed, a supersede is taken only
+        // from an ACCEPTED current-generation DELIVER (as TL-B08 credits
+        // custody); a data-only or ungated frame cannot lift a kill.
+        if (tv?.kind === 'supersede' && this._topicLifetime && !deliverAccepted) { this._log('warn', 'tombstone-unaccepted-deliver', { msgId: String(m.msgId).slice(0, 12) }); continue; }
       }
       // the CURRENT upstream SENT this body: it holds it (Topic Lifetime 4.7, TL-B02/B05). Armed only; the set is bound to the attachment above and pruned with the cache.
       if (deliverAccepted && role.upstreamHeldFrom === lc(payload.from)) { (role.upstreamHeld ??= new Set()).add(m.msgId); }   // credited only by an ACCEPTED current-generation DELIVER (TL-B08)
@@ -1304,7 +1307,10 @@ export const wireHandlersMethods = {
           } catch { /* undecided: cached as an ordinary topic until a bound body arrives */ }
         }
         this._cachePush(role, { msgId: m.msgId, publishTs: m.publishTs, json: m.json, seq: m.seq });
-        if (tv?.kind === 'supersede' && role.cacheIds.has(m.msgId)) this._tombstoneCommit(role, m.msgId, tv);
+        if (tv) {                                        // a tombstone stood: it falls only with a cached body (Orion D3)
+          if (!role.cacheIds.has(m.msgId)) continue;     // not cached: no fan-out, no app delivery, the tombstone stands
+          this._tombstoneCommit(role, m.msgId, tv);
+        }
         if (Number.isFinite(m.seq) && m.seq > role.seq) role.seq = m.seq;   // keep counter ready if we're promoted to root
         this._fanout(role, m, lc(payload.from));       // exclude the sender (m carries seq)
       }

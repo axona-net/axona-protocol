@@ -33,10 +33,10 @@ const TOPIC = { region: 'useast', owner: null, name: 'republish-commit', write: 
 const topicHex = await deriveTopicId(TOPIC), topicBig = await deriveTopicIdBig(TOPIC);
 const alice = await createAuthorIdentity();
 const T0 = 1_700_000_000_000;
-const harness = (clock) => {
+const harness = (clock, { armed = true } = {}) => {
   const raw = { getSelfId: () => 10n, onRoutedMessage: () => {}, onDirectMessage: () => {}, onEvent: () => () => {},
     sendDirect: async () => true, verdictsSupported: true, routeMessage: async () => ({ consumed: true }), findKClosest: async () => [] };
-  return new AxonaManager({ dht: sealTestDht(raw), now: () => clock.t, rootReplicas: 0 });
+  return new AxonaManager({ dht: sealTestDht(raw), now: () => clock.t, rootReplicas: 0, topicLifetime: armed });
 };
 const meta = { targetId: 10n, fromId: 20n, isTerminal: true };
 let n = 0; const body = () => `{"fire":${++n}}`;
@@ -71,9 +71,9 @@ console.log('fence_republish_after_kill_commit');
   check('R1b: a stamped replay refused at the cut keeps the tombstone', r === 'refused' && role.tombstones.has(e2.msgId) && !role.cacheIds.has(e2.msgId), String(r));
 }
 {
-  const clock = { t: T0 }; const am = harness(clock); const role = am._becomeRoot(topicBig, 'fence');
+  const clock = { t: T0 }; const am = harness(clock, { armed: false }); const role = am._becomeRoot(topicBig, 'fence');
   const { e2, killTs } = await killed(clock, am, role);
-  role.isRoot = false;                                                        // a relay on the DELIVER path
+  role.isRoot = false;                                                        // an UNARMED relay on the DELIVER path
   const from = '0'.repeat(65) + 'a';
   const signer = role.tombstones.get(e2.msgId).signer;
   const forged = JSON.stringify({ msgId: e2.msgId, signerPubkey: signer, message: 'not a signed envelope', ts: clock.t + 5000 });
@@ -83,7 +83,7 @@ console.log('fence_republish_after_kill_commit');
   await am._onDeliver({ topicId: topicHex, from, msgs: [{ msgId: e2.msgId, json: other, publishTs: killTs + 1, seq: 9 }] }, { targetId: 10n });
   check('R2b: an unsigned other-signer frame cannot revoke the tombstone', role.tombstones.has(e2.msgId) && !role.cacheIds.has(e2.msgId));
   await am._onDeliver({ topicId: topicHex, from, msgs: [{ msgId: e2.msgId, json: JSON.stringify(e2), publishTs: killTs + 1, seq: 9 }] }, { targetId: 10n });
-  check('R2c CONTROL: a verified republication on DELIVER above killTs supersedes', !role.tombstones.has(e2.msgId) && role.cacheIds.has(e2.msgId));
+  check('R2c CONTROL: unarmed, a verified republication on DELIVER above killTs supersedes', !role.tombstones.has(e2.msgId) && role.cacheIds.has(e2.msgId));
 }
 {
   const clock = { t: T0 }; const am = harness(clock); const role = am._becomeRoot(topicBig, 'fence');
@@ -125,6 +125,43 @@ const ROOT_HEX = '89' + '0'.repeat(62) + '01', PIN = '0'.repeat(65) + 'c';
   const had = role.superseded?.has(e2.msgId) === true;
   am._expireTombstones(role, clock.t + 10 * 24 * 3600_000);
   check('S: role.superseded is recorded, then swept at expiry', had && role.superseded.size === 0, String(had));
+}
+// D1 / D2 / D3 (Orion a8767b2b)
+{
+  const clock = { t: T0 }; const am = harness(clock); const role = am._becomeRoot(topicBig, 'fence');   // armed (the kernel default)
+  const { e2, killTs } = await killed(clock, am, role); role.isRoot = false;
+  await am._onDeliver({ topicId: topicHex, from: '0'.repeat(65) + 'a', msgs: [{ msgId: e2.msgId, json: JSON.stringify(e2), publishTs: killTs + 1, seq: 9 }] }, { targetId: 10n });
+  check('D1: armed, an ungated DELIVER (no generation) cannot lift a kill', role.tombstones.has(e2.msgId) && !role.cacheIds.has(e2.msgId));
+}
+{
+  const clock = { t: T0 }; const am = harness(clock, { armed: false }); const role = am._becomeRoot(topicBig, 'fence');
+  const { e2, killTs } = await killed(clock, am, role); role.isRoot = false;
+  const other = { ...TOPIC, name: 'republish-commit-OTHER' };
+  const eB = await buildEnvelope({ topic: other, message: JSON.parse(JSON.stringify(e2.message)), identity: alice, ts: e2.ts + 10, seq: 7 });
+  check('D2: the same content signed on another topic has the same msgId', eB.msgId === e2.msgId);
+  await am._onDeliver({ topicId: topicHex, from: '0'.repeat(65) + 'a', msgs: [{ msgId: eB.msgId, json: JSON.stringify(eB), publishTs: killTs + 1, seq: 9 }] }, { targetId: 10n });
+  check('D2: a cross-topic body cannot lift this topic\'s kill', role.tombstones.has(e2.msgId) && !role.cacheIds.has(e2.msgId));
+}
+{
+  const bob = await createAuthorIdentity();
+  const clock = { t: T0 }; const am = harness(clock); const role = am._becomeRoot(topicBig, 'fence');
+  const e = await buildEnvelope({ topic: TOPIC, message: body(), identity: alice, ts: clock.t, seq: 1 });
+  role.tombstones.set(e.msgId, { exp: clock.t + 600_000, killTs: clock.t - 1, signer: bob.pubkeyHex.toLowerCase(), seq: 1 });   // a provisional kill by a non-author
+  role.merge ??= {}; role.merge.reserve = { entries: 0, bytes: 0 };
+  const r = await am._ingestPublish(role, JSON.stringify(e), am._cutCapture(role));
+  check('D3a: a refused write leaves a revocable tombstone standing', r.ok === false && r.reason === 'merge-reserve' && role.tombstones.has(e.msgId), JSON.stringify(r));
+  role.merge.reserve = undefined;
+  const r2 = await am._ingestPublish(role, JSON.stringify(e), am._cutCapture(role));
+  check('D3a CONTROL: the admitted author body revokes the non-author kill', r2.ok && !r2.suppressed && !role.tombstones.has(e.msgId) && role.cacheIds.has(e.msgId), JSON.stringify(r2));
+}
+{
+  const clock = { t: T0 }; const am = harness(clock, { armed: false }); const role = am._becomeRoot(topicBig, 'fence');
+  const { e2, killTs } = await killed(clock, am, role); role.isRoot = false;
+  am.mySubscriptions.set(topicBig, { since: 0, interval: 5000 });
+  const seen = []; am._deliveryCallback = (t, json, msgId) => seen.push(msgId);
+  role.merge ??= {}; role.merge.gate = { staged: false };                       // a gated role: _cachePush refuses
+  await am._onDeliver({ topicId: topicHex, from: '0'.repeat(65) + 'a', msgs: [{ msgId: e2.msgId, json: JSON.stringify(e2), publishTs: killTs + 1, seq: 9 }] }, { targetId: 10n });
+  check('D3b: a refused cache write on DELIVER keeps the tombstone and delivers nothing', role.tombstones.has(e2.msgId) && !role.cacheIds.has(e2.msgId) && !seen.includes(e2.msgId), JSON.stringify(seen));
 }
 console.log(failed ? `\n${failed} FAILED of ${passed + failed}` : `\nall ${passed} passed`);
 process.exit(failed ? 1 : 0);
