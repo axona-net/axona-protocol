@@ -90,7 +90,7 @@ async function main() {
       cacheHas(r, topicId, e.msgId) && !tombstoned(r, topicId, e.msgId), `(cached=${cacheHas(r,topicId,e.msgId)} tomb=${tombstoned(r,topicId,e.msgId)})`);
 
     // AUTHORIZED: alice kills her own message → accepted
-    const kill = await buildKill({ topicId: idHex(topicId), msgId: e.msgId, seq: 2, identity: alice });
+    const kill = await buildKill({ topicId: idHex(topicId), msgId: e.msgId, seq: 2, ts: fab.clock, identity: alice });   // 4.131.0: the author signs with ONE clock (the fabric's)
     fab.clock += 100; r.am.pubsubKill(topicId, kill); await fab.settle();
     check('1b. authorized kill removes target from cache + tombstones it', !cacheHas(r, topicId, e.msgId) && tombstoned(r, topicId, e.msgId));
     check('1c. subscribers received the {deleted} callback', subA.dels.includes(e.msgId) && subB.dels.includes(e.msgId));
@@ -127,7 +127,7 @@ async function main() {
       nodes[1].am.pubsubPublish(topicId, JSON.stringify(e)); await fab.settle();
       const gotBody = subs.filter(s => s.got.includes(e.msgId)).length;
       const r = root(fab, topicId);
-      const kill = await buildKill({ topicId: idHex(topicId), msgId: e.msgId, seq: 2, identity: alice });
+      const kill = await buildKill({ topicId: idHex(topicId), msgId: e.msgId, seq: 2, ts: fab.clock, identity: alice });   // 4.131.0: the author signs with ONE clock (the fabric's)
       // kill happens UNDER LOSS — the subs that hold the body must converge the retraction
       fab.drop = 0.3;
       fab.clock += 100; r.am.pubsubKill(topicId, kill); await fab.settle();
@@ -159,7 +159,7 @@ async function main() {
     const e = await buildEnvelope({ topic: desc, message: { e: 1 }, seq: 1, identity: alice, ts: fab.clock });
     const r = root(fab, topicId);
     // kill arrives FIRST (root doesn't hold the target yet) — provisional accept
-    const kill = await buildKill({ topicId: idHex(topicId), msgId: e.msgId, seq: 1, identity: alice });
+    const kill = await buildKill({ topicId: idHex(topicId), msgId: e.msgId, seq: 1, ts: fab.clock, identity: alice });   // 4.131.0: one author clock
     r.am.pubsubKill(topicId, kill); await fab.settle();
     check('4a-i. provisional tombstone recorded before target seen', tombstoned(r, topicId, e.msgId));
     // now the (authorized) target arrives → suppressed (author matches kill signer)

@@ -21,6 +21,15 @@ import {
 import { idHex, idBig, lc, isHexId } from './ids.js';
 import { isMetricTopicName } from './metrics.js';
 
+// 4.131.0: is author stamp (ts, seq) strictly AFTER (bTs, bSeq) on ONE author's
+// clock? AxonaPeer draws pub and kill seq from one monotone _nextPubSeq while ts
+// stays Date.now(), so a same-millisecond pair is ordered by seq (Orion RAK-3).
+export function authorAfter(aTs, aSeq, bTs, bSeq) {
+  if (!Number.isFinite(aTs) || !Number.isFinite(bTs)) return false;
+  if (aTs !== bTs) return aTs > bTs;
+  return Number.isFinite(aSeq) && Number.isFinite(bSeq) && bSeq > 0 && aSeq > bSeq;
+}
+
 export const topicStoreMethods = {
   // ── cache ────────────────────────────────────────────────────────────
   // RETURNS true when the entry committed, false when refused at the cut
@@ -148,8 +157,8 @@ export const topicStoreMethods = {
     const tomb = role.tombstones.get(msgId);
     if (!tomb) return false;
     if (tomb.signer) {
-      let author = null, sentTs = null;
-      try { const e = JSON.parse(json); author = e?.signerPubkey ?? null; sentTs = e?.ts; } catch { /* */ }
+      let author = null, sentTs = null, sentSeq = null;
+      try { const e = JSON.parse(json); author = e?.signerPubkey ?? null; sentTs = e?.ts; sentSeq = e?.seq; } catch { /* */ }
       if (author && lc(author) === lc(tomb.signer)) {
         // 4.131.0 (republish after kill): the msgId is content-derived and folds
         // in neither ts nor seq, so the author sending the SAME message again
@@ -158,13 +167,22 @@ export const topicStoreMethods = {
         // content is a new message. Each test compares two stamps from ONE clock:
         //   a root-stamped copy (replay, fan-out): its publishTs against killTs,
         //     both from the root's monotone stamp. A pre-kill copy is lower.
-        //   a fresh write at the root (no stamp yet): the envelope ts against the
-        //     kill's own signed ts, both from the author's clock.
+        //   a fresh write at the root (no stamp yet): the envelope (ts, seq) against
+        //     the kill's own signed (ts, seq), both from the author's clock.
         // Anything else (no stamp, no author kill ts) stays dead, as before.
         let after = false;
         if (Number.isFinite(stampTs)) after = Number.isFinite(tomb.killTs) && stampTs > tomb.killTs;
-        else if (Number.isFinite(tomb.authorTs)) after = Number.isFinite(sentTs) && sentTs > tomb.authorTs;
+        else if (Number.isFinite(tomb.authorTs)) after = authorAfter(sentTs, sentSeq, tomb.authorTs, tomb.authorSeq);
         if (after) {
+          // Remember the superseded kill's signed (ts, seq) so a RE-SENT copy of
+          // that kill cannot retract the republication (Orion RAK-1a). Kill
+          // against kill, one author clock; bounded by the tombstone's own expiry.
+          if (Number.isFinite(tomb.authorTs)) {
+            const sup = (role.superseded ??= new Map());
+            sup.delete(msgId);
+            sup.set(msgId, { authorTs: tomb.authorTs, authorSeq: tomb.authorSeq, exp: tomb.exp });
+            if (sup.size > 4096) sup.delete(sup.keys().next().value);
+          }
           role.tombstones.delete(msgId);
           this._log?.('info', 'tombstone-superseded', { msgId: String(msgId).slice(0, 12), stampTs, sentTs, killTs: tomb.killTs, authorTs: tomb.authorTs ?? null });
           return false;
@@ -221,8 +239,21 @@ export const topicStoreMethods = {
   _deliverToApp(topicBig, json, msgId, publishTs, seq) {
     if (!this.mySubscriptions.has(topicBig)) return;   // pure relay stores+forwards, doesn't consume
     const key = topicBig.toString(16) + ':' + msgId;
-    if (this._appDelivered.has(key)) return;           // exactly-once
-    this._appDelivered.set(key, true);
+    // 4.131.0 (Orion RAK-2): exactly-once PER PUBLICATION. A republished body
+    // (same msgId) whose root stamp is above the kill this app already saw is a
+    // new publication: clear the kill record and deliver. A body at or below
+    // that kill is a late pre-kill copy and stays dropped. Values are root
+    // stamps; a legacy `true` carries none and keeps the old exactly-once.
+    const killKey = topicBig.toString(16) + ':kill:' + msgId;
+    const killedAt = this._appDelivered.get(killKey);
+    if (this._appDelivered.has(key)) {
+      if (!(Number.isFinite(killedAt) && Number.isFinite(publishTs) && publishTs > killedAt)) return;   // exactly-once
+      this._appDelivered.delete(killKey);
+    } else if (Number.isFinite(killedAt) && Number.isFinite(publishTs) && publishTs <= killedAt) {
+      return;                                          // pre-kill copy after its kill
+    }
+    this._appDelivered.delete(key);                    // re-insert at the LRU tail
+    this._appDelivered.set(key, Number.isFinite(publishTs) ? publishTs : true);
     if (this._appDelivered.size > APP_DEDUP_MAX) this._appDelivered.delete(this._appDelivered.keys().next().value);
     const prev = this._lastSeenTsByTopic.get(topicBig) || 0;
     if (publishTs > prev) this._lastSeenTsByTopic.set(topicBig, publishTs);
@@ -244,8 +275,12 @@ export const topicStoreMethods = {
     const prev = this._lastSeenTsByTopic.get(topicBig) || 0;
     if (killTs > prev) this._lastSeenTsByTopic.set(topicBig, killTs);
     const key = topicBig.toString(16) + ':kill:' + target;
-    if (this._appDelivered.has(key)) return;           // exactly-once
-    this._appDelivered.set(key, true);
+    if (this._appDelivered.has(key)) return;           // exactly-once (per publication: _deliverToApp clears it on a republish)
+    // 4.131.0 (Orion RAK-2): a kill stamped at or below the body this app holds
+    // retracts an EARLIER publication of the same msgId, not this one.
+    const heldAt = this._appDelivered.get(topicBig.toString(16) + ':' + target);
+    if (Number.isFinite(heldAt) && Number.isFinite(killTs) && killTs <= heldAt) return;
+    this._appDelivered.set(key, Number.isFinite(killTs) ? killTs : true);
     if (this._appDelivered.size > APP_DEDUP_MAX) this._appDelivered.delete(this._appDelivered.keys().next().value);
     // A kill retracts a message the app is holding. If this app NEVER received the body
     // (a since:'all' joiner that arrived after the kill — the killed body is spliced from

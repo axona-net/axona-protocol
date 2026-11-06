@@ -29,6 +29,7 @@ const randomNonce = () => {
 };
 import { verifyEnvelope, checkFreshness } from './envelope.js';
 import { makeMergeState } from './rootClaim.js';
+import { authorAfter } from './topicStore.js';
 import { verifyKill } from './kill.js';
 import { deriveTopicIdBig } from './post.js';
 import { signAckProof, verifyAckProof, PURPOSE, OP } from './ackProof.js';
@@ -1399,6 +1400,17 @@ export const wireHandlersMethods = {
       this._log('info', 'cut-refused', { topic: idHex(topicBig).slice(0, 12), at: 'applyKill', msgId: String(target).slice(0, 12), gated: !!role.merge?.gate, gen: role.gen | 0, gen0: cut ? cut.gen0 : null });
       return false;
     }
+    // 4.131.0 (Orion RAK-1b): a propagated tombstone (fan-out, replay, union,
+    // handoff, merge) stamped BELOW the body this node holds retracts an earlier
+    // publication of the same msgId. Both are root stamps. Ignore it: no
+    // tombstone, no splice, no fan-out, no app kill.
+    if (role && !role.tombstones.has(target) && Number.isFinite(m.killTs)) {
+      const held = role.cache.find(c => c.msgId === target);
+      if (held && Number.isFinite(held.publishTs) && m.killTs < held.publishTs) {
+        this._log('info', 'tombstone-predates-body', { msgId: String(target).slice(0, 12), killTs: m.killTs, publishTs: held.publishTs });
+        return;
+      }
+    }
     // A retracted message has no durability obligation left. Cancel it BEFORE
     // the tombstone/fan-out work below, so no retry can outlive the retraction
     // (Aster: the kill must cancel atomically and preserve the tombstone).
@@ -1440,7 +1452,7 @@ export const wireHandlersMethods = {
     }
     if (role && !existing) {
       const tomb = { exp: this._now() + TTL_MS, killTs, signer: proof ? proofSigner : (m.signer ?? null), seq };
-      if (Number.isFinite(m.authorTs)) tomb.authorTs = m.authorTs;   // 4.131.0: the verified kill's own signed ts (direct kill at the root only)
+      if (Number.isFinite(m.authorTs)) { tomb.authorTs = m.authorTs; if (Number.isFinite(m.authorSeq)) tomb.authorSeq = m.authorSeq; }   // 4.131.0: the verified kill's own signed (ts, seq) (direct kill at the root only; never from the wire)
       if (proof) tomb.kill = proof;                    // retain only the bound, caller-verified proof
       // DELETION OWNERSHIP (Topic Lifetime 4.6; Aster b0748c4c X1): a tombstone
       // belongs to the generation that delivered it, so an obligation's end
@@ -1536,6 +1548,19 @@ export const wireHandlersMethods = {
         this._log('warn', 'drop-unauthorized-kill', { target: String(target).slice(0, 12) });
         return 'consumed';
       }
+      // 4.131.0 (Orion RAK-1a): when the held body REPUBLISHED a msgId whose
+      // tombstone it superseded, a kill that is not after THAT superseded kill
+      // on the author's clock is a re-sent copy of it (or older): settled, acked,
+      // never stamped or applied. Kill against kill only; a body's own ts is
+      // never compared with a kill (fixtures and multi-host authors skew).
+      const sup = role.superseded?.get(target);
+      if (sup && sup.exp > this._now()) {
+        if (!authorAfter(kill.ts, kill.seq, sup.authorTs, sup.authorSeq)) {
+          this._log('info', 'kill-predates-body', { target: String(target).slice(0, 12), killTs: kill.ts, supersededTs: sup.authorTs });
+          this._sendIngestAck(meta?.fromId, role, target, 'kill', payload);
+          return 'consumed';
+        }
+      } else if (sup) role.superseded.delete(target);
     }
     // STAMP the kill like a publish (monotonic + dense counter) so it orders +
     // replays via `since` AND occupies a seq slot (a missed kill shows as a gap).
@@ -1568,7 +1593,7 @@ export const wireHandlersMethods = {
     // Pass the COMPLETE signed kill so _applyKill can retain + transport the proof
     // (blocker b). The root re-stamps ts/seq for replay ordering; the signed kill
     // keeps the author's own ts/seq for verifyKill() at every downstream node.
-    if (this._applyKill(role, topicBig, { msgId: target, killTs: ts, signer: lc(kill.signerPubkey), seq, kill, authorTs: kill.ts }, cut) === false) {
+    if (this._applyKill(role, topicBig, { msgId: target, killTs: ts, signer: lc(kill.signerPubkey), seq, kill, authorTs: kill.ts, authorSeq: kill.seq }, cut) === false) {
       role.seq = prevSeq; role.lastTs = prevTs; role.lastDemandAt = prevDemandAt;   // the stamp above did not commit
       this._cutDisposition(topicBig, T.KILL, payload);          // forwarded, not ingested: no ack from here
       return 'consumed';
