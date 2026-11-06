@@ -1272,7 +1272,8 @@ export const wireHandlersMethods = {
         // be retained or re-fanned (Aster B1). A proof that fails is stripped, so
         // _applyKill installs the tombstone WITHOUT an unverified/cross-carrier proof.
         let mm = m;
-        if (this._tombAuthority && m.kill && !(await this._taVerifyBoundKill(topicBig, m))) { const { kill, ...rest } = m; mm = rest; }
+        if (this._killProofs && m.kill && !(await this._verifyKillProof(role, topicBig, m))) { const { kill, ...rest } = m; mm = rest; }
+        else if (!this._killProofs && m.kill) { const { kill, ...rest } = m; mm = rest; }
         this._applyKill(role, topicBig, mm, null, (deliverAccepted && decision) ? decision.g : null);
         continue;
       }
@@ -1389,7 +1390,7 @@ export const wireHandlersMethods = {
     // set. Carries killTs+signer so the receiver's tombstone matches.
     const dels = [];
     for (const [tgt, tomb] of role.tombstones) {
-      if ((tomb?.exp ?? 0) > this._now()) dels.push({ del: true, msgId: tgt, killTs: tomb.killTs, signer: tomb.signer ?? null, publishTs: tomb.killTs, seq: tomb.seq, ...(this._tombAuthority && tomb.kill ? { kill: tomb.kill } : {}) });
+      if ((tomb?.exp ?? 0) > this._now()) dels.push({ del: true, msgId: tgt, killTs: tomb.killTs, signer: tomb.signer ?? null, publishTs: tomb.killTs, seq: tomb.seq, ...(this._killProofs && tomb.kill ? { kill: tomb.kill } : {}) });
     }
     if (dels.length) {
       sent = true;
@@ -1459,7 +1460,7 @@ export const wireHandlersMethods = {
     // also checks the signer and STRIPS an unverified proof before it reaches here). This
     // is the synchronous binding gate; a mismatched proof is never retained or re-fanned.
     let proof = null;
-    if (this._tombAuthority && m.kill && typeof m.kill.msgId === 'string' && m.kill.msgId === target) {
+    if (this._killProofs && m.kill && typeof m.kill.msgId === 'string' && m.kill.msgId === target) {
       try { if (m.kill.topicId != null && idBig(m.kill.topicId) === topicBig) proof = m.kill; } catch { proof = null; }
     }
     // When a proof is retained, the proof's VERIFIED signer is authoritative and stamps

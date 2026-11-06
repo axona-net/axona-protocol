@@ -20,6 +20,8 @@ import {
 } from './constants.js';
 import { idHex, idBig, lc, isHexId } from './ids.js';
 import { isMetricTopicName } from './metrics.js';
+import { verifyKill } from './kill.js';
+import { canonical } from './post.js';
 
 // 4.131.0: is author stamp (ts, seq) strictly AFTER (bTs, bSeq) on ONE author's
 // clock? AxonaPeer draws pub and kill seq from one monotone _nextPubSeq while ts
@@ -238,11 +240,33 @@ export const topicStoreMethods = {
   // MIGRATION (replicate, pull-up/replay-up, graceful handoff) must carry these
   // alongside `msgs`: a node that adopts cached history without the matching tombstones
   // would resurrect a killed message and serve it to a late joiner (the kill-leak class).
+  // 4.131.0 SIGNED-KILL PROOF CARRIAGE: verify + BIND a propagated proof to its
+  // carrier before anything may retain or re-fan it. Bound = the proof names the
+  // carrier's msgId, this topic, and a signer equal to the carrier's. A proof whose
+  // canonical bytes equal the one this node already holds was verified when it was
+  // retained, so a renewal re-send costs no signature check; any altered field
+  // (ts, seq, msgId...) changes the bytes and is verified afresh. Returns the
+  // proof, or null (the caller strips it). Observes into the shadow if built.
+  async _verifyKillProof(role, topicBig, marker) {
+    try {
+      const k = marker && marker.kill;
+      if (!k || typeof k.msgId !== 'string' || k.msgId !== marker.msgId) return null;
+      let bound = false; try { bound = k.topicId != null && idBig(k.topicId) === topicBig; } catch { bound = false; }
+      if (!bound || marker.signer == null) return null;
+      const held = role?.tombstones?.get(marker.msgId)?.kill;
+      if (held && canonical(held) === canonical(k)) return held;
+      const v = await verifyKill(k);
+      if (!v.ok || lc(marker.signer) !== lc(v.signerPubkey)) return null;
+      if (this._tombAuthority) { try { this._taObserveKill(topicBig, k, v.signerPubkey); } catch { /* shadow never throws into the hot path */ } }
+      return k;
+    } catch { return null; }
+  },
+
   _activeDels(role) {
     const now = this._now();
     const dels = [];
     for (const [tgt, tomb] of (role?.tombstones ?? [])) {
-      if ((tomb?.exp ?? 0) > now) dels.push({ del: true, msgId: tgt, killTs: tomb.killTs, signer: tomb.signer ?? null, seq: tomb.seq, publishTs: tomb.killTs, ...(this._tombAuthority && tomb.kill ? { kill: tomb.kill } : {}) });
+      if ((tomb?.exp ?? 0) > now) dels.push({ del: true, msgId: tgt, killTs: tomb.killTs, signer: tomb.signer ?? null, seq: tomb.seq, publishTs: tomb.killTs, ...(this._killProofs && tomb.kill ? { kill: tomb.kill } : {}) });
     }
     return dels;
   },
@@ -263,7 +287,8 @@ export const topicStoreMethods = {
         // WITHOUT an unverified/cross-carrier proof. Awaited so verification completes
         // before retention; a verified proof also observes into the shadow authority.
         let dd = d;
-        if (this._tombAuthority && d.kill && !(await this._taVerifyBoundKill(topicBig, d))) { const { kill, ...rest } = d; dd = rest; }
+        if (this._killProofs && d.kill && !(await this._verifyKillProof(role, topicBig, d))) { const { kill, ...rest } = d; dd = rest; }
+        else if (!this._killProofs && d.kill) { const { kill, ...rest } = d; dd = rest; }
         if (this._applyKill(role, topicBig, dd, cut, genTag) === false) return false;
       }
     }
