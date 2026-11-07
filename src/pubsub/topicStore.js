@@ -182,15 +182,21 @@ export const topicStoreMethods = {
     if (!tomb.signer) return { kind: 'suppress', tomb };              // signer-less tombstone (defensive)
     let author = null, sentTs = null, sentSeq = null;
     try { const e = JSON.parse(json); author = e?.signerPubkey ?? null; sentTs = e?.ts; sentSeq = e?.seq; } catch { /* */ }
-    if (!author || lc(author) !== lc(tomb.signer)) return { kind: 'revoke', tomb };
+    // 4.131.0 (Orion KP-1 vs the S2 upgrade): a tombstone keeps the signer it was
+    // installed with and records verified kill proofs from OTHER signers as claims.
+    // Only the body proves authorship (msgId binds the publisher), so the body
+    // decides: its author must be the tombstone's signer or a verified claimant.
+    // Neither a foreign valid kill nor a poisoned carrier signer can re-attribute it.
+    const claim = (author && lc(author) !== lc(tomb.signer)) ? tomb.claims?.get(lc(author)) : null;
+    if (!author || (lc(author) !== lc(tomb.signer) && !claim)) return { kind: 'revoke', tomb };
     // The kill's own signed (ts, seq), where this node knows it: authorTs at the
     // root that verified it, or a retained verified proof. A stamp is the
     // sender's word (DELIVER, REPLAYUP carry an unsigned publishTs), so where
     // the author's kill time is known a copy must ALSO be after it on the
     // author's clock: a validly signed pre-kill body replayed with a forged
     // stamp stays dead (Orion e47eb97c).
-    const aTs = Number.isFinite(tomb.authorTs) ? tomb.authorTs : (Number.isFinite(tomb.kill?.ts) ? tomb.kill.ts : null);
-    const aSeq = Number.isFinite(tomb.authorTs) ? tomb.authorSeq : tomb.kill?.seq;
+    const aTs = claim ? claim.ts : (Number.isFinite(tomb.authorTs) ? tomb.authorTs : (Number.isFinite(tomb.kill?.ts) ? tomb.kill.ts : null));
+    const aSeq = claim ? claim.seq : (Number.isFinite(tomb.authorTs) ? tomb.authorSeq : tomb.kill?.seq);
     let after = false;
     // Where the author's kill time is NOT known here (every node but the verifying
     // root, while tombstoneAuth proof carriage is off by default), a stamp may
@@ -201,7 +207,7 @@ export const topicStoreMethods = {
     // resurrect a pre-kill body on a claimed stamp).
     if (Number.isFinite(stampTs)) after = Number.isFinite(tomb.killTs) && stampTs > tomb.killTs && (aTs === null ? stampTrusted === true : authorAfter(sentTs, sentSeq, aTs, aSeq));
     else if (aTs !== null) after = authorAfter(sentTs, sentSeq, aTs, aSeq);
-    if (after) return { kind: 'supersede', tomb, stampTs, sentTs };
+    if (after) return { kind: 'supersede', tomb, stampTs, sentTs, aTs, aSeq };
     // Orion P2: a proof-less node that refuses a NEWER stamp it cannot vouch for
     // did not "hold" that body; say so, so a transfer's accounting stays honest.
     const unvouchedNewer = aTs === null && Number.isFinite(stampTs) && Number.isFinite(tomb.killTs) && stampTs > tomb.killTs;
@@ -219,8 +225,8 @@ export const topicStoreMethods = {
     // one author clock; bounded by the tombstone's own expiry.
     // Orion P4: the author's kill time comes from authorTs OR a retained verified
     // proof, exactly as _tombstoneVerdict reads it.
-    const aTs = Number.isFinite(tomb.authorTs) ? tomb.authorTs : (Number.isFinite(tomb.kill?.ts) ? tomb.kill.ts : null);
-    const aSeq = Number.isFinite(tomb.authorTs) ? tomb.authorSeq : tomb.kill?.seq;
+    const aTs = Number.isFinite(v.aTs) ? v.aTs : (Number.isFinite(tomb.authorTs) ? tomb.authorTs : (Number.isFinite(tomb.kill?.ts) ? tomb.kill.ts : null));
+    const aSeq = Number.isFinite(v.aTs) ? v.aSeq : (Number.isFinite(tomb.authorTs) ? tomb.authorSeq : tomb.kill?.seq);
     if (aTs !== null) {
       const sup = (role.superseded ??= new Map());
       sup.delete(msgId);
@@ -253,8 +259,12 @@ export const topicStoreMethods = {
       if (!k || typeof k.msgId !== 'string' || k.msgId !== marker.msgId) return null;
       let bound = false; try { bound = k.topicId != null && idBig(k.topicId) === topicBig; } catch { bound = false; }
       if (!bound || marker.signer == null) return null;
-      const held = role?.tombstones?.get(marker.msgId)?.kill;
-      if (held && canonical(held) === canonical(k)) return held;
+      // A proof is bound to ITS carrier signer here. Whether it becomes the
+      // tombstone's proof or only a claim is _applyKill's decision (Orion KP-1):
+      // a foreign signer's valid kill never re-attributes a tombstone.
+      const cur = role?.tombstones?.get(marker.msgId);
+      const held = (cur?.kill && lc(cur.kill.signerPubkey) === lc(marker.signer)) ? cur.kill : cur?.claims?.get(lc(marker.signer));
+      if (held && canonical(held) === canonical(k)) return lc(marker.signer) === lc(held.signerPubkey) ? held : null;   // Aster fbfd8256: the shortcut binds the carrier signer too
       const v = await verifyKill(k);
       if (!v.ok || lc(marker.signer) !== lc(v.signerPubkey)) return null;
       if (this._tombAuthority) { try { this._taObserveKill(topicBig, k, v.signerPubkey); } catch { /* shadow never throws into the hot path */ } }
@@ -262,11 +272,22 @@ export const topicStoreMethods = {
     } catch { return null; }
   },
 
+  // Verify the claims a marker carries: each a separate signed kill of THIS msgId
+  // on THIS topic, its own signer. Returns the verified subset (cap 4).
+  async _verifyKillClaims(role, topicBig, marker) {
+    const out = [];
+    for (const k of (Array.isArray(marker?.claims) ? marker.claims.slice(0, 4) : [])) {
+      const v = await this._verifyKillProof(role, topicBig, { msgId: marker.msgId, signer: k?.signerPubkey ?? null, kill: k });
+      if (v) out.push(v);
+    }
+    return out;
+  },
+
   _activeDels(role) {
     const now = this._now();
     const dels = [];
     for (const [tgt, tomb] of (role?.tombstones ?? [])) {
-      if ((tomb?.exp ?? 0) > now) dels.push({ del: true, msgId: tgt, killTs: tomb.killTs, signer: tomb.signer ?? null, seq: tomb.seq, publishTs: tomb.killTs, ...(this._killProofs && tomb.kill ? { kill: tomb.kill } : {}) });
+      if ((tomb?.exp ?? 0) > now) dels.push({ del: true, msgId: tgt, killTs: tomb.killTs, signer: tomb.signer ?? null, seq: tomb.seq, publishTs: tomb.killTs, ...(this._killProofs && tomb.kill ? { kill: tomb.kill } : {}), ...(this._killProofs && tomb.claims?.size ? { claims: [...tomb.claims.values()] } : {}) });
     }
     return dels;
   },
@@ -289,6 +310,7 @@ export const topicStoreMethods = {
         let dd = d;
         if (this._killProofs && d.kill && !(await this._verifyKillProof(role, topicBig, d))) { const { kill, ...rest } = d; dd = rest; }
         else if (!this._killProofs && d.kill) { const { kill, ...rest } = d; dd = rest; }
+        if (dd.claims) { const { claims, ...rest } = dd; dd = this._killProofs ? { ...rest, claims: await this._verifyKillClaims(role, topicBig, dd) } : rest; }
         if (this._applyKill(role, topicBig, dd, cut, genTag) === false) return false;
       }
     }

@@ -6,7 +6,8 @@
 //   K1a  a re-sent pre-republish KILL at the root is acked as settled; the body stays
 //   K1c  CONTROL: a new kill signed after the republication still retracts it
 //   K1b  a propagated tombstone stamped below the held body is ignored
-//   K1d  CONTROL: a propagated tombstone stamped above the held body still applies
+//   K1e  the superseded kill re-stamped above the held body is ignored (Orion KP-2)
+//   K1d  CONTROL: a NEWER signed kill stamped above the held body still applies
 //   K2   a live subscriber sees pub1, kill1, pub2, kill2 (4 events) and its since
 //        floor reaches pub2's stamp; a stale kill1 replayed after pub2 is not delivered
 //   K2c  CONTROL: a body replayed at or below its delivered kill stays dropped;
@@ -69,9 +70,13 @@ console.log('fence_republish_after_kill_paths');
   const heldTs = role.cache.find(c => c.msgId === e2.msgId)?.publishTs;
   await am._syncIngest({ topicId: topicHex, from: '0'.repeat(65) + 'b', msgs: [], dels: stale }, { targetId: 10n }, 'REPLICATE');
   check('K1b: a tombstone stamped below the held body is ignored', role.cacheIds.has(e2.msgId) && !role.tombstones.has(e2.msgId), JSON.stringify({ killTs: stale[0]?.killTs, heldTs }));
-  const newer = stale.map(d => ({ ...d, killTs: heldTs + 1, publishTs: heldTs + 1 }));
+  const restamped = stale.map(d => ({ ...d, killTs: heldTs + 1, publishTs: heldTs + 1 }));   // the OLD signed kill, re-stamped above the body
+  await am._syncIngest({ topicId: topicHex, from: '0'.repeat(65) + 'b', msgs: [], dels: restamped }, { targetId: 10n }, 'REPLICATE');
+  check('K1e: the superseded kill re-stamped above the body is ignored (Orion KP-2)', role.cacheIds.has(e2.msgId) && !role.tombstones.has(e2.msgId));
+  const k2 = await buildKill({ topicId: topicHex, msgId: e2.msgId, identity: alice, ts: clock.t + 500, seq: 4 });
+  const newer = [{ del: true, msgId: e2.msgId, killTs: heldTs + 1, publishTs: heldTs + 1, signer: alice.pubkeyHex.toLowerCase(), seq: 9, kill: k2 }];
   await am._syncIngest({ topicId: topicHex, from: '0'.repeat(65) + 'b', msgs: [], dels: newer }, { targetId: 10n }, 'REPLICATE');
-  check('K1d CONTROL: a tombstone stamped above the held body still retracts it', !role.cacheIds.has(e2.msgId) && role.tombstones.has(e2.msgId));
+  check('K1d CONTROL: a NEWER signed kill stamped above the held body still retracts it', !role.cacheIds.has(e2.msgId) && role.tombstones.has(e2.msgId));
 }
 // K2 + K2c — live subscriber
 {

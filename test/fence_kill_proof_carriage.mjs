@@ -13,8 +13,18 @@
 //   C8  hostile proofs are stripped: copied signature over an altered ts, another
 //       msgId, another topic, a carrier signer that does not match
 //   C8b the held-proof shortcut refuses an altered copy carrying the same signature
+//   C8c the held-proof shortcut also binds the carrier signer (Aster fbfd8256)
+//   C8d a forged claim is stripped, never recorded
 //   C9  a proof-less tombstone is upgraded when a verified proof arrives
 //   C10 killProofs:false carries no proof (proof-less, fail closed)
+//   KP1 another author's VALID kill never re-attributes a tombstone: it is recorded
+//       as a CLAIM; the arriving body's author decides (Orion 28a6ac06). The real
+//       author's pre-kill body stays dead, and under a poisoned signer the real
+//       author's claim still authorizes the kill (the S2 guarantee)
+//   KP2 a merge winner holding the republication ignores the loser's copy of the
+//       superseded kill re-stamped above it (no splice, body counted held)
+//   KP3 the superseded kill never attaches to a later proof-less kill2 tombstone,
+//       so it cannot rewind that tombstone's author time
 //
 // Run: node test/fence_kill_proof_carriage.mjs
 import { AxonaManager } from '../src/pubsub/AxonaManager.js';
@@ -117,7 +127,13 @@ console.log('fence_kill_proof_carriage');
   await V.am._applyDels(vr, topicBig, [good]);
   const altered = { ...good, kill: { ...good.kill, ts: good.kill.ts + 123 } };
   check('C8b: a node holding the proof refuses an altered copy with the same signature', vr.tombstones.get(good.msgId)?.kill && (await V.am._verifyKillProof(vr, topicBig, altered)) === null);
+  check('C8c: the identical held proof under a different carrier signer is refused (Aster fbfd8256)', (await V.am._verifyKillProof(vr, topicBig, { ...good, signer: bob.pubkeyHex.toLowerCase() })) === null);
   check('C8b CONTROL: the identical proof is vouched for from the held copy', (await V.am._verifyKillProof(vr, topicBig, good)) === vr.tombstones.get(good.msgId).kill);
+  // C8d: a forged claim (altered ts under a copied signature) is stripped, never recorded
+  const F = node(23n, clock); const fr = F.am._becomeRoot(topicBig, 'fence'); fr.isRoot = false;
+  const bobK = await buildKill({ topicId: topicHex, msgId: good.msgId, identity: bob, ts: good.kill.ts, seq: 3 });
+  await F.am._applyDels(fr, topicBig, [{ ...good, claims: [{ ...bobK, ts: bobK.ts + 77 }] }]);
+  check('C8d: a forged claim is stripped, never recorded', fr.tombstones.has(good.msgId) && !fr.tombstones.get(good.msgId).claims?.size);
   // C9: upgrade a proof-less tombstone
   const U = node(16n, clock); const ur = U.am._becomeRoot(topicBig, 'fence'); ur.isRoot = false;
   const { kill, ...bare } = good;
@@ -130,6 +146,60 @@ console.log('fence_kill_proof_carriage');
   // C10: off switch
   const clock = { t: T0 }; const s = await scene(clock, { killProofs: false });
   check('C10: killProofs:false carries no proof', s.dels.length === 1 && !s.dels[0].kill);
+}
+{
+  // KP1 — signer hijack
+  const clock = { t: T0 }; const s = await scene(clock);
+  const good = s.dels[0]; const { kill: _k, ...bare } = good;
+  const N = node(18n, clock); const nr = N.am._becomeRoot(topicBig, 'fence'); nr.isRoot = false;
+  await N.am._applyDels(nr, topicBig, [bare]);                               // proof-less tombstone, signer alice
+  const bobKill = await buildKill({ topicId: topicHex, msgId: good.msgId, identity: bob, ts: good.kill.ts + 1, seq: 7 });
+  const hijack = { ...bare, signer: bob.pubkeyHex.toLowerCase(), kill: bobKill };
+  await N.am._applyDels(nr, topicBig, [hijack]);
+  const t1 = nr.tombstones.get(good.msgId);
+  check('KP1: a foreign valid kill becomes a CLAIM, never the tombstone\'s signer or proof', t1 && t1.signer === alice.pubkeyHex.toLowerCase() && !t1.kill && t1.claims?.get(bob.pubkeyHex.toLowerCase())?.signature === bobKill.signature, JSON.stringify({ signer: t1?.signer?.slice(0, 8), kill: !!t1?.kill, claims: t1?.claims?.size }));
+  const r = await N.am._ingestStamped(nr, { msgId: s.e1.msgId, json: JSON.stringify(s.e1), publishTs: s.killTs - 1, seq: 1 }, N.am._cutCapture(nr));
+  check('KP1: the real author\'s pre-kill body stays dead (no revoke)', nr.tombstones.has(s.e1.msgId) && !nr.cacheIds.has(s.e1.msgId), String(r));
+  // at a root: a direct KILL from bob on alice's tombstone
+  const Rt = node(19n, clock); const rr = Rt.am._becomeRoot(topicBig, 'fence');
+  await Rt.am._applyDels(rr, topicBig, [bare]);
+  await Rt.am._onKill({ topicId: topicHex, kill: bobKill }, { targetId: 19n, fromId: 20n, isTerminal: true });
+  const rt = rr.tombstones.get(good.msgId);
+  check('KP1: at a root another signer\'s kill is recorded only as a claim', rt?.signer === alice.pubkeyHex.toLowerCase() && !rt?.kill && rt?.claims?.has(bob.pubkeyHex.toLowerCase()));
+  const r2 = await Rt.am._ingestStamped(rr, { msgId: s.e1.msgId, json: JSON.stringify(s.e1), publishTs: s.killTs - 1, seq: 1 }, Rt.am._cutCapture(rr));
+  check('KP1: ...and alice\'s pre-kill body stays dead there too', rr.tombstones.has(s.e1.msgId) && !rr.cacheIds.has(s.e1.msgId), String(r2));
+  // a claim decides for its own author: a body BY BOB under bob's claim is suppressed, a body by a third key revokes
+  const carol = await createAuthorIdentity();
+  const eCarol = await buildEnvelope({ topic: TOPIC, message: 'carol', identity: carol, ts: clock.t, seq: 1 });
+  const P = node(22n, clock); const pr = P.am._becomeRoot(topicBig, 'fence'); pr.isRoot = false;
+  pr.tombstones.set(eCarol.msgId, { exp: clock.t + 600_000, killTs: clock.t + 10, signer: alice.pubkeyHex.toLowerCase(), seq: 1 });
+  const carolKill = await buildKill({ topicId: topicHex, msgId: eCarol.msgId, identity: carol, ts: clock.t + 5, seq: 2 });
+  await P.am._applyDels(pr, topicBig, [{ del: true, msgId: eCarol.msgId, killTs: clock.t + 10, seq: 1, signer: carol.pubkeyHex.toLowerCase(), kill: carolKill }]);
+  const v = P.am._tombstoneVerdict(pr, eCarol.msgId, JSON.stringify(eCarol));
+  check('KP1 S2: a poisoned signer cannot revive the real author\'s killed body (her claim authorizes the kill)', v?.kind === 'suppress', JSON.stringify(v?.kind));
+}
+{
+  // KP2 — merge winner keeps the republication against the loser's re-stamped superseded kill
+  const clock = { t: T0 }; const s = await scene(clock);
+  const W = s.R; const wrole = s.role;
+  check('KP2: the winner recorded the superseded kill', wrole.superseded?.get(s.e2.msgId)?.authorTs === s.k1.ts);
+  const loserDel = { ...s.dels[0], killTs: s.stamped.publishTs + 500, publishTs: s.stamped.publishTs + 500, seq: 99 };
+  await W.am._applyDels(wrole, topicBig, [loserDel]);
+  check('KP2: the winner keeps the republication and installs no tombstone', wrole.cacheIds.has(s.e2.msgId) && !wrole.tombstones.has(s.e2.msgId));
+}
+{
+  // KP3 — superseded kill1 cannot downgrade a proof-less kill2 tombstone
+  const clock = { t: T0 }; const s = await scene(clock);
+  const K = node(21n, clock); const kr = K.am._becomeRoot(topicBig, 'fence'); kr.isRoot = false;
+  await K.am._applyDels(kr, topicBig, s.dels);                                 // kill1 with proof
+  await K.am._ingestStampedBatch(kr, [s.stamped], K.am._cutCapture(kr));      // pub2 supersedes kill1 (records superseded)
+  const kill2Ts = s.stamped.publishTs + 1000;
+  kr.cache = kr.cache.filter(c => c.msgId !== s.e2.msgId); kr.cacheIds.delete(s.e2.msgId);
+  kr.tombstones.set(s.e2.msgId, { exp: clock.t + 600_000, killTs: kill2Ts, signer: alice.pubkeyHex.toLowerCase(), seq: 5 });   // proof-less kill2 (e.g. via a 4.130 hop)
+  await K.am._applyDels(kr, topicBig, s.dels);                                 // the old kill1 proof arrives again
+  check('KP3: the superseded kill1 does not attach to the kill2 tombstone', kr.tombstones.has(s.e2.msgId) && !kr.tombstones.get(s.e2.msgId).kill);
+  const r = await K.am._ingestStamped(kr, { ...s.stamped, publishTs: kill2Ts + 1 }, K.am._cutCapture(kr));
+  check('KP3: killed pub2 replayed with a later stamp stays dead', kr.tombstones.has(s.e2.msgId) && !kr.cacheIds.has(s.e2.msgId), String(r));
 }
 console.log(failed ? `\n${failed} FAILED of ${passed + failed}` : `\nall ${passed} passed`);
 process.exit(failed ? 1 : 0);

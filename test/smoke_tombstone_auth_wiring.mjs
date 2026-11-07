@@ -366,19 +366,27 @@ async function main() {
       lc(tombH(eH3.msgId)?.signer) === lc(kH3.signerPubkey) && !!fmH2 && lc(fmH2.signer) === lc(kH3.signerPubkey));
     await fab.settle();
 
-    // H3 (S2) — proof-less tombstone installed with a CONFLICTING prior signer (Mallory), then a
-    //           valid Alice proof upgrades it: the tombstone signer becomes Alice, and the
-    //           re-emitted marker is CONSISTENT (signer Alice + Alice proof), never poisoned.
+    // H3 (S2, reworked in 4.131.0 for Orion KP-1) — proof-less tombstone installed with a
+    //           CONFLICTING prior signer (Mallory), then a valid Alice proof arrives. A proof
+    //           never re-attributes a tombstone (that override is the KP-1 hijack); it is kept
+    //           as a verified CLAIM and re-emitted with the marker. S2's guarantee holds through
+    //           the body: Alice's body is suppressed (her claim authorizes the kill), so a
+    //           poisoned signer can no longer get her killed message revoked back to life.
     await rH.am._applyDels(rH.am.axonRoles.get(tH), tH, [{ del: true, msgId: eH2.msgId, killTs: fab.clock + 50, seq: 11, signer: mallory }]);   // unsigned, signer=Mallory
     check('H3a. proof-less tombstone carries the prior (Mallory) signer, no proof', tombH(eH2.msgId) && tombH(eH2.msgId).kill === undefined && lc(tombH(eH2.msgId).signer) === lc(mallory));
     const kH2 = await buildKill({ topicId: idHex(tH), msgId: eH2.msgId, seq: 12, identity: alice });
     fab.queue.length = 0;
     await deliverH({ del: true, msgId: eH2.msgId, killTs: fab.clock + 55, seq: 12, signer: kH2.signerPubkey, kill: kH2 });
     const fmH3 = fannedMarker(eH2.msgId);
-    check('H3b. S2 upgrade OVERRIDES the stale signer: tombstone signer is now the verified proof signer',
-      tombH(eH2.msgId)?.kill?.signature === kH2.signature && lc(tombH(eH2.msgId).signer) === lc(kH2.signerPubkey));
-    check('H3c. S2 upgrade re-emits a CONSISTENT marker (verified signer + its proof), never poisoned',
-      !!fmH3 && lc(fmH3.signer) === lc(kH2.signerPubkey) && fmH3.kill?.signature === kH2.signature);
+    const fannedClaim = (mid) => { for (const j of fab.queue) { const x = (j.payload?.msgs || []).find(y => y && y.del && y.msgId === mid && Array.isArray(y.claims)); if (x) return x; } return null; };
+    const fmC = fannedClaim(eH2.msgId);
+    check('H3b. the verified Alice proof is kept as a CLAIM; the recorded signer is not overridden (KP-1)',
+      tombH(eH2.msgId)?.claims?.get(lc(kH2.signerPubkey))?.signature === kH2.signature && lc(tombH(eH2.msgId).signer) === lc(mallory) && tombH(eH2.msgId).kill === undefined);
+    check('H3c. the re-emitted marker carries the verified claim (never a poisoned signer+proof pair)',
+      !!fmC && fmC.claims.some(k => k.signature === kH2.signature) && !(fmC.kill && lc(fmC.signer) !== lc(fmC.kill.signerPubkey)));
+    const rStamp = await rH.am._ingestStamped(rH.am.axonRoles.get(tH), { msgId: eH2.msgId, json: JSON.stringify(eH2), publishTs: fab.clock + 1, seq: 2 }, rH.am._cutCapture(rH.am.axonRoles.get(tH)));
+    check('H3d. S2 guarantee: Alice\'s killed body stays dead under the poisoned signer (her claim authorizes the kill)',
+      !!tombH(eH2.msgId) && !rH.am.axonRoles.get(tH).cacheIds.has(eH2.msgId), String(rStamp));
     await fab.settle();
 
     // H4 (S2 convergence — ACTUAL FUNNEL) — an INDEPENDENT second receiver WITH A ROLE ingests
@@ -391,10 +399,12 @@ async function main() {
     const rxRole = rx.am._becomeRoot(tH, 'second-receiver');
     const rxTomb = () => rx.am.axonRoles.get(tH)?.tombstones?.get(eH2.msgId);
     const rxb = rx.am.tombstoneAuthShadow();
-    await rx.am._onDeliver({ topicId: idHex(tH), from: idHex(nodeIds[7]), msgs: [fmH3] }, { targetId: rx.id });
+    await rx.am._onDeliver({ topicId: idHex(tH), from: idHex(nodeIds[7]), msgs: [fmC] }, { targetId: rx.id });
     const rxa = rx.am.tombstoneAuthShadow();
-    check('H4a. second receiver RETAINS the re-emitted consistent proof + verified signer via _onDeliver (shadow observed the kill)',
-      !!rxRole && rxTomb()?.kill?.signature === kH2.signature && lc(rxTomb().signer) === lc(kH2.signerPubkey) && rxa.stats.kills > rxb.stats.kills);
+    check('H4a. second receiver RETAINS the re-emitted verified claim via _onDeliver (shadow observed the kill)',
+      !!rxRole && rxTomb()?.claims?.get(lc(kH2.signerPubkey))?.signature === kH2.signature && rxa.stats.kills > rxb.stats.kills);
+    const rxStamp = await rx.am._ingestStamped(rxRole, { msgId: eH2.msgId, json: JSON.stringify(eH2), publishTs: fab.clock + 1, seq: 2 }, rx.am._cutCapture(rxRole));
+    check('H4c. at the second receiver Alice\'s killed body also stays dead', !!rxTomb() && !rxRole.cacheIds.has(eH2.msgId), String(rxStamp));
 
     const ry = nodes[6];
     const ryRole = ry.am._becomeRoot(tH, 'second-receiver-poison');
