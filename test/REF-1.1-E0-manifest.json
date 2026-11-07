@@ -5,7 +5,7 @@
     "onNotification",
     "onRoutedMessage"
   ],
-  "treeHash": "8817e0e3d4837afc1cc0da3bf9bea1c0461ecef9",
+  "treeHash": "75e072259d6dde7abe911d1055936ef8846dec8e",
   "filesScanned": 91,
   "summary": {
     "migration-target": 48,
@@ -511,7 +511,7 @@
     },
     {
       "file": "transport/web/index.js",
-      "line": 1185,
+      "line": 1188,
       "callee": "registerFrame",
       "receiver": "composite._b2door",
       "wire": "hello",
@@ -520,7 +520,7 @@
     },
     {
       "file": "transport/web/index.js",
-      "line": 1186,
+      "line": 1189,
       "callee": "registerFrame",
       "receiver": "composite._b2door",
       "wire": "hello-ack",
@@ -529,7 +529,7 @@
     },
     {
       "file": "transport/web/index.js",
-      "line": 1228,
+      "line": 1231,
       "callee": "registerFrame",
       "receiver": "composite._b3door",
       "wire": "hello",
@@ -538,7 +538,7 @@
     },
     {
       "file": "transport/web/index.js",
-      "line": 1229,
+      "line": 1232,
       "callee": "registerFrame",
       "receiver": "composite._b3door",
       "wire": "hello-sig",
@@ -547,7 +547,7 @@
     },
     {
       "file": "transport/web/index.js",
-      "line": 1233,
+      "line": 1236,
       "callee": "registerFrame",
       "receiver": "composite._b2door",
       "wire": "cap-attest",

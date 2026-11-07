@@ -1133,6 +1133,14 @@ export function webTransport({
       const cbv = bridgeCbv();
       if (!cbv) { log('auth-bridge-no-cbv', { label }); return; }
       const res = await verifyAuthHello(body, { cbv });
+      // Orion TR-1: the hello-ack is also async. Build it here, BEFORE the
+      // liveness check below, so no await sits between that check and binding
+      // the peer / reporting 'open'.
+      let ack = null;
+      if (res.ok && label === 'hello') {
+        try { ack = await buildAuthHello({ identity, cbv }); }
+        catch (err) { log('auth-bridge-ack-build-failed', { err: err.message }); }
+      }
       // The verify awaited; the socket that carried this hello may have closed
       // meanwhile (the close handler clears bridgeServerNonce, so bridgeCbv()
       // no longer matches the cbv captured above, or is null). A late result
@@ -1161,14 +1169,9 @@ export function webTransport({
       // Reply with OUR authenticated hello-ack over the same CBV (only
       // on the inbound 'hello' — the bridge's reply to our ack would
       // loop).
-      if (label === 'hello') {
-        try {
-          const ack = await buildAuthHello({ identity, cbv });
-          bridge.notify(BRIDGE_CONN_ID, 'hello-ack', ack)
-            .catch(err => log('auth-bridge-ack-send-failed', { err: err.message }));
-        } catch (err) {
-          log('auth-bridge-ack-build-failed', { err: err.message });
-        }
+      if (ack) {
+        bridge.notify(BRIDGE_CONN_ID, 'hello-ack', ack)
+          .catch(err => log('auth-bridge-ack-send-failed', { err: err.message }));
       }
 
       bridgeNodeIdBig  = nodeIdBig;

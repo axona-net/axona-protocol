@@ -711,7 +711,7 @@ export const wireHandlersMethods = {
     // root that is doing its job.
     if (role.cacheIds.has(env.msgId)) return { ok: true, msgId: env.msgId, dup: true };
     const tv = this._tombstoneVerdict(role, env.msgId, json);           // 4.131.0: decide now, commit a supersede only after the cache write (Aster R1)
-    if (tv?.kind === 'suppress') return { ok: true, msgId: env.msgId, suppressed: true };
+    if (tv?.kind === 'suppress') { if (tv.viaClaim) this._promoteClaim(role, env.msgId, tv); return { ok: true, msgId: env.msgId, suppressed: true }; }   // verified above
 
     // W'S OWN WRITES DURING A ROUND, FAIL CLOSED (dual-root 4(d)): they draw on
     // the reserve admitted with the header; past it the write is refused and
@@ -1040,7 +1040,7 @@ export const wireHandlersMethods = {
       this._log('warn', 'stamped-republish-unvouched', { msgId: String(m.msgId).slice(0, 12), publishTs: m.publishTs, killTs: tv.tomb?.killTs });
       return 'unvouched';
     }
-    if (tv?.kind === 'suppress') return 'held';                          // killed → don't resurrect via replay-up
+    if (tv?.kind === 'suppress') { if (tv.viaClaim) this._promoteClaim(role, m.msgId, tv); return 'held'; }   // killed → don't resurrect via replay-up (verified above)
     if (!this._cachePush(role, { msgId: m.msgId, publishTs: m.publishTs, json: m.json, seq: m.seq }, cut)) return 'refused';
     if (tv && role.cacheIds.has(m.msgId)) this._tombstoneCommit(role, m.msgId, tv);   // revoke or supersede, only once cached (Orion D3)
     // Phase 3 shadow: observe the VERIFIED body (env passed verifyEnvelope + the
@@ -1452,15 +1452,36 @@ export const wireHandlersMethods = {
     // whatever stamp the carrier gives it. With no tombstone standing it is
     // ignored outright (the republication stays cached, a merge counts it held);
     // with one standing it may not attach and rewind that tombstone's author time.
-    let staleProof = false;
-    if (role && m.kill && typeof m.kill.msgId === 'string' && m.kill.msgId === target) {
-      const sup = role.superseded?.get(target);
-      if (sup && sup.exp > this._now() && !authorAfter(m.kill.ts, m.kill.seq, sup.authorTs, sup.authorSeq)) {
-        if (!role.tombstones.has(target)) {
-          this._log('info', 'kill-superseded-ignored', { msgId: String(target).slice(0, 12), killAuthorTs: m.kill.ts, supersededTs: sup.authorTs });
-          return;
+    // Orion CL-3: the same rule binds every proof the marker carries, its kill
+    // AND its claims. Once a republication superseded a kill here, the only kill
+    // that can retract that msgId is one by the republication's author signed
+    // after the superseded kill; a foreign or older one is dropped.
+    const sup = role?.superseded?.get(target);
+    const supLive = !!(sup && sup.exp > this._now());
+    const staleK = (k) => supLive && ((sup.signer && lc(k?.signerPubkey ?? '') !== sup.signer) || !authorAfter(k?.ts, k?.seq, sup.authorTs, sup.authorSeq));
+    const mKill = (role && m.kill && typeof m.kill.msgId === 'string' && m.kill.msgId === target) ? m.kill : null;
+    const staleProof = !!(mKill && staleK(mKill));
+    if (supLive && Array.isArray(m.claims)) m = { ...m, claims: m.claims.filter(k => !staleK(k)) };
+    if (role && !role.tombstones.has(target)) {
+      if (staleProof) {
+        this._log('info', 'kill-superseded-ignored', { msgId: String(target).slice(0, 12), killAuthorTs: mKill.ts, supersededTs: sup.authorTs });
+        return;
+      }
+      // Orion CL-3b: a body held here proves its author. A propagated deletion of
+      // it must come from that author: their proof, their claim, or (proof-less
+      // legacy carrier) their signer. Any other signer's deletion is refused.
+      const held = role.cache.find(c => c.msgId === target);
+      if (held) {
+        let heldAuthor = null; try { heldAuthor = lc(JSON.parse(held.json)?.signerPubkey ?? '') || null; } catch { heldAuthor = null; }
+        if (heldAuthor) {
+          const byAuthor = (mKill && lc(mKill.signerPubkey) === heldAuthor)
+            || (this._killProofs && Array.isArray(m.claims) && m.claims.some(k => lc(k?.signerPubkey ?? '') === heldAuthor))
+            || (!mKill && lc(m.signer ?? '') === heldAuthor);
+          if (!byAuthor) {
+            this._log('warn', 'del-not-by-body-author', { msgId: String(target).slice(0, 12), signer: String(m.signer ?? '').slice(0, 10) });
+            return;
+          }
         }
-        staleProof = true;
       }
     }
     // A retracted message has no durability obligation left. Cancel it BEFORE
@@ -1496,7 +1517,9 @@ export const wireHandlersMethods = {
         const s = lc(k?.signerPubkey ?? '');
         if (!s || s === lc(tomb.signer ?? '')) continue;
         const map = (tomb.claims ??= new Map());
-        if (!map.has(s) && map.size < 4) { map.set(s, k); added++; }
+        const cur = map.get(s);
+        if (cur) { if (authorAfter(k.ts, k.seq, cur.ts, cur.seq)) { map.set(s, k); added++; } continue; }   // Orion CL-1c: a claimant's newer kill advances its claim
+        if (map.size < 4) { map.set(s, k); added++; }
       }
       return added;
     };
@@ -1511,6 +1534,19 @@ export const wireHandlersMethods = {
         if (role.isRoot && this._rootReplicas) { const bridge = (typeof this.dht.bridgeId === 'function') ? this.dht.bridgeId() : null; this._replicateRole(topicBig, role, bridge, this._now()).catch(() => {}); }
       }
     }
+    // Orion CL-1b: the SAME author's NEWER kill advances the standing tombstone
+    // (proof, stamp, expiry): otherwise a node holding kill1 ignores kill2 and a
+    // delayed copy of the killed republication supersedes the stale kill1.
+    if (role && existing && proof && existing.kill && lc(existing.signer ?? '') === proofSigner && authorAfter(proof.ts, proof.seq, existing.kill.ts, existing.kill.seq)) {
+      existing.kill = proof;
+      if (Number.isFinite(killTs) && killTs > (existing.killTs ?? 0)) { existing.killTs = killTs; if (Number.isFinite(seq)) existing.seq = seq; }
+      if (Number.isFinite(existing.authorTs)) { existing.authorTs = proof.ts; existing.authorSeq = proof.seq; }
+      existing.exp = this._now() + TTL_MS;
+      this._log('info', 'tombstone-advanced', { msgId: String(target).slice(0, 12), killAuthorTs: proof.ts });
+      this._fanout(role, { del: true, msgId: target, killTs: existing.killTs, signer: existing.signer, publishTs: existing.killTs, seq: existing.seq, kill: proof, ...(existing.claims?.size ? { claims: [...existing.claims.values()] } : {}) }, null);
+      if (role.isRoot && this._rootReplicas) { const bridge = (typeof this.dht.bridgeId === 'function') ? this.dht.bridgeId() : null; this._replicateRole(topicBig, role, bridge, this._now()).catch(() => {}); }
+      return;
+    }
     if (role && existing && proof && !existing.kill && (!existing.signer || lc(existing.signer) === proofSigner)) {   // Orion KP-1: never re-attribute a tombstone
       // B2 UPGRADE — a proof-less tombstone gains a verified, bound proof. Attach it and
       // converge it downstream (re-fan now + re-replicate; the replay / replicate /
@@ -1519,7 +1555,7 @@ export const wireHandlersMethods = {
       // so this is a PURE proof-attach and must not repeat them.
       existing.kill = proof;
       existing.signer = proofSigner;   // the proof's verified signer becomes authoritative (Aster S2) — no stale/conflicting carrier
-      this._fanout(role, { del: true, msgId: target, killTs: existing.killTs, signer: existing.signer, publishTs: existing.killTs, seq: existing.seq, kill: proof }, null);
+      this._fanout(role, { del: true, msgId: target, killTs: existing.killTs, signer: existing.signer, publishTs: existing.killTs, seq: existing.seq, kill: proof, ...(existing.claims?.size ? { claims: [...existing.claims.values()] } : {}) }, null);   // Orion CL-2: claims ride every fan-out
       if (role.isRoot && this._rootReplicas) {
         const bridge = (typeof this.dht.bridgeId === 'function') ? this.dht.bridgeId() : null;
         this._replicateRole(topicBig, role, bridge, this._now()).catch(() => {});
@@ -1542,7 +1578,7 @@ export const wireHandlersMethods = {
       // fan the delete down — carries killTs + signer + seq so each receiver records
       // an identical tombstone (consistent replay + ordering + provisional authorship);
       // flag-on it also carries the BOUND signed kill + its verified signer so receivers verify it.
-      this._fanout(role, { del: true, msgId: target, killTs, signer: tomb.signer, publishTs: killTs, seq, ...(proof ? { kill: proof } : {}) }, null);
+      this._fanout(role, { del: true, msgId: target, killTs, signer: tomb.signer, publishTs: killTs, seq, ...(proof ? { kill: proof } : {}), ...(tomb.claims?.size ? { claims: [...tomb.claims.values()] } : {}) }, null);   // Orion CL-2
       // Replicas/cohort aren't subscribers/children — they don't see the fan-out. Push the
       // new tombstone to the cohort EAGERLY (not on the next tick) so a co-hosting root or a
       // backup that promotes mid-window can't serve the killed body it already holds (the
@@ -1653,13 +1689,32 @@ export const wireHandlersMethods = {
     // generation or a retirement during the verify await refuses it, and a
     // refused duplicate is forwarded and NOT acked, exactly like a refused
     // fresh kill (Aster edfdd869).
-    const existingTomb = role.tombstones.get(target);
+    let existingTomb = role.tombstones.get(target);
+    // Orion CL-1a: the SAME author's NEWER kill is not a duplicate. It takes a
+    // fresh stamp below (its own authorTs), keeping the standing tombstone's
+    // claims; the old tombstone comes back if the cut refuses the new one.
+    let replacedTomb = null;
+    if (existingTomb && lc(existingTomb.signer ?? '') === lc(kill.signerPubkey)) {
+      const eTs = Number.isFinite(existingTomb.authorTs) ? existingTomb.authorTs : existingTomb.kill?.ts;
+      const eSeq = Number.isFinite(existingTomb.authorTs) ? existingTomb.authorSeq : existingTomb.kill?.seq;
+      if (Number.isFinite(eTs) && authorAfter(kill.ts, kill.seq, eTs, eSeq)) {
+        replacedTomb = existingTomb; role.tombstones.delete(target); existingTomb = null;
+      }
+    }
     // A kill from a signer other than the tombstone's (Orion KP-1) takes the
     // duplicate path below: _applyKill records it as a CLAIM, never as the
     // tombstone's signer or proof, and the body's author decides on arrival.
     if (existingTomb) {
       if (this._applyKill(role, topicBig, { msgId: target, killTs: existingTomb.killTs, signer: lc(kill.signerPubkey), seq: existingTomb.seq, kill }, cut) === false) {
         this._cutDisposition(topicBig, T.KILL, payload);        // forwarded, not ingested: no ack from here
+        return 'consumed';
+      }
+      // Orion CL-4: a foreign signer's kill is acked only if it was RECORDED as a
+      // claim. Refused at the claim cap, it is not acked, so that sender's flight
+      // keeps retrying (the arriving body's author settles it).
+      const ks = lc(kill.signerPubkey);
+      if (lc(existingTomb.signer ?? '') !== ks && !role.tombstones.get(target)?.claims?.has(ks)) {
+        this._log('warn', 'kill-claim-not-recorded', { target: String(target).slice(0, 12), claims: role.tombstones.get(target)?.claims?.size ?? 0 });
         return 'consumed';
       }
       this._sendIngestAck(meta?.fromId, role, target, 'kill', payload);
@@ -1673,8 +1728,9 @@ export const wireHandlersMethods = {
     // Pass the COMPLETE signed kill so _applyKill can retain + transport the proof
     // (blocker b). The root re-stamps ts/seq for replay ordering; the signed kill
     // keeps the author's own ts/seq for verifyKill() at every downstream node.
-    if (this._applyKill(role, topicBig, { msgId: target, killTs: ts, signer: lc(kill.signerPubkey), seq, kill, authorTs: kill.ts, authorSeq: kill.seq }, cut) === false) {
+    if (this._applyKill(role, topicBig, { msgId: target, killTs: ts, signer: lc(kill.signerPubkey), seq, kill, authorTs: kill.ts, authorSeq: kill.seq, ...(replacedTomb?.claims?.size ? { claims: [...replacedTomb.claims.values()] } : {}) }, cut) === false) {
       role.seq = prevSeq; role.lastTs = prevTs; role.lastDemandAt = prevDemandAt;   // the stamp above did not commit
+      if (replacedTomb && !role.tombstones.has(target)) role.tombstones.set(target, replacedTomb);   // CL-1a: the old tombstone stands
       this._cutDisposition(topicBig, T.KILL, payload);          // forwarded, not ingested: no ack from here
       return 'consumed';
     }

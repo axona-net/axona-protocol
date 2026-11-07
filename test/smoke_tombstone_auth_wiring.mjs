@@ -372,7 +372,13 @@ async function main() {
     //           as a verified CLAIM and re-emitted with the marker. S2's guarantee holds through
     //           the body: Alice's body is suppressed (her claim authorizes the kill), so a
     //           poisoned signer can no longer get her killed message revoked back to life.
-    await rH.am._applyDels(rH.am.axonRoles.get(tH), tH, [{ del: true, msgId: eH2.msgId, killTs: fab.clock + 50, seq: 11, signer: mallory }]);   // unsigned, signer=Mallory
+    // 4.131.0 (Orion CL-3b): a node HOLDING Alice's body refuses Mallory's deletion outright.
+    const rHrole = rH.am.axonRoles.get(tH);
+    await rH.am._applyDels(rHrole, tH, [{ del: true, msgId: eH2.msgId, killTs: fab.clock + 50, seq: 11, signer: mallory }]);
+    check('H3e. a node holding Alice\'s body refuses Mallory\'s deletion of it (CL-3b)', !tombH(eH2.msgId) && rHrole.cacheIds.has(eH2.msgId));
+    // The S2 case is a node that does NOT hold the body: model it by dropping the cached copy.
+    rHrole.cache = rHrole.cache.filter(c => c.msgId !== eH2.msgId); rHrole.cacheIds.delete(eH2.msgId);
+    await rH.am._applyDels(rHrole, tH, [{ del: true, msgId: eH2.msgId, killTs: fab.clock + 50, seq: 11, signer: mallory }]);   // unsigned, signer=Mallory
     check('H3a. proof-less tombstone carries the prior (Mallory) signer, no proof', tombH(eH2.msgId) && tombH(eH2.msgId).kill === undefined && lc(tombH(eH2.msgId).signer) === lc(mallory));
     const kH2 = await buildKill({ topicId: idHex(tH), msgId: eH2.msgId, seq: 12, identity: alice });
     fab.queue.length = 0;

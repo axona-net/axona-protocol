@@ -207,11 +207,25 @@ export const topicStoreMethods = {
     // resurrect a pre-kill body on a claimed stamp).
     if (Number.isFinite(stampTs)) after = Number.isFinite(tomb.killTs) && stampTs > tomb.killTs && (aTs === null ? stampTrusted === true : authorAfter(sentTs, sentSeq, aTs, aSeq));
     else if (aTs !== null) after = authorAfter(sentTs, sentSeq, aTs, aSeq);
-    if (after) return { kind: 'supersede', tomb, stampTs, sentTs, aTs, aSeq };
+    if (after) return { kind: 'supersede', tomb, stampTs, sentTs, aTs, aSeq, author: lc(author) };
     // Orion P2: a proof-less node that refuses a NEWER stamp it cannot vouch for
     // did not "hold" that body; say so, so a transfer's accounting stays honest.
     const unvouchedNewer = aTs === null && Number.isFinite(stampTs) && Number.isFinite(tomb.killTs) && stampTs > tomb.killTs;
-    return unvouchedNewer ? { kind: 'suppress', tomb, unvouchedNewer: true } : { kind: 'suppress', tomb };
+    const base = { kind: 'suppress', tomb, ...(claim ? { viaClaim: claim, author: lc(author) } : {}) };
+    return unvouchedNewer ? { ...base, unvouchedNewer: true } : base;
+  },
+
+  // Orion CL-4: a VERIFIED body suppressed through a claim has proved its author
+  // owns that claim. Promote it: the claimant becomes the tombstone's signer and
+  // its kill the tombstone's proof; the other claims are cleared (the author is
+  // now known), which also frees a cap a Sybil flood filled.
+  _promoteClaim(role, msgId, v) {
+    if (!role || !v?.viaClaim || role.tombstones.get(msgId) !== v.tomb) return false;
+    const tomb = v.tomb;
+    tomb.signer = v.author; tomb.kill = v.viaClaim; tomb.claims = new Map();
+    delete tomb.authorTs; delete tomb.authorSeq;
+    this._log?.('info', 'tombstone-claim-promoted', { msgId: String(msgId).slice(0, 12) });
+    return true;
   },
 
   // Commit a verdict. Re-checks that the tombstone is the one the verdict saw.
@@ -230,7 +244,7 @@ export const topicStoreMethods = {
     if (aTs !== null) {
       const sup = (role.superseded ??= new Map());
       sup.delete(msgId);
-      sup.set(msgId, { authorTs: aTs, authorSeq: aSeq, exp: tomb.exp });
+      sup.set(msgId, { authorTs: aTs, authorSeq: aSeq, exp: tomb.exp, ...(v.author ? { signer: v.author } : {}) });   // Orion CL-3: whose republication superseded it
       if (sup.size > 4096) sup.delete(sup.keys().next().value);
     }
     role.tombstones.delete(msgId);
