@@ -22,6 +22,11 @@
 //   CL6   a re-stamped pre-republish kill1 cannot retract a held pub2 where no superseded record
 //         exists (handoff heir): not by REPLAYUP, not by a direct KILL
 // (Orion d2a8e83e)
+//   CL7a  a merged marker {signer: foreign, kill: stale, claims: [author kill2]} retracts the
+//         winner's held pub2 through the author claim (the stale kill is dropped, not decisive)
+//   CL7b  the tombstone author's newer kill carried as a CLAIM on a foreign-signed marker
+//         advances that tombstone; a delayed killed pub2 then stays dead
+// (Orion 5e5e3e03)
 //
 // Run: node test/fence_kill_claims_state.mjs
 import { readFileSync } from 'node:fs';
@@ -221,6 +226,49 @@ console.log('fence_kill_claims_state');
   const k2 = await buildKill({ topicId: topicHex, msgId: p2.msgId, identity: alice, ts: T0 + 3000, seq: 4 });
   await Hh.am._onKill({ topicId: topicHex, kill: k2 }, meta(35n));
   check('CL6 CONTROL: the author\'s newer kill2 at the heir retracts pub2', !hr.cacheIds.has(p2.msgId) && hr.tombstones.has(p2.msgId));
+}
+{ // CL7a
+  const clock = { t: T0 }; const W = node(40n, clock); const w = W.am._becomeRoot(topicBig, 'f'); const msg = body();
+  const p1 = await buildEnvelope({ topic: TOPIC, message: msg, identity: alice, ts: T0, seq: 1 }); await W.am._ingestPublish(w, JSON.stringify(p1));
+  clock.t = T0 + 1000; const k1 = await buildKill({ topicId: topicHex, msgId: p1.msgId, identity: alice, ts: T0 + 1000, seq: 2 });
+  await W.am._onKill({ topicId: topicHex, kill: k1 }, meta(40n));
+  clock.t = T0 + 2000; const p2 = await buildEnvelope({ topic: TOPIC, message: msg, identity: alice, ts: T0 + 2000, seq: 3 }); await W.am._ingestPublish(w, JSON.stringify(p2));
+  const mal = await createAuthorIdentity();
+  const kMal = await buildKill({ topicId: topicHex, msgId: p2.msgId, identity: mal, ts: T0 + 500, seq: 1 });
+  const k2 = await buildKill({ topicId: topicHex, msgId: p2.msgId, identity: alice, ts: T0 + 3000, seq: 4 });
+  clock.t = T0 + 4000;
+  await W.am._applyDels(w, topicBig, [{ del: true, msgId: p2.msgId, killTs: T0 + 1, publishTs: T0 + 1, seq: 1, signer: mal.pubkeyHex.toLowerCase(), kill: kMal, claims: [k2] }]);
+  const t = w.tombstones.get(p2.msgId);
+  check('CL7a: the author claim retracts the held pub2 despite the stale foreign kill beside it', !w.cacheIds.has(p2.msgId) && t?.signer === A && t?.kill?.signature === k2.signature, JSON.stringify({ cached: w.cacheIds.has(p2.msgId), signer: t?.signer?.slice(0, 8) }));
+  check('CL7a: its root stamp is past the held body', t?.killTs > T0 + 2000, String(t?.killTs));
+}
+{ // CL7b
+  const clock = { t: T0 }; const B = node(41n, clock); const b = B.am._becomeRoot(topicBig, 'f'); b.isRoot = false; const msg = body();
+  const p1 = await buildEnvelope({ topic: TOPIC, message: msg, identity: alice, ts: T0, seq: 1 });
+  const k1 = await buildKill({ topicId: topicHex, msgId: p1.msgId, identity: alice, ts: T0 + 1000, seq: 2 });
+  await B.am._applyDels(b, topicBig, [{ del: true, msgId: p1.msgId, killTs: T0 + 1000, publishTs: T0 + 1000, seq: 2, signer: A, kill: k1 }]);
+  const p2 = await buildEnvelope({ topic: TOPIC, message: msg, identity: alice, ts: T0 + 2000, seq: 3 });
+  const k2 = await buildKill({ topicId: topicHex, msgId: p1.msgId, identity: alice, ts: T0 + 3000, seq: 4 });
+  const mal = await createAuthorIdentity();
+  const kMal = await buildKill({ topicId: topicHex, msgId: p1.msgId, identity: mal, ts: T0 + 100, seq: 1 });
+  await B.am._applyDels(b, topicBig, [{ del: true, msgId: p1.msgId, killTs: T0 + 3500, publishTs: T0 + 3500, seq: 5, signer: mal.pubkeyHex.toLowerCase(), kill: kMal, claims: [k2] }]);
+  const t = b.tombstones.get(p1.msgId);
+  check('CL7b: the author\'s newer kill carried as a claim advances the tombstone', t?.signer === A && t?.kill?.ts === k2.ts, JSON.stringify({ signer: t?.signer?.slice(0, 8), kts: t?.kill?.ts }));
+  const r = await B.am._ingestStamped(b, { msgId: p2.msgId, json: JSON.stringify(p2), publishTs: T0 + 2500, seq: 3 }, B.am._cutCapture(b));
+  check('CL7b: a delayed copy of the killed pub2 stays dead', b.tombstones.has(p2.msgId) && !b.cacheIds.has(p2.msgId), String(r));
+}
+{ // CL7a floor: a body cached through the relay DELIVER path (no lastTs advance, wireHandlers _onDeliver)
+  // on a child later promoted to root sits ahead of the root clock; the kill must still stamp past it
+  const clock = { t: T0 }; const W = node(42n, clock); const w = W.am._becomeRoot(topicBig, 'f'); const msg = body();
+  const p2 = await buildEnvelope({ topic: TOPIC, message: msg, identity: alice, ts: T0, seq: 3 });
+  w.isRoot = false; W.am._cachePush(w, { msgId: p2.msgId, publishTs: T0 + 9000, json: JSON.stringify(p2), seq: 3 }); w.isRoot = true;
+  const mal = await createAuthorIdentity();
+  const kMal = await buildKill({ topicId: topicHex, msgId: p2.msgId, identity: mal, ts: T0 + 500, seq: 1 });
+  const k2 = await buildKill({ topicId: topicHex, msgId: p2.msgId, identity: alice, ts: T0 + 3000, seq: 4 });
+  clock.t = T0 + 4000;
+  await W.am._applyDels(w, topicBig, [{ del: true, msgId: p2.msgId, killTs: T0 + 1, publishTs: T0 + 1, seq: 1, signer: mal.pubkeyHex.toLowerCase(), kill: kMal, claims: [k2] }]);
+  const t = w.tombstones.get(p2.msgId);
+  check('CL7a: a body cached ahead of the root clock (DELIVER path) is still killed with a stamp past it', !w.cacheIds.has(p2.msgId) && t?.killTs > T0 + 9000, JSON.stringify({ cached: w.cacheIds.has(p2.msgId), kts: t?.killTs }));
 }
 console.log(failed ? `\n${failed} FAILED of ${passed + failed}` : `\nall ${passed} passed`);
 process.exit(failed ? 1 : 0);

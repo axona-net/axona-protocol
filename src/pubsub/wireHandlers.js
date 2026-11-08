@@ -1445,9 +1445,19 @@ export const wireHandlersMethods = {
     const sup = role?.superseded?.get(target);
     const supLive = !!(sup && sup.exp > this._now());
     const staleK = (k) => supLive && ((sup.signer && lc(k?.signerPubkey ?? '') !== sup.signer) || !authorAfter(k?.ts, k?.seq, sup.authorTs, sup.authorSeq));
-    const mKill = (role && m.kill && typeof m.kill.msgId === 'string' && m.kill.msgId === target) ? m.kill : null;
-    const staleProof = !!(mKill && staleK(mKill));
+    let mKill = (role && m.kill && typeof m.kill.msgId === 'string' && m.kill.msgId === target) ? m.kill : null;
+    let staleProof = !!(mKill && staleK(mKill));
     if (supLive && Array.isArray(m.claims)) m = { ...m, claims: m.claims.filter(k => !staleK(k)) };
+    // Orion CL-7a: a stale kill may ride with a VALID claim by the republication's
+    // author (a merged loser's {signer: foreign, kill: stale, claims: [kill2]}).
+    // The stale kill is dropped; the surviving author claim decides.
+    if (staleProof && this._killProofs && sup?.signer && Array.isArray(m.claims)) {
+      const sc = m.claims.find(k => lc(k?.signerPubkey ?? '') === sup.signer) || null;
+      if (sc) {
+        const { kill: _stale, ...rest } = m; m = rest; mKill = null; staleProof = false;
+        if (!role.cache.some(c => c.msgId === target)) { m = { ...m, signer: sup.signer, kill: sc, claims: [] }; mKill = sc; }
+      }
+    }
     if (role && !role.tombstones.has(target)) {
       if (staleProof) {
         this._log('info', 'kill-superseded-ignored', { msgId: String(target).slice(0, 12), killAuthorTs: mKill.ts, supersededTs: sup.authorTs });
@@ -1486,7 +1496,7 @@ export const wireHandlersMethods = {
             }
             let kts = m.killTs, kseq = m.seq;
             if (!(Number.isFinite(kts) && Number.isFinite(held.publishTs) && kts > held.publishTs)) {
-              if (role.isRoot) { kts = Math.max(role.lastTs + 1, this._now()); role.lastTs = kts; kseq = ++role.seq; }
+              if (role.isRoot) { kts = Math.max(role.lastTs + 1, this._now(), (Number.isFinite(held.publishTs) ? held.publishTs : 0) + 1); role.lastTs = kts; kseq = ++role.seq; }   // Orion CL-7a: never at or below the held body
               else kts = (Number.isFinite(held.publishTs) ? held.publishTs : 0) + 1;
             }
             m = { ...m, signer: heldAuthor, kill: ak, killTs: kts, publishTs: kts, seq: kseq, claims: [] };
@@ -1521,7 +1531,7 @@ export const wireHandlersMethods = {
     // the tombstone + every proof-bearing marker we emit, so a receiver's _taVerifyBoundKill
     // (which now requires a present matching carrier signer) always accepts it — never an
     // internally inconsistent carrier (Aster S1/S2). Flag-off / proof-less keeps m.signer.
-    const proofSigner = proof ? lc(proof.signerPubkey) : null;
+    let proofSigner = proof ? lc(proof.signerPubkey) : null;
     const existing = role ? role.tombstones.get(target) : null;
     if (existing) own(existing);                      // a second obligation delivering the same deletion owns it too
     // Claims: verified kills of this msgId by signers OTHER than the tombstone's.
@@ -1543,7 +1553,14 @@ export const wireHandlersMethods = {
     if (role && existing) {
       const conflict = proof && existing.signer && lc(existing.signer) !== proofSigner ? [proof] : [];
       const added = addClaims(existing, [...conflict, ...carried]);
-      if (conflict.length) proof = null;                // a foreign proof is a claim, never this tombstone's proof
+      if (conflict.length) { proof = null; proofSigner = null; }   // a foreign proof is a claim, never this tombstone's proof
+      // Orion CL-7b: the tombstone's OWN author's newer kill can arrive as a claim
+      // on a foreign-signed marker. addClaims skips the tombstone's signer, so use
+      // it as this tombstone's proof: the advance / upgrade below then applies it.
+      if (!proof && existing.signer) {
+        const own = carried.find(k => lc(k?.signerPubkey ?? '') === lc(existing.signer) && k?.msgId === target);
+        if (own) { proof = own; proofSigner = lc(own.signerPubkey); }
+      }
       if (added) {
         this._log('info', 'tombstone-claim-added', { msgId: String(target).slice(0, 12), claims: existing.claims.size });
         this._fanout(role, { del: true, msgId: target, killTs: existing.killTs, signer: existing.signer, publishTs: existing.killTs, seq: existing.seq, ...(existing.kill ? { kill: existing.kill } : {}), claims: [...existing.claims.values()] }, null);
