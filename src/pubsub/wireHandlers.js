@@ -1436,26 +1436,12 @@ export const wireHandlersMethods = {
       this._log('info', 'cut-refused', { topic: idHex(topicBig).slice(0, 12), at: 'applyKill', msgId: String(target).slice(0, 12), gated: !!role.merge?.gate, gen: role.gen | 0, gen0: cut ? cut.gen0 : null });
       return false;
     }
-    // 4.131.0 (Orion RAK-1b): a propagated tombstone (fan-out, replay, union,
-    // handoff, merge) stamped BELOW the body this node holds retracts an earlier
-    // publication of the same msgId. Both are root stamps. Ignore it: no
-    // tombstone, no splice, no fan-out, no app kill.
-    if (role && !role.tombstones.has(target) && Number.isFinite(m.killTs)) {
-      const held = role.cache.find(c => c.msgId === target);
-      if (held && Number.isFinite(held.publishTs) && m.killTs < held.publishTs) {
-        this._log('info', 'tombstone-predates-body', { msgId: String(target).slice(0, 12), killTs: m.killTs, publishTs: held.publishTs });
-        return;
-      }
-    }
-    // 4.131.0 (Orion KP-2/KP-3): a carried proof that is NOT after the kill this
-    // node already superseded (role.superseded, RAK-1a) is that old kill again,
-    // whatever stamp the carrier gives it. With no tombstone standing it is
-    // ignored outright (the republication stays cached, a merge counts it held);
-    // with one standing it may not attach and rewind that tombstone's author time.
-    // Orion CL-3: the same rule binds every proof the marker carries, its kill
-    // AND its claims. Once a republication superseded a kill here, the only kill
-    // that can retract that msgId is one by the republication's author signed
-    // after the superseded kill; a foreign or older one is dropped.
+    // 4.131.0 (Orion KP-2/KP-3, CL-3): a carried proof (kill OR claim) that is NOT
+    // after the kill this node already superseded (role.superseded, RAK-1a) is
+    // that old kill again, whatever stamp the carrier gives it. Once a
+    // republication superseded a kill here, the only kill that can retract that
+    // msgId is one by the republication's author signed after the superseded
+    // kill; a foreign or older one is dropped.
     const sup = role?.superseded?.get(target);
     const supLive = !!(sup && sup.exp > this._now());
     const staleK = (k) => supLive && ((sup.signer && lc(k?.signerPubkey ?? '') !== sup.signer) || !authorAfter(k?.ts, k?.seq, sup.authorTs, sup.authorSeq));
@@ -1467,20 +1453,50 @@ export const wireHandlersMethods = {
         this._log('info', 'kill-superseded-ignored', { msgId: String(target).slice(0, 12), killAuthorTs: mKill.ts, supersededTs: sup.authorTs });
         return;
       }
-      // Orion CL-3b: a body held here proves its author. A propagated deletion of
-      // it must come from that author: their proof, their claim, or (proof-less
-      // legacy carrier) their signer. Any other signer's deletion is refused.
+      // A body held here proves its author (msgId binds the publisher), so the
+      // body decides whether this deletion is for it:
+      //  - CL-3b: it must come from that author: their proof, their claim, or
+      //    (proof-less legacy carrier) their signer. Any other is refused.
+      //  - CL-6: an author proof or claim must be AFTER the held body on the
+      //    author's clock; an older one retracts an earlier publication of the
+      //    same msgId, whatever stamp it carries (no superseded record needed:
+      //    a handoff heir or new backup holds none).
+      //  - CL-5b: a verified author proof or claim is authoritative, so the
+      //    root-stamp test (RAK-1b) does not apply to it: it becomes this
+      //    marker's signer and kill, stamped past the held body.
+      //  - RAK-1b: a proof-less legacy carrier stamped BELOW the held body
+      //    retracts an earlier publication. Ignore it.
       const held = role.cache.find(c => c.msgId === target);
       if (held) {
-        let heldAuthor = null; try { heldAuthor = lc(JSON.parse(held.json)?.signerPubkey ?? '') || null; } catch { heldAuthor = null; }
+        let heldAuthor = null, hTs = null, hSeq = null;
+        try { const e = JSON.parse(held.json); heldAuthor = lc(e?.signerPubkey ?? '') || null; hTs = e?.ts; hSeq = e?.seq; } catch { heldAuthor = null; }
         if (heldAuthor) {
-          const byAuthor = (mKill && lc(mKill.signerPubkey) === heldAuthor)
-            || (this._killProofs && Array.isArray(m.claims) && m.claims.some(k => lc(k?.signerPubkey ?? '') === heldAuthor))
-            || (!mKill && lc(m.signer ?? '') === heldAuthor);
-          if (!byAuthor) {
+          const byProof = !!(mKill && lc(mKill.signerPubkey) === heldAuthor);
+          const authorClaim = (!byProof && this._killProofs && Array.isArray(m.claims)) ? (m.claims.find(k => lc(k?.signerPubkey ?? '') === heldAuthor) || null) : null;
+          const byLegacy = !mKill && !authorClaim && lc(m.signer ?? '') === heldAuthor;
+          if (!byProof && !authorClaim && !byLegacy) {
             this._log('warn', 'del-not-by-body-author', { msgId: String(target).slice(0, 12), signer: String(m.signer ?? '').slice(0, 10) });
             return;
           }
+          const ak = byProof ? mKill : authorClaim;
+          if (ak) {
+            if (Number.isFinite(hTs) && authorAfter(hTs, hSeq, ak.ts, ak.seq)) {   // the held body is strictly AFTER this kill
+              this._log('info', 'kill-predates-held-body', { msgId: String(target).slice(0, 12), killAuthorTs: ak.ts, bodyTs: hTs });
+              return;
+            }
+            let kts = m.killTs, kseq = m.seq;
+            if (!(Number.isFinite(kts) && Number.isFinite(held.publishTs) && kts > held.publishTs)) {
+              if (role.isRoot) { kts = Math.max(role.lastTs + 1, this._now()); role.lastTs = kts; kseq = ++role.seq; }
+              else kts = (Number.isFinite(held.publishTs) ? held.publishTs : 0) + 1;
+            }
+            m = { ...m, signer: heldAuthor, kill: ak, killTs: kts, publishTs: kts, seq: kseq, claims: [] };
+          } else if (Number.isFinite(m.killTs) && Number.isFinite(held.publishTs) && m.killTs < held.publishTs) {
+            this._log('info', 'tombstone-predates-body', { msgId: String(target).slice(0, 12), killTs: m.killTs, publishTs: held.publishTs });
+            return;
+          }
+        } else if (Number.isFinite(m.killTs) && Number.isFinite(held.publishTs) && m.killTs < held.publishTs) {
+          this._log('info', 'tombstone-predates-body', { msgId: String(target).slice(0, 12), killTs: m.killTs, publishTs: held.publishTs });
+          return;
         }
       }
     }
@@ -1545,6 +1561,8 @@ export const wireHandlersMethods = {
       this._log('info', 'tombstone-advanced', { msgId: String(target).slice(0, 12), killAuthorTs: proof.ts });
       this._fanout(role, { del: true, msgId: target, killTs: existing.killTs, signer: existing.signer, publishTs: existing.killTs, seq: existing.seq, kill: proof, ...(existing.claims?.size ? { claims: [...existing.claims.values()] } : {}) }, null);
       if (role.isRoot && this._rootReplicas) { const bridge = (typeof this.dht.bridgeId === 'function') ? this.dht.bridgeId() : null; this._replicateRole(topicBig, role, bridge, this._now()).catch(() => {}); }
+      this._confirmPending(topicBig, target);          // Orion RAK-APP(c): the advanced kill confirms and reaches the app
+      this._deliverKillToApp(topicBig, target, existing.killTs, existing.seq);
       return;
     }
     if (role && existing && proof && !existing.kill && (!existing.signer || lc(existing.signer) === proofSigner)) {   // Orion KP-1: never re-attribute a tombstone
@@ -1656,7 +1674,7 @@ export const wireHandlersMethods = {
     // (ingest checks the tombstone's signer; a forged kill is revoked on mismatch).
     const cached = role.cache.find(c => c.msgId === target);
     if (cached) {
-      let author = null; try { author = JSON.parse(cached.json)?.signerPubkey ?? null; } catch { /* */ }
+      let author = null, bTs = null, bSeq = null; try { const e = JSON.parse(cached.json); author = e?.signerPubkey ?? null; bTs = e?.ts; bSeq = e?.seq; } catch { /* */ }
       if (!author || lc(author) !== lc(kill.signerPubkey)) {
         this._log('warn', 'drop-unauthorized-kill', { target: String(target).slice(0, 12) });
         return 'consumed';
@@ -1664,8 +1682,15 @@ export const wireHandlersMethods = {
       // 4.131.0 (Orion RAK-1a): when the held body REPUBLISHED a msgId whose
       // tombstone it superseded, a kill that is not after THAT superseded kill
       // on the author's clock is a re-sent copy of it (or older): settled, acked,
-      // never stamped or applied. Kill against kill only; a body's own ts is
-      // never compared with a kill (fixtures and multi-host authors skew).
+      // never stamped or applied.
+      // Orion CL-6 at a root that holds no superseded record (a promoted heir, a
+      // new backup): a kill the cached body is strictly AFTER, on the author's
+      // clock, retracts an earlier publication of this msgId. Settled, acked.
+      if (Number.isFinite(bTs) && Number.isFinite(kill.ts) && authorAfter(bTs, bSeq, kill.ts, kill.seq)) {
+        this._log('info', 'kill-predates-body', { target: String(target).slice(0, 12), killTs: kill.ts, bodyTs: bTs });
+        this._sendIngestAck(meta?.fromId, role, target, 'kill', payload);
+        return 'consumed';
+      }
       const sup = role.superseded?.get(target);
       if (sup && sup.exp > this._now()) {
         if (!authorAfter(kill.ts, kill.seq, sup.authorTs, sup.authorSeq)) {

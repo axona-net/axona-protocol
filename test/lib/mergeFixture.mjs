@@ -114,8 +114,12 @@ export async function signedPub(ctx, desc, k, seq = k + 1) {
   const env = await buildEnvelope({ topic: desc, message: { k }, seq, identity: author, ts: ctx.clock.t });
   return { env, json: JSON.stringify(env), msgId: env.msgId };
 }
-/** A signed kill of msgId on the topic, by the fixture author. */
-export async function signedKill(ctx, topicId, msgId, seq = 1) {
+/** A signed kill of msgId on the topic, by the fixture author. The default seq
+ *  is above any body the fixture signs (bodies take seq k+1): a real peer draws
+ *  pub and kill seq from ONE monotone counter, so a kill always follows the body
+ *  it kills on the author's clock, and 4.131.0 decides republication by that
+ *  clock (a kill the held body is strictly after is refused). */
+export async function signedKill(ctx, topicId, msgId, seq = 1_000_000) {
   return buildKill({ topicId: idHex(topicId), msgId, ts: ctx.clock.t, seq, identity: author });
 }
 /** Meta for a bare write that terminates at ctx.self, sent by `from`. */

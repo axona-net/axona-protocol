@@ -211,7 +211,7 @@ export const topicStoreMethods = {
     // Orion P2: a proof-less node that refuses a NEWER stamp it cannot vouch for
     // did not "hold" that body; say so, so a transfer's accounting stays honest.
     const unvouchedNewer = aTs === null && Number.isFinite(stampTs) && Number.isFinite(tomb.killTs) && stampTs > tomb.killTs;
-    const base = { kind: 'suppress', tomb, ...(claim ? { viaClaim: claim, author: lc(author) } : {}) };
+    const base = { kind: 'suppress', tomb, ...(claim ? { viaClaim: claim, author: lc(author), stampTs } : {}) };
     return unvouchedNewer ? { ...base, unvouchedNewer: true } : base;
   },
 
@@ -224,7 +224,16 @@ export const topicStoreMethods = {
     const tomb = v.tomb;
     tomb.signer = v.author; tomb.kill = v.viaClaim; tomb.claims = new Map();
     delete tomb.authorTs; delete tomb.authorSeq;
-    this._log?.('info', 'tombstone-claim-promoted', { msgId: String(msgId).slice(0, 12) });
+    // Orion CL-5a: the promoted kill must reach nodes holding the body, so its
+    // stamp moves past that body (a root takes a fresh stamp and seq slot; a
+    // non-root moves past the stamp it was shown) and it is re-fanned.
+    if (role.isRoot) { const ts = Math.max(role.lastTs + 1, this._now(), Number.isFinite(v.stampTs) ? v.stampTs + 1 : 0); role.lastTs = ts; tomb.killTs = ts; tomb.seq = ++role.seq; }
+    else if (Number.isFinite(v.stampTs)) tomb.killTs = Math.max(tomb.killTs ?? 0, v.stampTs + 1);
+    this._log?.('info', 'tombstone-claim-promoted', { msgId: String(msgId).slice(0, 12), killTs: tomb.killTs });
+    try {
+      this._fanout?.(role, { del: true, msgId, killTs: tomb.killTs, signer: tomb.signer, publishTs: tomb.killTs, seq: tomb.seq, kill: tomb.kill }, null);
+      if (role.isRoot && this._rootReplicas) { const bridge = (typeof this.dht?.bridgeId === 'function') ? this.dht.bridgeId() : null; this._replicateRole?.(role.topicId, role, bridge, this._now())?.catch?.(() => {}); }
+    } catch { /* fan-out is best-effort; the renewal replay re-sends every live tombstone */ }
     return true;
   },
 
@@ -344,10 +353,10 @@ export const topicStoreMethods = {
     const killedAt = this._appDelivered.get(killKey);
     if (this._appDelivered.has(key)) {
       if (!(Number.isFinite(killedAt) && Number.isFinite(publishTs) && publishTs > killedAt)) return;   // exactly-once
-      this._appDelivered.delete(killKey);
     } else if (Number.isFinite(killedAt) && Number.isFinite(publishTs) && publishTs <= killedAt) {
       return;                                          // pre-kill copy after its kill
     }
+    if (killedAt !== undefined) this._appDelivered.delete(killKey);   // Orion RAK-APP(a): a passing body is a new publication; its kill record goes
     this._appDelivered.delete(key);                    // re-insert at the LRU tail
     this._appDelivered.set(key, Number.isFinite(publishTs) ? publishTs : true);
     if (this._appDelivered.size > APP_DEDUP_MAX) this._appDelivered.delete(this._appDelivered.keys().next().value);
@@ -371,7 +380,11 @@ export const topicStoreMethods = {
     const prev = this._lastSeenTsByTopic.get(topicBig) || 0;
     if (killTs > prev) this._lastSeenTsByTopic.set(topicBig, killTs);
     const key = topicBig.toString(16) + ':kill:' + target;
-    if (this._appDelivered.has(key)) return;           // exactly-once (per publication: _deliverToApp clears it on a republish)
+    if (this._appDelivered.has(key)) {                 // exactly-once (per publication: _deliverToApp clears it on a republish)
+      const prevKill = this._appDelivered.get(key);    // Orion RAK-APP(b): a NEWER kill advances the record, so a delayed body below it stays dropped
+      if (Number.isFinite(killTs) && (!Number.isFinite(prevKill) || killTs > prevKill)) this._appDelivered.set(key, killTs);
+      return;
+    }
     // 4.131.0 (Orion RAK-2): a kill stamped at or below the body this app holds
     // retracts an EARLIER publication of the same msgId, not this one.
     const heldAt = this._appDelivered.get(topicBig.toString(16) + ':' + target);

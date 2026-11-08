@@ -14,6 +14,14 @@
 //   CL4   a claim refused at the cap is NOT acked; a verified body suppressed through
 //         a claim promotes it (signer + proof) and clears the other claims
 //   TR1   onBridgeAuthHello: no await between the late-hello check and 'open'
+//   APPa  a subscriber that joined between kill1 and pub2 still gets kill2 (Orion RAK-APP)
+//   APPb  a reordered kill2 ahead of pub2 advances the app's kill record; pub2 stays retracted
+//   APPc  the CL-1b advance confirms and reaches a subscribed holder's app
+//   CL5a  a promoted claim takes a stamp past the body and is re-fanned
+//   CL5b  a claim-bearing deletion from the body's author applies at a body holder even with a low stamp
+//   CL6   a re-stamped pre-republish kill1 cannot retract a held pub2 where no superseded record
+//         exists (handoff heir): not by REPLAYUP, not by a direct KILL
+// (Orion d2a8e83e)
 //
 // Run: node test/fence_kill_claims_state.mjs
 import { readFileSync } from 'node:fs';
@@ -139,6 +147,80 @@ console.log('fence_kill_claims_state');
   const i = src.indexOf("log('auth-bridge-late-hello-dropped'"); const j = src.indexOf("setBridgeState('open');", i);
   const seg = i > 0 && j > i ? src.slice(i, j) : '';
   check('TR1: no await between the late-hello check and setBridgeState(\'open\')', seg.length > 0 && !/\bawait\b/.test(seg), String(seg.length));
+}
+{ // APPa / APPb — app delivery state at a pure subscriber
+  const clock = { t: T0 }; const S = node(30n, clock); S.am.mySubscriptions.set(topicBig, { since: 0, interval: 5000 });
+  const seen = []; S.am._deliveryCallback = (t, json, msgId) => seen.push(JSON.parse(json).deleted ? 'del' : 'body');
+  const from = '0'.repeat(65) + 'a', msg = body();
+  const p1 = await buildEnvelope({ topic: TOPIC, message: msg, identity: alice, ts: T0, seq: 1 });
+  const p2 = await buildEnvelope({ topic: TOPIC, message: msg, identity: alice, ts: T0 + 3000, seq: 3 });
+  const dl = (m) => S.am._onDeliver({ topicId: topicHex, from, msgs: [m] }, { targetId: 30n });
+  await dl({ del: true, msgId: p1.msgId, killTs: T0 + 2000, publishTs: T0 + 2000, signer: A, seq: 2 });   // joined after kill1: kill only
+  await dl({ json: JSON.stringify(p2), msgId: p2.msgId, publishTs: T0 + 3000, seq: 3 });
+  await dl({ del: true, msgId: p2.msgId, killTs: T0 + 4000, publishTs: T0 + 4000, signer: A, seq: 4 });
+  check('APPa: a subscriber joined between kill1 and pub2 sees pub2 and then kill2', seen.join(',') === 'body,del', seen.join(','));
+  const S2 = node(31n, clock); S2.am.mySubscriptions.set(topicBig, { since: 0, interval: 5000 });
+  const seen2 = []; S2.am._deliveryCallback = (t, json) => seen2.push(JSON.parse(json).deleted ? 'del' : 'body');
+  const dl2 = (m) => S2.am._onDeliver({ topicId: topicHex, from, msgs: [m] }, { targetId: 31n });
+  await dl2({ json: JSON.stringify(p1), msgId: p1.msgId, publishTs: T0 + 1000, seq: 1 });
+  await dl2({ del: true, msgId: p1.msgId, killTs: T0 + 2000, publishTs: T0 + 2000, signer: A, seq: 2 });
+  await dl2({ del: true, msgId: p2.msgId, killTs: T0 + 4000, publishTs: T0 + 4000, signer: A, seq: 4 });   // kill2 reordered ahead of pub2
+  await dl2({ json: JSON.stringify(p2), msgId: p2.msgId, publishTs: T0 + 3000, seq: 3 });
+  check('APPb: a reordered kill2 keeps the delayed pub2 retracted', seen2.join(',') === 'body,del', seen2.join(','));
+}
+{ // APPc — CL-1b advance reaches a subscribed holder's app
+  const clock = { t: T0 }; const H = node(32n, clock); const h = H.am._becomeRoot(topicBig, 'f'); h.isRoot = false;
+  H.am.mySubscriptions.set(topicBig, { since: 0, interval: 5000 });
+  const msg = body(); const p1 = await buildEnvelope({ topic: TOPIC, message: msg, identity: alice, ts: T0, seq: 1 });
+  const k1 = await buildKill({ topicId: topicHex, msgId: p1.msgId, identity: alice, ts: T0 + 1000, seq: 2 });
+  const k2 = await buildKill({ topicId: topicHex, msgId: p1.msgId, identity: alice, ts: T0 + 4000, seq: 4 });
+  await H.am._applyDels(h, topicBig, [{ del: true, msgId: p1.msgId, killTs: T0 + 2000, publishTs: T0 + 2000, seq: 2, signer: A, kill: k1 }]);
+  await H.am._applyDels(h, topicBig, [{ del: true, msgId: p1.msgId, killTs: T0 + 5000, publishTs: T0 + 5000, seq: 5, signer: A, kill: k2 }]);
+  check('APPc: the advanced kill moves the app\'s since-floor and kill record', H.am._sinceFor(topicBig) >= T0 + 5000 && H.am._appDelivered.get(topicBig.toString(16) + ':kill:' + p1.msgId) === T0 + 5000, String(H.am._sinceFor(topicBig)));
+}
+{ // CL5a — promotion advances the stamp and re-fans
+  const clock = { t: T0 + 50_000 }; const P = node(33n, clock); const pr = P.am._becomeRoot(topicBig, 'f');
+  pr.subscribers.set('0'.repeat(65) + 'e', { lastSeen: clock.t });
+  const p = await buildEnvelope({ topic: TOPIC, message: body(), identity: alice, ts: T0, seq: 1 });
+  const kA = await buildKill({ topicId: topicHex, msgId: p.msgId, identity: alice, ts: T0 + 5, seq: 2 });
+  const s0 = await createAuthorIdentity();
+  pr.tombstones.set(p.msgId, { exp: clock.t + 600_000, killTs: T0 + 1, signer: s0.pubkeyHex.toLowerCase(), seq: 1, claims: new Map([[A, kA]]) });
+  await P.am._ingestPublish(pr, JSON.stringify(p));
+  const t = pr.tombstones.get(p.msgId);
+  const out = fanned(P.routed).find(m => m.msgId === p.msgId && m.kill);
+  check('CL5a: the promoted claim takes a fresh stamp past the body and is re-fanned', t?.signer === A && t.killTs > T0 + 1 && !!out && out.killTs === t.killTs, JSON.stringify({ killTs: t?.killTs, fanned: !!out }));
+}
+{ // CL5b — claim-bearing deletion from the author applies at a body holder despite a low stamp
+  const clock = { t: T0 }; const R2 = node(34n, clock); const r2 = R2.am._becomeRoot(topicBig, 'f');
+  const p = await buildEnvelope({ topic: TOPIC, message: body(), identity: alice, ts: T0 + 1000, seq: 1 });
+  clock.t = T0 + 1000; await R2.am._ingestPublish(r2, JSON.stringify(p));
+  const kA = await buildKill({ topicId: topicHex, msgId: p.msgId, identity: alice, ts: T0 + 2000, seq: 2 });
+  const mal = await createAuthorIdentity();
+  clock.t = T0 + 3000;
+  await R2.am._applyDels(r2, topicBig, [{ del: true, msgId: p.msgId, killTs: T0 + 1, publishTs: T0 + 1, seq: 1, signer: mal.pubkeyHex.toLowerCase(), claims: [kA] }]);
+  const t = r2.tombstones.get(p.msgId);
+  check('CL5b: the author\'s claim retracts the held body although the carrier stamp is below it', !r2.cacheIds.has(p.msgId) && t?.signer === A && t?.kill?.signature === kA.signature && t.killTs > T0 + 1000, JSON.stringify({ cached: r2.cacheIds.has(p.msgId), killTs: t?.killTs }));
+}
+{ // CL6 — handoff heir without a superseded record
+  const clock = { t: T0 }; const msg = body();
+  const p1 = await buildEnvelope({ topic: TOPIC, message: msg, identity: alice, ts: T0, seq: 1 });
+  const k1 = await buildKill({ topicId: topicHex, msgId: p1.msgId, identity: alice, ts: T0 + 1000, seq: 2 });
+  const p2 = await buildEnvelope({ topic: TOPIC, message: msg, identity: alice, ts: T0 + 2000, seq: 3 });
+  const Hh = node(35n, clock); const leaver = '0'.repeat(64) + '0b';
+  clock.t = T0 + 2500;
+  await Hh.am._syncIngest({ topicId: topicHex, from: leaver, msgs: [{ msgId: p2.msgId, json: JSON.stringify(p2), publishTs: T0 + 2500, seq: 3 }], dels: [] }, { targetId: 35n }, 'HANDOFF');
+  const hr = Hh.am.axonRoles.get(topicBig);
+  check('CL6: the heir holds pub2 and no superseded record', !!hr && hr.cacheIds.has(p2.msgId) && !hr.superseded?.size);
+  await Hh.am._applyDels(hr, topicBig, [{ del: true, msgId: p1.msgId, killTs: T0 + 9000, publishTs: T0 + 9000, seq: 9, signer: A, kill: k1 }]);
+  check('CL6: a re-stamped kill1 by REPLAYUP cannot retract the held pub2', hr.cacheIds.has(p2.msgId) && !hr.tombstones.has(p2.msgId));
+  hr.isRoot = true;
+  const seq0 = hr.seq, last0 = hr.lastTs;
+  await Hh.am._onKill({ topicId: topicHex, kill: k1 }, meta(35n));
+  check('CL6: nor can a re-sent kill1 by direct KILL at the heir as root', hr.cacheIds.has(p2.msgId) && !hr.tombstones.has(p2.msgId));
+  check('CL6: ...and the refused kill takes no stamp or seq slot', hr.seq === seq0 && hr.lastTs === last0, JSON.stringify({ seq0, seq: hr.seq }));
+  const k2 = await buildKill({ topicId: topicHex, msgId: p2.msgId, identity: alice, ts: T0 + 3000, seq: 4 });
+  await Hh.am._onKill({ topicId: topicHex, kill: k2 }, meta(35n));
+  check('CL6 CONTROL: the author\'s newer kill2 at the heir retracts pub2', !hr.cacheIds.has(p2.msgId) && hr.tombstones.has(p2.msgId));
 }
 console.log(failed ? `\n${failed} FAILED of ${passed + failed}` : `\nall ${passed} passed`);
 process.exit(failed ? 1 : 0);
