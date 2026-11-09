@@ -50,9 +50,25 @@ async function run(name, { verifyWalk, cutover = false, returnRoute = false }) {
   const Lt = await realTopic(name);
   const net = new SimNetwork();
   const domain = new AxonaDomain({ LOOKAHEAD_MS: 50, EPSILON: 0, LOOKUP_WALK_DEADLINE_MS: 800, RETURN_ROUTE: returnRoute });
+  // PRECONDITION (2026-11-09): the chain is sorted by distance to the TOPIC, but the
+  // merge offer is routed toward W's NODE ID, hop by hop over bound-only channels
+  // (no new connections). With random ids, a chain node's neighbour closest to W is
+  // sometimes the node behind it; the offer then dead-ends and V3 waits 15 s for
+  // merge-offer-timeout. Measured: 7 of 40 random draws were blocked and all 7 stuck;
+  // all 33 greedy-routable draws merged in ~100 ms. Draw ids until every interior hop
+  // makes greedy progress toward W, so V3 tests the merge and not the draw.
+  let idents = null;
+  for (let tries = 0; tries < 50 && !idents; tries++) {
+    const cand = [];
+    for (let i = 0; i < 5; i++) cand.push(await createNodeIdentity({ lat: 40 + i * 0.01, lng: -74 }));
+    const order = cand.map((id) => ({ id, big: fromHex(id.id) })).sort((x, y) => ((x.big ^ Lt.topicId) > (y.big ^ Lt.topicId) ? -1 : 1));
+    const Wb = order[4].big;
+    if ([1, 2, 3].every((i) => (order[i + 1].big ^ Wb) < (order[i - 1].big ^ Wb))) idents = order.map((o) => o.id);
+  }
+  if (!idents) { console.log('  ✗ precondition: no greedy-routable 5-node chain in 50 draws'); process.exit(1); }
   const raw = [];
   for (let i = 0; i < 5; i++) {
-    const id = await createNodeIdentity({ lat: 40 + i * 0.01, lng: -74 });
+    const id = idents[i];
     const transport = boundOnly(simTransport({ network: net, identity: id, heartbeatMs: 0, sendTimeoutMs: 400 }));
     await transport.start(id.id);
     const node = new NeuronNode({ id: fromHex(id.id), lat: 40 + i * 0.01, lng: -74 });
