@@ -42,6 +42,16 @@ const check = (label, cond, extra = '') => {
 const idHex = (b) => b.toString(16).padStart(66, '0');
 const lc = (s) => String(s).toLowerCase();
 const flush = async (rounds = 24) => { for (let i = 0; i < rounds; i++) await new Promise((r) => setImmediate(r)); };
+// Wait for a condition, not a fixed number of turns. Publish ingest awaits signature
+// verification, which can need more than 24 event-loop turns on a slower machine: CI
+// failed (A)+(C) on every run 2026-11-02..11-09 while (B), which reads the same cache
+// later, passed. Bounded by WALL time (the network clock is a mock and does not move
+// here), so a real failure still fails, after at most `ms`.
+const settle = async (pred, ms = 2000) => {
+  const end = Date.now() + ms;
+  while (!pred() && Date.now() < end) await new Promise((r) => setImmediate(r));
+  return pred();
+};
 
 // A gappy mock network of real AxonaManager instances. `resolve` toggles whether the
 // DHT can iteratively resolve the true root (fix available) or not (RED control).
@@ -126,9 +136,8 @@ async function scenario({ resolve, author, desc, T }) {
   await flush();
   const env = await buildEnvelope({ topic: desc, message: { hi: 'cold-replay' }, seq: 1, identity: author, ts: net.clock.t });
   R.am.pubsubPublish(T, JSON.stringify(env));
-  await flush();
   const rootRole = R.am.axonRoles.get(T);
-  const rootHolds = !!rootRole?.isRoot && (rootRole?.cache?.length ?? 0) > 0;
+  const rootHolds = await settle(() => !!rootRole?.isRoot && (rootRole?.cache?.length ?? 0) > 0);
 
   // FRESH cold subscribe, since:'all' (reset the consumption floor to 0 so the root
   // replays the full history it already holds).
@@ -136,6 +145,7 @@ async function scenario({ resolve, author, desc, T }) {
   S.am.pubsubResetTopicConsumption(T);
   S.am.pubsubSubscribe(T);
   await flush();
+  await settle(() => S.got.includes(env.msgId));   // GREEN: delivery lands; RED: waits the full bound, then reads 'nothing'
 
   const sHex = lc(idHex(S_ID));
   return {
