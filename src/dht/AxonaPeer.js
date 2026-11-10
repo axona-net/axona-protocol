@@ -319,9 +319,11 @@ export class AxonaPeer extends DHT {
           // P2 (Mesh Partition Self-Heal v0.2): T_pex, S_pex, C_pex; P3: the PATH cooldown. Read only with the flags on.
           pexMs: synaptomeMaintain.pexMs ?? 60000, pexSample: synaptomeMaintain.pexSample ?? 16, pexCooldownMs: synaptomeMaintain.pexCooldownMs ?? 30000,
           noPathMs: synaptomeMaintain.noPathMs ?? 30000, noPathMaxMs: synaptomeMaintain.noPathMaxMs ?? 600000,
-          pexIncapableMs: synaptomeMaintain.pexIncapableMs ?? 600000 }
+          pexIncapableMs: synaptomeMaintain.pexIncapableMs ?? 600000,
+          /* No-Channel Sweep (council eb305550, Vega 56751848): N consecutive maintain ticks a table member may be reported neither connected nor in flight before the missing death is raised. 0 = OFF (default). */
+          noChannelTicks: Number.isInteger(synaptomeMaintain.noChannelTicks) && synaptomeMaintain.noChannelTicks > 0 ? synaptomeMaintain.noChannelTicks : 0 }
       : (synaptomeMaintain === true)
-        ? { kNear: 5, intervalMs: 15000, maxPerTick: 3, kCache: 64, pPending: 8, directoryMs: 600000, pexMs: 60000, pexSample: 16, pexCooldownMs: 30000, noPathMs: 30000, noPathMaxMs: 600000, pexIncapableMs: 600000 }
+        ? { kNear: 5, intervalMs: 15000, maxPerTick: 3, kCache: 64, pPending: 8, directoryMs: 600000, pexMs: 60000, pexSample: 16, pexCooldownMs: 30000, noPathMs: 30000, noPathMaxMs: 600000, pexIncapableMs: 600000, noChannelTicks: 0 }
         : null;
     this._maintainTimer = null;
     this._maintainInflight = false;
@@ -873,26 +875,7 @@ export class AxonaPeer extends DHT {
           const dead = (typeof peerBig === 'bigint') ? peerBig
             : (typeof peerBig === 'string' && isHexId(peerBig)) ? fromHex(peerBig) : null;
           if (dead === null) return;
-          const node = this._node;
-          if (!node) return;
-          node.synaptome?.delete(dead);
-          node.incomingSynapses?.delete(dead);
-          node.connections?.delete(dead);
-          // Row 1 (Hold-and-Fill v0.5): the mark records WHY and WHEN. Row 10
-          // (v0.7 "Marks"): this is the FAIL input of the mark automaton; a
-          // first death writes the mark, a later one advances its schedule.
-          // A table some other owner installed as a bare Set keeps its shape;
-          // the reason then lives only in the log line below.
-          const marks = (node._deadPeers ??= new DeadPeers());
-          if (typeof marks.fail === 'function') marks.fail(dead, reason ?? 'unknown');
-          else marks.add(dead);
-          this._axonaManager?.pubsubPeerDied?.(toHex(dead));   // purge ghost root beacons
-          // reason (4.76.3): the transport-level close cause, threaded through
-          // mesh _retire → onPeerLost. Transports that do not supply one (sim,
-          // pre-4.76.3) log 'unknown'. Makes eviction churn attributable.
-          this._emitLog?.('info', 'peer-died-evicted', { peer: toHex(dead), reason: reason ?? 'unknown' });
-          this._scheduleMaintain();   // a lost peer may have been a near-quota successor → refill
-
+          this._peerDeath(dead, reason);   // the ONE death body (4.132.0): the transport's event and the no-channel sweep both end here
         } catch (err) {
           if (typeof console !== 'undefined') console.warn('AxonaPeer.onPeerDied: eviction failed', err);
         }
@@ -1882,6 +1865,10 @@ export class AxonaPeer extends DHT {
       // in the table; refused → stays BOUND and charged, and with the gate
       // armed its grace timer starts (case 2). GATED with the tick itself.
       this._reconcileBound();   // admissions are read from this._reconcileLast; the return below counts DIALS only
+      // 4.132.0: the reverse of the reconcile. Bound-not-in-table was offered above;
+      // in-table-with-no-channel is counted here and, after N ticks, dies. Needs no
+      // dial, so it too runs above the search backoff. OFF by default.
+      this._sweepNoChannel();
       // Slice 3: deficit backoff (opt-in, rides the attempt guard). A pass that
       // attempted nothing backs the next SEARCH off exponentially — an empty
       // deficit is usually an unpopulated band, and searching cannot fill it.
@@ -2605,6 +2592,97 @@ export class AxonaPeer extends DHT {
   }
 
   // Debounced trigger — coalesce a burst of near-neighbour losses into one pass.
+  /**
+   * THE DEATH BODY. Everything the kernel does when a peer is gone, in one
+   * place, with two triggers: the transport's onPeerDied event, and the
+   * no-channel sweep below raising a death the transport never delivered
+   * (4.132.0; until then this body lived inline in the onPeerDied handler).
+   * It asks no duty gate: a dead channel is not a voluntary close (Rule 1).
+   * @param {bigint} dead
+   * @param {string} [reason]
+   * @returns {boolean} false when there is no node to act on
+   */
+  _peerDeath(dead, reason) {
+    const node = this._node;
+    if (!node) return false;
+    node.synaptome?.delete(dead);
+    node.incomingSynapses?.delete(dead);
+    node.connections?.delete(dead);
+    // Row 1 (Hold-and-Fill v0.5): the mark records WHY and WHEN. Row 10
+    // (v0.7 "Marks"): this is the FAIL input of the mark automaton; a
+    // first death writes the mark, a later one advances its schedule.
+    // A table some other owner installed as a bare Set keeps its shape;
+    // the reason then lives only in the log line below.
+    const marks = (node._deadPeers ??= new DeadPeers());
+    if (typeof marks.fail === 'function') marks.fail(dead, reason ?? 'unknown');
+    else marks.add(dead);
+    this._axonaManager?.pubsubPeerDied?.(toHex(dead));   // purge ghost root beacons
+    // reason (4.76.3): the transport-level close cause, threaded through
+    // mesh _retire → onPeerLost. Transports that do not supply one (sim,
+    // pre-4.76.3) log 'unknown'. Makes eviction churn attributable.
+    this._emitLog?.('info', 'peer-died-evicted', { peer: toHex(dead), reason: reason ?? 'unknown' });
+    this._scheduleMaintain();   // a lost peer may have been a near-quota successor → refill
+    return true;
+  }
+
+  /**
+   * NO-CHANNEL SWEEP (4.132.0; council eb305550, shape corrected by Vega
+   * 56751848). The table's invariant is "every synapse is a live channel",
+   * and until this method only a death EVENT enforced it: a death the
+   * composite swallowed, or a channel that ended without one, left the
+   * member in the table for the life of the process, handed to every walk
+   * and route that came near it (testnet bridge ff316c366644, 2026-11-10:
+   * synaptome 17 with 0 connections and 0 open channels).
+   *
+   * What it is NOT. It is not the anneal and not a voluntary shed: it closes
+   * no channel and asks no duty gate, because a member with no channel has
+   * nothing to close. It does not delete a row itself: it RAISES THE MISSING
+   * DEATH through _peerDeath, so the mark, the pub/sub purge and the refill
+   * run exactly as for a death the transport reported.
+   *
+   * A member is swept only after `noChannelTicks` CONSECUTIVE maintain ticks
+   * on each of which the transport answered "not connected" AND no attempt to
+   * it was in flight. Three reads reset the run and are never counted:
+   *   - connected;
+   *   - a negotiation in flight (the attempt guard's inflightOf);
+   *   - isConnected THREW: that tick is "unknown", not "not connected".
+   * OFF unless synaptomeMaintain.noChannelTicks is a positive integer.
+   * @returns {{checked:number, noChannel:number, inflight:number, unknown:number, swept:number}}
+   */
+  _sweepNoChannel() {
+    const out = { checked: 0, noChannel: 0, inflight: 0, unknown: 0, swept: 0 };
+    this._noChannelLast = out;
+    const n = this._maintainCfg?.noChannelTicks | 0;
+    const node = this._node; const t = node?.transport;
+    if (n <= 0 || !node?.synaptome || typeof t?.isConnected !== 'function') return out;
+    const runs = (this._noChannelRuns ??= new Map());
+    const self = node.id;
+    const due = [];
+    for (const [key, syn] of node.synaptome) {
+      if (typeof key !== 'bigint' || key === self) continue;   // a legacy hex key is unreadable here: never counted, never swept
+      out.checked++;
+      let connected;
+      try { connected = t.isConnected(key) === true; }
+      catch { out.unknown++; runs.delete(key); continue; }
+      if (connected) { runs.delete(key); continue; }
+      let inflight = false;
+      try { inflight = !!this._attemptGuard?.inflightOf?.(key); } catch { inflight = true; }   // an unreadable guard is "unknown": do not count the tick
+      if (inflight) { out.inflight++; runs.delete(key); continue; }
+      out.noChannel++;
+      const run = (runs.get(key) ?? 0) + 1;
+      if (run >= n) due.push([key, run, syn?._addedBy ?? null]); else runs.set(key, run);
+    }
+    for (const k of runs.keys()) if (!node.synaptome.has(k)) runs.delete(k);   // a member that left by another path takes its run with it
+    for (const [key, run, addedBy] of due) {
+      runs.delete(key);
+      this._emitLog?.('info', 'no-channel-swept', { peer: toHex(key), ticks: run, addedBy });
+      this._peerDeath(key, 'no-channel');
+      out.swept++;
+    }
+    this._noChannelSwept = (this._noChannelSwept ?? 0) + out.swept;
+    return out;
+  }
+
   _scheduleMaintain() {
     if (!this._maintainCfg || this._maintainPending) return;
     this._maintainPending = true;
