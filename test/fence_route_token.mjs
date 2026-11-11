@@ -144,11 +144,13 @@ const X = 0xabc1n, Y = 0xabc2n;
     door.bindStale(X, 'c3');
     check('D1 a bind whose token is not the sub\'s current token is ignored (step 0)', bound.length === 1 && comp.routeStats.staleToken === 1 && comp.routeOf(X)?.token === 'c7');
     mesh.bind(X, 'm-1');                       // switch
+    check('D1b while the mesh route is admitted the identity is listed once (the superseded door adds nothing)', comp.boundPeers().filter(i => i === X).length === 1 && comp.isConnected(X) === true);
     mesh.die(X);                               // admitted route dies while the socket is still open
     check('D2 the admitted route died: forwarded; the record survives for the superseded socket', died.length === 1 && comp.routeOf(X) === null && comp._routes.has(X));
     const rs = door.bind(X, 'c7');             // a late hello on the superseded socket (same token)
     check('D3 a bind from the superseded route after identity death is ignored, not re-admitted', bound.length === 1 && rs[0] === false);
     check('D3b the identity has no routable owner (superseded is never re-promoted)', comp._routeFor(X) === null);
+    check('D3c boundPeers() does not list an identity whose only binding is a superseded route (4.134.0)', door.boundPeers().includes(X) && !comp.boundPeers().includes(X) && comp.isConnected(X) === false, JSON.stringify({ door: door.boundPeers().length, comp: comp.boundPeers().length }));
     door.die(X);
     check('D4 the superseded socket\'s close is swallowed and clears the record', died.length === 1 && !comp._routes.has(X));
     door.bind(X, 'c8');
