@@ -49,7 +49,7 @@ import { fromHex, toHex, clz264 }   from '../src/utils/hexid.js';
 let passed = 0, failed = 0;
 const check = (label, ok, extra = '') => { console.log(`  ${ok ? '✓' : '✗'} ${label}${ok ? '' : ' ' + extra}`); ok ? passed++ : failed++; };
 const wait = (ms) => new Promise(r => setTimeout(r, ms));
-const EXPECTED = 24;
+const EXPECTED = 27;
 process.on('exit', (code) => { if (code === 0 && passed + failed < EXPECTED) { console.log(`  ✗ exited after ${passed + failed} of ${EXPECTED} checks`); process.exitCode = 1; } });
 
 async function makePeer(net, domain, lat, lng, opts = {}) {
@@ -61,7 +61,8 @@ async function makePeer(net, domain, lat, lng, opts = {}) {
   const peer = new AxonaPeer({ domain, node, nodeIdentity: id, transport, ...opts });
   await peer.start();
   if (peer._maintainTimer) { clearInterval(peer._maintainTimer); peer._maintainTimer = null; }   // the fence drives the tick
-  const rec = { peer, id, transport, node, big: fromHex(id.id), hex: id.id, logs: [], purged: [] };
+  const rec = { peer, id, transport, node, big: fromHex(id.id), hex: id.id, logs: [], purged: [], clock: 1_000_000 };
+  peer._noChannelClock = () => rec.clock;                                     // the fence owns the sweep's clock
   peer.findKClosest = async () => [rec.big];                                  // nothing to dial
   const emit = peer._emitLog?.bind(peer);
   peer._emitLog = (lvl, ev, ctx) => { rec.logs.push({ ev, ctx }); return emit?.(lvl, ev, ctx); };
@@ -76,7 +77,9 @@ function strand(rec, xorSeed) {
   rec.node.synaptome.set(id, syn);
   return id;
 }
-const tick = (rec) => rec.peer._maintainSynaptome();
+const INTERVAL = 15000;                                                        // the maintain default the elapsed floor multiplies
+const tick = (rec) => { rec.clock += INTERVAL; return rec.peer._maintainSynaptome(); };     // a pass one interval later
+const pass = (rec) => rec.peer._maintainSynaptome();                           // a pass with NO time elapsed (a death-triggered pass)
 const marked = (rec, id) => !!rec.node._deadPeers?.has?.(id);
 const stopAll = async (...rs) => { for (const r of rs) await r.peer.stop().catch(() => {}); };
 
@@ -191,6 +194,22 @@ const stopAll = async (...rs) => { for (const r of rs) await r.peer.stop().catch
     a.peer._peerDeath(b.big, 'socket-closed');
     check('G one body, two triggers: a reported death evicts, marks and purges', had && !a.node.synaptome.has(b.big) && marked(a, b.big) && a.purged.includes(toHex(b.big)) && a.logs.some(l => l.ev === 'peer-died-evicted' && l.ctx?.reason === 'socket-closed'));
     await stopAll(a, b);
+  }
+
+  // I. PASSES ARE NOT TIME (4.133.0). N = 3 passes with no time elapsed do not sweep;
+  //    the member goes only once (N - 1) intervals have elapsed since the first.
+  {
+    const net = new SimNetwork();
+    const a = await makePeer(net, domain, 8, 8, { synaptomeMaintain: { noChannelTicks: 3 } });
+    const ghost = strand(a, 0x8888n);
+    for (let i = 0; i < 6; i++) await pass(a);
+    check('I six passes with no time elapsed sweep nothing', a.node.synaptome.has(ghost) && (a.peer._noChannelSwept ?? 0) === 0 && a.peer._noChannelLast?.noChannel === 1, JSON.stringify(a.peer._noChannelLast));
+    a.clock += 2 * INTERVAL - 1; await pass(a);
+    check('I one millisecond short of (N - 1) intervals: still present', a.node.synaptome.has(ghost));
+    a.clock += 1; await pass(a);
+    const swept = a.logs.find(l => l.ev === 'no-channel-swept');
+    check('I at (N - 1) intervals the member dies; the row carries the elapsed ms', !a.node.synaptome.has(ghost) && swept?.ctx?.ms === 2 * INTERVAL && swept?.ctx?.ticks === 8, JSON.stringify(swept?.ctx));
+    await stopAll(a);
   }
 
   // H. static

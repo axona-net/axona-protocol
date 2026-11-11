@@ -2640,9 +2640,15 @@ export class AxonaPeer extends DHT {
    * DEATH through _peerDeath, so the mark, the pub/sub purge and the refill
    * run exactly as for a death the transport reported.
    *
-   * A member is swept only after `noChannelTicks` CONSECUTIVE maintain ticks
+   * A member is swept only after `noChannelTicks` CONSECUTIVE maintain passes
    * on each of which the transport answered "not connected" AND no attempt to
-   * it was in flight. Three reads reset the run and are never counted:
+   * it was in flight, AND only once (noChannelTicks - 1) x intervalMs has
+   * elapsed since the first of those passes. The pass count alone is NOT a
+   * time: _scheduleMaintain runs an extra pass 250 ms after every peer death,
+   * so under a mass death N passes elapse inside seconds (testnet 2026-11-11:
+   * four members swept 16-25 s after a kill with N = 3 and a 15 s interval).
+   * 4.133.0 adds the elapsed floor so a channel briefly absent during churn
+   * is not swept by pass count. Three reads reset the run and are never counted:
    *   - connected;
    *   - a negotiation in flight (the attempt guard's inflightOf);
    *   - isConnected THREW: that tick is "unknown", not "not connected".
@@ -2655,7 +2661,9 @@ export class AxonaPeer extends DHT {
     const n = this._maintainCfg?.noChannelTicks | 0;
     const node = this._node; const t = node?.transport;
     if (n <= 0 || !node?.synaptome || typeof t?.isConnected !== 'function') return out;
-    const runs = (this._noChannelRuns ??= new Map());
+    const runs = (this._noChannelRuns ??= new Map());   // key -> { n: consecutive passes, since: ms of the first }
+    const now = typeof this._noChannelClock === 'function' ? this._noChannelClock() : Date.now();
+    const floorMs = (n - 1) * (this._maintainCfg.intervalMs | 0);
     const self = node.id;
     const due = [];
     for (const [key, syn] of node.synaptome) {
@@ -2669,13 +2677,16 @@ export class AxonaPeer extends DHT {
       try { inflight = !!this._attemptGuard?.inflightOf?.(key); } catch { inflight = true; }   // an unreadable guard is "unknown": do not count the tick
       if (inflight) { out.inflight++; runs.delete(key); continue; }
       out.noChannel++;
-      const run = (runs.get(key) ?? 0) + 1;
-      if (run >= n) due.push([key, run, syn?._addedBy ?? null]); else runs.set(key, run);
+      const prev = runs.get(key);
+      const run = (prev?.n ?? 0) + 1;
+      const since = prev?.since ?? now;
+      if (run >= n && (now - since) >= floorMs) due.push([key, run, syn?._addedBy ?? null, now - since]);
+      else runs.set(key, { n: run, since });
     }
     for (const k of runs.keys()) if (!node.synaptome.has(k)) runs.delete(k);   // a member that left by another path takes its run with it
-    for (const [key, run, addedBy] of due) {
+    for (const [key, run, addedBy, ms] of due) {
       runs.delete(key);
-      this._emitLog?.('info', 'no-channel-swept', { peer: toHex(key), ticks: run, addedBy });
+      this._emitLog?.('info', 'no-channel-swept', { peer: toHex(key), ticks: run, ms, addedBy });
       this._peerDeath(key, 'no-channel');
       out.swept++;
     }
