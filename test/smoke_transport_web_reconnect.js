@@ -263,6 +263,80 @@ async function main() {
   check('4200 (not meshed) → not stuck graduated', t5.bridgeState !== 'graduated');
   await t5.stop();
 
+  // ── Close a Retired Socket (4.136.0, David 2026-11-12) ───────────────
+  // A bridge closes the socket (4200) as soon as the WebRTC channel to it has
+  // replaced it, whatever the mesh size. The client takes that as a release
+  // when its channel to THAT bridge is bound, and re-dials only when that
+  // channel is gone AND the mesh is thin.
+  const mk = () => webTransport({
+    bridgeUrl: 'wss://test.example', identity: alice, WebSocketImpl: FakeWS,
+    handshakeTimeoutMs: 2000, reconnectInitialMs: 30, reconnectMaxMs: 30,
+    graduationMeshFloor: 3, graduationRecheckMs: 40,
+  });
+  const up = async (t) => { const st = t.start(); await sleep(5); const s = t.socket; feedWelcome(s); await feedBridgeHello(s); await st; return s; };
+
+  // R1/R2: a THIN client (mesh = the bridge alone) is released, stays released
+  // while the channel lives, and re-dials when the channel dies.
+  liveSockets = [];
+  const t6 = mk(); const r1 = await up(t6);
+  t6.webrtc.boundPeers = () => [BRIDGE_BIG];
+  const n6 = liveSockets.length;
+  r1.close(4200, 'bootstrap complete');
+  check('R1 4200 with the bridge channel bound and mesh 1 → released (graduated)', t6.bridgeState === 'graduated');
+  await sleep(130);
+  check('R1 no reconnect while the bridge channel lives', liveSockets.length === n6, `sockets ${liveSockets.length} vs ${n6}`);
+  t6.webrtc.boundPeers = () => [];
+  await sleep(130);
+  check('R2 the bridge channel dies with a thin mesh → re-dial', liveSockets.length >= n6 + 1);
+  await t6.stop();
+
+  // R3: released, then the bridge channel dies while two OTHER peers remain
+  // (mesh 2, under the floor) → re-dial.
+  liveSockets = [];
+  const t7 = mk(); const r3 = await up(t7);
+  t7.webrtc.boundPeers = () => [BRIDGE_BIG, 1n];
+  const n7 = liveSockets.length;
+  r3.close(4200, 'bootstrap complete');
+  await sleep(100);
+  check('R3 released with mesh 2 including the bridge → no reconnect', t7.bridgeState === 'graduated' && liveSockets.length === n7);
+  t7.webrtc.boundPeers = () => [1n, 2n];
+  await sleep(130);
+  check('R3 bridge channel gone, mesh 2 → re-dial', liveSockets.length >= n7 + 1);
+  await t7.stop();
+
+  // R4: 4200 with a thin mesh that does NOT include the bridge → reconnects at
+  // once, as before (the old self-correcting branch is untouched).
+  liveSockets = [];
+  const t8 = mk(); const r4 = await up(t8);
+  t8.webrtc.boundPeers = () => [1n];
+  const n8 = liveSockets.length;
+  r4.close(4200, 'graduated');
+  await sleep(120);
+  check('R4 4200, mesh 1 without the bridge → reconnects, not released', liveSockets.length >= n8 + 1 && t8.bridgeState !== 'graduated');
+  await t8.stop();
+
+  // R5: released, the bridge channel dies, three other peers remain → no
+  // re-dial (the mesh is at the floor; this is the plain graduation rule).
+  liveSockets = [];
+  const t9 = mk(); const r5 = await up(t9);
+  t9.webrtc.boundPeers = () => [BRIDGE_BIG, 1n, 2n, 3n];
+  const n9 = liveSockets.length;
+  r5.close(4200, 'bootstrap complete');
+  t9.webrtc.boundPeers = () => [1n, 2n, 3n];
+  await sleep(130);
+  check('R5 bridge channel gone, mesh 3 → no re-dial', liveSockets.length === n9 && t9.bridgeState === 'graduated');
+  await t9.stop();
+
+  // R6: a non-4200 close with the bridge channel bound still reconnects.
+  liveSockets = [];
+  const t10 = mk(); const r6 = await up(t10);
+  t10.webrtc.boundPeers = () => [BRIDGE_BIG];
+  const n10 = liveSockets.length;
+  r6.close(1006, 'abnormal');
+  await sleep(120);
+  check('R6 abnormal close with the bridge channel bound → reconnects', liveSockets.length >= n10 + 1 && t10.bridgeState !== 'graduated');
+  await t10.stop();
+
   console.log(`\nResult: ${passed} passed, ${failed} failed`);
   process.exit(failed === 0 ? 0 : 1);
 }

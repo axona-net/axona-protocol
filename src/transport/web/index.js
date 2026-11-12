@@ -328,6 +328,7 @@ export function webTransport({
     socket.addEventListener('open', () => {
       socketOpen = true;
       graduated = false;
+      releasedBridgeId = null;
       stopGraduationWatch();
       log('bridge-socket-open', { bridgeUrl });
       setBridgeState('connecting');
@@ -377,6 +378,10 @@ export function webTransport({
       const code = ev && typeof ev.code === 'number' ? ev.code : null;
       log('bridge-socket-close', { code });
       bridge.handleConnClosed();
+      // Close a Retired Socket (4.136.0): the identity this socket was bound
+      // to, read before it is cleared, so the 4200 branch below can ask
+      // whether the WebRTC channel to THIS bridge is bound.
+      const bridgeIdAtClose = bridgeNodeIdBig;
       // Allow the persistent hello handler to re-bind on the next open.
       bridgeNodeIdBig   = null;
       bridgeServerNonce = null;   // fresh nonce per (re)connection
@@ -385,13 +390,21 @@ export function webTransport({
         stopped = true;
         stopStaleChecker();
         setBridgeState('upgrade-required', (ev && ev.reason) || 'client out of date');
-      } else if (code === GRADUATED_CLOSE_CODE && meshBoundCount() >= graduationMeshFloor) {
+      } else if (code === GRADUATED_CLOSE_CODE && (meshBoundCount() >= graduationMeshFloor || bridgeChannelBound(bridgeIdAtClose))) {
         // Bootstrap-nursery graduation: we're meshed, so keep the WebRTC mesh
         // and DON'T reconnect — freeing the bridge slot for a newcomer. A
         // watchdog re-dials if the mesh thins. (If we weren't actually meshed,
         // this branch is skipped and we reconnect below — self-correcting.)
+        //
+        // Close a Retired Socket (4.136.0, David 2026-11-12): a bridge closes
+        // the socket as soon as the WebRTC channel to it has replaced it. The
+        // channel then IS the relation, whatever the size of the mesh, so a
+        // 4200 with that channel bound is a release too. The watch below
+        // re-dials only when that channel is gone AND the mesh is thin: the
+        // socket exists only while there is no channel to carry the relation.
         stopStaleChecker();
         graduated = true;
+        releasedBridgeId = bridgeChannelBound(bridgeIdAtClose) ? bridgeIdAtClose : null;
         setBridgeState('graduated', (ev && ev.reason) || 'meshed — released by bridge');
         log('bridge-graduated', { meshPeers: meshBoundCount() });
         armGraduationWatch();
@@ -855,6 +868,9 @@ export function webTransport({
   let reconnectAttempt = 0;
   let stopped          = false;  // composite.stop() sets this — suppresses reconnect
   let graduated        = false;  // released by the bridge while meshed — no reconnect
+  // Close a Retired Socket (4.136.0): the bridge whose channel was bound when
+  // it released this socket, or null for a plain graduation. Read by the watch.
+  let releasedBridgeId = null;
   // 4.108.0: a graduated node re-dialling ONLY for a fresh TURN credential. The
   // client-hello says so (`intent: 'turn-refresh'`), the peer-list — if a bridge
   // without the intent still sends one — is ignored, and the node returns to
@@ -932,15 +948,23 @@ export function webTransport({
   function meshBoundCount() {
     try { return webrtc.boundPeers().length; } catch { return 0; }
   }
+  /** Is the authenticated WebRTC channel to `id` (a bridge) bound right now? */
+  function bridgeChannelBound(id) {
+    if (typeof id !== 'bigint') return false;
+    try { return webrtc.boundPeers().some((p) => p === id); } catch { return false; }
+  }
   /** After graduation, watch the mesh; re-dial the bridge if it thins below the
-   *  floor so a node never strands itself off the network. */
+   *  floor so a node never strands itself off the network. A node released
+   *  with its channel to the bridge bound is not re-dialled while that channel
+   *  lives: the channel carries the relation. */
   function armGraduationWatch() {
     if (graduationTimer != null) return;
     graduationTimer = setInterval(() => {
       if (stopped) { stopGraduationWatch(); return; }
-      if (meshBoundCount() < graduationMeshFloor) {
+      if (meshBoundCount() < graduationMeshFloor && !bridgeChannelBound(releasedBridgeId)) {
         stopGraduationWatch();
         graduated = false;
+        releasedBridgeId = null;
         log('bridge-graduation-redial', { meshPeers: meshBoundCount(), floor: graduationMeshFloor });
         if (reconnect && autoHandshake) { setBridgeState('connecting'); openSocket(); }
       }
