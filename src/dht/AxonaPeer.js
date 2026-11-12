@@ -168,6 +168,11 @@ function _canReceiveDispatch(recv) {
 // bounds the connection load a flood of triadic/hop_cache/lateral_spread
 // notifications can induce.
 const MAX_VERIFY_PROBES = 8;
+// Bootstrap Sample Dial (4.135.0): bounds. A bridge's sample is 16 by default.
+const BOOTSTRAP_SAMPLE_MAX    = 16;      // ids kept from one offered list
+const BOOTSTRAP_SAMPLE_TRIES  = 2;       // dials per id, per offer
+const BOOTSTRAP_SAMPLE_TTL_MS = 60_000;  // an offer older than this is dropped undialed
+const BOOTSTRAP_HEX66 = /^[0-9a-f]{66}$/;
 // Max peers disclosed by a single local_probe reply (D-4): enough for an
 // honest annealing/dead-replace pick, too few to cheaply map the mesh.
 const LOCAL_PROBE_MAX   = 8;
@@ -245,7 +250,7 @@ export class AxonaPeer extends DHT {
    *        signed publishes (the default).  Apps that only call
    *        `peer.pub(topic, message, { sign: false })` can omit it.
    */
-  constructor({ engine = null, domain = null, node, axonaManager = null, nodeIdentity = null, transport = null, persist = null, maxPublishBytes = null, synaptomeMaintain = null, admissionGate = null, presence = null, attemptGuard = null, rootReplicas = null, frameRegistry = false, mergeCapable = null, directMessageTypes = undefined, enforceDirectMessageTypes = false }) {
+  constructor({ engine = null, domain = null, node, axonaManager = null, nodeIdentity = null, transport = null, persist = null, maxPublishBytes = null, synaptomeMaintain = null, admissionGate = null, presence = null, attemptGuard = null, rootReplicas = null, frameRegistry = false, mergeCapable = null, directMessageTypes = undefined, enforceDirectMessageTypes = false, bootstrapSample = true }) {
     super();
     if (!node) throw new Error('AxonaPeer: node is required');
     // Singleton-root replication fan-out (kernel v4.9.2). null → kernel default (2).
@@ -329,6 +334,17 @@ export class AxonaPeer extends DHT {
     this._maintainInflight = false;
     /** Row 12: NOMINATED identities (the candidate cache), bigint → { src, at }. */
     this._fillCache = new Map();
+    // Bootstrap Sample Dial (4.135.0): a node WITHOUT the fill still dials the
+    // ids a bridge offers in a peer-list's `graduated` field. Not the fill: no
+    // cache, no target, no retry schedule. One bounded pass per offered list,
+    // each id dialed at most BOOTSTRAP_SAMPLE_TRIES times, through the same
+    // verified path gossip takes (_considerCandidate). Inert until a bridge
+    // sends the field. `bootstrapSample: false` turns it off.
+    this._bootSampleOn = bootstrapSample !== false;
+    /** bigint → { at, tries } — the ids of the newest offer not yet dialed. */
+    this._bootSample = new Map();
+    this._bootSampleDraining = false;
+    this._bootSampleStats = { offers: 0, offered: 0, kept: 0, dialed: 0, bound: 0, failed: 0, expired: 0, skipped: 0 };
     this._fillStats = { ticks: 0, nominated: 0, nominateRefusedFull: 0, nominateIneligible: 0, dialed: 0, dialDeferred: 0, directoryRequests: 0, directoryUnavailable: 0 };
     this._fillLast = null;             // the last tick's report
     this._fillState = null;            // the last REPORTED liveness state (logged on change only)
@@ -742,6 +758,7 @@ export class AxonaPeer extends DHT {
     // onPeerBound handler receives BigInt (contract).
     if (transport && typeof transport.onPeerBound === 'function') {
       this._onPeerBoundUnsub = transport.onPeerBound((peerBig, _meshId, inc) => {
+        if (this._bootSample.size) queueMicrotask(() => { this._bootstrapSampleDrain(); });   // a bound peer is a path to relay through
         // Row 8: BIND ends the attempt's guard token (expiry-on-bind). A bind
         // of an identity this guard never dialed is ignored by the guard; a
         // bind on another incarnation than the one the attempt started is
@@ -786,7 +803,8 @@ export class AxonaPeer extends DHT {
     // dialing of that list is unchanged). Inert unless the fill is armed.
     if (transport && typeof transport.onPeerList === 'function') {
       this._onPeerListUnsub = transport.onPeerList((peers) => {
-        if (!Array.isArray(peers) || !this._fillArmed()) return;
+        if (!Array.isArray(peers)) return;
+        if (!this._fillArmed()) { this._bootstrapSampleOffer(peers); return; }
         // R12-3: the ANSWER is recorded here, by the handler that receives it
         // — an empty list is an answer too. The request step records only
         // that it sent; silence after a sent request stays 'sent'.
@@ -1937,6 +1955,72 @@ export class AxonaPeer extends DHT {
   // the dial (row 10, inside _considerCandidate).
 
   /** The fill runs only with the guard and the gate present (the arming rule). */
+  /**
+   * Bootstrap Sample Dial: take a bridge peer-list as received by the row-12
+   * handler on a node whose fill is NOT armed. Connection handles are not
+   * ids and are ignored; only lowercase 66-hex strings are read. The newest
+   * offer REPLACES what is left of the previous one. At most
+   * BOOTSTRAP_SAMPLE_MAX ids are kept.
+   * @param {unknown[]} peers
+   */
+  _bootstrapSampleOffer(peers) {
+    if (!this._bootSampleOn) return;
+    const node = this._node;
+    if (!node?.synaptome) return;
+    const st = this._bootSampleStats;
+    const now = Date.now();
+    const next = new Map();
+    let offered = 0;
+    for (const p of peers) {
+      if (typeof p !== 'string' || !BOOTSTRAP_HEX66.test(p)) continue;
+      offered++;
+      if (next.size >= BOOTSTRAP_SAMPLE_MAX) continue;
+      let big = null;
+      try { big = fromHex(p); } catch { big = null; }
+      if (typeof big !== 'bigint' || big === node.id || node.synaptome.has(big) || this._isBoundPeer(big)) continue;
+      if (!next.has(big)) next.set(big, { at: now, tries: 0 });
+    }
+    if (offered === 0) return;                       // a list with no ids leaves an earlier offer alone
+    st.offers++; st.offered += offered; st.kept += next.size;
+    this._bootSample = next;
+    this._emitLog?.('info', 'bootstrap-sample', { offered, kept: next.size });
+    this._bootstrapSampleDrain();
+  }
+
+  /**
+   * Dial what is left of the offer. Runs when an offer arrives and when a
+   * peer binds. With no bound peer there is nothing to relay a dial through
+   * and the pass waits. Each id is dialed at most BOOTSTRAP_SAMPLE_TRIES
+   * times and the whole offer expires BOOTSTRAP_SAMPLE_TTL_MS after it came.
+   */
+  async _bootstrapSampleDrain() {
+    if (this._bootSampleDraining || !this._bootSample.size) return;
+    this._bootSampleDraining = true;
+    const st = this._bootSampleStats;
+    try {
+      const node = this._node;
+      const t = node?.transport;
+      const sample = this._bootSample;
+      for (const [id, rec] of [...sample.entries()]) {
+        if (this._bootSample !== sample) break;                                            // a newer offer replaced this one
+        if (Date.now() - rec.at > BOOTSTRAP_SAMPLE_TTL_MS) { sample.delete(id); st.expired++; continue; }
+        if (!node?.synaptome || node.synaptome.has(id) || this._isBoundPeer(id)) { sample.delete(id); st.skipped++; continue; }
+        if (!this._isEligibleCandidate(id)) { sample.delete(id); st.skipped++; continue; }
+        let anyBound = false;
+        try { anyBound = typeof t?.boundPeers === 'function' && t.boundPeers().length > 0; } catch { anyBound = false; }
+        if (!anyBound) break;                                                              // no path yet; the next bind runs this again
+        rec.tries++;
+        let out = 'failed';
+        try { out = await this._considerCandidate(id, 'bootstrap'); } catch { out = 'failed'; }
+        if (out === 'held' || out === 'added') { sample.delete(id); st.dialed++; }
+        else if (out === 'bound') { sample.delete(id); st.bound++; }
+        else if (out === 'deferred' || out === 'deferred-deficit') { rec.tries--; break; }  // capacity: nothing went out, try at the next bind
+        else if (rec.tries >= BOOTSTRAP_SAMPLE_TRIES) { sample.delete(id); st.failed++; }
+        // 'failed' or 'skip' below the try bound: the id stays for the next bind
+      }
+    } finally { this._bootSampleDraining = false; }
+  }
+
   _fillArmed() {
     return !!(this._maintainCfg && this._attemptGuard && this._gateCfg);
   }
