@@ -362,6 +362,49 @@ async function main() {
   { const p = lastPing(); check('R10 a throwing bound list reads false and 0, never a missing field', !!p && p.bridgeBound === false && p.meshBound === 0, JSON.stringify(p)); }
   await t11.stop();
 
+  // ── The first peer-list reaches a handler that registers late (4.140.0) ──
+  // connect() starts the transport, then the peer; the bridge's one peer-list
+  // arrives in between. Mutants: no replay → R11, R12; replay with no age
+  // bound → R13; replay to a handler that was present → R14; call a removed
+  // handler → R15; replay only the handles, without the graduated ids → R11.
+  const ID_A = '89' + 'a'.repeat(64), ID_B = '89' + 'b'.repeat(64);
+  const mkPL = (extra = {}) => webTransport({
+    bridgeUrl: 'wss://test.example', identity: alice, WebSocketImpl: FakeWS,
+    handshakeTimeoutMs: 2000, reconnectInitialMs: 30, reconnectMaxMs: 30, ...extra,
+  });
+  liveSockets = [];
+  { const t = mkPL(); const st = t.start(); await sleep(5); const s = t.socket; feedWelcome(s);
+    const early = []; const offEarly = t.onPeerList((l) => early.push(l));
+    s.deliver({ type: 'peer-list', peers: [], graduated: [ID_A, ID_B], serverT: Date.now() });   // no handles: this harness has no WebRTC for the mesh to dial
+    await feedBridgeHello(s); await st;
+    const late = []; t.onPeerList((l) => late.push(l));
+    check('R11 nothing is delivered synchronously at registration', late.length === 0);
+    await sleep(5);
+    check('R11 a handler registered AFTER the list gets that list once, graduated ids included', late.length === 1 && late[0].length === 2 && late[0].includes(ID_A) && late[0].includes(ID_B), JSON.stringify(late));
+    check('R14 a handler that was present when the list arrived is not called again', early.length === 1);
+    const gone = []; const off = t.onPeerList((l) => gone.push(l)); off();
+    await sleep(5);
+    check('R15 a handler removed before the microtask is never called', gone.length === 0);
+    late[0].push('mutated'); const late2 = []; t.onPeerList((l) => late2.push(l)); await sleep(5);
+    check('R16 each handler gets its own copy', late2.length === 1 && !late2[0].includes('mutated'));
+    s.deliver({ type: 'peer-list', peers: [], graduated: [ID_B], serverT: Date.now() });
+    const late3 = []; t.onPeerList((l) => late3.push(l)); await sleep(5);
+    check('R17 the NEWEST list is the one kept', late3.length === 1 && late3[0].length === 1 && late3[0][0] === ID_B, JSON.stringify(late3));
+    offEarly(); await t.stop(); }
+  { const t = mkPL(); const st = t.start(); await sleep(5); const s = t.socket; feedWelcome(s); await feedBridgeHello(s); await st;
+    const none = []; t.onPeerList((l) => none.push(l)); await sleep(5);
+    check('R12 with no list received, a late handler is not called', none.length === 0); await t.stop(); }
+  { const t = mkPL({ peerListReplayMs: 20 }); const st = t.start(); await sleep(5); const s = t.socket; feedWelcome(s);
+    s.deliver({ type: 'peer-list', peers: [], graduated: [ID_A], serverT: Date.now() });
+    await feedBridgeHello(s); await st; await sleep(40);
+    const old = []; t.onPeerList((l) => old.push(l)); await sleep(5);
+    check('R13 a list older than the replay window is not handed to a late handler', old.length === 0); await t.stop(); }
+  { const t = mkPL({ peerListReplayMs: 0 }); const st = t.start(); await sleep(5); const s = t.socket; feedWelcome(s);
+    s.deliver({ type: 'peer-list', peers: [], graduated: [ID_A], serverT: Date.now() });
+    await feedBridgeHello(s); await st;
+    const off0 = []; t.onPeerList((l) => off0.push(l)); await sleep(5);
+    check('R18 a window of 0 turns the replay off', off0.length === 0); await t.stop(); }
+
   console.log(`\nResult: ${passed} passed, ${failed} failed`);
   process.exit(failed === 0 ? 0 : 1);
 }

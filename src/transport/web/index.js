@@ -170,6 +170,9 @@ export function webTransport({
   // treat graduation as a misjudgement and reconnect normally. A graduated node
   // re-dials the bridge if its bound-peer count later falls below this floor.
   graduationMeshFloor = 3,
+  // 4.140.0: how long the last peer-list is kept for a kernel handler that
+  // registers after it arrived (see composite.onPeerList below).
+  peerListReplayMs = 60_000,
   serveMeshFloor = null,          // R4: bound mesh peers needed to serve; null = graduationMeshFloor
   graduationRecheckMs = 5000,
   // BOUNDED MESH DEGREE (4.95.0). Null/absent ⇒ the mesh keeps a channel to
@@ -496,6 +499,15 @@ export function webTransport({
   let webrtcRef = null;
   /** Row 12: kernel handlers for the bridge `peer-list` sample (composite.onPeerList). */
   const peerListHandlers = new Set();
+  // 4.140.0: the most recent list handed to the handlers, and when. THE ORDER
+  // connect() RUNS IN makes this necessary: `await transport.start()` and then
+  // `await peer.start()`. The bridge sends its ONE peer-list on admission,
+  // during transport.start; the peer registers its handler in peer.start. So
+  // the kernel never saw the list, and the bootstrap-sample dial (4.135.0)
+  // never ran. Measured on testnet 2026-11-13: an observer registered before
+  // start saw a list with 1 graduated id, the peer counted 0 offers, and the
+  // same list replayed to the peer bound that node within 6 s.
+  let lastPeerList = null;   // { list: string[], at: number }
   // G4: the profile is built (and refused) HERE, before the mesh or any cap
   // consumer exists; a ledger turned off cannot carry pools.
   const poolProfile = meshPools ? makePoolProfile(meshPools) : null;
@@ -728,6 +740,7 @@ export function webTransport({
           const graduated = sanitizeGraduatedSample(frame.graduated);
           if (graduated.length) log('peer-list-graduated', { offered: Array.isArray(frame.graduated) ? frame.graduated.length : 0, kept: graduated.length });
           const forHandlers = graduated.length ? peers.concat(graduated) : peers;
+          lastPeerList = { list: forHandlers.slice(), at: Date.now() };
           for (const h of peerListHandlers) { try { h(forHandlers.slice()); } catch { /* a kernel handler that throws does not stop the bootstrap */ } }   // row 12: the directory sample
           if (typeof mesh.onPeerList === 'function') {
             return mesh.onPeerList(peers);
@@ -1728,6 +1741,18 @@ export function webTransport({
   composite.onPeerList = (handler) => {
     if (typeof handler !== 'function') throw new TypeError('onPeerList: handler must be a function');
     peerListHandlers.add(handler);
+    // A handler that registers AFTER a list arrived is given that list once,
+    // if it is younger than peerListReplayMs. This delivers a fact the
+    // handler was not yet there to hear; it asks the bridge for nothing and
+    // repeats nothing. A handler removed before the microtask runs is not
+    // called, and a handler present when the list arrived is not called twice.
+    const held = lastPeerList;
+    if (held && peerListReplayMs > 0 && Date.now() - held.at < peerListReplayMs) {
+      queueMicrotask(() => {
+        if (!peerListHandlers.has(handler) || lastPeerList !== held) return;   // removed, or a newer list has been delivered live
+        try { handler(held.list.slice()); } catch { /* a kernel handler that throws does not stop the bootstrap */ }
+      });
+    }
     return () => { peerListHandlers.delete(handler); };
   };
 
