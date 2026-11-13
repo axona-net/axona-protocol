@@ -337,6 +337,31 @@ async function main() {
   check('R6 abnormal close with the bridge channel bound → reconnects', liveSockets.length >= n10 + 1 && t10.bridgeState !== 'graduated');
   await t10.stop();
 
+  // ── Two-sided release (4.137.0; Orion acbffcc6 point 1) ──────────────
+  // The heartbeat says whether THIS node's channel to the bridge is bound, so
+  // a bridge that still believes a dead channel up does not close the socket.
+  liveSockets = [];
+  const t11 = webTransport({
+    bridgeUrl: 'wss://test.example', identity: alice, WebSocketImpl: FakeWS,
+    handshakeTimeoutMs: 2000, reconnectInitialMs: 30, reconnectMaxMs: 30,
+    graduationMeshFloor: 3, graduationRecheckMs: 40, pingIntervalMs: 15,
+  });
+  const r7 = await up(t11);
+  const lastPing = () => { for (let i = r7.sent.length - 1; i >= 0; i--) { try { const f = JSON.parse(r7.sent[i]); if (f.type === 'ping') return f; } catch { /* not json */ } } return null; };
+  t11.webrtc.boundPeers = () => [1n];
+  await sleep(60);
+  { const p = lastPing(); check('R7 no channel to the bridge → ping says bridgeBound false, with the mesh count', !!p && p.bridgeBound === false && p.meshBound === 1, JSON.stringify(p)); }
+  t11.webrtc.boundPeers = () => [BRIDGE_BIG, 1n];
+  await sleep(60);
+  { const p = lastPing(); check('R8 channel to the bridge bound → ping says bridgeBound true', !!p && p.bridgeBound === true && p.meshBound === 2, JSON.stringify(p)); }
+  t11.webrtc.boundPeers = () => [2n, 3n, 4n];
+  await sleep(60);
+  { const p = lastPing(); check('R9 a full mesh WITHOUT the bridge still says false (the count is not the answer)', !!p && p.bridgeBound === false && p.meshBound === 3, JSON.stringify(p)); }
+  t11.webrtc.boundPeers = () => { throw new Error('boom'); };
+  await sleep(60);
+  { const p = lastPing(); check('R10 a throwing bound list reads false and 0, never a missing field', !!p && p.bridgeBound === false && p.meshBound === 0, JSON.stringify(p)); }
+  await t11.stop();
+
   console.log(`\nResult: ${passed} passed, ${failed} failed`);
   process.exit(failed === 0 ? 0 : 1);
 }

@@ -1364,7 +1364,12 @@ export function webTransport({
         // the graduation floor trusts locally. The bridge uses it to graduate
         // the best-meshed peer first (vitality-based graduation, #374), rather
         // than guessing from uptime. Additive field; no wire-version change.
-        socket.send(JSON.stringify({ type: 'ping', t: Date.now(), meshBound: meshBoundCount() }));
+        // Two-sided release (4.137.0; Orion acbffcc6 point 1): also say whether
+        // OUR channel to this bridge is bound. The bridge closes a retired socket
+        // on its own belief that the channel is up; a client that lost the
+        // channel knows first, and a false here withholds that close. Additive
+        // field; a bridge that does not read it behaves as before.
+        socket.send(JSON.stringify({ type: 'ping', t: Date.now(), meshBound: meshBoundCount(), bridgeBound: bridgeChannelBound(bridgeNodeIdBig) }));
         bridge._emitPingTraffic('sent');
       } catch (err) {
         log('bridge-ping-send-failed', { err: err.message });
