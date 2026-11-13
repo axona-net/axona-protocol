@@ -36,7 +36,7 @@ import { AxonaManager } from '../src/pubsub/AxonaManager.js';
 import { RootClaim, makeRole } from '../src/pubsub/rootClaim.js';
 import { sameRegion, regionOf } from '../src/pubsub/regionRoles.js';
 import { AxonaPeer } from '../src/dht/AxonaPeer.js';
-import { PublishError, ErrorCodes } from '../src/errors.js';
+import { PublishError, PullError, ErrorCodes } from '../src/errors.js';
 import { T } from '../src/pubsub/constants.js';
 import { sealTestDht } from './lib/testCapability.mjs';
 
@@ -226,7 +226,16 @@ ok('0b an unreadable id shares no region', sameRegion(HOME, 'zz') === false && s
     ok('H11 a walk that does not answer in time is "cannot say": no error, and the call returns', e === null && Date.now() - t0 < 1000, `${Date.now() - t0} ms`); }
   { const p = peer([mk(0x13, 0x1)], { walk: { found: false, path: [idHex(SELF)] } }); ok('H12 a walk that visited nobody else is "cannot say"', (await tryIt(p, armedAm, FOREIGN)) === null); }
   { const p = peer([mk(0x13, 0x1)], { walk: null }); ok('H13 a walk with no result is "cannot say"', (await tryIt(p, armedAm, FOREIGN)) === null); }
-  { const p = peer([mk(0x13, 0x1), PEER_OUT]); await tryIt(p, armedAm, FOREIGN); ok('H14 when the local lookup already found a node, the walk is not run', p.walks === 0); } }
+  { const p = peer([mk(0x13, 0x1), PEER_OUT]); await tryIt(p, armedAm, FOREIGN); ok('H14 when the local lookup already found a node, the walk is not run', p.walks === 0); }
+  // A READ raises the same error (4.142.0; David 2026-11-13: "a read in a region with no nodes raises the same error").
+  { const p = peer([mk(0x13, 0x1)]); let e = null; try { await guard.call(p, armedAm, FOREIGN, PullError, 'pull'); } catch (x) { e = x; }
+    ok('H15 the guard raises the caller\'s own error class: a PullError with REGION_UNPOPULATED, naming peer.pull', e instanceof PullError && e.code === ErrorCodes.REGION_UNPOPULATED && /^peer\.pull: no nodes found in region 0x12/.test(e.message), String(e?.message ?? e)); }
+  { const src = readFileSync(new URL('../src/dht/AxonaPeer.js', import.meta.url), 'utf8');
+    const body = (name, next) => src.slice(src.indexOf(`  async ${name}(msgId, { topic, timeoutMs = 1000 } = {}) {`), src.indexOf(next));
+    const pull = body('pull', '  async pullOutcome('), po = body('pullOutcome', '   * Resolve an author\'s self-declared class');
+    const before = (b, a, c) => b.indexOf(a) > 0 && b.indexOf(c) > b.indexOf(a);
+    ok('H16 peer.pull runs the guard BEFORE it asks the network', pull.length > 200 && before(pull, "await this._assertRegionPopulated(am, topicIdBig, PullError, 'pull');", 'am.requestPull('));
+    ok('H17 peer.pullOutcome runs the same guard before it asks: two doors onto one read agree', po.length > 200 && before(po, "await this._assertRegionPopulated(am, desc.topicIdBig, PullError, 'pullOutcome');", 'am.requestPull(')); } }
 
 // ── I. statics ─────────────────────────────────────────────────────────
 { const rd = (p) => readFileSync(new URL(p, import.meta.url), 'utf8');

@@ -4667,6 +4667,9 @@ export class AxonaPeer extends DHT {
     }
     const desc       = await this._resolveReadTopic(topic, 'pull');
     const topicIdBig = desc.topicIdBig;
+    // REGION ROLES (David 2026-11-13: "a read in a region with no nodes raises
+    // the same error"). Default off; the same guard as pub and sub.
+    await this._assertRegionPopulated(am, topicIdBig, PullError, 'pull');
     const outcome = await am.requestPull(topicIdBig, wantsLatest ? null : msgId, { timeoutMs });
     // requestPull is TAGGED as of Q1. peer.pull keeps its documented envelope|null
     // shape so existing callers are unaffected; peer.pullOutcome() exposes the full
@@ -4736,6 +4739,7 @@ export class AxonaPeer extends DHT {
     }
     const am = this._requireAxonaManager('pullOutcome');
     const desc = await this._resolveReadTopic(topic, 'pullOutcome');
+    await this._assertRegionPopulated(am, desc.topicIdBig, PullError, 'pullOutcome');   // REGION ROLES: the same guard as pull (two entry points onto one read must not disagree)
     const wantsLatest = msgId === null || msgId === undefined;
     return am.requestPull(desc.topicIdBig, wantsLatest ? null : msgId, { timeoutMs });
   }
