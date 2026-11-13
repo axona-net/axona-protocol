@@ -4465,8 +4465,9 @@ export class AxonaPeer extends DHT {
    * other nodes and none is in the region, this node's lookup found none.
    *
    * WHAT IT IS NOT: proof the region is empty. It is what THIS node's lookup
-   * reached. A lookup that fails, or names nobody else, is "cannot say" and
-   * does not refuse. The answer is cached per region, 30 s when a node was
+   * and, when that finds none, its routed walk reached. A lookup or a walk
+   * that fails, times out, or names nobody else is "cannot say" and does not
+   * refuse. The answer is cached per region, 30 s when a node was
    * found and 5 s when none was, so a publisher in a loop asks once.
    */
   async _assertRegionPopulated(am, topicIdBig, ErrCls, opName) {
@@ -4495,7 +4496,35 @@ export class AxonaPeer extends DHT {
       try { if (extractS2Prefix(id) === topicRegion) { found = true; break; } } catch { /* unreadable id: not a node in the region */ }
     }
     if (others === 0) return;                                                    // knows nobody else: cannot say
-    cache.set(topicRegion, { found, at: now });
+    // RR-LOOKUP-RADIUS (4.141.0; Orion e3b03ec5). findKClosest asks only peers
+    // this node holds a channel to, so what it can learn ends two hops out. A
+    // populated region three hops away read as empty, and the app was told
+    // "no nodes found" about a region a routed walk reaches. Before refusing,
+    // the ROUTED lookup walk decides: each hop forwards over its own channels,
+    // and every in-region node is closer to the topic than every node outside
+    // it, so a walk that can reach the region visits a node in it.
+    // The walk that fails, times out, or visits nobody else is "cannot say":
+    // no error, and nothing cached.
+    if (!found) {
+      let walked = null;
+      const walkMs = Number.isFinite(this._regionWalkMs) && this._regionWalkMs > 0 ? this._regionWalkMs : 3000;
+      try {
+        walked = await Promise.race([
+          this.lookup(asId(topicIdBig), { noCache: true }),
+          new Promise((res) => { const t = setTimeout(() => res('__timeout__'), walkMs); if (t && typeof t.unref === 'function') t.unref(); }),
+        ]);
+      } catch { walked = null; }
+      if (walked === '__timeout__' || !walked || !Array.isArray(walked.path)) return;
+      let visited = 0;
+      for (const raw of walked.path) {
+        let id; try { id = asId(raw); } catch { continue; }
+        if (id === selfId) continue;
+        visited++;
+        try { if (extractS2Prefix(id) === topicRegion) { found = true; break; } } catch { /* not a node in the region */ }
+      }
+      if (!found && visited === 0) return;                                       // the walk went nowhere: cannot say
+    }
+    cache.set(topicRegion, { found, at: Date.now() });
     if (!found) refuse();
   }
 

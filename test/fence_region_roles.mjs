@@ -196,7 +196,10 @@ ok('0b an unreadable id shares no region', sameRegion(HOME, 'zz') === false && s
 
 // ── H. the app's error ─────────────────────────────────────────────────
 { const guard = AxonaPeer.prototype._assertRegionPopulated;
-  const peer = (found, opts = {}) => ({ _node: { id: SELF }, calls: 0, async findKClosest() { this.calls++; if (opts.throws) throw new Error('lookup failed'); return found; } });
+  // `walk`: what the routed lookup visits. Default: one foreign node, so the walk agrees with a local "none".
+  const peer = (found, opts = {}) => ({ _node: { id: SELF }, calls: 0, walks: 0, _regionWalkMs: opts.walkMs,
+    async findKClosest() { this.calls++; if (opts.throws) throw new Error('lookup failed'); return found; },
+    lookup(_t, o) { this.walks++; this.walkOpts = o; if (opts.walkThrows) return Promise.reject(new Error('walk failed')); if (opts.walkHangs) return new Promise(() => {}); return Promise.resolve('walk' in opts ? opts.walk : { found: true, path: [idHex(mk(0x13, 0x2))] }); } });
   const armedAm = { _regionRoles: true }, off = { _regionRoles: false };
   const tryIt = async (p, am, topic) => { try { await guard.call(p, am, topic, PublishError, 'pub'); return null; } catch (e) { return e; } };
   { const p = peer([PEER_OUT]); ok('H1 unarmed: no lookup, no error', (await tryIt(p, off, FOREIGN)) === null && p.calls === 0); }
@@ -208,7 +211,22 @@ ok('0b an unreadable id shares no region', sameRegion(HOME, 'zz') === false && s
   { const p = peer([mk(0x13, 0x1), PEER_OUT]); ok('H4 one node in the region is enough', (await tryIt(p, armedAm, FOREIGN)) === null); }
   { const p = peer(null, { throws: true }); ok('H5 a lookup that FAILS is "cannot say": no error', (await tryIt(p, armedAm, FOREIGN)) === null); }
   { const p = peer([SELF]); ok('H6 a lookup that names nobody else is "cannot say": no error', (await tryIt(p, armedAm, FOREIGN)) === null); }
-  { const p = peer([123, 'x', null]); ok('H7 hostile lookup entries are not nodes and refuse nothing', (await tryIt(p, armedAm, FOREIGN)) === null); } }
+  { const p = peer([123, 'x', null]); ok('H7 hostile lookup entries are not nodes and refuse nothing', (await tryIt(p, armedAm, FOREIGN)) === null); }
+  // RR-LOOKUP-RADIUS (4.141.0; Orion e3b03ec5): the local lookup's reach ends two hops out.
+  { const p = peer([mk(0x13, 0x1)], { walk: { found: true, path: [idHex(mk(0x13, 0x2)), idHex(mk(0xff, 0x1)), idHex(PEER_OUT)] } });
+    const e = await tryIt(p, armedAm, FOREIGN);
+    ok('H8 the local lookup finds none, the ROUTED walk visits a node in the region → no error', e === null && p.walks === 1 && p.walkOpts?.noCache === true, String(e?.code ?? e));
+    const before = p.calls; await tryIt(p, armedAm, FOREIGN);
+    ok('H8b and that answer is cached as found', p.calls === before && p.walks === 1); }
+  { const p = peer([mk(0x13, 0x1)]); const e = await tryIt(p, armedAm, FOREIGN);
+    ok('H9 the walk also visits no node in the region → REGION_UNPOPULATED', e?.code === ErrorCodes.REGION_UNPOPULATED && p.walks === 1); }
+  { const p = peer([mk(0x13, 0x1)], { walkThrows: true }); ok('H10 a walk that FAILS is "cannot say": no error, nothing cached', (await tryIt(p, armedAm, FOREIGN)) === null && (await tryIt(p, armedAm, FOREIGN)) === null && p.walks === 2); }
+  { const p = peer([mk(0x13, 0x1)], { walkHangs: true, walkMs: 25 }); const t0 = Date.now(); const keep = setInterval(() => {}, 20);   // the kernel's timer is unref'd; hold the process open for the test
+    const e = await tryIt(p, armedAm, FOREIGN); clearInterval(keep);
+    ok('H11 a walk that does not answer in time is "cannot say": no error, and the call returns', e === null && Date.now() - t0 < 1000, `${Date.now() - t0} ms`); }
+  { const p = peer([mk(0x13, 0x1)], { walk: { found: false, path: [idHex(SELF)] } }); ok('H12 a walk that visited nobody else is "cannot say"', (await tryIt(p, armedAm, FOREIGN)) === null); }
+  { const p = peer([mk(0x13, 0x1)], { walk: null }); ok('H13 a walk with no result is "cannot say"', (await tryIt(p, armedAm, FOREIGN)) === null); }
+  { const p = peer([mk(0x13, 0x1), PEER_OUT]); await tryIt(p, armedAm, FOREIGN); ok('H14 when the local lookup already found a node, the walk is not run', p.walks === 0); } }
 
 // ── I. statics ─────────────────────────────────────────────────────────
 { const rd = (p) => readFileSync(new URL(p, import.meta.url), 'utf8');

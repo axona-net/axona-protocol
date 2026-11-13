@@ -5,7 +5,7 @@
     "onNotification",
     "onRoutedMessage"
   ],
-  "treeHash": "ea430c8b56fd0593c74f6b9d3429bc618875da92",
+  "treeHash": "c54cf0a5b28610c9385a8dff884af58dad732cb9",
   "filesScanned": 92,
   "summary": {
     "migration-target": 48,
@@ -157,7 +157,7 @@
     },
     {
       "file": "dht/AxonaPeer.js",
-      "line": 4898,
+      "line": 4927,
       "callee": "onMessage",
       "receiver": "def",
       "wire": "—",
@@ -166,7 +166,7 @@
     },
     {
       "file": "dht/AxonaPeer.js",
-      "line": 4911,
+      "line": 4940,
       "callee": "registerFrame",
       "receiver": "this._b6door",
       "wire": "axona:direct",
@@ -176,7 +176,7 @@
     },
     {
       "file": "dht/AxonaPeer.js",
-      "line": 4927,
+      "line": 4956,
       "callee": "registerFrame",
       "receiver": "this._b6door",
       "wire": "axona:direct",
@@ -186,7 +186,7 @@
     },
     {
       "file": "dht/AxonaPeer.js",
-      "line": 5475,
+      "line": 5504,
       "callee": "onDirectMessage",
       "receiver": "peer",
       "wire": "<type>",
@@ -195,7 +195,7 @@
     },
     {
       "file": "dht/AxonaPeer.js",
-      "line": 5527,
+      "line": 5556,
       "callee": "registerFrame",
       "receiver": "peer._b6door",
       "wire": "__tunneled_direct__",
@@ -205,7 +205,7 @@
     },
     {
       "file": "dht/AxonaPeer.js",
-      "line": 7258,
+      "line": 7287,
       "callee": "onDirectMessage",
       "receiver": "def",
       "wire": "—",
