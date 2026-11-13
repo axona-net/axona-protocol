@@ -117,6 +117,11 @@ ok('0b an unreadable id shares no region', sameRegion(HOME, 'zz') === false && s
   const r = await am._onReplicate({ topicId: idHex(FOREIGN), from: idHex(PEER_OUT), msgs: [], dels: [] }, { targetId: SELF, fromId: idHex(PEER_OUT) });
   await am._syncIngest({ topicId: idHex(FOREIGN), from: idHex(PEER_OUT), msgs: [], dels: [] }, { fromId: idHex(PEER_OUT) }, 'REPLICATE');
   ok('C6 REPLICATE: no backup outside the region, at the door and at the ingest; not consumed', r === undefined && !am.axonRoles.has(FOREIGN) && am.inspectRegionRoles().refusals.backup === 2, JSON.stringify(am.inspectRegionRoles())); }
+{ const { am, logs } = newAM();
+  for (let i = 0; i < 50; i++) await am._onReplicate({ topicId: idHex(FOREIGN), from: idHex(PEER_OUT), msgs: [], dels: [] }, { targetId: SELF, fromId: idHex(PEER_OUT) });
+  await am._onReplicate({ topicId: idHex(mk(0x12, 0xabd)), from: idHex(PEER_OUT), msgs: [], dels: [] }, { targetId: SELF, fromId: idHex(PEER_OUT) });
+  const lines = logs.filter((l) => l.event === 'pubsub:role-refused' && l.data?.why === 'region');
+  ok('C6b fifty-one refusals are all counted and log ONE line per topic (the 2,922-line flood of 2026-11-13)', am.inspectRegionRoles().refusals.backup === 51 && lines.length === 2, `count ${am.inspectRegionRoles().refusals.backup} lines ${lines.length}`); }
 { const { am } = newAM({ self: mk(0x13, 0x1) });          // closer to FOREIGN (0x12) than the loser below, and outside its region
   const loser = idHex(mk(0x89, 0x5));
   const staged = am._stageOffer(FOREIGN, undefined, loser, { topicId: idHex(FOREIGN), corr: 'c'.repeat(16), handoff: 1, count: 3, loserEpoch: 1, timing: {} });

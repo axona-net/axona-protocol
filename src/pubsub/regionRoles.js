@@ -90,7 +90,21 @@ export const regionRolesMethods = {
   _regionRefuse(kind, topicBig) {
     const st = (this._regionStats ??= { stops: 0, byType: {}, refusals: {} });
     st.refusals[kind] = (st.refusals[kind] || 0) + 1;
-    this._log('info', 'role-refused', { topic: idHex(topicBig).slice(0, 12), why: 'region', kind });
+    // RATE-LIMITED (4.139.0). Every refusal is counted; the log line is at most
+    // one a minute per (kind, topic). On testnet, 2026-11-13 20:21Z, an unarmed
+    // bridge pushed REPLICATE at an armed one for 56 roots and the armed bridge
+    // wrote 2,922 of these lines in 22 s. In a mixed fleet an unarmed root goes
+    // on choosing an armed foreign backup, so the refusal recurs for as long
+    // as the fleet is mixed.
+    const now = this._now();
+    const seen = (this._regionRefuseLogged ??= new Map());
+    const key = kind + ':' + topicBig.toString(16);
+    const last = seen.get(key);
+    if (last === undefined || now - last >= REGION_STOP_LOG_MS) {
+      if (seen.size >= 1024) seen.delete(seen.keys().next().value);   // bounded
+      seen.set(key, now);
+      this._log('info', 'role-refused', { topic: idHex(topicBig).slice(0, 12), why: 'region', kind, total: st.refusals[kind] });
+    }
     return false;
   },
 
