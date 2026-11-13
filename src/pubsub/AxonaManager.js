@@ -75,6 +75,7 @@ import { successorGateMethods } from './successorGate.js';
 import { holderProbeMethods } from './holderProbe.js';
 import { handoffBindingMethods } from './handoffBinding.js';
 import { standingLeaseMethods } from './standingLease.js';
+import { regionRolesMethods } from './regionRoles.js';
 import buildBoundary1Registry from './boundary1Registry.js';
 // Return routes (Closer-Born v0.6): breadcrumb lifetime, map bound, path ids kept.
 const RETURN_ROUTE_TTL_MS = 60_000, RETURN_ROUTE_CAP = 256, RETURN_RPATH_MAX = 16;
@@ -120,6 +121,7 @@ export class AxonaManager {
     tombstoneAuth = false,         // REF-1.1 S2.0c Phase 3: DEFAULT-OFF shadow wiring of the tombstone authorization core (observe-only; no behavior change)
     killProofs = null,             // 4.131.0: carry + retain the author's signed kill proof with every tombstone (DEFAULT-ON; null = env KILL_PROOFS, default 1)
     frameRegistry = false,         // REF-1.1 S2: DEFAULT-OFF Boundary-1 frame-contract registry (shadow-wraps the 19 routed handlers; observe-only; byte-identical flag-off)
+    regionRoles = null,            // David 2026-11-13: a role goes only to a node in the topic's region (regionRoles.js). DEFAULT OFF; null = env REGION_ROLES
     cutover = null,
     hintRefresh = null,            // Closer-Born v0.6 3d hint refresh (David 2026-11-03): DEFAULT OFF; null = env HINT_REFRESH
     replicaInherit = null,         // Closer-Born v0.6 3c (David 2026-11-03 "go ahead with 3c"): DEFAULT OFF; null = env REPLICA_INHERIT
@@ -388,6 +390,9 @@ export class AxonaManager {
     // closer than the farthest replica takes the slot; the displaced backup
     // stops receiving REPLICATE and lapses on its standby lease.
     this._replicaInherit  = !!(replicaInherit ?? envNum('REPLICA_INHERIT', 0));
+    // REGION ROLES (regionRoles.js; David 2026-11-13): a role goes only to a node
+    // in the topic's region. Routing is untouched. Reverses I-16 for roles.
+    this._regionRoles     = !!(regionRoles ?? envNum('REGION_ROLES', 0));
     // 6b SUCCESSOR GATE (successorGate.js): an 'app' process holding a root
     // reports degraded: no-successor while no replica is current, and re-seats.
     this._successorGate   = !!(successorGate ?? envNum('SUCCESSOR_GATE', 0));
@@ -885,6 +890,9 @@ export class AxonaManager {
    */
   admitPushedRole(topicBig) {
     const topic = idHex(topicBig).slice(0, 12);
+    // REGION ROLES: an heir outside the topic's region takes no handoff. Silent,
+    // as every refusal here is: the leaver's unacked path re-homes the topic.
+    if (this._regionIneligible(topicBig)) return this._regionRefuse('handoff', topicBig);
     if (this._neverRoot) {
       this._admitRefusals.bridge++;
       this._log('info', 'role-refused', { topic, why: 'bridge', hard: true, pushed: true });
@@ -934,6 +942,7 @@ export class AxonaManager {
         terminated: this._rolesTerminated || 0,   // roots that ended their generation under Topic Lifetime 4.5
       },
       lifetime: this._lifetimeInspect(),
+      regionRoles: this.inspectRegionRoles(),
       capacity: this.inspectCapacity(),
     };
   }
@@ -999,7 +1008,7 @@ export class AxonaManager {
     const prev = role.merge.candidate;
     // A standing candidate is replaced only by one that wins over IT: two
     // paths naming two winners in one tick converge on the relation's answer.
-    if (prev && !RootClaim.claimWins(topicBig, claim, prev)) return false;
+    if (prev && !RootClaim.claimWins(topicBig, claim, prev, !!this._regionRoles)) return false;
     role.merge.candidate = { ...claim, source, at: this._now() };
     this._log('info', 'merge-candidate', { topic: idHex(topicBig).slice(0, 12), id: w.slice(0, 10), epoch: claim.epoch, source, cache: role.cache.length, replaced: !!prev });
     this._mergeOffer(topicBig, role);                       // step 1 of the exchange (d3): OFFER toward the recorded winner
@@ -1738,6 +1747,9 @@ export class AxonaManager {
   }
 
   pubsubHost(topicId) {
+    // REGION ROLES: hosting holds the topic, so it is a role (David 2026-11-13,
+    // answer 1). peer.host() throws before this; this is the backstop.
+    if (this._regionIneligible(topicId)) { this._regionRefuse('host', topicId); return false; }
     this._hostedTopics.add(topicId);
     // Participate so the node won't be torn down and can root the topic if closest.
     // Route the announce through _sendSubscribe (lookup-assisted → the true root, and
@@ -2076,6 +2088,7 @@ Object.assign(
   holderProbeMethods,    // Closer-Born v0.6 3a: holder-first empty-root probe with role-less NACKs — behind holderProbe
   handoffBindingMethods, // Closer-Born v0.6 Part 7: the loser signs `handoff`; an armed candidate verifies — behind handoffBinding
   standingLeaseMethods,  // Closer-Born v0.6 6c: a standing topic's root lease — behind standingLease
+  regionRolesMethods,    // David 2026-11-13: a role goes only to a node in the topic's region — behind regionRoles
 );
 
 export default AxonaManager;

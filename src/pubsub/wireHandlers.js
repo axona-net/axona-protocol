@@ -177,7 +177,9 @@ export const wireHandlersMethods = {
     }
     // Bare topic id → only the terminus handles. The closest reachable node roots
     // the topic whatever its region — region is a placement hint folded into the id,
-    // never an eligibility gate.
+    // never an eligibility gate. (UNARMED. With regionRoles armed a role goes only to a node in the topic's region: regionRoles.js, David 2026-11-13.)
+    // The stop for an out-of-region terminal is in the handlers, at the birth
+    // point, after the closer-root defer; routing itself compares no regions.
     if (!meta.isTerminal) return 'forward';
     return 'handle';
   },
@@ -293,6 +295,11 @@ export const wireHandlersMethods = {
       // The meshBare() hold here stays as the SUB-side guard it always was.
       if (idBig(lc(payload.subscriberId)) === this.nodeId && this._rootClaim.meshBare()) return 'consumed';
     }
+    // REGION ROLES: the walk ended here and this node is outside the topic's
+    // region. No root is born; the walk STOPS, not consumed, and the
+    // subscriber's renewal carries it. After the closer-root defer above, which
+    // still names a known in-region root.
+    if (!this.axonRoles.has(topicBig) && this._regionIneligible(topicBig)) return this._regionStop(T.SUB, topicBig);
     let role = this.axonRoles.get(topicBig);
     if (!role) {
       // Synchronous terminal verification (council 2026-08-30, gated). Before a
@@ -469,7 +476,7 @@ export const wireHandlersMethods = {
   // instead of seating the newcomer over capacity.
   _promoteChild(role) {
     // Any leaf may be promoted to a child relay — region is not an eligibility
-    // predicate (it is only a placement hint folded into the id).
+    // predicate (it is only a placement hint folded into the id). (UNARMED. With regionRoles armed a role goes only to a node in the topic's region: regionRoles.js, David 2026-11-13.)
     // A subscriber already in a PENDING delegation is not a leaf to promote or
     // to hand off again: it is seated here only until its child's ADOPTACK.
     // Without this exclusion the next over-capacity SUB promoted a pending
@@ -485,6 +492,7 @@ export const wireHandlersMethods = {
       // handed off); a node that stepped down within the cooldown is not
       // re-promoted (4.7), though it may still be handed off as a leaf.
       if (seat?.kind === 'standby') continue;
+      if (this._regionRoles && !this._roleRegionOk(role.topicId, s)) continue;   // REGION ROLES: a child relay is a role (David 2026-11-13, answer 1)
       if (this._topicLifetime && leaves.length === 0 && (this._childCooldown.get(s) || 0) > now) continue;
       leaves.push(s);
     }
@@ -572,6 +580,13 @@ export const wireHandlersMethods = {
     const topicBig = idBig(payload.topicId);
     const parentHex = lc(payload.parent);
     const nonce = typeof payload.nonce === 'string' ? payload.nonce : null;
+    // REGION ROLES: a node outside the topic's region is no child relay. The
+    // parent is told, and keeps serving the batch (pending delegation).
+    if (this._regionIneligible(topicBig)) {
+      this._regionRefuse('child', topicBig);
+      if (nonce && isHexId(parentHex)) this._route(idBig(parentHex), T.ADOPTACK, { topicId: payload.topicId, nonce, accepted: [], refused: 'region' });
+      return 'consumed';
+    }
     const role = this._rootClaim.adoptChild(topicBig, parentHex);
     if (!role) {
       this._log('info', 'adopt-refused', { topic: idHex(topicBig).slice(0, 12), parent: parentHex.slice(0, 12), why: 'custody' });
@@ -628,6 +643,7 @@ export const wireHandlersMethods = {
       // and a failed forward invalidates the pointer instead of our state.
       if (closer) { this._forwardToRoot(topicBig, T.PUB, payload, closer); return 'consumed'; }
     }
+    if (!this.axonRoles.has(topicBig) && this._regionIneligible(topicBig)) return this._regionStop(T.PUB, topicBig);   // REGION ROLES: stop, not consumed; the publisher's retry carries it
     let role = this.axonRoles.get(topicBig) || this._becomeRoot(topicBig, 'pub-terminal');
     // Admission refused (bridge fence): a declined PUB must be FORWARDED, never
     // swallowed. Dropping it here is silent message loss.
@@ -1126,6 +1142,12 @@ export const wireHandlersMethods = {
     // RI-2 (Orion 867c3048): a bridge never holds a backup (_neverRoot). Not
     // consumed, so the sender credits no replica and its verdict is 'failed'.
     if (this._neverRoot) return;
+    // REGION ROLES: no backup outside the topic's region. Same answer: not
+    // consumed, no replica credited. A root keeps its UNION_AT_ROOT path below.
+    if (this._regionRoles) {
+      let tb = null; try { tb = idBig(payload.topicId); } catch { tb = null; }
+      if (tb !== null && !this.axonRoles.get(tb)?.isRoot && this._regionIneligible(tb)) { this._regionRefuse('backup', tb); return; }
+    }
     // Root-side: UNION_AT_ROOT (keep the claim, converge to the union). Else:
     // enter the BACKUP nature. Both are the REPLICATE policy hooks in
     // _syncIngest; the body drains through the time-sliced pump (I-11).
@@ -1666,6 +1688,7 @@ export const wireHandlersMethods = {
       // the app believes it already sent.
       if (closer) { this._forwardToRoot(topicBig, T.KILL, payload, closer); return 'consumed'; }
     }
+    if (!this.axonRoles.has(topicBig) && this._regionIneligible(topicBig)) return this._regionStop(T.KILL, topicBig);   // REGION ROLES
     const role = this.axonRoles.get(topicBig) || this._becomeRoot(topicBig, 'kill-terminal');
     if (!role) {
       // A tombstone is the one thing we least want to lose, but forwarding it
@@ -1912,6 +1935,7 @@ export const wireHandlersMethods = {
         if (closer) { this._deferToRoot(topicBig, T.METRICSON, payload, closer); return 'consumed'; }
       }
       if (!this.axonRoles.has(topicBig) && this._rootClaim.holdFor(topicBig)) return 'consumed';   // step-down hold (4.102.0): metrics are cosmetic
+      if (!this.axonRoles.has(topicBig) && this._regionIneligible(topicBig)) return this._regionStop(T.METRICSON, topicBig);   // REGION ROLES
       const role = this.axonRoles.get(topicBig) || this._becomeRoot(topicBig, 'metricson-terminal');
       if (!role) return 'consumed';   // refused: metrics are cosmetic, drop quietly
       this._maybePromoteRoot(role, payload, meta);

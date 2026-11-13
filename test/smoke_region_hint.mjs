@@ -8,6 +8,10 @@
 // the removed region walls is reintroduced (the configureRegionLock flag, the
 // _topicDecision 'reject', the _promoteChild / _onAdopt / pubsubHost refusals).
 //
+// SCOPE since 4.138.0: this fences the UNARMED kernel, which is the default. The
+// option regionRoles (David 2026-11-13) keeps every ROLE in the topic's region and
+// is fenced by fence_region_roles.mjs; routing compares no regions either way.
+//
 // Run: node test/smoke_region_hint.mjs
 import { AxonaManager } from '../src/pubsub/AxonaManager.js';
 import { sealTestDht } from './lib/testCapability.mjs';

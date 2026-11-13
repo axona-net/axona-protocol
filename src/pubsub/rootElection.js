@@ -138,7 +138,9 @@ export const rootElectionMethods = {
       //                   behave exactly as 4.61.x did.
       const staleClaim = !!this._rootTombstoned?.(tBig, payload.root, epoch);
       const closer = (rootBig ^ tBig) < (this.nodeId ^ tBig);
-      if (supersedesMine || (closer && !staleClaim)) {
+      // REGION ROLES: never yield to a root outside the topic's region. The
+      // record above is kept: its epoch is seat history either way.
+      if ((supersedesMine || (closer && !staleClaim)) && this._roleRegionOk(tBig, rootBig)) {
         // Through the ONE candidate entry (dual-root packet 4(d)): a root with
         // custody on a merge-capable node records the winner instead of yielding.
         this._mergeCandidate(tBig, lc(payload.root), epoch,
@@ -450,6 +452,7 @@ export const rootElectionMethods = {
             let b; try { b = idBig(id); } catch { continue; }
             if (b === this.nodeId) continue;
             if (bridge != null && b === bridge) continue;
+            if (this._regionRoles && !this._roleRegionOk(t, b)) continue;   // REGION ROLES: the nominee is in the topic's region
             const d = b ^ t;
             if (cD === null || d < cD) { cD = d; cBig = b; }
           }

@@ -4058,6 +4058,7 @@ export class AxonaPeer extends DHT {
   async pub(topic, message, opts = {}) {
     const desc = await this._resolveTopicOrThrow(topic, 'pub');
     const am   = this._requireAxonaManager('pub');
+    await this._assertRegionPopulated(am, desc.topicIdBig, PublishError, 'pub');   // REGION ROLES (default off)
 
     // Signer (design v0.3 §5/§6): opts.signWith is an AUTHOR identity, or the
     // ANONYMOUS sentinel for a deliberately unsigned publish. There is NO default
@@ -4276,6 +4277,7 @@ export class AxonaPeer extends DHT {
     const desc       = await this._resolveReadTopic(topic, 'sub');
     const am         = this._requireAxonaManager('sub');
     const topicIdBig = desc.topicIdBig;
+    await this._assertRegionPopulated(am, topicIdBig, SubscribeError, 'sub');   // REGION ROLES (default off)
 
     // Apply `since` mode by seeding AxonaManager's per-topic lastSeenTs
     // BEFORE the subscribe call.  AxonaManager passes lastSeenTs in the
@@ -4409,6 +4411,13 @@ export class AxonaPeer extends DHT {
       return { ok: true, scope: 'keyspace' };
     }
     const desc = await this._resolveTopicOrThrow(topic, 'host');
+    // REGION ROLES (David 2026-11-13, answer 1): hosting holds the topic, so it
+    // is a role, and a role stays in the topic's region.
+    if (typeof am._regionIneligible === 'function' && am._regionIneligible(desc.topicIdBig)) {
+      throw new PublishError(ErrorCodes.ROLE_OUT_OF_REGION,
+        `peer.host: this node is in region 0x${extractS2Prefix(this._node.id).toString(16)} and the topic is in region 0x${extractS2Prefix(desc.topicIdBig).toString(16)}; a topic is hosted only by nodes in its own region`,
+        { context: { topicRegion: extractS2Prefix(desc.topicIdBig), selfRegion: extractS2Prefix(this._node.id) } });
+    }
     // ADDRESS RULE — hosting and owning are DISJOINT properties.
     //
     // A node may host a topic only if its own ADDRESS puts it in that topic's
@@ -4443,6 +4452,51 @@ export class AxonaPeer extends DHT {
     am.pubsubHost(desc.topicIdBig);
     this._markPersistDirty('hosting');
     return { ok: true, scope: 'topic', topicId: desc.topicId };
+  }
+
+  /**
+   * REGION ROLES (regionRoles.js; David 2026-11-13, answer 3): "No nodes found
+   * in region is a sufficient error. The app can switch regions if needed."
+   *
+   * A pre-send guard for pub and sub, armed only. A node IN the topic's region
+   * is itself a node in that region and never refuses. Any other node asks
+   * the network for the nodes closest to the topic id. Every in-region node
+   * is closer to the topic than every node outside it, so if the answer names
+   * other nodes and none is in the region, this node's lookup found none.
+   *
+   * WHAT IT IS NOT: proof the region is empty. It is what THIS node's lookup
+   * reached. A lookup that fails, or names nobody else, is "cannot say" and
+   * does not refuse. The answer is cached per region, 30 s when a node was
+   * found and 5 s when none was, so a publisher in a loop asks once.
+   */
+  async _assertRegionPopulated(am, topicIdBig, ErrCls, opName) {
+    if (!am || am._regionRoles !== true) return;
+    const selfId = this._node?.id;
+    let topicRegion, selfRegion = null;
+    try { topicRegion = extractS2Prefix(asId(topicIdBig)); } catch { return; }
+    try { selfRegion = (typeof selfId === 'bigint') ? extractS2Prefix(selfId) : null; } catch { selfRegion = null; }
+    if (selfRegion === topicRegion) return;
+    const refuse = () => {
+      throw new ErrCls(ErrorCodes.REGION_UNPOPULATED,
+        `peer.${opName}: no nodes found in region 0x${topicRegion.toString(16)}; a topic is served only by nodes in its own region`,
+        { context: { topicRegion, selfRegion } });
+    };
+    const now = Date.now();
+    const cache = (this._regionSeen ??= new Map());
+    const c = cache.get(topicRegion);
+    if (c && now - c.at < (c.found ? 30_000 : 5_000)) { if (c.found) return; refuse(); }
+    let ids;
+    try { ids = await this.findKClosest(asId(topicIdBig), 4); } catch { return; }   // cannot ask: do not refuse
+    if (!Array.isArray(ids)) return;
+    let others = 0, found = false;
+    for (const id of ids) {
+      if (typeof id !== 'bigint' || id === selfId) continue;
+      others++;
+      try { if (extractS2Prefix(id) === topicRegion) { found = true; break; } } catch { /* unreadable id: not a node in the region */ }
+    }
+    if (others === 0) return;                                                    // knows nobody else: cannot say
+    cache.set(topicRegion, { found, at: now });
+    if (!found) refuse();
   }
 
   /**

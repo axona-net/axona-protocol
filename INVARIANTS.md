@@ -189,8 +189,8 @@ the full statements and the reasoning are in the document.
 | I-13 | Durable bookkeeping is written from receipts, never from sends | **UNFENCED** |
 | I-14 | A negative result names its kind — timeout, answered-empty, and unparseable are three facts | **UNFENCED** — issue #418 is a live instance |
 | I-15 | Transport identity is ephemeral; author identity is durable | `smoke_persistence_wiring.js`, `smoke_snapshot.js`, `fence_transport_identity.mjs` (was `I-ID`) |
-| I-16 | Region is an optimization, never a wall | `smoke_region_lock.mjs` covers the dormant path only; nothing asserts the default stays off (was `B1`) |
-| I-17 | A bridge holds no topic role, at any load, with no floor exception | `smoke_role_admission.mjs`; nothing asserts a bridge ends bring-up with `axonRoles` empty (was `B12`) |
+| I-16 | **Routing** never compares regions. **Roles** stay in the topic's region when `regionRoles` is armed (David 2026-11-13; DEFAULT OFF). Unarmed, region gates nothing, as since 4.75.0. This REVERSES the old I-16 ("region is an optimization, never a wall") for roles only: a thin region may have no root and may lose its history, and the app is told `REGION_UNPOPULATED`. Design: axona-docs `design/same-region-role-rule.md` | armed: `fence_region_roles.mjs`; unarmed: `smoke_region_hint.mjs` (was `B1`) |
+| I-17 | A bridge holds no topic role for an ordinary topic, at any load, with no floor exception. With `regionRoles` armed this follows from I-16 by region equality, and a bridge MAY hold a topic minted in the bridge region (David 2026-11-13, answer 4) | `smoke_role_admission.mjs`; nothing asserts a bridge ends bring-up with `axonRoles` empty (was `B12`) |
 | I-18 | Capacity is measured, never counted | `smoke_role_admission.mjs` (was `B13`) |
 
 Also folded into §XII from the retired axona-docs file: the six structural
