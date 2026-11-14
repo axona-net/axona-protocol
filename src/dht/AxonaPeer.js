@@ -169,6 +169,10 @@ function _canReceiveDispatch(recv) {
 // notifications can induce.
 const MAX_VERIFY_PROBES = 8;
 // Bootstrap Sample Dial (4.135.0): bounds. A bridge's sample is 16 by default.
+// Region check (regionRoles): how long a walk's verdict on a region is reused.
+// One value for both answers since 4.143.0: a "populated" kept for 30 s hid a
+// region's death from the app for that long.
+const REGION_SEEN_TTL_MS      = 5_000;
 const BOOTSTRAP_SAMPLE_MAX    = 16;      // ids kept from one offered list
 const BOOTSTRAP_SAMPLE_TRIES  = 2;       // dials per id, per offer
 const BOOTSTRAP_SAMPLE_TTL_MS = 60_000;  // an offer older than this is dropped undialed
@@ -4458,17 +4462,18 @@ export class AxonaPeer extends DHT {
    * REGION ROLES (regionRoles.js; David 2026-11-13, answer 3): "No nodes found
    * in region is a sufficient error. The app can switch regions if needed."
    *
-   * A pre-send guard for pub and sub, armed only. A node IN the topic's region
-   * is itself a node in that region and never refuses. Any other node asks
-   * the network for the nodes closest to the topic id. Every in-region node
-   * is closer to the topic than every node outside it, so if the answer names
-   * other nodes and none is in the region, this node's lookup found none.
+   * A pre-send guard for pub, sub and the two reads, armed only. A node IN
+   * the topic's region is itself a node in that region and never refuses. Any
+   * other node needs a LIVE node in the region: a peer it holds an open
+   * channel to, or a hop that took its routed walk toward the topic. Every
+   * in-region node is closer to the topic than every node outside it, so a
+   * walk that can reach the region visits a node in it.
    *
-   * WHAT IT IS NOT: proof the region is empty. It is what THIS node's lookup
-   * and, when that finds none, its routed walk reached. A lookup or a walk
-   * that fails, times out, or names nobody else is "cannot say" and does not
-   * refuse. The answer is cached per region, 30 s when a node was
-   * found and 5 s when none was, so a publisher in a loop asks once.
+   * WHAT IT IS NOT: proof the region is empty. It is what THIS node's channels
+   * and its routed walk reached. An id in a table, or on a walk's path as the
+   * hop a send failed to, is not a node. No open channel, a walk that fails
+   * or times out, or one nobody took is "cannot say" and does not refuse. A
+   * walk's verdict is reused for 5 s, so a publisher in a loop walks once.
    */
   async _assertRegionPopulated(am, topicIdBig, ErrCls, opName) {
     if (!am || am._regionRoles !== true) return;
@@ -4482,47 +4487,72 @@ export class AxonaPeer extends DHT {
         `peer.${opName}: no nodes found in region 0x${topicRegion.toString(16)}; a topic is served only by nodes in its own region`,
         { context: { topicRegion, selfRegion } });
     };
+    // LIVENESS (4.143.0; Orion 2d4ece07, David 2026-11-14 "Build the liveness
+    // rule"). Through 4.142.0 this check read an ID as a node: an id returned
+    // by findKClosest, or any id on the walk's path. On testnet 2026-11-13 a
+    // host killed hours earlier was still named by a neighbour's table, and
+    // the walk's path ends at the hop its send FAILED to, so a region whose
+    // nodes were all dead read as populated and the app was told nothing.
+    // Evidence now is a node that ANSWERED:
+    //   1. A channel this node holds open, to a peer not marked dead. No RPC.
+    //      None at all: cannot say. One in the topic's region: populated.
+    //   2. Otherwise the ROUTED walk, and only the hops that took it. The
+    //      final path element is dropped when the walk ended `node-down`, or
+    //      ended `send-failed` at exactly that element (fail.next): it was
+    //      chosen, never reached. ANY remaining hop in the region is a live
+    //      node there (the last answered hop alone is not the test: a region
+    //      with one live node hands the walk on, out of the region).
+    //   A walk that fails, times out, ends `walk-deadline`, or leaves no
+    //   answered hop is "cannot say": no error, nothing cached.
+    let peers;
+    try { peers = this._usablePeers(); } catch { return; }                       // cannot ask: do not refuse
+    if (!Array.isArray(peers) || peers.length === 0) return;                     // holds no live channel: cannot say
+    // THE FAST PATH'S EVIDENCE AND ITS AGE (Aster 19657f77). "Open" is the
+    // transport's word: connected, not marked dead, and not SUSPECT (stale by
+    // the heartbeat) whichever pool the peer is in. It is as old as the
+    // transport's own detection of a dead channel: a channel to a node that
+    // died reads connected until the heartbeat or a failed send says
+    // otherwise (measured once, testnet 2026-11-14: a bridge held a killed
+    // node's channel as connected for 10.2 s). For that long this path can
+    // answer "populated" for a region whose one known node just died. The
+    // walk is not asked to confirm it: a send to that same peer would be the
+    // only better evidence, and pub/sub is about to make it.
+    for (const p of peers) {
+      try {
+        if (typeof p?.id !== 'bigint' || p.id === selfId || extractS2Prefix(p.id) !== topicRegion) continue;
+        if (typeof this._isStalePeer === 'function' && this._isStalePeer(p.id)) continue;   // suspect: not evidence
+        return;
+      } catch { /* unreadable id: not a node in the region */ }
+    }
     const now = Date.now();
     const cache = (this._regionSeen ??= new Map());
     const c = cache.get(topicRegion);
-    if (c && now - c.at < (c.found ? 30_000 : 5_000)) { if (c.found) return; refuse(); }
-    let ids;
-    try { ids = await this.findKClosest(asId(topicIdBig), 4); } catch { return; }   // cannot ask: do not refuse
-    if (!Array.isArray(ids)) return;
-    let others = 0, found = false;
-    for (const id of ids) {
+    if (c && now - c.at < REGION_SEEN_TTL_MS) { if (c.found) return; refuse(); }
+    let walked = null, timer = null;
+    const walkMs = Number.isFinite(this._regionWalkMs) && this._regionWalkMs > 0 ? this._regionWalkMs : 3000;
+    try {
+      walked = await Promise.race([
+        this.lookup(asId(topicIdBig), { noCache: true }),
+        new Promise((res) => { timer = setTimeout(() => res('__timeout__'), walkMs); if (timer && typeof timer.unref === 'function') timer.unref(); }),
+      ]);
+    } catch { walked = null; }
+    finally { if (timer) clearTimeout(timer); }
+    if (walked === '__timeout__' || !walked || !Array.isArray(walked.path) || walked.reason === 'walk-deadline') return;
+    const answered = [];
+    for (const raw of walked.path) {
+      let id; try { id = asId(raw); } catch { continue; }
       if (typeof id !== 'bigint' || id === selfId) continue;
-      others++;
-      try { if (extractS2Prefix(id) === topicRegion) { found = true; break; } } catch { /* unreadable id: not a node in the region */ }
+      answered.push(id);
     }
-    if (others === 0) return;                                                    // knows nobody else: cannot say
-    // RR-LOOKUP-RADIUS (4.141.0; Orion e3b03ec5). findKClosest asks only peers
-    // this node holds a channel to, so what it can learn ends two hops out. A
-    // populated region three hops away read as empty, and the app was told
-    // "no nodes found" about a region a routed walk reaches. Before refusing,
-    // the ROUTED lookup walk decides: each hop forwards over its own channels,
-    // and every in-region node is closer to the topic than every node outside
-    // it, so a walk that can reach the region visits a node in it.
-    // The walk that fails, times out, or visits nobody else is "cannot say":
-    // no error, and nothing cached.
-    if (!found) {
-      let walked = null;
-      const walkMs = Number.isFinite(this._regionWalkMs) && this._regionWalkMs > 0 ? this._regionWalkMs : 3000;
-      try {
-        walked = await Promise.race([
-          this.lookup(asId(topicIdBig), { noCache: true }),
-          new Promise((res) => { const t = setTimeout(() => res('__timeout__'), walkMs); if (t && typeof t.unref === 'function') t.unref(); }),
-        ]);
-      } catch { walked = null; }
-      if (walked === '__timeout__' || !walked || !Array.isArray(walked.path)) return;
-      let visited = 0;
-      for (const raw of walked.path) {
-        let id; try { id = asId(raw); } catch { continue; }
-        if (id === selfId) continue;
-        visited++;
-        try { if (extractS2Prefix(id) === topicRegion) { found = true; break; } } catch { /* not a node in the region */ }
-      }
-      if (!found && visited === 0) return;                                       // the walk went nowhere: cannot say
+    if (answered.length) {
+      const last = answered[answered.length - 1];
+      let lastHex = null; try { lastHex = toHex(last).slice(0, 12); } catch { lastHex = null; }
+      if (walked.reason === 'node-down' || (walked.reason === 'send-failed' && typeof walked.fail?.next === 'string' && lastHex !== null && lastHex === walked.fail.next)) answered.pop();
+    }
+    if (answered.length === 0) return;                                           // nobody took the walk: cannot say
+    let found = false;
+    for (const id of answered) {
+      try { if (extractS2Prefix(id) === topicRegion) { found = true; break; } } catch { /* not a node in the region */ }
     }
     cache.set(topicRegion, { found, at: Date.now() });
     if (!found) refuse();

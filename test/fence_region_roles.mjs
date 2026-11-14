@@ -36,6 +36,7 @@ import { AxonaManager } from '../src/pubsub/AxonaManager.js';
 import { RootClaim, makeRole } from '../src/pubsub/rootClaim.js';
 import { sameRegion, regionOf } from '../src/pubsub/regionRoles.js';
 import { AxonaPeer } from '../src/dht/AxonaPeer.js';
+import { toHex as toHexId } from '../src/utils/hexid.js';
 import { PublishError, PullError, ErrorCodes } from '../src/errors.js';
 import { T } from '../src/pubsub/constants.js';
 import { sealTestDht } from './lib/testCapability.mjs';
@@ -196,37 +197,76 @@ ok('0b an unreadable id shares no region', sameRegion(HOME, 'zz') === false && s
 
 // ── H. the app's error ─────────────────────────────────────────────────
 { const guard = AxonaPeer.prototype._assertRegionPopulated;
-  // `walk`: what the routed lookup visits. Default: one foreign node, so the walk agrees with a local "none".
-  const peer = (found, opts = {}) => ({ _node: { id: SELF }, calls: 0, walks: 0, _regionWalkMs: opts.walkMs,
-    async findKClosest() { this.calls++; if (opts.throws) throw new Error('lookup failed'); return found; },
-    lookup(_t, o) { this.walks++; this.walkOpts = o; if (opts.walkThrows) return Promise.reject(new Error('walk failed')); if (opts.walkHangs) return new Promise(() => {}); return Promise.resolve('walk' in opts ? opts.walk : { found: true, path: [idHex(mk(0x13, 0x2))] }); } });
+  // `live`: the peers this node holds an open channel to (what _usablePeers returns).
+  // `walk`: what the routed lookup returns. Default: one foreign hop took it, so the walk agrees with "none".
+  const OUT13 = mk(0x13, 0x1), OUT13b = mk(0x13, 0x2), BR = mk(0xff, 0x1);
+  const peer = (live, opts = {}) => ({ _node: { id: SELF }, calls: 0, walks: 0, findK: 0, _regionWalkMs: opts.walkMs,
+    _usablePeers() { this.calls++; if (opts.throws) throw new Error('no table'); return live === null ? null : live.map((id) => (id && typeof id === 'object') ? id : { id, cls: 'M', syn: null }); },
+    async findKClosest() { this.findK++; return []; },
+    lookup(_t, o) { this.walks++; this.walkOpts = o; if (opts.walkThrows) return Promise.reject(new Error('walk failed')); if (opts.walkHangs) return new Promise(() => {}); return Promise.resolve('walk' in opts ? opts.walk : { found: false, reason: 'stalled', path: [SELF, OUT13b] }); } });
   const armedAm = { _regionRoles: true }, off = { _regionRoles: false };
   const tryIt = async (p, am, topic) => { try { await guard.call(p, am, topic, PublishError, 'pub'); return null; } catch (e) { return e; } };
-  { const p = peer([PEER_OUT]); ok('H1 unarmed: no lookup, no error', (await tryIt(p, off, FOREIGN)) === null && p.calls === 0); }
+  const UNPOP = ErrorCodes.REGION_UNPOPULATED;
+  { const p = peer([PEER_OUT]); ok('H1 unarmed: no table read, no walk, no error', (await tryIt(p, off, FOREIGN)) === null && p.calls === 0 && p.walks === 0); }
   { const p = peer([]); ok('H2 a node IN the topic\'s region never asks and never refuses', (await tryIt(p, armedAm, HOME)) === null && p.calls === 0); }
-  { const p = peer([SELF, mk(0x13, 0x1), mk(0xff, 0x1)]); const e = await tryIt(p, armedAm, FOREIGN);
-    ok('H3 the lookup names other nodes and none in the region → REGION_UNPOPULATED, "no nodes found in region"', e instanceof PublishError && e.code === ErrorCodes.REGION_UNPOPULATED && /no nodes found in region 0x12/.test(e.message), String(e?.code ?? e));
+  { const p = peer([OUT13, BR]); const e = await tryIt(p, armedAm, FOREIGN);
+    ok('H3 live peers, none in the region, and the walk reaches none → REGION_UNPOPULATED, "no nodes found in region"', e instanceof PublishError && e.code === UNPOP && /no nodes found in region 0x12/.test(e.message) && p.walks === 1, String(e?.code ?? e));
     const e2 = await tryIt(p, armedAm, FOREIGN);
-    ok('H3b the answer is cached: the second call asks nobody', e2?.code === ErrorCodes.REGION_UNPOPULATED && p.calls === 1, `calls ${p.calls}`); }
-  { const p = peer([mk(0x13, 0x1), PEER_OUT]); ok('H4 one node in the region is enough', (await tryIt(p, armedAm, FOREIGN)) === null); }
-  { const p = peer(null, { throws: true }); ok('H5 a lookup that FAILS is "cannot say": no error', (await tryIt(p, armedAm, FOREIGN)) === null); }
-  { const p = peer([SELF]); ok('H6 a lookup that names nobody else is "cannot say": no error', (await tryIt(p, armedAm, FOREIGN)) === null); }
-  { const p = peer([123, 'x', null]); ok('H7 hostile lookup entries are not nodes and refuse nothing', (await tryIt(p, armedAm, FOREIGN)) === null); }
-  // RR-LOOKUP-RADIUS (4.141.0; Orion e3b03ec5): the local lookup's reach ends two hops out.
-  { const p = peer([mk(0x13, 0x1)], { walk: { found: true, path: [idHex(mk(0x13, 0x2)), idHex(mk(0xff, 0x1)), idHex(PEER_OUT)] } });
+    ok('H3b the walk\'s verdict is reused: the second call walks nowhere', e2?.code === UNPOP && p.walks === 1, `walks ${p.walks}`); }
+  { const p = peer([OUT13, PEER_OUT]); ok('H4 one OPEN CHANNEL to a node in the region is enough, and no walk is run', (await tryIt(p, armedAm, FOREIGN)) === null && p.walks === 0); }
+  { const p = peer(null, { throws: true }); ok('H5 a table that cannot be read is "cannot say": no error, no walk', (await tryIt(p, armedAm, FOREIGN)) === null && p.walks === 0); }
+  { const p = peer([]); ok('H6 a node with NO open channel is "cannot say": no error, no walk', (await tryIt(p, armedAm, FOREIGN)) === null && p.walks === 0); }
+  { const p = peer(null); ok('H6b a table that is not a list is "cannot say"', (await tryIt(p, armedAm, FOREIGN)) === null && p.walks === 0); }
+  { const p = peer([{ id: 123 }, { id: 'x' }, { id: null }, {}], { walk: { found: false, reason: 'stalled', path: [SELF, 123, 'x', null, {}] } });
+    ok('H7 hostile entries are not nodes: they neither populate a region nor refuse one', (await tryIt(p, armedAm, FOREIGN)) === null); }
+  // The routed walk (4.141.0, RR-LOOKUP-RADIUS; Orion e3b03ec5): a region beyond this node's own channels.
+  { const p = peer([OUT13], { walk: { found: false, reason: 'stalled', path: [SELF, OUT13b, BR, PEER_OUT] } });
     const e = await tryIt(p, armedAm, FOREIGN);
-    ok('H8 the local lookup finds none, the ROUTED walk visits a node in the region → no error', e === null && p.walks === 1 && p.walkOpts?.noCache === true, String(e?.code ?? e));
-    const before = p.calls; await tryIt(p, armedAm, FOREIGN);
-    ok('H8b and that answer is cached as found', p.calls === before && p.walks === 1); }
-  { const p = peer([mk(0x13, 0x1)]); const e = await tryIt(p, armedAm, FOREIGN);
-    ok('H9 the walk also visits no node in the region → REGION_UNPOPULATED', e?.code === ErrorCodes.REGION_UNPOPULATED && p.walks === 1); }
-  { const p = peer([mk(0x13, 0x1)], { walkThrows: true }); ok('H10 a walk that FAILS is "cannot say": no error, nothing cached', (await tryIt(p, armedAm, FOREIGN)) === null && (await tryIt(p, armedAm, FOREIGN)) === null && p.walks === 2); }
-  { const p = peer([mk(0x13, 0x1)], { walkHangs: true, walkMs: 25 }); const t0 = Date.now(); const keep = setInterval(() => {}, 20);   // the kernel's timer is unref'd; hold the process open for the test
+    ok('H8 no channel into the region, and a hop IN the region took the walk → no error', e === null && p.walks === 1 && p.walkOpts?.noCache === true, String(e?.code ?? e));
+    await tryIt(p, armedAm, FOREIGN);
+    ok('H8b and that verdict is reused', p.walks === 1); }
+  { const p = peer([OUT13]); const e = await tryIt(p, armedAm, FOREIGN);
+    ok('H9 the walk is taken by a foreign hop only → REGION_UNPOPULATED', e?.code === UNPOP && p.walks === 1); }
+  { const p = peer([OUT13], { walkThrows: true }); ok('H10 a walk that FAILS is "cannot say": no error, nothing kept', (await tryIt(p, armedAm, FOREIGN)) === null && (await tryIt(p, armedAm, FOREIGN)) === null && p.walks === 2); }
+  { const p = peer([OUT13], { walkHangs: true, walkMs: 25 }); const t0 = Date.now(); const keep = setInterval(() => {}, 20);   // the kernel's timer is unref'd; hold the process open for the test
     const e = await tryIt(p, armedAm, FOREIGN); clearInterval(keep);
     ok('H11 a walk that does not answer in time is "cannot say": no error, and the call returns', e === null && Date.now() - t0 < 1000, `${Date.now() - t0} ms`); }
-  { const p = peer([mk(0x13, 0x1)], { walk: { found: false, path: [idHex(SELF)] } }); ok('H12 a walk that visited nobody else is "cannot say"', (await tryIt(p, armedAm, FOREIGN)) === null); }
-  { const p = peer([mk(0x13, 0x1)], { walk: null }); ok('H13 a walk with no result is "cannot say"', (await tryIt(p, armedAm, FOREIGN)) === null); }
-  { const p = peer([mk(0x13, 0x1), PEER_OUT]); await tryIt(p, armedAm, FOREIGN); ok('H14 when the local lookup already found a node, the walk is not run', p.walks === 0); }
+  { const p = peer([OUT13], { walk: { found: false, reason: 'stalled', path: [SELF] } }); ok('H12 a walk nobody else took is "cannot say"', (await tryIt(p, armedAm, FOREIGN)) === null); }
+  { const p = peer([OUT13], { walk: null }); ok('H13 a walk with no result is "cannot say"', (await tryIt(p, armedAm, FOREIGN)) === null); }
+  { const p = peer([OUT13, PEER_OUT]); await tryIt(p, armedAm, FOREIGN); ok('H14 the check never calls findKClosest: its ids carry no liveness', p.findK === 0); }
+  // LIVENESS (4.143.0; Orion 2d4ece07). An id is not a node.
+  // Ids whose first 12 hex digits differ, as real ids' do: `fail.next` is a 12-digit prefix.
+  const hi = (region, tag) => (BigInt(region) << 256n) | (BigInt(tag) << 216n);
+  const DEAD = hi(0x12, 0xd1), LIVE_IN = hi(0x12, 0xa7), F13 = hi(0x13, 0x3c);
+  const h12 = (id) => toHexId(id).slice(0, 12), deadHex = h12(DEAD);
+  { const p = peer([OUT13], { walk: { found: false, reason: 'send-failed', path: [SELF, F13, DEAD], fail: { at: h12(F13), next: deadHex, connected: false } } });
+    ok('H18 the hop a send FAILED to is not a node: a dead in-region id at the path\'s end → REGION_UNPOPULATED (testnet 2026-11-13)', (await tryIt(p, armedAm, FOREIGN))?.code === UNPOP); }
+  { const p = peer([OUT13], { walk: { found: false, reason: 'send-failed', path: [SELF, F13, LIVE_IN], fail: { at: h12(LIVE_IN), next: deadHex, connected: false } } });
+    ok('H19 a send-failed whose path ends at the hop that TRIED (re-selection on) keeps that hop: it took the walk', (await tryIt(p, armedAm, FOREIGN)) === null); }
+  { const p = peer([OUT13], { walk: { found: false, reason: 'node-down', path: [SELF, F13, DEAD] } });
+    ok('H20 a walk that ended node-down drops its last hop', (await tryIt(p, armedAm, FOREIGN))?.code === UNPOP); }
+  { const p = peer([OUT13], { walk: { found: false, reason: 'walk-deadline', path: [SELF, F13] } });
+    ok('H21 a walk that ran into its own deadline is "cannot say", and nothing is kept', (await tryIt(p, armedAm, FOREIGN)) === null && (await tryIt(p, armedAm, FOREIGN)) === null && p.walks === 2); }
+  { const p = peer([OUT13], { walk: { found: false, reason: 'stalled', path: [SELF, F13, LIVE_IN, BR] } });
+    ok('H22 ONE live node in the region, and the walk moved on and stalled outside it → populated (the last hop alone is not the test)', (await tryIt(p, armedAm, FOREIGN)) === null); }
+  { const p = peer([OUT13], { walk: { found: false, reason: 'send-failed', path: [SELF, DEAD], fail: { at: h12(SELF), next: deadHex, connected: true } } });
+    ok('H23 the only hop was the one the send failed to → nobody took the walk → "cannot say", not an error', (await tryIt(p, armedAm, FOREIGN)) === null && (await tryIt(p, armedAm, FOREIGN)) === null && p.walks === 2); }
+  { const p = peer([OUT13], { walk: { found: false, reason: 'send-failed', path: [SELF, LIVE_IN, DEAD], fail: { at: h12(LIVE_IN), next: deadHex, connected: false } } });
+    ok('H24 a dead last hop does not hide a LIVE in-region hop before it', (await tryIt(p, armedAm, FOREIGN)) === null); }
+  { let live = [OUT13]; const p = peer(null); p._usablePeers = function () { this.calls++; return live.map((id) => ({ id })); };
+    const e1 = await tryIt(p, armedAm, FOREIGN); live = [OUT13, PEER_OUT]; const e2 = await tryIt(p, armedAm, FOREIGN);
+    ok('H25 a channel opened to an in-region node overrides a kept "none" at once', e1?.code === UNPOP && e2 === null && p.walks === 1); }
+  { const p = peer([OUT13], { walk: { found: false, reason: 'stalled', path: [SELF, OUT13b, PEER_OUT] } });
+    const e1 = await tryIt(p, armedAm, FOREIGN);
+    for (const rec of p._regionSeen.values()) rec.at -= 6000;                    // six seconds pass
+    p.lookup = function () { this.walks++; return Promise.resolve({ found: false, reason: 'stalled', path: [SELF, OUT13b] }); };
+    const e2 = await tryIt(p, armedAm, FOREIGN);
+    ok('H26 a "populated" kept longer than 5 s is not reused: the region is walked again (30 s through 4.142.0)', e1 === null && p._regionSeen.size === 1 && e2?.code === UNPOP && p.walks === 2, `walks ${p.walks}`); }
+  { const p = peer([OUT13, PEER_OUT]); p._isStalePeer = (id) => id === PEER_OUT; const e = await tryIt(p, armedAm, FOREIGN);
+    ok('H28 an in-region channel the transport calls STALE is not evidence: the walk decides', e?.code === UNPOP && p.walks === 1); }
+  { const src = readFileSync(new URL('../src/dht/AxonaPeer.js', import.meta.url), 'utf8');
+    const g = src.slice(src.indexOf('  async _assertRegionPopulated('), src.indexOf('   * ADDRESS RULE test for host(topic)'));
+    ok('H27 the walk\'s timer is cleared when the walk answers first, and the body asks no closest-set', g.length > 500 && /finally \{ if \(timer\) clearTimeout\(timer\); \}/.test(g) && !/findKClosest\(/.test(g)); }
   // A READ raises the same error (4.142.0; David 2026-11-13: "a read in a region with no nodes raises the same error").
   { const p = peer([mk(0x13, 0x1)]); let e = null; try { await guard.call(p, armedAm, FOREIGN, PullError, 'pull'); } catch (x) { e = x; }
     ok('H15 the guard raises the caller\'s own error class: a PullError with REGION_UNPOPULATED, naming peer.pull', e instanceof PullError && e.code === ErrorCodes.REGION_UNPOPULATED && /^peer\.pull: no nodes found in region 0x12/.test(e.message), String(e?.message ?? e)); }
