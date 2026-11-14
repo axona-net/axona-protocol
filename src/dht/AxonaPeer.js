@@ -4543,7 +4543,9 @@ export class AxonaPeer extends DHT {
     //      node there (the last answered hop alone is not the test: a region
     //      with one live node hands the walk on, out of the region).
     //   A walk that fails, times out, ends `walk-deadline`, or leaves no
-    //   answered hop is "cannot say": no error, nothing cached.
+    //   answered hop is "cannot say": no error, nothing cached. And a walk
+    //   that did not run to its end (see below) may say "populated" and may
+    //   never say "empty".
     let peers;
     try { peers = this._usablePeers(); } catch { return; }                       // cannot ask: do not refuse
     if (!Array.isArray(peers) || peers.length === 0) return;                     // holds no live channel: cannot say
@@ -4552,8 +4554,8 @@ export class AxonaPeer extends DHT {
     // the heartbeat) whichever pool the peer is in. It is as old as the
     // transport's own detection of a dead channel: a channel to a node that
     // died reads connected until the heartbeat or a failed send says
-    // otherwise (measured once, testnet 2026-11-14: a bridge held a killed
-    // node's channel as connected for 10.2 s). For that long this path can
+    // otherwise (measured on testnet 2026-11-14: 10.2 s on a bridge's channel
+    // to a killed node, 19 s on a node's own direct channel). For that long this path can
     // answer "populated" for a region whose one known node just died. The
     // walk is not asked to confirm it: a send to that same peer would be the
     // only better evidence, and pub/sub is about to make it.
@@ -4594,6 +4596,18 @@ export class AxonaPeer extends DHT {
     for (const id of answered) {
       try { if (extractS2Prefix(id) === topicRegion) { found = true; break; } } catch { /* not a node in the region */ }
     }
+    // AN INCOMPLETE WALK REFUSES NOTHING (4.146.0; David 2026-11-14 "Correct the
+    // liveness rule"). Through 4.145.0 a walk cut short by a failed send or a
+    // down node, with its unreached hop dropped, was read as "no node in the
+    // region answered" and REFUSED. On testnet 2026-11-14 20:16Z a node whose
+    // only peer was the bridge walked bridge → an old node → a dead member,
+    // the send failed, and the app was told region 0x80 was empty while three
+    // hosts were alive in it. A walk that stopped early says nothing about
+    // what lies past the stop. Only a walk that ran to its end may refuse:
+    // one that STALLED (no unvisited peer was closer) or found its target.
+    // Every other ending (send-failed, node-down, the hop cap, a stop, a
+    // thrown step, no reason at all) is "cannot say": no error, nothing kept.
+    if (!found && !(walked.reason === 'stalled' || walked.stalled === true || walked.found === true)) return;
     cache.set(topicRegion, { found, at: Date.now() });
     if (!found) refuse();
   }

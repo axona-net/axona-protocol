@@ -240,19 +240,36 @@ ok('0b an unreadable id shares no region', sameRegion(HOME, 'zz') === false && s
   const DEAD = hi(0x12, 0xd1), LIVE_IN = hi(0x12, 0xa7), F13 = hi(0x13, 0x3c);
   const h12 = (id) => toHexId(id).slice(0, 12), deadHex = h12(DEAD);
   { const p = peer([OUT13], { walk: { found: false, reason: 'send-failed', path: [SELF, F13, DEAD], fail: { at: h12(F13), next: deadHex, connected: false } } });
-    ok('H18 the hop a send FAILED to is not a node: a dead in-region id at the path\'s end → REGION_UNPOPULATED (testnet 2026-11-13)', (await tryIt(p, armedAm, FOREIGN))?.code === UNPOP); }
+    const e1 = await tryIt(p, armedAm, FOREIGN), e2 = await tryIt(p, armedAm, FOREIGN);
+    ok('H18 the hop a send FAILED to is not a node, and a walk cut short by that failure REFUSES NOTHING: a dead in-region id at the path\'s end → "cannot say", nothing kept (testnet 2026-11-14: a live region was called empty)', e1 === null && e2 === null && p.walks === 2, String(e1?.code ?? e2?.code)); }
   { const p = peer([OUT13], { walk: { found: false, reason: 'send-failed', path: [SELF, F13, LIVE_IN], fail: { at: h12(LIVE_IN), next: deadHex, connected: false } } });
-    ok('H19 a send-failed whose path ends at the hop that TRIED (re-selection on) keeps that hop: it took the walk', (await tryIt(p, armedAm, FOREIGN)) === null); }
+    await tryIt(p, armedAm, FOREIGN); const again = await tryIt(p, armedAm, FOREIGN);
+    ok('H19 a send-failed whose path ends at the hop that TRIED (re-selection on) keeps that hop: it took the walk, the region is POPULATED, and that verdict is kept', again === null && p.walks === 1, `walks ${p.walks}`); }
   { const p = peer([OUT13], { walk: { found: false, reason: 'node-down', path: [SELF, F13, DEAD] } });
-    ok('H20 a walk that ended node-down drops its last hop', (await tryIt(p, armedAm, FOREIGN))?.code === UNPOP); }
+    ok('H20 a walk that ended node-down drops its last hop and, being incomplete, refuses nothing', (await tryIt(p, armedAm, FOREIGN)) === null && (await tryIt(p, armedAm, FOREIGN)) === null && p.walks === 2); }
   { const p = peer([OUT13], { walk: { found: false, reason: 'walk-deadline', path: [SELF, F13] } });
     ok('H21 a walk that ran into its own deadline is "cannot say", and nothing is kept', (await tryIt(p, armedAm, FOREIGN)) === null && (await tryIt(p, armedAm, FOREIGN)) === null && p.walks === 2); }
+  { const p = peer([OUT13], { walk: { found: false, reason: 'walk-deadline', path: [SELF, LIVE_IN] } });
+    await tryIt(p, armedAm, FOREIGN); await tryIt(p, armedAm, FOREIGN);
+    ok('H21b a walk-deadline result is not read at all: even an in-region id on its path keeps nothing', p.walks === 2, `walks ${p.walks}`); }
   { const p = peer([OUT13], { walk: { found: false, reason: 'stalled', path: [SELF, F13, LIVE_IN, BR] } });
     ok('H22 ONE live node in the region, and the walk moved on and stalled outside it → populated (the last hop alone is not the test)', (await tryIt(p, armedAm, FOREIGN)) === null); }
   { const p = peer([OUT13], { walk: { found: false, reason: 'send-failed', path: [SELF, DEAD], fail: { at: h12(SELF), next: deadHex, connected: true } } });
     ok('H23 the only hop was the one the send failed to → nobody took the walk → "cannot say", not an error', (await tryIt(p, armedAm, FOREIGN)) === null && (await tryIt(p, armedAm, FOREIGN)) === null && p.walks === 2); }
   { const p = peer([OUT13], { walk: { found: false, reason: 'send-failed', path: [SELF, LIVE_IN, DEAD], fail: { at: h12(LIVE_IN), next: deadHex, connected: false } } });
     ok('H24 a dead last hop does not hide a LIVE in-region hop before it', (await tryIt(p, armedAm, FOREIGN)) === null); }
+  // AN INCOMPLETE WALK REFUSES NOTHING (4.146.0; David 2026-11-14 "Correct the liveness rule").
+  { const BRIDGE = hi(0xff, 0x51), SEAT = hi(0x89, 0x1b);
+    const p = peer([BRIDGE], { walk: { found: false, stalled: false, reason: 'send-failed', path: [SELF, BRIDGE, SEAT, DEAD], fail: { at: h12(SEAT), next: deadHex, connected: false } } });
+    ok('H29 THE FIELD CASE: one peer (a bridge), walk bridge → old node → dead member, send failed → no error; the region may be full of nodes the walk never reached', (await tryIt(p, armedAm, FOREIGN)) === null); }
+  for (const [reason, label] of [['max-hops', 'the hop cap'], ['stopped', 'a stop'], ['step-threw', 'a thrown step'], [null, 'no reason at all'], ['send-failed', 'a failed send whose path ends at the hop that tried']]) {
+    const p = peer([OUT13], { walk: { found: false, stalled: false, reason, path: [SELF, F13, OUT13b], fail: reason === 'send-failed' ? { at: toHexId(OUT13b).slice(0, 12), next: deadHex } : undefined } });
+    ok('H30 a walk ended by ' + label + ', with only foreign hops answered, is "cannot say"', (await tryIt(p, armedAm, FOREIGN)) === null && (await tryIt(p, armedAm, FOREIGN)) === null && p.walks === 2); }
+  { const p = peer([OUT13], { walk: { found: false, stalled: true, reason: 'stalled', path: [SELF, F13, OUT13b] } });
+    ok('H31 a walk that RAN TO ITS END (stalled) with only foreign hops still refuses: that is the evidence of an empty region', (await tryIt(p, armedAm, FOREIGN))?.code === UNPOP); }
+  { const p = peer([OUT13], { walk: { found: false, stalled: false, reason: 'send-failed', path: [SELF, LIVE_IN, DEAD], fail: { at: h12(LIVE_IN), next: deadHex } } });
+    await tryIt(p, armedAm, FOREIGN); await tryIt(p, armedAm, FOREIGN);
+    ok('H32 an incomplete walk may still say POPULATED: an answered in-region hop counts, and that verdict is kept', p.walks === 1); }
   { let live = [OUT13]; const p = peer(null); p._usablePeers = function () { this.calls++; return live.map((id) => ({ id })); };
     const e1 = await tryIt(p, armedAm, FOREIGN); live = [OUT13, PEER_OUT]; const e2 = await tryIt(p, armedAm, FOREIGN);
     ok('H25 a channel opened to an in-region node overrides a kept "none" at once', e1?.code === UNPOP && e2 === null && p.walks === 1); }
