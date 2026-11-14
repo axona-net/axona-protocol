@@ -1328,6 +1328,13 @@ export class AxonaPeer extends DHT {
           && (connOk ? connOk(rp) : node.synaptome.has(rp));
         if (rpOk) { nextHopId = rp; rpathRest = msg.rpath.slice(1, SIGNAL_RPATH_MAX); RS.honoured++; } else { RS.unavailable++; }
       }
+      // BOUND TARGET (4.145.0): this hop holds an open, healthy channel to the
+      // frame's target and the target is not on the path: deliver there.
+      if (nextHopId === null && this._domain?.BOUND_TARGET_DELIVER && this._boundTargetOk(targetBig, exclude)) {
+        nextHopId = targetBig;
+        const BT = (this._boundTargetStats ??= { lookup: 0, route: 0, origin: 0 });
+        BT.route++;
+      }
       if (nextHopId === null && viaId !== null) {
         const viaOk = viaId !== meId && !exclude.has(viaId)
           && !(deadSet && deadSet.has(viaId))
@@ -3579,6 +3586,39 @@ export class AxonaPeer extends DHT {
       if (big !== null) out.push({ key, big, s });
     }
     return out;
+  }
+  /**
+   * BOUND TARGET (4.145.0; Orion 0e8f044b, David 2026-11-14 "Build the forwarder
+   * change"). Does this node hold an open, healthy channel to `targetBig`
+   * ITSELF, and is the target not already on the walk? Then the walk's next
+   * hop is the target, whatever the table says.
+   *
+   * WHY. A peer that dialed in is BOUND and is not always a table member: the
+   * table is full, or the pools keep it in the incoming class. With pools
+   * unarmed such a peer is in neither the lookup step's candidates nor the
+   * forwarder's usable set, so a node holding a live channel to the target
+   * forwarded to a closer table member instead, or stalled. On testnet
+   * 2026-11-14 that member was a host dead 21 hours and the answer to a live
+   * host's offer was never sent (fence_stale_member_answer).
+   *
+   * Only a NODE id can be bound: a topic id never is, so pub/sub walks
+   * (SUB, PUB, PULL, REPLICATE) are untouched. Two guards (Orion): a channel
+   * the transport calls stale is not used, since a half-dead channel reads
+   * connected for seconds; and a target already on the path is not revisited.
+   * @param {bigint} targetBig
+   * @param {{has(id: bigint): boolean}|null} [onPath]
+   */
+  _boundTargetOk(targetBig, onPath = null) {
+    const node = this._node;
+    if (!node || typeof targetBig !== 'bigint' || targetBig === node.id) return false;
+    if (onPath && onPath.has(targetBig)) return false;
+    try { if (node._deadPeers && node._deadPeers.has(targetBig)) return false; } catch { return false; }
+    const t = node.transport;
+    if (typeof t?.isConnected !== 'function') return false;
+    let open = false;
+    try { open = t.isConnected(targetBig) === true; } catch { open = false; }
+    if (!open) return false;
+    return !this._isStalePeer(targetBig);
   }
   /** SUSPECT: the transport says the channel is stale. A transport with no reader says no. */
   _isStalePeer(big) {
@@ -6937,6 +6977,12 @@ export class AxonaPeer extends DHT {
         if (f !== originNode.id && originNode.transport.isConnected(f)) { nextHopId = f; rpathRest = opts.rpath.slice(1, SIGNAL_RPATH_MAX); }
       } catch { /* unreadable entry: no return route */ }
     }
+    // BOUND TARGET (4.145.0): the origin holds an open, healthy channel to the target.
+    if (nextHopId === null && this._domain?.BOUND_TARGET_DELIVER && this._boundTargetOk(targetId, null)) {
+      nextHopId = targetId;
+      const BT = (this._boundTargetStats ??= { lookup: 0, route: 0, origin: 0 });
+      BT.origin++;
+    }
     if (nextHopId === null) nextHopId = this._greedyNextHopToward(targetId);
     let viaNext   = null;
     let isTerminal = nextHopId === null;
@@ -7426,6 +7472,17 @@ export class AxonaPeer extends DHT {
       candidates.push({ peerId: u.id, latency: 50, weight: 0.1, stratum });
     }
 
+    // BOUND TARGET (4.145.0): an open, healthy channel to the target itself is
+    // a candidate, and the chosen one, table member or not. It enters the
+    // candidate set here so a node with no closer member does not stall.
+    let boundTarget = null;
+    if (domain.BOUND_TARGET_DELIVER && this._boundTargetOk(targetKey, ctx.queried)) {
+      boundTarget = { peerId: targetKey, latency: 1, weight: 1, stratum: clz264(node.id ^ targetKey), _addedBy: 'bound-target' };
+      candidates.push(boundTarget);
+      const BT = (this._boundTargetStats ??= { lookup: 0, route: 0, origin: 0 });
+      BT.lookup++;
+    }
+
     if (deadSynapses.length > 0) {
       node.temperature = Math.max(node.temperature, domain.T_REHEAT);
       for (const syn of deadSynapses) {
@@ -7452,6 +7509,7 @@ export class AxonaPeer extends DHT {
     const direct = node.synaptome.get(targetKey)
                 ?? node.incomingSynapses.get(targetKey);
     if (direct && !dead.has(targetKey)) nextSyn = direct;
+    if (!nextSyn && boundTarget) nextSyn = boundTarget;
 
     if (!nextSyn && node.id === sourceId
         && Math.random() < domain.EPSILON) {
