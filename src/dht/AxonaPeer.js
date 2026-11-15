@@ -3657,6 +3657,26 @@ export class AxonaPeer extends DHT {
     }
     return !this._isStalePeer(big);
   }
+  /**
+   * 4.148.0 — the measured round trip of every peer this node could send to,
+   * nearest table order: `[{ id, cls, rtt }]` where `rtt` is the transport's
+   * getRtt answer (null when the transport cannot say). Read-only. Nothing in
+   * the kernel reads this to choose a hop, time a request or remove a peer.
+   */
+  rttSnapshot(max = 64) {
+    const t = this._node?.transport;
+    const out = [];
+    if (!t || typeof t.getRtt !== 'function') return out;
+    let peers = [];
+    try { peers = this._usablePeers(); } catch { peers = []; }
+    for (const p of peers) {
+      if (out.length >= max) break;
+      let rtt = null;
+      try { rtt = t.getRtt(p.id) ?? null; } catch { rtt = null; }
+      out.push({ id: toHex(p.id).slice(0, 12), cls: p.cls ?? null, rtt });
+    }
+    return out;
+  }
   _isStalePeer(big) {
     const t = this._node?.transport;
     if (typeof t?.isStale !== 'function') return false;

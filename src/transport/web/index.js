@@ -685,6 +685,8 @@ export function webTransport({
           // transport.bridgeInfo + onWelcome) — connId, the bridge's
           // package version, and its kernel version for the UI's
           // version row.
+          socketRtt = null;
+          try { bridge.resetRtt(); } catch { /* measurement only */ }   // a new socket is a new channel instance: it starts cold (4.148.0)
           bridgeInfo = {
             connId:        frame.connId ?? null,
             version:       frame.version ?? null,
@@ -875,6 +877,7 @@ export function webTransport({
   let upgradeReason    = null;   // set when state === 'upgrade-required'
   let lastPongAt       = 0;
   let lastRtt          = null;
+  let socketRtt        = null;   // the newest round trip measured on THIS socket; null on a new one (4.148.0)
   const rttBuffer      = [];
   let staleTimer       = null;
   let reconnectTimer   = null;
@@ -937,6 +940,8 @@ export function webTransport({
       lastRtt = Math.max(0, Date.now() - t);
       rttBuffer.push(lastRtt);
       if (rttBuffer.length > RTT_WINDOW) rttBuffer.shift();
+      socketRtt = lastRtt;
+      try { bridge.recordRtt(lastRtt); } catch { /* measurement only */ }
     }
     if (bridgeState === 'stale') setBridgeState('open');
   }
@@ -1382,7 +1387,13 @@ export function webTransport({
         // on its own belief that the channel is up; a client that lost the
         // channel knows first, and a false here withholds that close. Additive
         // field; a bridge that does not read it behaves as before.
-        socket.send(JSON.stringify({ type: 'ping', t: Date.now(), meshBound: meshBoundCount(), bridgeBound: bridgeChannelBound(bridgeNodeIdBig) }));
+        // Round-trip measurement (4.148.0): also carry OUR measured round trip
+        // to this bridge, once there is one ON THIS SOCKET (a reconnect does
+        // not carry the old socket's figure). The bridge only echoes this ping;
+        // it cannot time the socket itself, so this is the one way it learns
+        // the figure (bridge 2.191.0 keeps it per socket). Additive field; a
+        // bridge that does not read it behaves as before.
+        socket.send(JSON.stringify({ type: 'ping', t: Date.now(), meshBound: meshBoundCount(), bridgeBound: bridgeChannelBound(bridgeNodeIdBig), ...(typeof socketRtt === 'number' ? { rtt: socketRtt } : {}) }));
         bridge._emitPingTraffic('sent');
       } catch (err) {
         log('bridge-ping-send-failed', { err: err.message });

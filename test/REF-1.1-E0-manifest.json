@@ -5,8 +5,8 @@
     "onNotification",
     "onRoutedMessage"
   ],
-  "treeHash": "fab49d273d7992ffda746e7175ad46f37001e7d0",
-  "filesScanned": 92,
+  "treeHash": "d60ce3d87d644923cec1f7e9bdda87b625e1f30e",
+  "filesScanned": 93,
   "summary": {
     "migration-target": 48,
     "registration-helper": 0,
@@ -157,7 +157,7 @@
     },
     {
       "file": "dht/AxonaPeer.js",
-      "line": 5051,
+      "line": 5071,
       "callee": "onMessage",
       "receiver": "def",
       "wire": "—",
@@ -166,7 +166,7 @@
     },
     {
       "file": "dht/AxonaPeer.js",
-      "line": 5064,
+      "line": 5084,
       "callee": "registerFrame",
       "receiver": "this._b6door",
       "wire": "axona:direct",
@@ -176,7 +176,7 @@
     },
     {
       "file": "dht/AxonaPeer.js",
-      "line": 5080,
+      "line": 5100,
       "callee": "registerFrame",
       "receiver": "this._b6door",
       "wire": "axona:direct",
@@ -186,7 +186,7 @@
     },
     {
       "file": "dht/AxonaPeer.js",
-      "line": 5628,
+      "line": 5648,
       "callee": "onDirectMessage",
       "receiver": "peer",
       "wire": "<type>",
@@ -195,7 +195,7 @@
     },
     {
       "file": "dht/AxonaPeer.js",
-      "line": 5680,
+      "line": 5700,
       "callee": "registerFrame",
       "receiver": "peer._b6door",
       "wire": "__tunneled_direct__",
@@ -205,7 +205,7 @@
     },
     {
       "file": "dht/AxonaPeer.js",
-      "line": 7417,
+      "line": 7437,
       "callee": "onDirectMessage",
       "receiver": "def",
       "wire": "—",
@@ -448,7 +448,7 @@
     },
     {
       "file": "transport/web/index.js",
-      "line": 717,
+      "line": 719,
       "callee": "dispatch",
       "receiver": "signaling",
       "wire": "turn",
@@ -457,7 +457,7 @@
     },
     {
       "file": "transport/web/index.js",
-      "line": 725,
+      "line": 727,
       "callee": "dispatch",
       "receiver": "signaling",
       "wire": "peer-list",
@@ -466,7 +466,7 @@
     },
     {
       "file": "transport/web/index.js",
-      "line": 750,
+      "line": 752,
       "callee": "dispatch",
       "receiver": "signaling",
       "wire": "peer-joined",
@@ -475,7 +475,7 @@
     },
     {
       "file": "transport/web/index.js",
-      "line": 756,
+      "line": 758,
       "callee": "dispatch",
       "receiver": "signaling",
       "wire": "peer-left",
@@ -484,7 +484,7 @@
     },
     {
       "file": "transport/web/index.js",
-      "line": 774,
+      "line": 776,
       "callee": "dispatch",
       "receiver": "signaling",
       "wire": "signal",
@@ -493,7 +493,7 @@
     },
     {
       "file": "transport/web/index.js",
-      "line": 780,
+      "line": 782,
       "callee": "dispatch",
       "receiver": "signaling",
       "wire": "pong",
@@ -502,7 +502,7 @@
     },
     {
       "file": "transport/web/index.js",
-      "line": 786,
+      "line": 788,
       "callee": "dispatch",
       "receiver": "signaling",
       "wire": "version-gate",
@@ -511,7 +511,7 @@
     },
     {
       "file": "transport/web/index.js",
-      "line": 1225,
+      "line": 1230,
       "callee": "registerFrame",
       "receiver": "composite._b2door",
       "wire": "hello",
@@ -520,7 +520,7 @@
     },
     {
       "file": "transport/web/index.js",
-      "line": 1226,
+      "line": 1231,
       "callee": "registerFrame",
       "receiver": "composite._b2door",
       "wire": "hello-ack",
@@ -529,7 +529,7 @@
     },
     {
       "file": "transport/web/index.js",
-      "line": 1268,
+      "line": 1273,
       "callee": "registerFrame",
       "receiver": "composite._b3door",
       "wire": "hello",
@@ -538,7 +538,7 @@
     },
     {
       "file": "transport/web/index.js",
-      "line": 1269,
+      "line": 1274,
       "callee": "registerFrame",
       "receiver": "composite._b3door",
       "wire": "hello-sig",
@@ -547,7 +547,7 @@
     },
     {
       "file": "transport/web/index.js",
-      "line": 1273,
+      "line": 1278,
       "callee": "registerFrame",
       "receiver": "composite._b2door",
       "wire": "cap-attest",
@@ -556,7 +556,7 @@
     },
     {
       "file": "transport/web/mesh.js",
-      "line": 535,
+      "line": 536,
       "callee": "onMessage",
       "receiver": "def",
       "wire": "—",

@@ -709,6 +709,13 @@ export class CompositeTransport extends Transport {
     return t ? t.getLatency(nodeId) : -1;
   }
 
+  /** 4.148.0 — smoothed round trip of the CURRENT route to `nodeId`, or null. Read-only. */
+  getRtt(nodeId) {
+    const t = this._routeFor(nodeId);
+    if (!t || typeof t.getRtt !== 'function') return null;
+    try { return t.getRtt(nodeId); } catch { return null; }
+  }
+
   // ── Convenience: ask every sub-transport for its mapping ──────────
 
   /** Reverse-lookup BigInt nodeId from a mesh-layer connId / meshId.
