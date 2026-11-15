@@ -1032,11 +1032,28 @@ export class AxonaPeer extends DHT {
     registerFrame(transport, 'lookahead_probe', async (_fromId, payload) => {
       const target   = payload.target;
       const fromDist = payload.fromDist;
+      // LOOKAHEAD ANSWER LIVE (4.147.0; David 2026-11-15 "Build the lookahead-
+      // answer liveness check first"). The asker filters the peers it probes
+      // (dead, connected, on the path); until now the ANSWERER filtered
+      // nothing and named any table entry closer than fromDist. A table that
+      // still holds a dead member then names it, the asker forwards toward
+      // it, and the walk leaves the true closest node (testnet 2026-11-14/15:
+      // the topics that missed their closest host were exactly those XOR-
+      // closer to one dead host id). ON: a node names only a peer it could
+      // send to itself (_lookaheadNameable). OFF: the 4.146.0 answer.
+      const liveOnly = !!domain.LOOKAHEAD_ANSWER_LIVE;
+      const AS = liveOnly ? (this._lookaheadAnswerStats ??= { answers: 0, skipped: 0, terminalAfterSkip: 0 }) : null;
+      if (AS) AS.answers++;
       const fwd = [];
+      let skipped = 0;
       for (const syn of node.synaptome.values()) {
-        if ((syn.peerId ^ target) < fromDist) fwd.push(syn);
+        if (!((syn.peerId ^ target) < fromDist)) continue;
+        if (liveOnly && !this._lookaheadNameable(syn.peerId)) { skipped++; continue; }
+        fwd.push(syn);
       }
+      if (AS) AS.skipped += skipped;
       if (fwd.length === 0) {
+        if (AS && skipped) AS.terminalAfterSkip++;
         return { peerId: node.id, latency: 0, terminal: true };
       }
       const best = node.bestByAP(fwd, target, 0);
@@ -3621,6 +3638,25 @@ export class AxonaPeer extends DHT {
     return !this._isStalePeer(targetBig);
   }
   /** SUSPECT: the transport says the channel is stale. A transport with no reader says no. */
+  /**
+   * LOOKAHEAD ANSWER LIVE (4.147.0): may this node NAME `big` to an asker as a
+   * forward? Only a peer this node could send to now: not itself, not marked
+   * dead, a channel that reads open, not suspect. The same tests the asker
+   * applies to the peers it probes. A transport with no isConnected cannot
+   * say; the entry is then named as before.
+   */
+  _lookaheadNameable(big) {
+    const node = this._node;
+    if (!node || typeof big !== 'bigint' || big === node.id) return false;
+    try { if (node._deadPeers && node._deadPeers.has(big)) return false; } catch { return false; }
+    const t = node.transport;
+    if (typeof t?.isConnected === 'function') {
+      let open = false;
+      try { open = t.isConnected(big) === true; } catch { open = false; }
+      if (!open) return false;
+    }
+    return !this._isStalePeer(big);
+  }
   _isStalePeer(big) {
     const t = this._node?.transport;
     if (typeof t?.isStale !== 'function') return false;
