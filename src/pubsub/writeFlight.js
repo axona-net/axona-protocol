@@ -223,9 +223,14 @@ export const writeFlightMethods = {
         const first = f.entries.values().next().value;
         if (!first) { this._writeFlights.delete(key); continue; }
         let rootBig; try { rootBig = idBig(f.rootHex); } catch { this._writeFlights.delete(key); continue; }
-        this._route(rootBig, T.RECEIPTPROBE, {
-          topicId: idHex(f.topicBig), msgId: first.msgId, op: first.op,
-        });
+        // 4.153.0 (flightAddressGuard): the probe carries the flight's ack
+        // routing, as a forwarded write does, so a root that holds the message
+        // can answer with a SIGNED proof addressed to this owner. An unsigned
+        // ack binds to the node that hands it over, which past one hop is a
+        // relay and never the root.
+        this._route(rootBig, T.RECEIPTPROBE, this._flightAddressGuard
+          ? { topicId: idHex(f.topicBig), msgId: first.msgId, op: first.op, ackTo: f.ackTo, flightNonce: f.flightNonce, attemptId: first.attemptId }
+          : { topicId: idHex(f.topicBig), msgId: first.msgId, op: first.op });
         this._log('info', 'receipt-probe', {
           topic: idHex(f.topicBig).slice(0, 12), root: f.rootHex.slice(0, 12), round: f.rounds,
         });
@@ -245,8 +250,17 @@ export const writeFlightMethods = {
     const role = this.axonRoles.get(tBig);
     const op = payload.op === 'kill' ? 'kill' : 'pub';
     const holds = !!role && (role.cacheIds.has(payload.msgId) || role.tombstones?.has(payload.msgId));
-    let fromBig; try { fromBig = idBig(meta?.fromId); } catch { return 'consumed'; }
-    if (holds) {
+    // 4.153.0 (flightAddressGuard): answer the node that ASKED. meta.fromId is
+    // the node that handed this hop the frame — the asker at one hop, a relay
+    // past it; the walk carries the asker as originId. Off, or with no
+    // originId, the reply goes to fromId as before.
+    const replyTo = (this._flightAddressGuard && typeof meta?.originId === 'string') ? meta.originId : meta?.fromId;
+    let fromBig; try { fromBig = idBig(replyTo); } catch { return 'consumed'; }
+    if (holds && this._flightAddressGuard) {
+      // Signed to payload.ackTo when the probe carried the tuple; the unsigned
+      // one-hop ack to replyTo when it did not (an older asker).
+      this._sendIngestAck(replyTo, role, payload.msgId, op, payload);
+    } else if (holds) {
       this._route(fromBig, T.INGESTACK, {
         topicId: payload.topicId, msgId: payload.msgId, epoch: role.epoch ?? 0, op,
       });
