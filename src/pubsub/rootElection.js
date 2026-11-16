@@ -14,7 +14,7 @@ import {
   PENDING_PUB_TTL_MS, PENDING_PUB_MAX_TRIES, COLD_BURST_TRIES,
   COLD_BURST_INTERVAL_MS, COLD_BURST_SLOW_TRIES, COLD_BURST_SLOW_INTERVAL_MS,
   COLD_PEER_THRESHOLD, FIRST_PUBLISH_RESEND_MS, REPLAY_CHUNK_BYTES,
-  FUTURE_TOLERANCE_MS, BEACON_MS, BEACON_TTL_MS, BEACON_SEEN_MS,
+  FUTURE_TOLERANCE_MS, BEACON_MS, BEACON_TTL_MS, BEACON_SEEN_MS, BEACON_TOPICS_MAX,
   ROOT_VERIFY_FIRST_MS, ROOT_VERIFY_MS, ROOT_VERIFY_BATCH, METRICS_LEASE_MS,
   METRICS_PUB_MS, METRICS_COALESCE_MS,
 } from './constants.js';
@@ -61,17 +61,27 @@ export const rootElectionMethods = {
     const neigh = (this.dht.neighbors() || []).map(idBig).filter(n => n !== this.nodeId);
     if (!neigh.length) return;
     const basin = neigh.slice().sort((a, b) => this._cmpXor(a, b, this.nodeId)).slice(0, this._beaconFanout);
-    const payload = {
-      root: lc(idHex(this.nodeId)),
-      topics: rooted.map(idHex),
-      // Incarnations, index-aligned with `topics` (v0.3). Receivers without
-      // this field, and senders without it, interoperate: absent → epoch 0.
-      epochs: rooted.map((t) => { const r = this.axonRoles.get(t); return (r && Number.isInteger(r.epoch)) ? r.epoch : 0; }),
-      beaconId: `${idHex(this.nodeId).slice(0, 10)}-${this._now()}-${this._beaconSeq++}`,
-      layer: this._beaconLayers,
-    };
-    this._beaconSeen.set(payload.beaconId, this._now() + BEACON_SEEN_MS);   // never re-forward my own
-    for (const nb of basin) this._route(nb, T.ROOTBEACON, payload);
+    // BEACON_CHUNK (4.151.0): a receiver reads the first BEACON_TOPICS_MAX
+    // topics of a beacon and drops the rest (see _onRootBeacon). A node that
+    // roots more than that was only partly heard: on testnet on 2026-11-15 two
+    // roots stood for topics past the cut and never merged. With the switch on
+    // a longer list goes out as several beacons, each within the limit, each
+    // with its own beaconId. A list within the limit is one beacon, as before.
+    const size = this._beaconChunk ? BEACON_TOPICS_MAX : rooted.length;
+    for (let i = 0; i < rooted.length; i += size) {
+      const part = (i === 0 && size >= rooted.length) ? rooted : rooted.slice(i, i + size);
+      const payload = {
+        root: lc(idHex(this.nodeId)),
+        topics: part.map(idHex),
+        // Incarnations, index-aligned with `topics` (v0.3). Receivers without
+        // this field, and senders without it, interoperate: absent → epoch 0.
+        epochs: part.map((t) => { const r = this.axonRoles.get(t); return (r && Number.isInteger(r.epoch)) ? r.epoch : 0; }),
+        beaconId: `${idHex(this.nodeId).slice(0, 10)}-${this._now()}-${this._beaconSeq++}`,
+        layer: this._beaconLayers,
+      };
+      this._beaconSeen.set(payload.beaconId, this._now() + BEACON_SEEN_MS);   // never re-forward my own
+      for (const nb of basin) this._route(nb, T.ROOTBEACON, payload);
+    }
   },
 
   // Receive: cache the pointer (verify-don't-trust), then re-forward once within
@@ -80,11 +90,19 @@ export const rootElectionMethods = {
   // publish to a node FARTHER from the topic than honest routing would pick.
   _onRootBeacon(payload, meta) {
     if (!payload || typeof payload.root !== 'string' || !Array.isArray(payload.topics)) return;
-    if (!payload.beaconId || this._beaconSeen.has(payload.beaconId)) return;
+    // BEACON_VERDICT (4.151.0): until now this handler returned nothing, so the
+    // walk that DELIVERED a beacon reported consumed:false and routed-outcomes
+    // counted every delivered beacon as a failed send (991 of 991 on a testnet
+    // bridge, 2026-11-16). With the switch on, the node the beacon was
+    // ADDRESSED to reports it consumed. Only that node: this handler also runs
+    // at the sender and at any hop on the way, and 'consumed' there would end
+    // the walk before the beacon arrived. A malformed beacon is not consumed.
+    const done = (this._beaconVerdict && meta && typeof meta.targetId === 'bigint' && meta.targetId === this.nodeId) ? 'consumed' : undefined;
+    if (!payload.beaconId || this._beaconSeen.has(payload.beaconId)) return done;
     this._beaconSeen.set(payload.beaconId, this._now() + BEACON_SEEN_MS);
     let rootBig; try { if (!isHexId(lc(payload.root))) return; rootBig = idBig(payload.root); } catch { return; }
     const now = this._now();
-    const topics = payload.topics.slice(0, 256);
+    const topics = payload.topics.slice(0, BEACON_TOPICS_MAX);
     for (let i = 0; i < topics.length; i++) {
       const tHex = topics[i];
       let tBig; try { if (!isHexId(lc(tHex))) continue; tBig = idBig(tHex); } catch { continue; }
@@ -180,6 +198,7 @@ export const rootElectionMethods = {
         this._route(nb, T.ROOTBEACON, fwd);
       }
     }
+    return done;
   },
 
   // Emit a root beacon IMMEDIATELY on becoming root, so a brand-new topic's
