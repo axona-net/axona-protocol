@@ -49,10 +49,14 @@ export const rootElectionMethods = {
     return e;
   },
 
-  _emitRootBeacons() {
+  // `only` (4.150.0, ANNOUNCE_NEW_ONLY): announce just these topics. The timer
+  // passes nothing and sends the whole list, as before. A topic this node does
+  // not root, or is dismantling, is never announced either way.
+  _emitRootBeacons(only = null) {
     if (typeof this.dht.neighbors !== 'function') return;
     const rooted = [];
-    for (const [t, r] of this.axonRoles) if (r.isRoot && !r.dismantling) rooted.push(t);   // a dismantling root advertises nothing (Topic Lifetime 4.5)
+    if (only) { for (const t of only) { const r = this.axonRoles.get(t); if (r && r.isRoot && !r.dismantling) rooted.push(t); } }
+    else for (const [t, r] of this.axonRoles) if (r.isRoot && !r.dismantling) rooted.push(t);   // a dismantling root advertises nothing (Topic Lifetime 4.5)
     if (!rooted.length) return;
     const neigh = (this.dht.neighbors() || []).map(idBig).filter(n => n !== this.nodeId);
     if (!neigh.length) return;
@@ -189,7 +193,15 @@ export const rootElectionMethods = {
     if (!this._lastAnnounce) this._lastAnnounce = new Map();
     if (now - (this._lastAnnounce.get(topicBig) || 0) < BEACON_MS / 2) return;
     this._lastAnnounce.set(topicBig, now);
-    this._emitRootBeacons();
+    // Until 4.150.0 every claim re-sent the node's WHOLE rooted list: n claims
+    // cost n full lists, the square of the topics rooted. On testnet on
+    // 2026-11-16 a no-role bridge received 4,098 beacons in about 20 s while
+    // three hosts claimed 1,124 topics, and sat on the CPU for 18 s. With the
+    // switch on, a claim announces the one topic it is about. Nothing reads a
+    // topic's ABSENCE from a beacon, so the receiver needs no change, and the
+    // BEACON_MS timer still sends the whole list.
+    if (this._announceNewOnly) this._emitRootBeacons([topicBig]);
+    else this._emitRootBeacons();
   },
 
   // Nearest node to `tBig` among what I know LOCALLY: my neighbors, myself, and

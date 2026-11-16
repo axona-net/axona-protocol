@@ -135,6 +135,7 @@ export class AxonaManager {
     attachEcho = null,             // Closer-Born v0.6 3d (David 2026-11-03 "go ahead with 3d"): DEFAULT OFF; null = env ATTACH_ECHO
     returnRoute = null,            // Closer-Born v0.6 return routes (David 2026-11-03 "go ahead with the return routes"): DEFAULT OFF; null = env RETURN_ROUTE                // Closer-Born Relay Inherits the Root v0.4 Part 3e (David 2026-11-03 "go ahead with the cutover state machine"): DEFAULT OFF; null = env CUTOVER
     routeTypeTally = null,         // DIAGNOSTIC (David 2026-11-16 "build the per-type count"): DEFAULT OFF; env ROUTE_TYPE_TALLY=1. Counts this manager's routed sends and received frames BY TYPE. Changes no decision.
+    announceNewOnly = null,        // 4.150.0 (David 2026-11-16 "build the announce-only-the-new-topic change"): DEFAULT OFF; env ANNOUNCE_NEW_ONLY=1. A root claim announces THAT topic; the full list stays on the BEACON_MS timer.
     mergeCapable = null,           // dual-root reconciliation (axona-docs 14a6bd8): DEFAULT-ON since 4.118.0; null = env MERGE_CAPABLE, else MERGE_CAPABLE_DEFAULT
     topicLifetime = null,          // Topic Lifetime (axona-docs 11288d7): DEFAULT-ON since 4.118.0; null = env TOPIC_LIFETIME, else TOPIC_LIFETIME_DEFAULT
     ..._legacy   // accepted-and-ignored clean-break tunables (pickRelayPeer, rootSetSize, …)
@@ -367,6 +368,7 @@ export class AxonaManager {
     // to it is open, else greedy), and the own lookup is the fallback. The
     // breadcrumb is a hint: authority rests on signed envelopes and corr.
     this._returnRoute     = !!(returnRoute ?? envNum('RETURN_ROUTE', 0));
+    this._announceNewOnly = !!(announceNewOnly ?? envNum('ANNOUNCE_NEW_ONLY', 0));
     // Per-type tally (4.149.0): null when off, so every path below is one null test.
     this._typeTally       = (routeTypeTally ?? envNum('ROUTE_TYPE_TALLY', 0)) ? { out: new Map(), in: new Map() } : null;
     // 3d SUBSCRIBERS FOLLOW THE ROOT (Closer-Born v0.6). A caught-up renewal
