@@ -52,31 +52,31 @@ export const wireHandlersMethods = {
     // so the shared migration-aware ownership grammar recognizes each as a B1 door
     // (E2.1 council 389be28f / eb71240a). transportKind is OMITTED: every Boundary-1
     // row is a single-primitive bare-keyed routed wire.
-    registerFrame(this.dht, T.SUB,          this._onSub.bind(this),          { registry: this._frameDoor });
-    registerFrame(this.dht, T.UNSUB,        this._onUnsub.bind(this),        { registry: this._frameDoor });
-    registerFrame(this.dht, T.PUB,          this._onPub.bind(this),          { registry: this._frameDoor });
-    registerFrame(this.dht, T.DELIVER,      this._onDeliver.bind(this),      { registry: this._frameDoor });
-    registerFrame(this.dht, T.ADOPT,        this._onAdopt.bind(this),        { registry: this._frameDoor });
-    registerFrame(this.dht, T.ADOPTACK,     this._onAdoptAck.bind(this),     { registry: this._frameDoor });
-    registerFrame(this.dht, T.MERGE_OFFER,  this._onMergeOffer.bind(this),   { registry: this._frameDoor });
-    registerFrame(this.dht, T.REPLAYACK,    this._onReplayAck.bind(this),    { registry: this._frameDoor });
-    registerFrame(this.dht, T.MERGE_CLOSED, this._onMergeClosed.bind(this),  { registry: this._frameDoor });
-    registerFrame(this.dht, T.PULLUP,       this._onPullUp.bind(this),       { registry: this._frameDoor });
-    registerFrame(this.dht, T.HANDOFFACK,   this._onHandoffAck.bind(this),   { registry: this._frameDoor });
-    registerFrame(this.dht, T.REPLAYUP,     this._onReplayUp.bind(this),     { registry: this._frameDoor });
-    registerFrame(this.dht, T.HANDOFF,      this._onHandoff.bind(this),      { registry: this._frameDoor });
-    registerFrame(this.dht, T.REPLICATE,    this._onReplicate.bind(this),    { registry: this._frameDoor });
-    registerFrame(this.dht, T.KILL,         this._onKill.bind(this),         { registry: this._frameDoor });
-    registerFrame(this.dht, T.INGESTACK,    this._onIngestAck.bind(this),    { registry: this._frameDoor });
-    registerFrame(this.dht, T.RECEIPTPROBE, this._onReceiptProbe.bind(this), { registry: this._frameDoor });
-    registerFrame(this.dht, T.RECEIPTNACK,  this._onReceiptNack.bind(this),  { registry: this._frameDoor });
-    registerFrame(this.dht, T.TOUCH,        this._onTouch.bind(this),        { registry: this._frameDoor });  // no-op (peer.touch deprecated v4.3.0); kept for wire compat
-    registerFrame(this.dht, T.PULL,         this._onPull.bind(this),         { registry: this._frameDoor });
-    registerFrame(this.dht, T.PULLRESP,     this._onPullResp.bind(this),     { registry: this._frameDoor });
-    registerFrame(this.dht, T.ROOTBEACON,   this._onRootBeacon.bind(this),   { registry: this._frameDoor });
-    registerFrame(this.dht, T.METRICSON,    this._onMetricsOn.bind(this),    { registry: this._frameDoor });
-    registerFrame(this.dht, T.TOPIC_TERMINATED, this._onTopicTerminated.bind(this), { registry: this._frameDoor });   // Topic Lifetime 4.5 (topicLifetime.js)
-    registerFrame(this.dht, T.REHOME,       this._onRehome.bind(this),       { registry: this._frameDoor });   // Topic Lifetime 4.7 (topicLifetime.js)
+    registerFrame(this.dht, T.SUB,          this._countIn(T.SUB, this._onSub.bind(this)),          { registry: this._frameDoor });
+    registerFrame(this.dht, T.UNSUB,        this._countIn(T.UNSUB, this._onUnsub.bind(this)),        { registry: this._frameDoor });
+    registerFrame(this.dht, T.PUB,          this._countIn(T.PUB, this._onPub.bind(this)),          { registry: this._frameDoor });
+    registerFrame(this.dht, T.DELIVER,      this._countIn(T.DELIVER, this._onDeliver.bind(this)),      { registry: this._frameDoor });
+    registerFrame(this.dht, T.ADOPT,        this._countIn(T.ADOPT, this._onAdopt.bind(this)),        { registry: this._frameDoor });
+    registerFrame(this.dht, T.ADOPTACK,     this._countIn(T.ADOPTACK, this._onAdoptAck.bind(this)),     { registry: this._frameDoor });
+    registerFrame(this.dht, T.MERGE_OFFER,  this._countIn(T.MERGE_OFFER, this._onMergeOffer.bind(this)),   { registry: this._frameDoor });
+    registerFrame(this.dht, T.REPLAYACK,    this._countIn(T.REPLAYACK, this._onReplayAck.bind(this)),    { registry: this._frameDoor });
+    registerFrame(this.dht, T.MERGE_CLOSED, this._countIn(T.MERGE_CLOSED, this._onMergeClosed.bind(this)),  { registry: this._frameDoor });
+    registerFrame(this.dht, T.PULLUP,       this._countIn(T.PULLUP, this._onPullUp.bind(this)),       { registry: this._frameDoor });
+    registerFrame(this.dht, T.HANDOFFACK,   this._countIn(T.HANDOFFACK, this._onHandoffAck.bind(this)),   { registry: this._frameDoor });
+    registerFrame(this.dht, T.REPLAYUP,     this._countIn(T.REPLAYUP, this._onReplayUp.bind(this)),     { registry: this._frameDoor });
+    registerFrame(this.dht, T.HANDOFF,      this._countIn(T.HANDOFF, this._onHandoff.bind(this)),      { registry: this._frameDoor });
+    registerFrame(this.dht, T.REPLICATE,    this._countIn(T.REPLICATE, this._onReplicate.bind(this)),    { registry: this._frameDoor });
+    registerFrame(this.dht, T.KILL,         this._countIn(T.KILL, this._onKill.bind(this)),         { registry: this._frameDoor });
+    registerFrame(this.dht, T.INGESTACK,    this._countIn(T.INGESTACK, this._onIngestAck.bind(this)),    { registry: this._frameDoor });
+    registerFrame(this.dht, T.RECEIPTPROBE, this._countIn(T.RECEIPTPROBE, this._onReceiptProbe.bind(this)), { registry: this._frameDoor });
+    registerFrame(this.dht, T.RECEIPTNACK,  this._countIn(T.RECEIPTNACK, this._onReceiptNack.bind(this)),  { registry: this._frameDoor });
+    registerFrame(this.dht, T.TOUCH,        this._countIn(T.TOUCH, this._onTouch.bind(this)),        { registry: this._frameDoor });  // no-op (peer.touch deprecated v4.3.0); kept for wire compat
+    registerFrame(this.dht, T.PULL,         this._countIn(T.PULL, this._onPull.bind(this)),         { registry: this._frameDoor });
+    registerFrame(this.dht, T.PULLRESP,     this._countIn(T.PULLRESP, this._onPullResp.bind(this)),     { registry: this._frameDoor });
+    registerFrame(this.dht, T.ROOTBEACON,   this._countIn(T.ROOTBEACON, this._onRootBeacon.bind(this)),   { registry: this._frameDoor });
+    registerFrame(this.dht, T.METRICSON,    this._countIn(T.METRICSON, this._onMetricsOn.bind(this)),    { registry: this._frameDoor });
+    registerFrame(this.dht, T.TOPIC_TERMINATED, this._countIn(T.TOPIC_TERMINATED, this._onTopicTerminated.bind(this)), { registry: this._frameDoor });   // Topic Lifetime 4.5 (topicLifetime.js)
+    registerFrame(this.dht, T.REHOME,       this._countIn(T.REHOME, this._onRehome.bind(this)),       { registry: this._frameDoor });   // Topic Lifetime 4.7 (topicLifetime.js)
   },
 
   // REF-1.1 S2 inspector: the Boundary-1 registry's shadow state. `built` is

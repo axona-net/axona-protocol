@@ -134,6 +134,7 @@ export class AxonaManager {
     verifyWalk = null,             // Closer-Born v0.6 farther-reaching verify (David 2026-11-03): DEFAULT OFF; null = env VERIFY_WALK
     attachEcho = null,             // Closer-Born v0.6 3d (David 2026-11-03 "go ahead with 3d"): DEFAULT OFF; null = env ATTACH_ECHO
     returnRoute = null,            // Closer-Born v0.6 return routes (David 2026-11-03 "go ahead with the return routes"): DEFAULT OFF; null = env RETURN_ROUTE                // Closer-Born Relay Inherits the Root v0.4 Part 3e (David 2026-11-03 "go ahead with the cutover state machine"): DEFAULT OFF; null = env CUTOVER
+    routeTypeTally = null,         // DIAGNOSTIC (David 2026-11-16 "build the per-type count"): DEFAULT OFF; env ROUTE_TYPE_TALLY=1. Counts this manager's routed sends and received frames BY TYPE. Changes no decision.
     mergeCapable = null,           // dual-root reconciliation (axona-docs 14a6bd8): DEFAULT-ON since 4.118.0; null = env MERGE_CAPABLE, else MERGE_CAPABLE_DEFAULT
     topicLifetime = null,          // Topic Lifetime (axona-docs 11288d7): DEFAULT-ON since 4.118.0; null = env TOPIC_LIFETIME, else TOPIC_LIFETIME_DEFAULT
     ..._legacy   // accepted-and-ignored clean-break tunables (pickRelayPeer, rootSetSize, …)
@@ -366,6 +367,8 @@ export class AxonaManager {
     // to it is open, else greedy), and the own lookup is the fallback. The
     // breadcrumb is a hint: authority rests on signed envelopes and corr.
     this._returnRoute     = !!(returnRoute ?? envNum('RETURN_ROUTE', 0));
+    // Per-type tally (4.149.0): null when off, so every path below is one null test.
+    this._typeTally       = (routeTypeTally ?? envNum('ROUTE_TYPE_TALLY', 0)) ? { out: new Map(), in: new Map() } : null;
     // 3d SUBSCRIBERS FOLLOW THE ROOT (Closer-Born v0.6). A caught-up renewal
     // produced no DELIVER, so a subscriber that lost its pin, or whose pin
     // named a node that has since handed off, never heard the echo that pins
@@ -504,7 +507,7 @@ export class AxonaManager {
     const send = (o) => Promise.resolve(this.dht.routeMessage(targetBig, type, payload, o)).catch(fail);
     try {
       const rpath = this._returnRoute ? this._returnFor(targetBig) : null;
-      if (!rpath) return send(opts).then((r) => this._tallyRoute(targetBig, r));
+      if (!rpath) return send(opts).then((r) => this._tallyRoute(targetBig, r, type));
       // The return route first; a reply it does not deliver goes by the own
       // lookup. A duplicate is safe: replies are idempotent by msgId or corr.
       const RS = this._returnRouteStats; RS.used++;
@@ -516,9 +519,9 @@ export class AxonaManager {
         const k = lc(idHex(targetBig));
         if (this._retRoutes.get(k)?.rpath === rpath) this._retRoutes.delete(k);
         return send(opts);
-      }).then((r) => this._tallyRoute(targetBig, r));
+      }).then((r) => this._tallyRoute(targetBig, r, type));
     } catch (e) {
-      return Promise.resolve(this._tallyRoute(targetBig, fail(e)));   // synchronous throw out of routeMessage
+      return Promise.resolve(this._tallyRoute(targetBig, fail(e), type));   // synchronous throw out of routeMessage
     }
   }
 
@@ -568,7 +571,27 @@ export class AxonaManager {
   // per tick and only when something failed (see _reportRouteOutcomes).
   // Verdict shape is routing's own, unchanged; this reads it and returns it
   // untouched, so no caller's contract moves.
-  _tallyRoute(targetBig, r) {
+  _tallyRoute(targetBig, r, type) {
+    // 4.149.0 per-type tally, OFF unless ROUTE_TYPE_TALLY: which message types
+    // this node's routed sends are, and how each ended. `none` = the adapter
+    // reported no verdict. Bounded: 64 types, 6 reasons per type.
+    if (this._typeTally) {
+      try {
+        const m = this._typeTally.out, k = String(type).slice(0, 40);
+        let e = m.get(k);
+        if (!e && m.size < 64) { e = { ok: 0, fail: 0, none: 0, why: {} }; m.set(k, e); }
+        if (e) {
+          if (r && typeof r === 'object' && typeof r.consumed === 'boolean') {
+            if (r.consumed) e.ok++;
+            else {
+              e.fail++;
+              const w = r.transportError ? 'transport' : r.exhausted ? 'exhausted' : (typeof r.reason === 'string' && r.reason) ? r.reason.slice(0, 24) : 'other';
+              if (w in e.why || Object.keys(e.why).length < 6) e.why[w] = (e.why[w] || 0) + 1;
+            }
+          } else e.none++;
+        }
+      } catch { /* a diagnostic must never break routing */ }
+    }
     try {
       const s = (this._routeStats ??= { ok: 0, fail: 0, by: new Map() });
       // A non-reporting adapter resolves undefined/a push count — that is NOT a
@@ -588,6 +611,14 @@ export class AxonaManager {
       }
     } catch { /* observability must never break routing */ }
     return r;
+  }
+  // 4.149.0: wrap a frame handler so arrivals are counted by type. With the
+  // tally off this returns the handler itself: the registration is unchanged.
+  _countIn(type, fn) {
+    const t = this._typeTally;
+    if (!t) return fn;
+    const k = String(type).slice(0, 40);
+    return (...a) => { try { if (t.in.has(k) || t.in.size < 64) t.in.set(k, (t.in.get(k) || 0) + 1); } catch { /* diagnostic only */ } return fn(...a); };
   }
   // Pop a dead waypoint and keep routing. When the via chain empties, _send
   // falls through to the TOPIC ID — that is deliberate and load-bearing: it is

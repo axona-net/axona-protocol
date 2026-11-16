@@ -621,6 +621,14 @@ export const repairPlaneMethods = {
   // failing" — the same move that made replicate-all-failed attributable in
   // 4.76.2. Non-reporting adapters resolve no verdict and appear nowhere.
   _reportRouteOutcomes() {
+    // 4.149.0 per-type tally: one line per tick while anything was counted,
+    // drained on report. `la` is the lookahead answer count so far (cumulative).
+    const tt = this._typeTally;
+    if (tt && (tt.out.size || tt.in.size)) {
+      const la = this.dht?._lookaheadAnswerStats;
+      this._log('info', 'route-type-tally', { out: Object.fromEntries(tt.out), in: Object.fromEntries(tt.in), ...(la ? { la: { answers: la.answers, skipped: la.skipped } } : {}) });
+      tt.out.clear(); tt.in.clear();
+    }
     const s = this._routeStats;
     if (!s || s.fail === 0) { if (s) { s.ok = 0; s.by.clear(); } return; }
     const top = [...s.by.entries()]
