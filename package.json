@@ -49,7 +49,7 @@
     "url": "git+https://github.com/axona-net/axona-protocol.git"
   },
   "homepage": "https://axona.net",
-  "license": "MIT",
+  "license": "Apache-2.0",
   "keywords": [
     "dht",
     "p2p",
