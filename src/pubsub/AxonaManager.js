@@ -138,6 +138,7 @@ export class AxonaManager {
     announceNewOnly = null,        // 4.150.0 (David 2026-11-16 "build the announce-only-the-new-topic change"): DEFAULT OFF; env ANNOUNCE_NEW_ONLY=1. A root claim announces THAT topic; the full list stays on the BEACON_MS timer.
     beaconChunk = null,            // 4.151.0 (David 2026-11-16 "chunk the timer's list and fix the beacon handler"): DEFAULT OFF; env BEACON_CHUNK=1. A beacon lists at most BEACON_TOPICS_MAX topics; a longer list goes out as several beacons.
     beaconVerdict = null,          // 4.151.0: DEFAULT OFF; env BEACON_VERDICT=1. The beacon handler reports 'consumed' at the node the beacon was addressed to, so a delivered beacon stops counting as a failed routed send.
+    flightAddressGuard = null,     // 4.152.0: DEFAULT OFF; env FLIGHT_ADDRESS_GUARD=1. INGESTACK, RECEIPTPROBE and RECEIPTNACK are handled only at the node they are addressed to; a routed frame's handler also runs at its sender's own hop 0, where these three returned 'consumed' and the frame never left.
     mergeCapable = null,           // dual-root reconciliation (axona-docs 14a6bd8): DEFAULT-ON since 4.118.0; null = env MERGE_CAPABLE, else MERGE_CAPABLE_DEFAULT
     topicLifetime = null,          // Topic Lifetime (axona-docs 11288d7): DEFAULT-ON since 4.118.0; null = env TOPIC_LIFETIME, else TOPIC_LIFETIME_DEFAULT
     ..._legacy   // accepted-and-ignored clean-break tunables (pickRelayPeer, rootSetSize, …)
@@ -373,6 +374,7 @@ export class AxonaManager {
     this._announceNewOnly = !!(announceNewOnly ?? envNum('ANNOUNCE_NEW_ONLY', 0));
     this._beaconChunk     = !!(beaconChunk ?? envNum('BEACON_CHUNK', 0));
     this._beaconVerdict   = !!(beaconVerdict ?? envNum('BEACON_VERDICT', 0));
+    this._flightAddressGuard = !!(flightAddressGuard ?? envNum('FLIGHT_ADDRESS_GUARD', 0));
     // Per-type tally (4.149.0): null when off, so every path below is one null test.
     this._typeTally       = (routeTypeTally ?? envNum('ROUTE_TYPE_TALLY', 0)) ? { out: new Map(), in: new Map() } : null;
     // 3d SUBSCRIBERS FOLLOW THE ROOT (Closer-Born v0.6). A caught-up renewal
@@ -507,6 +509,14 @@ export class AxonaManager {
   // containment is here, once: a transport error becomes a FAILURE VERDICT of the
   // same shape routing already uses, which dispatchVerdict() classifies as 'failed'.
   // A caller that ignores the result is safe; a caller that reads it gets the truth.
+  // 4.152.0 (flightAddressGuard). True when a routed frame is NOT addressed to
+  // this node. routeMessage runs a frame's handler at the sender's own hop 0
+  // and at every intermediate hop; a handler that answers there consumes a
+  // frame meant for someone else. Off, or with no targetId on the meta (a
+  // direct call), it is never true and the handlers behave as before.
+  _notAddressedToMe(meta) {
+    return this._flightAddressGuard && !!meta && typeof meta.targetId === 'bigint' && meta.targetId !== this.nodeId;
+  }
   _route(targetBig, type, payload) {
     const fail = (e) => ({ consumed: false, error: String((e && e.message) || e), transportError: true });
     const opts = { fromId: idHex(this.nodeId), viaHopBudget: VIA_HOP_BUDGET };

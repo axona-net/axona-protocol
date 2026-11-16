@@ -239,6 +239,7 @@ export const writeFlightMethods = {
   // ROOT side: prove the correlated receipt or state the inability. An
   // already-tombstoned target is held state too — the kill settled it.
   _onReceiptProbe(payload, meta) {
+    if (this._notAddressedToMe(meta)) return;            // 4.152.0: not consumed here; the walk carries it to the root
     if (!payload || typeof payload.topicId !== 'string' || typeof payload.msgId !== 'string') return 'consumed';
     let tBig; try { tBig = idBig(payload.topicId); } catch { return 'consumed'; }
     const role = this.axonRoles.get(tBig);
@@ -261,7 +262,8 @@ export const writeFlightMethods = {
   // simply never have arrived. The retry re-arms the ack deadline; a root
   // that stays receipt-less after being handed the write directly is evicted
   // on the next sweep (rounds cap).
-  _onReceiptNack(payload) {
+  _onReceiptNack(payload, meta) {
+    if (this._notAddressedToMe(meta)) return;            // 4.152.0: the nack is for the flight owner
     if (!this._writeFlights || !payload || typeof payload.topicId !== 'string') return 'consumed';
     let tBig; try { tBig = idBig(payload.topicId); } catch { return 'consumed'; }
     for (const [, f] of this._writeFlights) {
