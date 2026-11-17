@@ -111,7 +111,7 @@ async function open(mesh, id) { await mesh._initiateTo(id); await new Promise((r
   {
     const src = readFileSync(new URL('../src/transport/web/mesh.js', import.meta.url), 'utf8');
     const retire = src.slice(src.indexOf('  _retire(peerId, reason'), src.indexOf('this._peers.delete(peerId);', src.indexOf('  _retire(peerId, reason')));
-    check('A5 _retire reaches pc.close() only through the deferred/immediate branch', /if \(immediateClose\) closeNative\(\); else deferMacrotask\(closeNative\);/.test(retire) && !/^\s*if \(state\.pc\) try \{ state\.pc\.close\(\); \} catch \{\}/m.test(retire));
+    check('A5 _retire reaches pc.close() only through the immediate, parked (4.155.0 close at rest) or deferred branch', /if \(immediateClose\) closeNative\(\);\s*else if \(this\._closeAtRest && pc && !PC_AT_REST\.has\(pc\.connectionState\)\) this\._parkClose\(state, pc, closeNative\);\s*else deferMacrotask\(closeNative\);/.test(retire) && !/^\s*if \(state\.pc\) try \{ state\.pc\.close\(\); \} catch \{\}/m.test(retire));
   }
 
   console.log(`\nfence_retire_deferred_close: ${passed} passed, ${failed} failed`);

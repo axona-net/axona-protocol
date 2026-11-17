@@ -147,6 +147,41 @@ const MESH_BIND_DEADLINE_MS    = 30_000;
 // Node, a zero timeout in a browser. Never a microtask — a microtask still runs
 // before the current callback's native frame returns.
 const deferMacrotask = (typeof setImmediate === 'function') ? (fn) => setImmediate(fn) : (fn) => setTimeout(fn, 0);
+
+// CLOSE AT REST (4.155.0, option `closeAtRest` / env CLOSE_AT_REST=1, default OFF).
+//
+// A relay froze at start three times on 2026-11-17 and 21 times since 10-13.
+// The first stack read (Windows dump, node-datachannel 0.33.4 = libdatachannel
+// 0.24.5 + libjuice 3c40a35) shows a lock-order inversion INSIDE the native
+// library, which no JS can reorder:
+//   - libjuice's poll thread holds its ONE registry mutex while it runs a
+//     callback. On ICE Connected the callback is libdatachannel's
+//     initDtlsTransport -> DtlsTransport::start, which takes that transport's
+//     SSL mutex.
+//   - pc.close() schedules DtlsTransport::stop -> doRecv -> SSL_shutdown under
+//     the SSL mutex, and the alert it writes goes out through juice_send. On a
+//     TURN-relayed pair agent_send takes the registry mutex ("We have to lock").
+// Close a connection in the instant its ICE connects over a relay and each
+// thread holds the lock the other wants. Every later libjuice call blocks,
+// including the event loop's own next addIceCandidate. That is the freeze.
+//
+// The window is ICE-connecting through DTLS start: connectionState 'new' or
+// 'connecting'. A connection that is 'connected' finished DtlsTransport::start
+// long ago; one that is 'failed', 'disconnected' or 'closed' gets no ICE
+// Connected. So with the option on, a retire of a connection that is NOT at
+// rest does all its bookkeeping at once, as before, and only the NATIVE close
+// waits until the connection reaches one of those states.
+//
+// THE BACKSTOP is derived, not chosen: libjuice gives up on ICE 39.5 s after
+// it starts waiting (ICE_PAC_TIMEOUT 39500 ms) and libdatachannel fails a DTLS
+// handshake after roughly 30 s, so a connection left alone is at rest within
+// 69.5 s. A parked close that has seen no rest state by 90 s is issued anyway
+// and logged `backstop`; that close runs the old risk and should not happen.
+//
+// THIS IS AN AVOIDANCE, NOT A REPAIR. The inversion stays in the library. A
+// `dispose`/`reset` close stays immediate and is not covered.
+const PC_AT_REST = new Set(['connected', 'failed', 'disconnected', 'closed']);
+const CLOSE_AT_REST_BACKSTOP_MS = 90_000;
 const DC_LABEL         = 'axona';
 const RETRY_AFTER_MS   = 5000;   // single retry after pc-failed (B10)
 // Absolute ceiling on how long a peer may stay in negotiation WITHOUT ever
@@ -213,6 +248,7 @@ import { bigintReplacer, bigintReviver } from '../wire.js';
 import { selectMeshRetire } from './mesh_degree.js';
 import { ChannelLedger } from './channel_ledger.js';
 import { RttEstimator } from '../rtt.js';
+import { envNum } from '../../utils/env.js';
 
 // ── ICE configuration ───────────────────────────────────────────────
 //
@@ -282,7 +318,7 @@ export class MeshManager {
    * @param {(peerId:string)=>string|null} [opts.degree.regionOf]     peerId → keyspace region
    * @param {(peerId:string)=>boolean}     [opts.degree.isProtected]  peerId carries an obligation
    */
-  constructor({ sendSignal, log, degree = null, ledger = null, heartbeat = null, bindDeadlineMs = MESH_BIND_DEADLINE_MS }) {
+  constructor({ sendSignal, log, degree = null, ledger = null, heartbeat = null, bindDeadlineMs = MESH_BIND_DEADLINE_MS, closeAtRest = undefined }) {
     this._sendSignal = sendSignal;
     this._log = log ?? (() => {});
     // Bind deadline for EVERY channel (see MESH_BIND_DEADLINE_MS). A finite
@@ -299,6 +335,12 @@ export class MeshManager {
     /** PCs whose close was issued and not yet confirmed, by incarnation tag,
      *  so an escalation can force a second close on the same object. */
     this._closingPcs = new Map();
+    // Close at rest (see PC_AT_REST): an explicit boolean wins; otherwise the
+    // env switch. Parked native closes by incarnation tag (or by the PC when
+    // it has no tag), each { onState, closeNow, timer, at }.
+    this._closeAtRest = (typeof closeAtRest === 'boolean') ? closeAtRest : envNum('CLOSE_AT_REST', 0) === 1;
+    this._parkedCloses = new Map();
+    this._closeAtRestStats = { parked: 0, atRest: 0, backstop: 0 };
     this._ledger = (ledger === false) ? null
       : new ChannelLedger({
           ...(ledger && typeof ledger === 'object' ? ledger : {}),
@@ -307,7 +349,10 @@ export class MeshManager {
           // keeps the record CLOSING and charged until 'closed' arrives.
           onEscalate: (t, meshId) => {
             const pc = this._closingPcs.get(t);
-            this._log('close-escalate', { peerId: meshId, inc: t, hadPc: !!pc });
+            this._log('close-escalate', { peerId: meshId, inc: t, hadPc: !!pc, parked: this._parkedCloses.has(t) });
+            // A parked close has not been issued yet, on purpose. Escalating
+            // it would issue the very close the park is holding back.
+            if (this._parkedCloses.has(t)) return;
             if (pc) { try { pc.close(); } catch (err) { this._log('close-escalate-threw', { inc: t, err: err?.message }); } }
           },
         });
@@ -759,11 +804,51 @@ export class MeshManager {
     return { local, remote };
   }
 
+  /**
+   * Close at rest: hold the NATIVE close of a connection that is still
+   * negotiating until it is connected, failed, disconnected or closed, or
+   * until the backstop. Everything else about the retire has already happened.
+   */
+  _parkClose(state, pc, closeNative) {
+    const key = state.inc ?? pc;
+    const at = Date.now();
+    // The retired channel must stay retired while its close waits: a parked
+    // connection can still finish connecting and open its data channel, and
+    // the handlers that would bind it, ping it or signal for it are removed.
+    // Only the connection-state handler stays; it is what ends the park.
+    const dc = state.dc;
+    if (dc) { try { dc.onopen = null; dc.onclose = null; dc.onerror = null; dc.onmessage = null; } catch {} }
+    try { pc.onicecandidate = null; pc.ondatachannel = null; pc.oniceconnectionstatechange = null; } catch {}
+    const rec = { at, timer: null, onState: null, closeNow: null };
+    const release = (why, immediate = false) => {
+      if (this._parkedCloses.get(key) !== rec) return;
+      this._parkedCloses.delete(key);
+      if (rec.timer) clearTimeout(rec.timer);
+      if (why === 'backstop') this._closeAtRestStats.backstop++; else if (why === 'at-rest') this._closeAtRestStats.atRest++;
+      this._log('close-unparked', { peerId: state.peerId, inc: state.inc ?? null, why, pc: pc.connectionState, heldMs: Date.now() - at, parked: this._parkedCloses.size });
+      if (immediate) closeNative(); else deferMacrotask(closeNative);
+    };
+    rec.onState = (cs) => { if (PC_AT_REST.has(cs)) release('at-rest'); };
+    rec.closeNow = () => release('dispose', true);
+    rec.timer = setTimeout(() => release('backstop'), CLOSE_AT_REST_BACKSTOP_MS);
+    rec.timer?.unref?.();
+    this._parkedCloses.set(key, rec);
+    this._closeAtRestStats.parked++;
+    this._log('close-parked', { peerId: state.peerId, inc: state.inc ?? null, pc: pc.connectionState, parked: this._parkedCloses.size });
+  }
+
+  /** Close-at-rest counters and the number of closes held right now. */
+  closeAtRestSnapshot() {
+    return { on: this._closeAtRest, held: this._parkedCloses.size, ...this._closeAtRestStats };
+  }
+
   /** Disconnect from everyone and stop all timers. */
   dispose() {
     for (const id of [...this._peers.keys()]) {
       this._retire(id, 'dispose', { immediateClose: true });
     }
+    // Parked closes go out now: a disposed mesh will hear no more state.
+    for (const rec of [...this._parkedCloses.values()]) rec.closeNow();
     this._negotiationDeadline.clear();
     this._listeners.clear();
     // Row 3: a disposed mesh has no transport left to confirm a close, so
@@ -1968,6 +2053,12 @@ export class MeshManager {
   //            reconnect bridgeless.
   _onConnState(state, connectionState) {
     this._log('pc-state', { peerId: state.peerId, inc: state.inc, pc: connectionState });
+    // A parked native close goes out the moment its connection is at rest.
+    // The state object was retired when the close was parked: none of the
+    // live-channel policy below applies to it (no retry, no path refresh).
+    // Only 'closed' falls through, for the ledger's confirmation.
+    const parked = this._parkedCloses.get(state.inc ?? state.pc);
+    if (parked) { parked.onState(connectionState); if (connectionState !== 'closed') return; }
     if (connectionState === 'failed') {
       state.state = 'failed';
       this._refreshPath(state, 'on-failed');
@@ -2095,7 +2186,9 @@ export class MeshManager {
       if (dc) try { dc.close(); } catch {}
       if (pc) try { pc.close(); } catch {}
     };
-    if (immediateClose) closeNative(); else deferMacrotask(closeNative);
+    if (immediateClose) closeNative();
+    else if (this._closeAtRest && pc && !PC_AT_REST.has(pc.connectionState)) this._parkClose(state, pc, closeNative);
+    else deferMacrotask(closeNative);
     this._peers.delete(peerId);
     if (!keepDeadline) this._negotiationDeadline.delete(peerId);
     // Fire onPeerLost for Transport listeners ONLY when the channel actually
