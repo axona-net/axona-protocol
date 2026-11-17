@@ -25,7 +25,7 @@
 //
 // Flights are swept from refreshTick (the kernel's one scheduler) — no
 // per-flight timers, nothing to leak; every exit path deletes the flight.
-import { T, BEACON_TTL_MS } from './constants.js';
+import { T, BEACON_TTL_MS, BEACON_MS } from './constants.js';
 import { idHex, idBig } from './ids.js';
 import { rootPubMatchesNodeHash } from './ackProof.js';
 import { checkFreshness } from './envelope.js';
@@ -301,7 +301,13 @@ export const writeFlightMethods = {
     if (!this._rootTombstones) this._rootTombstones = new Map();
     const prev = this._rootTombstones.get(f.topicBig);
     if (!prev || f.epoch >= prev.epoch) {
-      this._rootTombstones.set(f.topicBig, { root: f.rootHex, epoch: f.epoch, exp: this._now() + ROOT_TOMBSTONE_TTL_MS });
+      // 4.154.0 (steppedHold): 2 minutes, 10 on a repeat for the same root on
+      // the same topic; never shorter than a beacon record can live, so a
+      // corpse's stale pointer still cannot outlive its conviction.
+      const ttl = this._steppedHold
+        ? Math.max(this._holdStrike(`${f.topicBig.toString(16)}|${f.rootHex}`), BEACON_TTL_MS + BEACON_MS)
+        : ROOT_TOMBSTONE_TTL_MS;
+      this._rootTombstones.set(f.topicBig, { root: f.rootHex, epoch: f.epoch, exp: this._now() + ttl });
     }
     const rec = this._rootBeacons.get(f.topicBig);
     if (rec && lc(rec.root) === f.rootHex && (!Number.isInteger(rec.epoch) || rec.epoch <= f.epoch)) {
