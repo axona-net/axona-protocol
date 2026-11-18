@@ -37,6 +37,7 @@ import { buildKill } from '../src/pubsub/kill.js';
 import { deriveTopicIdBig } from '../src/pubsub/post.js';
 import { createAuthorIdentity } from '../src/identity/index.js';
 import { sealTestDht } from './lib/testCapability.mjs';
+import { pendingKey } from "../src/pubsub/ids.js";
 
 let n = 0, fail = 0;
 const ok = (m, c, extra = '') => {
@@ -221,9 +222,9 @@ console.log('killed body vs a REAL late subscriber — asked at the app callback
 
   // Undo the cancellation: the delivery leg behaves as though the kill never
   // reached it. This is the failure mode, staged rather than assumed.
-  root._pendingPub.set(env.msgId, { topicBig: topicId, json, at: net.clock.t, tries: 0 });
+  root._pendingPub.set(pendingKey(topicId, env.msgId), { topicBig: topicId, msgId: env.msgId, json, at: net.clock.t, tries: 0 });
   ok('4a. precondition — the delivery retry is armed again for a KILLED message',
-    root._pendingPub.has(env.msgId));
+    root._pendingPub.has(pendingKey(topicId, env.msgId)));
 
   await tick(root, net, 3);
   ok('4b. the pump re-sent, and the ingest REFUSED it every time — the tombstone ' +

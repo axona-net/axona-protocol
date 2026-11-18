@@ -628,6 +628,11 @@
       "class": "default"
     },
     {
+      "file": "fence_pending_per_topic.mjs",
+      "class": "default",
+      "note": "4.156.0. A publisher's pending publish/kill retry is keyed by (topic, msgId), not msgId. msgId = sha256(publisher, message) carries no topic, so one body published to several topics (Civil Defense sends each alert to all 15 containing cells) shares one msgId. Keyed by msgId alone, each publish overwrote the entry, every topic's early re-send pump sent the LAST topic's envelope to its own topic (dropped at the root as drop-topic-mismatch: ~21k per alert-bot run, Lyra night 2026-11-18), the other topics had no retry of their own, and one sighting confirmed all. Fences: one entry per topic; the cold burst and the tick re-send each topic its own envelope; confirm is per topic with a msgId-wide fallback when no topic is named; kills likewise. 8 of 12 checks fail on 4.154.0."
+    },
+    {
       "file": "smoke_pubsub_leave_handoff.mjs",
       "class": "default"
     },

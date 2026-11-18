@@ -9,12 +9,13 @@
 // toward the current root hint each refreshTick until the publisher observes its
 // own msgId (implicit ACK → _confirmPending) or maxTries/TTL — idempotent (the
 // root dedups by msgId). Two quick publishes to the same topic each retry
-// independently (msgId-keyed, not topic-keyed).
+// independently (keyed by topic and msgId).
 //
 // Run: node test/smoke_pubsub_kill_heal.mjs
 // =====================================================================
 import { AxonaManager } from '../src/pubsub/AxonaManager.js';
 import { sealTestDht } from './lib/testCapability.mjs';
+import { pendingKey } from '../src/pubsub/ids.js';
 
 let n = 0, fail = 0;
 const ok = (m, c) => { if (c) { console.log(`  ok ${++n} - ${m}`); } else { console.log(`  ✗  ${m}`); fail++; } };
@@ -50,14 +51,14 @@ const root = 0x89n << 248n | 0xabcdn;
   ok('warm kill carries via=[root]',    k[0]?.payload.via?.[0] === idHex(root));
 }
 
-// ── 2. two quick publishes to the SAME topic are BOTH retained (msgId-keyed) ──
+// ── 2. two quick publishes to the SAME topic are BOTH retained (topic+msgId-keyed) ──
 {
   const { am } = mkManager({ closest: root });
   const topic = 0x89n << 248n | 0x5678n;
   am.pubsubPublish(topic, JSON.stringify({ msgId: 'a', message: 1 }));
   am.pubsubPublish(topic, JSON.stringify({ msgId: 'b', message: 2 }));
-  ok('both publishes retained independently (msgId-keyed, no overwrite)',
-     am._pendingPub.has('a') && am._pendingPub.has('b'));
+  ok('both publishes retained independently (topic+msgId-keyed, no overwrite)',
+     am._pendingPub.has(pendingKey(topic, 'a')) && am._pendingPub.has(pendingKey(topic, 'b')));
 }
 
 // ── 3. refreshTick RE-SENDS pending publish/kill (persistent, not one-shot) ──
@@ -82,7 +83,7 @@ const root = 0x89n << 248n | 0xabcdn;
   await am.warmRootHint(topic, 1000);
   am.pubsubPublish(topic, JSON.stringify({ msgId: 'p', message: 1 }));
   am._confirmPending(topic, 'p');                    // publisher observed its own msg
-  ok('confirmed publish removed from _pendingPub', !am._pendingPub.has('p'));
+  ok('confirmed publish removed from _pendingPub', !am._pendingPub.has(pendingKey(topic, 'p')));
   const after = byType(sends, 'pub').length;
   await am.refreshTick(); await am.refreshTick();
   ok('no further re-sends after confirmation', byType(sends, 'pub').length === after);
@@ -95,7 +96,7 @@ const root = 0x89n << 248n | 0xabcdn;
   await am.warmRootHint(topic, 1000);
   am.pubsubPublish(topic, JSON.stringify({ msgId: 'p', message: 1 }));
   for (let i = 0; i < 20; i++) await am.refreshTick();   // never confirmed
-  ok('un-confirmed publish eventually dropped (maxTries bound)', !am._pendingPub.has('p'));
+  ok('un-confirmed publish eventually dropped (maxTries bound)', !am._pendingPub.has(pendingKey(topic, 'p')));
   ok('total PUB sends bounded (initial + ≤maxTries)', byType(sends, 'pub').length <= 1 + 6);
 }
 

@@ -40,6 +40,7 @@ import { buildKill } from '../src/pubsub/kill.js';
 import { deriveTopicIdBig } from '../src/pubsub/post.js';
 import { createAuthorIdentity } from '../src/identity/index.js';
 import { sealTestDht } from './lib/testCapability.mjs';
+import { pendingKey } from "../src/pubsub/ids.js";
 
 let n = 0, fail = 0;
 const ok = (m, c, extra = '') => {
@@ -125,7 +126,7 @@ async function publishCase(label, report, declares, expect) {
   const json = JSON.stringify(env);
   am.pubsubPublish(topicId, json);                       // production writer → _pendingPub
   ok(`1${expect.tag}a. [${label}] precondition — the publish is PENDING before ingest`,
-    am._pendingPub.has(env.msgId), JSON.stringify([...am._pendingPub.keys()]));
+    am._pendingPub.has(pendingKey(topicId, env.msgId)), JSON.stringify([...am._pendingPub.keys()]));
   await am._ingestPublish(role, json);
   // SUPERSEDED ASSERTION, kept deliberately as a record. This used to demand the
   // publish stay in _pendingPub without a verdict. Under Aster's two-machine
@@ -135,7 +136,7 @@ async function publishCase(label, report, declares, expect) {
   // section 5. What section 1 still proves is the diagnostic classification.
   ok(`1${expect.tag}b. [${label}] local delivery resolved (the root holds it); the ` +
      `durability leg is asserted separately in section 5`,
-    !am._pendingPub.has(env.msgId), `stillPending=${am._pendingPub.has(env.msgId)}`);
+    !am._pendingPub.has(pendingKey(topicId, env.msgId)), `stillPending=${am._pendingPub.has(pendingKey(topicId, env.msgId))}`);
   return { am, role };
 }
 {
@@ -181,7 +182,7 @@ async function killCase(label, report, declares, stillPending) {
   // dropped and every "stays pending" below would pass for the wrong reason.
   const kill = await buildKill({ topicId: idHex(topicId), msgId: env.msgId, ts: clock.t, seq: 2, identity: author });
   if (!am._pendingKill) am._pendingKill = new Map();
-  am._pendingKill.set(env.msgId, { topicBig: topicId, kill, at: clock.t, tries: 0 });
+  am._pendingKill.set(pendingKey(topicId, env.msgId), { topicBig: topicId, msgId: env.msgId, kill, at: clock.t, tries: 0 });
   // isTerminal is REQUIRED: _topicDecision returns 'forward' without it and
   // _onKill returns before reaching the gate — which is how 2d/2v were passing
   // vacuously against code that never ran.
@@ -189,8 +190,8 @@ async function killCase(label, report, declares, stillPending) {
   await new Promise(r => setImmediate(r));               // the confirm rides a .then()
   await new Promise(r => setImmediate(r));
   ok(`2${label[0]}. [${label}] the kill ${stillPending ? 'stays PENDING' : 'CONFIRMS'}`,
-    am._pendingKill.has(env.msgId) === stillPending,
-    `stillPending=${am._pendingKill.has(env.msgId)}, want ${stillPending}`);
+    am._pendingKill.has(pendingKey(topicId, env.msgId)) === stillPending,
+    `stillPending=${am._pendingKill.has(pendingKey(topicId, env.msgId))}, want ${stillPending}`);
 }
 await killCase('consumed', CONSUMED, true, false);              // CONTROL
 await killCase('declared-false', VOID, false, true);
@@ -270,8 +271,8 @@ async function twoMachines(label, report, declares) {
   // This is the rule that closes the regression my reverted fix caused.
   const { am, clock, topicId, role, env, author } = await twoMachines('kill', VOID, false);
   ok('5e. precondition — the publish is outstanding on BOTH legs before the kill',
-    am._pendingPub.has(env.msgId) === false || am._durability?.get(env.msgId)?.state === 'pending',
-    JSON.stringify({ pend: am._pendingPub.has(env.msgId), dur: am._durability?.get(env.msgId)?.state }));
+    am._pendingPub.has(pendingKey(topicId, env.msgId)) === false || am._durability?.get(env.msgId)?.state === 'pending',
+    JSON.stringify({ pend: am._pendingPub.has(pendingKey(topicId, env.msgId)), dur: am._durability?.get(env.msgId)?.state }));
 
   const kill = await buildKill({ topicId: idHex(topicId), msgId: env.msgId, ts: clock.t + 1, seq: 3, identity: author });
   await am._onKill({ topicId: idHex(topicId), kill }, { targetId: am.nodeId, isTerminal: true });
@@ -283,7 +284,7 @@ async function twoMachines(label, report, declares) {
     dur(am, env.msgId));
   ok('5g. …and cancels the delivery retry, so the pump cannot re-send the body ' +
      'to a late subscriber (the regression that broke smoke_pubsub_kill)',
-    !am._pendingPub.has(env.msgId), JSON.stringify([...am._pendingPub.keys()]));
+    !am._pendingPub.has(pendingKey(topicId, env.msgId)), JSON.stringify([...am._pendingPub.keys()]));
   ok('5h. …with the TOMBSTONE preserved — cancelling the retry must not ' +
      'cancel the retraction',
     role.tombstones.has(env.msgId), JSON.stringify([...role.tombstones.keys()]));

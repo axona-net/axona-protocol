@@ -46,7 +46,7 @@
 // =====================================================================
 
 import { RootClaim, roleNature, makeMergeState } from './rootClaim.js';
-import { idHex, idBig, lc, isHexId } from './ids.js';
+import { idHex, idBig, lc, isHexId, pendingKey } from './ids.js';
 import { dispatchVerdict, dispatchAttributedTo } from './dispatch.js';
 import { RoleScopedDurability } from './durability.js';
 import { T, RENEW_MS, RENEW_FAST_MS, DROP_MS, ROOT_REPLICAS, CACHE_MAX,
@@ -1753,11 +1753,13 @@ export class AxonaManager {
     // resolves — a one-shot publish never re-routes on its own, so a cold-hint
     // strand = a lost message. Idempotent: the root dedups by msgId.
     if (!this._pendingPub) this._pendingPub = new Map();
-    // Keyed by msgId (not topic) so two quick publishes to the SAME topic don't
-    // overwrite each other's pending retry — each message is independently retried.
+    // Keyed by (topic, msgId): two quick publishes to the SAME topic don't
+    // overwrite each other's pending retry, and (4.156.0) one body published to
+    // SEVERAL topics — same msgId on each, since msgId carries no topic — keeps
+    // one entry per topic. Each message on each topic is independently retried.
     let pmsgId = null; try { pmsgId = JSON.parse(json)?.msgId ?? null; } catch { /* opaque body */ }
     const via = this._pubVia(topicId);
-    if (pmsgId) this._pendingPub.set(pmsgId, { topicBig: topicId, json, at: this._now(), tries: 0, via: via[0] ?? null });
+    if (pmsgId) this._pendingPub.set(pendingKey(topicId, pmsgId), { topicBig: topicId, msgId: pmsgId, json, at: this._now(), tries: 0, via: via[0] ?? null });
     this._send(T.PUB, { topicId: idHex(topicId), via, json });
     this._latStage(pmsgId, 'pub:send');
     // Early re-sends — ONE plan, ONE pump (v4.25.0, Phase 6): a cold publisher
@@ -1890,7 +1892,7 @@ export class AxonaManager {
   pubsubKill(topicId, kill) {
     const via = this._pubVia(topicId);                  // 4.154.0: the hint, or bare when pubHintLive says not to pin
     if (!this._pendingKill) this._pendingKill = new Map();
-    if (kill?.msgId) this._pendingKill.set(kill.msgId, { topicBig: topicId, kill, at: this._now(), tries: 0, via: via[0] ?? null });
+    if (kill?.msgId) this._pendingKill.set(pendingKey(topicId, kill.msgId), { topicBig: topicId, msgId: kill.msgId, kill, at: this._now(), tries: 0, via: via[0] ?? null });
     this._send(T.KILL, { topicId: idHex(topicId), via, kill });
   }
   // pubsubUnpub() — REMOVED v4.3.0 (decision 2026-06-25: keep kill, drop unpub)
