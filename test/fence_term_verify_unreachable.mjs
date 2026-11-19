@@ -31,6 +31,10 @@
 //   2. It does not self-root (fail closed holds the seat).
 //   3. A REACHABLE closer node is still deferred to (the check still works).
 //   4. Check off: unchanged (self-roots, no lookup).
+//   5. MULTI-HOP (Orion 2165944e): the closer node has no direct channel, but a
+//      live peer is closer to it than this node is. That is reachable: the SUB
+//      is deferred via the closer node. b14fecb called it 'inconclusive' and
+//      stranded the subscriber.
 //
 // Offline, fake DHT. The fake routes any message aimed at a node this node is
 // not connected to back to this node as terminal, which is what greedy routing
@@ -45,28 +49,36 @@ import { sealTestDht } from './lib/testCapability.mjs';
 let pass = 0, fail = 0;
 const ok = (cond, name, extra = '') => { if (cond) { pass++; console.log(`  ✓ ${name}`); } else { fail++; console.log(`  ✗ ${name} ${extra}`); } };
 
-const SELF  = 0x80aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaan;
 const TOPIC = 0x80c0000000000000000000000000000000000000000000000000000000000000c0n;
-const CLOSER = 0x80c0000000000000000000000000000000000000000000000000000000000000c1n;   // much closer to TOPIC than SELF
+// Distances are built in one 4-bit window so every relation is explicit
+// (topic-relative offsets 12, 11, 13 at bit 200; the region byte is untouched):
+//   CLOSER is strictly closer to TOPIC than SELF (11 < 12);
+//   RELAY is FARTHER from TOPIC than SELF (13 > 12), so SELF is the greedy
+//   terminal for the topic, yet closer to CLOSER than SELF is (13^11=6 < 12^11=7).
+const SELF   = TOPIC ^ (12n << 200n);
+const CLOSER = TOPIC ^ (11n << 200n);
+const RELAY  = TOPIC ^ (13n << 200n);
 const CAP = 500;
 
-function mkManager({ verify, reachable, listedNotLive = false }) {
+function mkManager({ verify, reachable, listedNotLive = false, viaRelay = false }) {
   const handlers = new Map();
   let deliveries = 0, runaway = false; const sent = [];
-  const neighbors = (reachable || listedNotLive) ? [idHex(CLOSER)] : [];
+  const neighbors = viaRelay ? [idHex(RELAY)] : (reachable || listedNotLive) ? [idHex(CLOSER)] : [];
   const dht = {
     getSelfId: () => SELF,
     verdictsSupported: false,
     onRoutedMessage: (type, h) => { handlers.set(type, h); },
     neighbors: () => neighbors,
-    isLive: (id) => reachable && id === CLOSER,   // open, healthy channel now
+    isLive: (id) => (reachable && id === CLOSER) || (viaRelay && id === RELAY),   // open, healthy channel now
     findKClosest: async () => [CLOSER],
-    lookup: async () => ({ path: [SELF, CLOSER] }),
+    lookup: async () => ({ path: viaRelay ? [SELF, RELAY, CLOSER] : [SELF, CLOSER] }),
     // Greedy: a reachable target is delivered there (recorded as sent); anything
-    // else ends at this node as terminal.
+    // else ends at this node as terminal. With a live relay the closer node is
+    // reached in two hops.
     routeMessage: (target, type, payload) => {
       sent.push({ target, type, payload: { ...payload } });
       if (reachable && target === CLOSER) return { consumed: true, atNode: CLOSER, hops: 1 };
+      if (viaRelay && target === CLOSER) return { consumed: true, atNode: CLOSER, hops: 2 };
       if (++deliveries > CAP) { runaway = true; return { consumed: false, exhausted: true }; }
       const h = handlers.get(type);
       return Promise.resolve(h ? h(payload, { targetId: SELF, originId: idHex(SELF), isTerminal: true, hopCount: 0 }) : undefined)
@@ -133,6 +145,20 @@ console.log('\n[3] check off: unchanged, self-roots without a lookup');
   ok(!stats().runaway, 'no loop');
   const role = m.axonRoles.get(TOPIC);
   ok(!!(role && role.isRoot), 'the terminal node roots the topic, as before');
+}
+
+console.log('\n[5] check on, closer node 2 hops away through a live relay: deferred to it (Orion 2165944e)');
+{
+  const { m, sent, stats } = mkManager({ verify: true, reachable: false, viaRelay: true });
+  ok((RELAY ^ CLOSER) < (SELF ^ CLOSER), 'precondition: the relay is closer to the closer node than this node is');
+  ok((RELAY ^ TOPIC) > (SELF ^ TOPIC), 'precondition: the relay is not closer to the topic, so this node is the greedy terminal');
+  const v = await m._verifyTerminalOwnership(TOPIC);
+  ok(v.kind === 'closer' && v.rootHex === idHex(CLOSER), "the check answers 'closer' with the 2-hop node (b14fecb: 'inconclusive')", JSON.stringify(v));
+  await subscribeOnce(m);
+  ok(!stats().runaway, 'no loop', JSON.stringify(stats()));
+  ok(sent.some((s) => s.type === T.SUB && s.target === CLOSER), 'the SUB is sent via the closer node');
+  const role = m.axonRoles.get(TOPIC);
+  ok(!(role && role.isRoot), 'and this node does not root it');
 }
 
 console.log(`\n${fail ? '✗' : '✓'} fence_term_verify_unreachable: ${pass} passed, ${fail} failed`);
