@@ -727,6 +727,11 @@
       "class": "default"
     },
     {
+      "file": "fence_term_verify_unreachable.mjs",
+      "class": "default",
+      "note": "4.157.0. With SUB_TERMINAL_VERIFY on, _verifyTerminalOwnership answered 'closer' with a node this node could not reach (fresh hint fast path and the iterative lookup alike). The SUB was deferred via it, the route ended back here, the dead waypoint was rerouted bare, it ended here again, and the check named the same node: an unbounded cycle with no timer between steps. Sim 2026-11-18: a cut-off in-region node ran to the 4 GB heap limit in about 2 minutes; one topic was enough. Same shape as the 2026-07-27 bridge wedge (smoke_reroute_termination). Now 'closer' requires dht.isLive (an open, healthy channel now); dht.neighbors() is not enough because with no bound peers it falls back to the synaptome. A closer node without a live channel is 'inconclusive' (fail closed, hold, renewal retries). Fences: no runaway with an unreachable closer node or a listed neighbour with no live channel (503 re-deliveries before the fix), no self-root, a node with a live channel still deferred to, check off unchanged."
+    },
+    {
       "file": "smoke_reroute_termination.mjs",
       "class": "default"
     },
