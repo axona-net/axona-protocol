@@ -1151,9 +1151,30 @@ export class AxonaManager {
     // A via=null hint means "resolver's LOCAL findKClosest saw self" — which at a
     // local minimum is exactly the wrong answer (the network escalation may not
     // have landed yet). Never infer 'self' from it; verify actively instead.
+    // 4.157.0: 'closer' is only a node this node can REACH. Deferring to an
+    // unreachable one sends the SUB "via" it; the route ends back here, the
+    // waypoint reads dead, _reroute sends it bare, it ends here again and this
+    // check names the same node again — an unbounded cycle with no timer between
+    // steps (sim, 2026-11-18: a cut-off in-region node ran to the 4 GB heap
+    // limit; fence_term_verify_unreachable.mjs). A closer node that is not
+    // reachable is evidence that the mesh around this node is thin, not that
+    // this node may root: FAIL CLOSED, hold, and let the renewal retry.
+    // Reachable = an open, healthy channel NOW (dht.isLive, the test the
+    // publish hint uses since 4.154.0). NOT dht.neighbors(): with no bound
+    // peers that falls back to the synaptome, which still lists nodes this node
+    // has no channel to (sim trace: the closer node was one of 2 listed
+    // neighbours and the SUB still came back). An adapter with no liveness
+    // reader falls back to the neighbour test.
+    const reachable = (hex) => {
+      try {
+        if (typeof this.dht.isLive === 'function') return this.dht.isLive(idBig(hex)) === true;
+        return typeof this._isReachableId !== 'function' || this._isReachableId(hex);
+      } catch { return false; }
+    };
     const hint = this._rootHint?.get(topicBig);
     if (hint && hint.via && (this._now() - hint.at) < this.renewFastMs) {
-      return verdict('closer', lc(hint.via), lc(hint.via));
+      if (reachable(lc(hint.via))) return verdict('closer', lc(hint.via), lc(hint.via));
+      return verdict('inconclusive', null, lc(hint.via));
     }
     const canLookup = (typeof this.dht.findKClosest === 'function') || (typeof this.dht.lookup === 'function');
     if (!canLookup) return verdict('inconclusive');
@@ -1180,7 +1201,11 @@ export class AxonaManager {
       let cBig; try { cBig = idBig(id); } catch { return verdict('inconclusive'); }
       const cHex = lc(idHex(cBig));
       if (cBig === this.nodeId) return verdict('self', null, cHex);
-      if ((cBig ^ topicBig) < selfDist) return verdict('closer', cHex, cHex);
+      if ((cBig ^ topicBig) < selfDist) {
+        if (reachable(cHex)) return verdict('closer', cHex, cHex);
+        if (typeof this.warmRootHint === 'function') this.warmRootHint(topicBig).catch(() => {});
+        return verdict('inconclusive', null, cHex);                                // closer but unreachable → hold
+      }
       return verdict('self', null, cHex);                                         // nobody strictly closer → legitimate self-root
     } catch { return verdict('inconclusive'); }
     finally { this._termVerifyInflight.delete(topicBig); }
