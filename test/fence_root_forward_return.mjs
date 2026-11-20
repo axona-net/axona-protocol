@@ -118,5 +118,35 @@ console.log('\n[control] the closer root consumes the forward: nothing comes bac
   ok(m._rootBeacons.has(TOPIC), 'the beacon record is kept (no false invalidation)');
 }
 
+// RF-2 (Orion 82dad175): a copy carrying a FOREIGN holdFwd (it left a held
+// node, or a peer set the field) at a node that holds nothing must still be
+// tagged and bounded. 6c91a83 skipped the rootFwd tag on the wire field and
+// ran to the cap on PUB and KILL.
+for (const [name, type] of [['PUB', T.PUB], ['KILL', T.KILL]]) {
+  console.log(`\n[RF-2 ${name}] foreign holdFwd on the wire, this node holds nothing`);
+  const { m, handlers, stats } = mkManager();
+  ok(!m._rootClaim.holdFor(TOPIC), 'precondition: this node holds no step-down for the topic');
+  await handlers.get(type)({ ...payloadFor(type), holdFwd: 'f0f0f0f0f0f0f0f0' }, { targetId: SELF, originId: idHex(OTHER), isTerminal: true, hopCount: 1 });
+  await settle();
+  const s = stats();
+  ok(!s.runaway && s.deliveries <= 4, 'bounded despite the foreign holdFwd', JSON.stringify(s));
+}
+
+// RF-1 (Orion 82dad175): a write flight opened on a forward that arrived
+// carrying ANOTHER node's rootFwd must not store that nonce. 6c91a83 kept it,
+// so a promotion back to that node inside ROOT_FWD_MS read there as its own
+// forward returning and was dropped.
+console.log('\n[RF-1] a flight never stores an upstream rootFwd');
+{
+  const { m } = mkManager({ rootConsumes: true });
+  const fwdIn = { topicId: idHex(TOPIC), json: JSON.stringify({ msgId: 'cd'.repeat(32), k: 1 }), rootFwd: 'a1a1a1a1a1a1a1a1' };   // writeMsgId reads json.msgId
+  m._forwardToRoot(TOPIC, T.PUB, fwdIn, idHex(CLOSER));
+  await settle();
+  let stored = 0, withNonce = 0;
+  for (const f of (m._writeFlights?.values?.() ?? [])) for (const e of f.entries.values()) { stored++; if (e.payload && 'rootFwd' in e.payload) withNonce++; }
+  ok(stored >= 1, 'precondition: a write flight was opened', `stored=${stored}`);
+  ok(withNonce === 0, 'the stored payload carries no rootFwd', `withNonce=${withNonce}`);
+}
+
 console.log(`\n${fail ? '✗' : '✓'} fence_root_forward_return: ${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

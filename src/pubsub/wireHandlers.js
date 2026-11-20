@@ -255,7 +255,7 @@ export const wireHandlersMethods = {
     fwd.set(nonce, { at: now, topic: topicBig, type, holdAt: h.at, root: h.to, beaconAt: (b && lc(b.root) === h.to) ? b.at : null });
     const out = { ...payload, holdFwd: nonce };
     if (type === T.SUB) this._send(T.SUB, { ...out, via: [to] });
-    else this._forwardToRoot(topicBig, type, out, to);
+    else this._forwardToRoot(topicBig, type, out, to, { fromHold: true });   // 4.157.0 RF-2: local evidence, not the wire field
     return true;
   },
 
