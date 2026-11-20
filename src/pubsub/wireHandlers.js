@@ -21,6 +21,9 @@ import {
 import { idHex, idBig, lc, isHexId } from './ids.js';
 // Step-down hold re-entry guard (see _holdIntercept, 4.102.0): how long a
 // forward's return nonce is remembered, and how many may be outstanding.
+// 4.158.0 REPLICATE DELTA: the eager (per-write) cohort replicate. Armed, it may
+// send a credited replica only the messages newer than its last credited push.
+const EAGER = Object.freeze({ eager: true });
 const HOLD_REENTRY_MS = 10_000;
 const HOLD_FWD_MAX    = 256;
 const randomNonce = () => {
@@ -806,7 +809,7 @@ export const wireHandlersMethods = {
       // Q2/C4: the outcome is READ, not discarded. `.catch(() => {})` here used to
       // swallow the only evidence available and confirm regardless, so a publish
       // whose every replication push exhausted still reported durable.
-      const rep = await this._replicateRole(role.topicId, role, bridge, this._now())
+      const rep = await this._replicateRole(role.topicId, role, bridge, this._now(), null, -1, EAGER)
         // A REJECTION FABRICATES NOTHING (Aster, on v4.58.2). I had this catch
         // asserting dispatched:true, snapshot:true — inventing evidence flags for a
         // call that threw, in the middle of a change whose entire purpose is that
@@ -1587,7 +1590,7 @@ export const wireHandlersMethods = {
       if (added) {
         this._log('info', 'tombstone-claim-added', { msgId: String(target).slice(0, 12), claims: existing.claims.size });
         this._fanout(role, { del: true, msgId: target, killTs: existing.killTs, signer: existing.signer, publishTs: existing.killTs, seq: existing.seq, ...(existing.kill ? { kill: existing.kill } : {}), claims: [...existing.claims.values()] }, null);
-        if (role.isRoot && this._rootReplicas) { const bridge = (typeof this.dht.bridgeId === 'function') ? this.dht.bridgeId() : null; this._replicateRole(topicBig, role, bridge, this._now()).catch(() => {}); }
+        if (role.isRoot && this._rootReplicas) { const bridge = (typeof this.dht.bridgeId === 'function') ? this.dht.bridgeId() : null; this._replicateRole(topicBig, role, bridge, this._now(), null, -1, EAGER).catch(() => {}); }
       }
     }
     // Orion CL-1b: the SAME author's NEWER kill advances the standing tombstone
@@ -1600,7 +1603,7 @@ export const wireHandlersMethods = {
       existing.exp = this._now() + TTL_MS;
       this._log('info', 'tombstone-advanced', { msgId: String(target).slice(0, 12), killAuthorTs: proof.ts });
       this._fanout(role, { del: true, msgId: target, killTs: existing.killTs, signer: existing.signer, publishTs: existing.killTs, seq: existing.seq, kill: proof, ...(existing.claims?.size ? { claims: [...existing.claims.values()] } : {}) }, null);
-      if (role.isRoot && this._rootReplicas) { const bridge = (typeof this.dht.bridgeId === 'function') ? this.dht.bridgeId() : null; this._replicateRole(topicBig, role, bridge, this._now()).catch(() => {}); }
+      if (role.isRoot && this._rootReplicas) { const bridge = (typeof this.dht.bridgeId === 'function') ? this.dht.bridgeId() : null; this._replicateRole(topicBig, role, bridge, this._now(), null, -1, EAGER).catch(() => {}); }
       this._confirmPending(topicBig, target);          // Orion RAK-APP(c): the advanced kill confirms and reaches the app
       this._deliverKillToApp(topicBig, target, existing.killTs, existing.seq);
       return;
@@ -1616,7 +1619,7 @@ export const wireHandlersMethods = {
       this._fanout(role, { del: true, msgId: target, killTs: existing.killTs, signer: existing.signer, publishTs: existing.killTs, seq: existing.seq, kill: proof, ...(existing.claims?.size ? { claims: [...existing.claims.values()] } : {}) }, null);   // Orion CL-2: claims ride every fan-out
       if (role.isRoot && this._rootReplicas) {
         const bridge = (typeof this.dht.bridgeId === 'function') ? this.dht.bridgeId() : null;
-        this._replicateRole(topicBig, role, bridge, this._now()).catch(() => {});
+        this._replicateRole(topicBig, role, bridge, this._now(), null, -1, EAGER).catch(() => {});
       }
       return;
     }
@@ -1648,7 +1651,7 @@ export const wireHandlersMethods = {
         // Q2/C4: same gate as the publish path — a kill is a publish plus a side
         // effect, so a tombstone whose every replication push failed must not
         // report durable either.
-        this._replicateRole(topicBig, role, bridge, this._now())
+        this._replicateRole(topicBig, role, bridge, this._now(), null, -1, EAGER)
           .catch((e) => ({ attempted: 1, verified: 0, failed: 1, unsupported: 0, violation: 0, failures: [], reason: String(e?.message || e) }))
           .then((rep) => {
             if (rep.attempted > 0 && rep.verified === 0) {

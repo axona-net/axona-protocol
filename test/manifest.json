@@ -1780,6 +1780,11 @@
       "file": "fence_topic_late_renewal.mjs",
       "class": "default",
       "note": "Topic Lifetime 4.5/4.8 on a fabric of real managers: a reader, a publisher, a root with two cohort backups seated as standbys; the message is deleted, the reader leaves, the root dismantles after one DROP window and the backups drop the generation with the tombstone; THE LATE RENEWAL (David): a standby SUB landing after the role is gone regenerates an empty root at epoch+1 with one seat, which ends by the same rule within one DROP window and two ticks; nothing referenced anywhere after. 13 checks."
+    },
+    {
+      "file": "fence_replicate_delta.mjs",
+      "class": "default",
+      "note": "4.158.0 (David 2026-11-20 'build the delta replicate fix'; council 0a2320e8; Howard #77). Every publish a root ingests runs the eager cohort replicate, and before this each run pushed the WHOLE cache to every replica (P publishes = P growing snapshots per replica; testnet TQ3: one host took 10,030 ingest entries in 29 s, JS heap 584 MB). REPLICATE_DELTA (option replicateDelta / env, DEFAULT OFF): on the eager path a credited replica with a recorded stamp, no failed push since, and a full push inside ROOT_REPLICATE_FULL_MS gets only messages newer than its stamp; the receiver's REPLICATE ingest is a union, so a partial push adds and never erases. A delta round does not advance role.sync.sig, so the periodic sweep still sends one full snapshot. Fences: unarmed unchanged (P squared), armed linear, durability evidence kept, sweep full, backstop full, new member full, a member after a failed push full."
     }
   ]
 }
