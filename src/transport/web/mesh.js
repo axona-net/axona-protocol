@@ -264,6 +264,21 @@ const STUN_SERVERS = [
  * @property {number | null} pathPollTimer
  */
 
+// Mesh I/O diagnostic helpers (4.157.1). Kind = envelope k:type, plus the
+// routed message's own type when the envelope carries one in its body.
+function ioKind(msg) {
+  if (!msg || typeof msg !== 'object') return '?';
+  if (msg.type === 'ping' || msg.type === 'pong') return msg.type;
+  const b = msg.body && typeof msg.body === 'object' ? msg.body : null;
+  const inner = b ? (b.type ?? b.msgType ?? b.mtype ?? b.kind ?? b.t ?? null) : null;
+  return `${msg.k ?? '?'}:${msg.type ?? '?'}${typeof inner === 'string' ? '/' + inner : ''}`;
+}
+function ioAdd(map, kind, bytes) {
+  let r = map.get(kind);
+  if (!r) { r = { n: 0, bytes: 0, max: 0 }; map.set(kind, r); }
+  r.n++; r.bytes += bytes; if (bytes > r.max) r.max = bytes;
+}
+
 export class MeshManager {
   /**
    * @param {Object} opts
@@ -393,6 +408,20 @@ export class MeshManager {
     /** @type {Map<string, {n:number, bytes:number}>} */
     this._frameCounts = new Map();
     this._frameSince  = Date.now();
+
+    // MESH I/O DIAGNOSTIC (4.157.1, MESH_IO_DIAG=1, default off). The testnet
+    // bridge held ~1.9 GB of native memory with a 40 MB JS heap (2026-11-20):
+    // dc.send() copies each frame into libdatachannel's unbounded queue and
+    // nothing here reads bufferedAmount. This counts, per minute, bytes in and
+    // out by frame kind, the largest frame each way, the highest bufferedAmount
+    // seen at any send, and send throws. It measures; it bounds nothing.
+    this._ioDiag = globalThis.process?.env?.MESH_IO_DIAG === '1';
+    this._io = null;
+    if (this._ioDiag) {
+      this._ioReset();
+      const t = setInterval(() => this._ioFlush(), 60_000);
+      if (typeof t?.unref === 'function') t.unref();
+    }
 
     // ── v0.4.0 — Transport-contract hooks ──────────────────────────────
     //
@@ -638,7 +667,46 @@ export class MeshManager {
     // node IDs through req/res/ntf bodies; native JSON.stringify
     // throws on BigInts.  Serialise as "<digits>n" suffixed strings;
     // the receiver's dc.onmessage parses with the inverse reviver.
-    state.dc.send(JSON.stringify(payload, bigintReplacer));
+    if (!this._ioDiag) { state.dc.send(JSON.stringify(payload, bigintReplacer)); return; }
+    const frame = JSON.stringify(payload, bigintReplacer);
+    const io = this._io, kind = ioKind(payload), n = frame.length;
+    ioAdd(io.out, kind, n);
+    if (n > io.maxOut) { io.maxOut = n; io.maxOutKind = kind; }
+    const b0 = state.dc.bufferedAmount || 0;
+    if (b0 > io.bufMax) { io.bufMax = b0; io.bufMaxKind = kind; }
+    try { state.dc.send(frame); }
+    catch (err) {
+      const why = String(err?.message || err).replace(/^libdatachannel error while sending data channel message: /, '').slice(0, 48);
+      io.throws[why] = (io.throws[why] || 0) + 1;
+      throw err;
+    }
+    const b1 = state.dc.bufferedAmount || 0;
+    if (b1 > io.bufMax) { io.bufMax = b1; io.bufMaxKind = kind; }
+    if (b1 >= 1_048_576) io.sendsOver1MB++;
+  }
+
+  _ioReset() {
+    this._io = { since: Date.now(), out: new Map(), in: new Map(), maxOut: 0, maxOutKind: null, maxIn: 0, maxInKind: null,
+                 bufMax: 0, bufMaxKind: null, sendsOver1MB: 0, throws: {} };
+  }
+
+  _ioFlush() {
+    const io = this._io; this._ioReset();
+    const top = (m) => [...m.entries()].sort((a, b) => b[1].bytes - a[1].bytes).slice(0, 8)
+      .map(([k, r]) => ({ k, n: r.n, kb: Math.round(r.bytes / 1024), max: r.max }));
+    const sum = (m) => { let n = 0, b = 0; for (const r of m.values()) { n += r.n; b += r.bytes; } return { n, kb: Math.round(b / 1024) }; };
+    let bufNow = 0, open = 0;
+    for (const st of this._peers.values()) { if (st.dc?.readyState === 'open') { open++; bufNow += st.dc.bufferedAmount || 0; } }
+    const mu = typeof globalThis.process?.memoryUsage === 'function' ? globalThis.process.memoryUsage() : null;
+    const mb = (x) => Math.round((x || 0) / 1048576);
+    this._log('mesh-io', {
+      ms: Date.now() - io.since, open,
+      out: sum(io.out), in: sum(io.in),
+      maxOut: io.maxOut, maxOutKind: io.maxOutKind, maxIn: io.maxIn, maxInKind: io.maxInKind,
+      bufMax: io.bufMax, bufMaxKind: io.bufMaxKind, bufNow, sendsOver1MB: io.sendsOver1MB,
+      throws: io.throws, topOut: top(io.out), topIn: top(io.in),
+      ...(mu ? { rssMB: mb(mu.rss), heapUsedMB: mb(mu.heapUsed), externalMB: mb(mu.external), arrayBuffersMB: mb(mu.arrayBuffers) } : {}),
+    });
   }
 
   /**
@@ -1699,6 +1767,11 @@ export class MeshManager {
       // body}) and by the bare type for ping/pong. Bytes are summed alongside,
       // because 745 heartbeats and 745 payload frames are the same count and
       // very different problems.
+      if (this._ioDiag) {
+        const n = typeof ev.data === 'string' ? ev.data.length : 0, kind = ioKind(msg), io = this._io;
+        ioAdd(io.in, kind, n);
+        if (n > io.maxIn) { io.maxIn = n; io.maxInKind = kind; }
+      }
       this._countFrame(
         msg.type === 'ping' || msg.type === 'pong'
           ? msg.type
