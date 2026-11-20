@@ -21,6 +21,12 @@ import {
 import { idHex, idBig, lc, isHexId } from './ids.js';
 // Step-down hold re-entry guard (see _holdIntercept, 4.102.0): how long a
 // forward's return nonce is remembered, and how many may be outstanding.
+// 4.154.1 diagnostic: bytes a queued sync payload holds (message json + tombstone count × 200).
+const ingestBytes = (p) => {
+  let n = 0;
+  try { for (const m of (Array.isArray(p?.msgs) ? p.msgs : [])) n += (typeof m?.json === 'string' ? m.json.length : 0) + 64; n += (Array.isArray(p?.dels) ? p.dels.length : 0) * 200; } catch { /* estimate only */ }
+  return n;
+};
 const HOLD_REENTRY_MS = 10_000;
 const HOLD_FWD_MAX    = 256;
 const randomNonce = () => {
@@ -982,7 +988,7 @@ export const wireHandlersMethods = {
     // installs no role toward the child; nothing is owed when it drains.
     // One enqueue (the duty gate pins exactly two callers in this file): a frame
     // under corr is a merge frame (dual-root 4(d)), else the REPLAY_UP union.
-    await this._ingestEnqueue(() => (typeof payload.corr === 'string' ? this._mergeIngestFrame(payload, meta) : this._syncIngest(payload, meta, 'REPLAY_UP')), null);   // inline path completes here; queued path returns at once
+    await this._ingestEnqueue(() => (typeof payload.corr === 'string' ? this._mergeIngestFrame(payload, meta) : this._syncIngest(payload, meta, 'REPLAY_UP')), null, ingestBytes(payload));   // inline path completes here; queued path returns at once
     return 'consumed';
   },
 
@@ -1158,7 +1164,7 @@ export const wireHandlersMethods = {
     let dep = null;
     if (payload.from && isHexId(lc(payload.from))) dep = lc(payload.from);
     else if (meta?.fromId != null) { try { dep = lc(idHex(idBig(meta.fromId))); } catch { /* unresolvable: no pin */ } }
-    await this._ingestEnqueue(() => this._syncIngest(payload, meta, 'REPLICATE'), dep);   // inline path completes here; queued path returns at once
+    await this._ingestEnqueue(() => this._syncIngest(payload, meta, 'REPLICATE'), dep, ingestBytes(payload));   // inline path completes here; queued path returns at once
     return 'consumed';
   },
 

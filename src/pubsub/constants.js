@@ -163,6 +163,7 @@ export const REPLICATE_FULL_BUDGET = 32;
 // REPLAYUP ingest is queued and drained in time-boxed slices so verification
 // CPU can never monopolize the loop. Queue overflow drops the NEWEST payload
 // (logged); anti-entropy re-delivers within ROOT_REPLICATE_FULL_MS.
+export const INGEST_COUNTER_LOG_MS = 5_000;      // 4.154.1 diagnostic: at most one 'ingest-queue' line per 5 s while the queue is busy
 export const INGEST_QUEUE_MAX = 4096;           // queued ingest payloads before overflow-drop
 export const INGEST_SLICE_MS  = 8;              // ingest CPU per slice; keeps ping RTT << mesh eviction timeout
 // Mesh re-warm (facet 2: relays never re-initiated their inter-mesh after a

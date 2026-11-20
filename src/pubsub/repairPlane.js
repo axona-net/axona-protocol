@@ -20,7 +20,7 @@ import {
   EMPTY_ROOT_PROBE_DELAY_MS, EMPTY_ROOT_PROBE_MAX, EMPTY_ROOT_PROBE_INTERVAL_MS,
   EMPTY_ROOT_PROBE_FANOUT, HANDOFF_ACK_MS, HANDOFF_TRIES,
   HANDOFF_ACK_PER_TOPIC_MS, HANDOFF_ACK_MAX_MS,
-  ROOT_REPLICATE_FULL_MS, REPLICATE_FULL_BUDGET, INGEST_QUEUE_MAX,
+  ROOT_REPLICATE_FULL_MS, REPLICATE_FULL_BUDGET, INGEST_QUEUE_MAX, INGEST_COUNTER_LOG_MS,
   HELLO_DEADLINE_MS,
   INGEST_SLICE_MS, MESH_REWARM_MIN, MESH_REWARM_TICKS, MESH_REWARM_COOLDOWN_MS, MESH_REWARM_BACKOFF_MAX_MS,
   ROUTE_REPORT_TOP,
@@ -536,7 +536,29 @@ export const repairPlaneMethods = {
     const n = (m.get(dep) || 0) - 1;
     if (n <= 0) m.delete(dep); else m.set(dep, n);
   },
-  async _ingestEnqueue(fn, dep = null) {
+  // ── INGEST QUEUE COUNTERS (4.154.1, diagnostic; David 2026-11-20) ────────
+  // Question: under a fast publish burst, does the queue hold whole-cache
+  // REPLICATE snapshots by the thousand (bounded by INGEST_QUEUE_MAX entries,
+  // never by bytes)? Callers pass an estimate of the payload's bytes (sum of
+  // message json lengths). The counters only log; they change no behaviour.
+  // One 'ingest-queue' warn at most every INGEST_COUNTER_LOG_MS while the queue
+  // is non-empty or its peak moved, plus one when it drains.
+  _ingestCount(kind, bytes) {
+    const c = (this._ingestCtr ??= { len: 0, bytes: 0, peakLen: 0, peakBytes: 0, enq: 0, done: 0, inline: 0, lastLog: 0, logged: false });
+    if (kind === 'push') { c.len++; c.bytes += bytes; c.enq++; if (c.len > c.peakLen) c.peakLen = c.len; if (c.bytes > c.peakBytes) c.peakBytes = c.bytes; }
+    else if (kind === 'shift') { c.len = Math.max(0, c.len - 1); c.bytes = Math.max(0, c.bytes - bytes); c.done++; }
+    else if (kind === 'inline') { c.inline++; }
+    const now = Date.now();
+    const drained = kind === 'shift' && c.len === 0 && c.logged;
+    if (drained || (c.len > 0 && now - c.lastLog >= INGEST_COUNTER_LOG_MS)) {
+      let mem = null;
+      try { if (typeof process !== 'undefined' && process.memoryUsage) { const m = process.memoryUsage(); mem = { heapMB: Math.round(m.heapUsed / 1048576), rssMB: Math.round(m.rss / 1048576) }; } } catch { mem = null; }
+      this._log('warn', 'ingest-queue', { len: c.len, kB: Math.round(c.bytes / 1024), peakLen: c.peakLen, peakKB: Math.round(c.peakBytes / 1024), enq: c.enq, done: c.done, inline: c.inline, dropped: this._ingestDropped || 0, drained, ...(mem || {}) });
+      c.lastLog = now; c.logged = !drained;
+    }
+  },
+
+  async _ingestEnqueue(fn, dep = null, bytes = 0) {
     const q = (this._ingestQueue ??= []);
     const dependency = (typeof dep === 'string' && dep) ? dep.toLowerCase() : null;
     // Inline is single-flight: a burst's SECOND arrival — landing while the
@@ -551,6 +573,7 @@ export const repairPlaneMethods = {
       }
       if (nowMs - this._inlineSliceStart < INGEST_SLICE_MS) {
         this._ingestInlineActive = true;
+        this._ingestCount('inline', 0);
         this._pinInFlight(dependency);
         try { await fn(); } catch { /* ingest is best-effort; anti-entropy re-heals */ }
         finally { this._ingestInlineActive = false; this._unpinInFlight(dependency); }
@@ -559,10 +582,11 @@ export const repairPlaneMethods = {
     }
     if (q.length >= INGEST_QUEUE_MAX) {
       this._ingestDropped = (this._ingestDropped || 0) + 1;
-      if ((this._ingestDropped & 255) === 1) this._log('warn', 'ingest-overflow', { dropped: this._ingestDropped, queued: q.length });
+      if ((this._ingestDropped & 255) === 1) this._log('warn', 'ingest-overflow', { dropped: this._ingestDropped, queued: q.length, queuedKB: Math.round((this._ingestCtr?.bytes || 0) / 1024) });
       return;
     }
-    q.push({ fn, dep: dependency });
+    q.push({ fn, dep: dependency, bytes });
+    this._ingestCount('push', bytes);
     if (!this._ingestPumping) { this._ingestPumping = true; this._ingestPump(); }
   },
 
@@ -573,6 +597,7 @@ export const repairPlaneMethods = {
         const t0 = Date.now();                       // wall clock: CPU slicing, not sim time
         while (q.length && (Date.now() - t0) < INGEST_SLICE_MS) {
           const entry = q.shift();
+          this._ingestCount('shift', entry.bytes || 0);
           // The pin moves from the queue entry to the in-flight count in this
           // same synchronous step; no await between the shift and the start
           // of fn(), so the dependency is never unpinned before its install.
