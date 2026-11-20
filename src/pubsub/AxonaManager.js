@@ -1356,7 +1356,7 @@ export class AxonaManager {
     return best === null ? null : lc(idHex(best));
   }
 
-  _forwardToRoot(topicBig, type, payload, rootHex) {
+  _forwardToRoot(topicBig, type, payload, rootHex, opts = null) {
     const declares = this.dht?.verdictsSupported;
     const rec = this._rootBeacons.get(topicBig);           // capture identity + at BEFORE the send
     // E3 (v0.3): a WRITE completes only on its INGEST-ack. The flight opens at
@@ -1373,8 +1373,12 @@ export class AxonaManager {
       ackRoute = this._flightOpen(topicBig, rootHex, type, payload, payload?.attemptId ?? null);
     }
     // 4.157.0: every forward carries this node's return nonce (see _rootFwdTag).
-    // A held-node forward already carries holdFwd, which bounds its own return.
-    const rootFwd = (typeof payload?.holdFwd === 'string') ? undefined : this._rootFwdTag(topicBig, type, rootHex);
+    // A forward started by THIS node's _holdIntercept carries holdFwd, which
+    // bounds its own return, and says so through opts.fromHold. The wire field
+    // payload.holdFwd is not that evidence (Orion 82dad175 RF-2): a copy that
+    // left a held node and landed at a non-held one still carries it, and any
+    // peer can set it, so testing it here reopened the 501-delivery loop.
+    const rootFwd = opts?.fromHold ? undefined : this._rootFwdTag(topicBig, type, rootHex);
     const outPayload = ackRoute
       ? { ...payload, via: [rootHex], rootFwd, ackTo: ackRoute.ackTo, flightNonce: ackRoute.flightNonce, attemptId: ackRoute.attemptId }
       : { ...payload, via: [rootHex], rootFwd };
