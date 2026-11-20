@@ -80,8 +80,10 @@ import buildBoundary1Registry from './boundary1Registry.js';
 // Return routes (Closer-Born v0.6): breadcrumb lifetime, map bound, path ids kept.
 const RETURN_ROUTE_TTL_MS = 60_000, RETURN_ROUTE_CAP = 256, RETURN_RPATH_MAX = 16;
 // Root-forward return bound (4.157.0, see _rootFwdTag): how long a forward's
-// return nonce is remembered, and how many may be outstanding.
-const ROOT_FWD_MS = 2_000, ROOT_FWD_MAX = 4_096;
+// return nonce is honoured (a STRICT acceptance deadline, checked on match as
+// well as pruned on allocation), and how many may be outstanding.
+export const ROOT_FWD_MS = 2_000;
+const ROOT_FWD_MAX = 4_096;
 const rootFwdNonce = () => {
   const b = new Uint8Array(8); globalThis.crypto.getRandomValues(b);
   return Array.from(b, (x) => x.toString(16).padStart(2, '0')).join('');
@@ -1116,6 +1118,13 @@ export class AxonaManager {
   //     routing — milliseconds), at most ROOT_FWD_MAX; when full the OLDEST is
   //     evicted rather than refusing the send, because this tag rides every
   //     healthy multi-hop forward too and must never throttle one.
+  //   · ROOT_FWD_MS is a strict ACCEPTANCE deadline, not only a pruning age
+  //     (Aster 190df442): allocation prunes, but a quiet node allocates
+  //     nothing, so _rootFwdReturned also checks the age. A copy arriving at or
+  //     after the deadline is NOT a return: its entry is discarded and the copy
+  //     is handled as any other arrival. No beacon, hint or message is dropped
+  //     on a late match. If it is still a loop, the next forward carries a
+  //     fresh nonce and that return is caught inside the deadline.
   // Same shape as Aster's holdFwd bound in _holdIntercept.
   _rootFwdTag(topicBig, type, rootHex) {
     const fwd = (this._rootFwd ??= new Map());
@@ -1141,6 +1150,7 @@ export class AxonaManager {
     const back = this._rootFwd.get(payload.rootFwd);
     if (!back || back.topic !== topicBig || back.type !== type) return false;
     this._rootFwd.delete(payload.rootFwd);
+    if (this._now() - back.at >= ROOT_FWD_MS) return false;   // past the deadline: not a return (see _rootFwdTag)
     let beaconDropped = false, hintDropped = false;
     const b = this._rootBeacons.get(topicBig);
     if (b && back.beaconAt !== null && lc(b.root) === back.root && b.at === back.beaconAt) {

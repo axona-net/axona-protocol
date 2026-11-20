@@ -35,7 +35,7 @@
 // Offline, fake DHT: a message to a target this node has no channel to ends
 // here as terminal; a runaway is cut at 500 deliveries and reported.
 // =====================================================================
-import { AxonaManager } from '../src/pubsub/AxonaManager.js';
+import { AxonaManager, ROOT_FWD_MS } from '../src/pubsub/AxonaManager.js';
 import { T } from '../src/pubsub/constants.js';
 import { idHex } from '../src/pubsub/ids.js';
 import { sealTestDht } from './lib/testCapability.mjs';
@@ -49,7 +49,8 @@ const CLOSER = 0x80c000000000000000000000000000000000000000000000000000000000000
 const OTHER  = 0x80bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbn;
 const CAP = 500;
 
-function mkManager({ rootConsumes = false } = {}) {
+function mkManager({ rootConsumes = false, clock = null } = {}) {
+  const nowFn = clock ? () => clock.t : () => Date.now();
   const handlers = new Map();
   let deliveries = 0, runaway = false; const sent = [];
   const dht = {
@@ -71,11 +72,11 @@ function mkManager({ rootConsumes = false } = {}) {
   };
   const prev = process.env.SUB_TERMINAL_VERIFY;
   delete process.env.SUB_TERMINAL_VERIFY;
-  const m = new AxonaManager({ dht: sealTestDht(dht), now: () => Date.now() });
+  const m = new AxonaManager({ dht: sealTestDht(dht), now: nowFn });
   if (prev !== undefined) process.env.SUB_TERMINAL_VERIFY = prev;
   m._log = () => {};
   m._rootClaim.meshBare = () => false;
-  const now = Date.now();
+  const now = nowFn();
   m._rootBeacons.set(TOPIC, { root: idHex(CLOSER), at: now, exp: now + 90_000, verified: true });
   return { m, handlers, sent, stats: () => ({ deliveries, runaway }) };
 }
@@ -146,6 +147,43 @@ console.log('\n[RF-1] a flight never stores an upstream rootFwd');
   for (const f of (m._writeFlights?.values?.() ?? [])) for (const e of f.entries.values()) { stored++; if (e.payload && 'rootFwd' in e.payload) withNonce++; }
   ok(stored >= 1, 'precondition: a write flight was opened', `stored=${stored}`);
   ok(withNonce === 0, 'the stored payload carries no rootFwd', `withNonce=${withNonce}`);
+}
+
+// LATE (Aster 190df442): ROOT_FWD_MS is a strict acceptance deadline. On a
+// quiet node nothing allocates, so pruning alone never runs; the match itself
+// must check the age. Clock-controlled; nothing else allocates in between.
+console.log('\n[LATE] a return at or past ROOT_FWD_MS on a quiet node is not a return');
+{
+  const clock = { t: 1_000_000 };
+  const { m } = mkManager({ clock });
+  const nonce = m._rootFwdTag(TOPIC, T.PUB, idHex(CLOSER));
+  ok(m._rootFwd.has(nonce), 'precondition: the forward nonce is recorded');
+  clock.t += ROOT_FWD_MS;
+  const r = m._rootFwdReturned(TOPIC, T.PUB, { topicId: idHex(TOPIC), rootFwd: nonce });
+  ok(r === false, 'a copy arriving at the deadline is not treated as a return', String(r));
+  ok(m._rootBeacons.has(TOPIC), 'the beacon record is kept (nothing dropped on a late match)');
+  ok(!m._rootFwd.has(nonce), 'the expired entry is discarded');
+}
+
+console.log('\n[ON-TIME] the same return just inside the deadline is caught');
+{
+  const clock = { t: 1_000_000 };
+  const { m } = mkManager({ clock });
+  const nonce = m._rootFwdTag(TOPIC, T.PUB, idHex(CLOSER));
+  clock.t += ROOT_FWD_MS - 1;
+  ok(m._rootFwdReturned(TOPIC, T.PUB, { topicId: idHex(TOPIC), rootFwd: nonce }) === true, 'caught as a return');
+  ok(!m._rootBeacons.has(TOPIC), 'the same-generation beacon record is dropped');
+}
+
+console.log('\n[NEWER] an on-time return leaves newer routing state alone');
+{
+  const clock = { t: 1_000_000 };
+  const { m } = mkManager({ clock });
+  const nonce = m._rootFwdTag(TOPIC, T.PUB, idHex(CLOSER));
+  clock.t += 500;
+  m._rootBeacons.set(TOPIC, { root: idHex(CLOSER), at: clock.t, exp: clock.t + 90_000, verified: true });   // a fresh beacon arrived
+  ok(m._rootFwdReturned(TOPIC, T.PUB, { topicId: idHex(TOPIC), rootFwd: nonce }) === true, 'caught as a return');
+  ok(m._rootBeacons.get(TOPIC)?.at === clock.t, 'the newer beacon record is kept');
 }
 
 console.log(`\n${fail ? '✗' : '✓'} fence_root_forward_return: ${pass} passed, ${fail} failed`);
