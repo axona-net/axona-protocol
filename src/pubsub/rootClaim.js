@@ -346,9 +346,24 @@ export class RootClaim {
     // next epoch for this seat. Minted BEFORE the flip so the announce that
     // follows any promotion carries the new incarnation, never a stale one.
     if (isRoot) role.epoch = (this.m._knownEpoch?.(role.topicId) ?? 0) + 1;
-    // 4.159.0: a new incarnation of the claim starts with no merge candidate.
-    // The record belongs to the incarnation that recorded it.
-    if (isRoot && role.merge) role.merge.candidate = null;
+    // 4.159.0: a new incarnation of the claim starts with NO loser-round
+    // residue. The candidate record belongs to the incarnation that recorded
+    // it. So does a completion still waiting for MERGE_CLOSED (MC-1, Orion
+    // 49bffa7b): MERGE_CLOSED is one unretried frame, and the case in which a
+    // loser promotes again is the case in which its winner went away, so the
+    // frame never came. Left set, `completing` refuses every later offer
+    // (_mergeOffer) and every inbound pull (_mergeAnswerPull) on the new root
+    // for ever, and the pins it holds exempt the export from expiry for ever.
+    // Loser-side round records are closed; W-side pulls (openPulls) are not
+    // touched, and the pins stay while one is open.
+    if (isRoot && role.merge) {
+      role.merge.candidate = null;
+      role.merge.completing = null;
+      role.merge.acceptedWinner = null;
+      role.merge.releaseToken = null;
+      for (const corr of [...(role.sync?.openMerges?.keys?.() ?? [])]) this.m._mergeCloseCorr?.(role, corr);
+      if (!role.sync?.openPulls?.size) { role.merge.pins?.clear?.(); role.merge.reserve = null; }
+    }
     if (isRoot) this.m._stepDownHold?.delete(role.topicId);   // a root holds no step-down
     // Nature hygiene (v4.26.0, Phase 7): a role flipping to ROOT sheds any
     // BACKUP residue in the same transition. Before this, promote() left

@@ -35,6 +35,15 @@
 //   6  a verify while an offer to W stands logs outcome 'standing' and sends
 //      no further offer (the same-winner path does not storm)
 //
+//   7  MC-1 (Orion 49bffa7b): MERGE_CLOSED is one unretried frame. With it
+//      LOST on the first merge, L still holds `completing`, the round record
+//      and its pins when the hold expires. Re-promoted, L must carry none of
+//      them: it offers again and the two converge to one root holding every
+//      body. Before the fix `completing` refused every later offer and every
+//      inbound pull on the new root, and two roots stood for ever.
+//   8  The same lost MERGE_CLOSED, L staying a child: past MERGE_RETENTION_MS
+//      the sweep closes the round, clears `completing` and releases the pins.
+//
 // Mutants (each red): drop the same-winner branch in _mergeCandidate → 3,4,5;
 // drop the clear in _mergeStep5 AND _onMergeClosed AND the hold expiry AND
 // _set → 1 (any one of the four left in keeps 1 green on this path, so 1 is
@@ -42,6 +51,7 @@
 // Run: node test/fence_merge_candidate_after_completion.mjs
 // =====================================================================
 import { splitScene, idHex } from './lib/mergeFixture.mjs';
+import { MERGE_RETENTION_MS } from '../src/pubsub/constants.js';
 
 let passed = 0, failed = 0;
 const check = (label, ok, extra = '') => { console.log(`  ${ok ? '✓' : '✗'} ${label}${ok ? '' : ' ' + extra}`); ok ? passed++ : failed++; };
@@ -93,6 +103,46 @@ const wRole = S.W.am.axonRoles.get(S.Lt.topicId);
 const roots = [lRole, wRole].filter((r) => r && r.isRoot);
 check('5 the two converge: exactly one root afterwards, holding all three bodies', roots.length === 1 && roots[0].cache.length === 3,
   `roots=${roots.length} L=${lRole.isRoot}/${lRole.cache.length} W=${wRole?.isRoot}/${wRole?.cache.length}`);
+
+// ── MC-1: the same story with MERGE_CLOSED lost ──────────────────────────
+{
+  const S2 = await splitScene('candidate-mergeclosed-lost');
+  await S2.stamp(S2.W, 1); await S2.stamp(S2.Ln, 2);
+  S2.fab.tap = (j) => (j.type === 'pubsub:mergeclosed') ? null : j;      // the single frame, lost
+  await S2.trigger();
+  const L = S2.lRole;
+  if (L.isRoot || !L.merge?.completing || !L.sync.openMerges.size) { console.log(`setup failed (MC-1): isRoot=${L.isRoot} completing=${!!L.merge?.completing} open=${L.sync.openMerges.size}`); process.exit(1); }
+  S2.fab.tap = null;
+  S2.fab.clock += (S2.Ln.am._stepDownHoldMs | 0) + 1000;
+  S2.Ln.am._announceRoot = () => {};
+  S2.Ln.rc.promote(L, { topicId: idHex(S2.Lt.topicId), via: [] }, { targetId: S2.lId, isTerminal: true, hopCount: 1 });
+  await S2.fab.settle();
+  const clean = L.isRoot === true && L.merge.completing === null && L.merge.candidate === null && L.sync.openMerges.size === 0 && L.merge.pins.size === 0;
+  const offersBefore = S2.logs(S2.Ln, 'merge-offer').length;
+  await S2.stamp(S2.Ln, 3);
+  await S2.trigger();
+  for (let i = 0; i < 6; i++) await new Promise((r) => setImmediate(r));
+  await S2.fab.settle();
+  const w2 = S2.W.am.axonRoles.get(S2.Lt.topicId);
+  const roots2 = [L, w2].filter((r) => r && r.isRoot);
+  check('7 MERGE_CLOSED lost: the re-promoted root carries no round residue, offers again, and the two converge',
+    clean && S2.logs(S2.Ln, 'merge-offer').length === offersBefore + 1 && roots2.length === 1 && roots2[0].cache.length === 3,
+    `clean=${clean} completing=${JSON.stringify(L.merge.completing)} open=${L.sync.openMerges.size} pins=${L.merge.pins.size} offers ${offersBefore} -> ${S2.logs(S2.Ln, 'merge-offer').length} roots=${roots2.length} L=${L.isRoot}/${L.cache.length} W=${w2?.isRoot}/${w2?.cache.length}`);
+}
+{
+  const S3 = await splitScene('candidate-mergeclosed-lost-sweep');
+  await S3.stamp(S3.W, 1); await S3.stamp(S3.Ln, 2);
+  S3.fab.tap = (j) => (j.type === 'pubsub:mergeclosed') ? null : j;
+  await S3.trigger();
+  const L = S3.lRole;
+  if (L.isRoot || !L.merge?.completing) { console.log('setup failed (sweep): not completing'); process.exit(1); }
+  S3.Ln.am._mergeSweep(S3.fab.clock + MERGE_RETENTION_MS - 1);
+  const early = L.merge.completing !== null && L.sync.openMerges.size === 1;
+  S3.Ln.am._mergeSweep(S3.fab.clock + MERGE_RETENTION_MS + 1);
+  check('8 MERGE_CLOSED lost, L stays a child: the sweep ends the round at MERGE_RETENTION_MS and not before',
+    early && L.isRoot === false && L.merge.completing === null && L.sync.openMerges.size === 0 && L.merge.pins.size === 0 && S3.logs(S3.Ln, 'merge-completion-unclosed').length === 1,
+    `early=${early} completing=${JSON.stringify(L.merge.completing)} open=${L.sync.openMerges.size} pins=${L.merge.pins.size} log=${S3.logs(S3.Ln, 'merge-completion-unclosed').length}`);
+}
 
 console.log(`\nfence_merge_candidate_after_completion: ${passed} passed, ${failed} failed`);
 process.exit(failed ? 1 : 0);

@@ -232,6 +232,17 @@ export const mergeMachineMethods = {
             role.merge.releaseToken = randomNonce() + randomNonce();
             this._rootClaim.demote(role.topicId, m.winner, 'merge-legacy-fallback', { releaseToken: role.merge.releaseToken });
           }
+        } else if (m.state === 'completed' && Number.isFinite(m.completedAt) && now - m.completedAt >= MERGE_RETENTION_MS) {
+          // 4.159.0 (MC-1, Orion 49bffa7b): a COMPLETED round whose
+          // MERGE_CLOSED never came. W's own record ends at tS + R, after
+          // which W cannot send it. Past R on this side the round is closed
+          // here: the record goes, `completing` stops riding every SUB, and
+          // the export returns to ordinary expiry unless a pull is open.
+          // Until 4.159.0 nothing but MERGE_CLOSED ended this state.
+          this._mergeCloseCorr(role, corr);
+          if (role.merge?.completing?.corr === corr) role.merge.completing = null;
+          if (!role.sync?.openPulls?.size) this._mergeReleasePins(role, m, 'completion-unclosed');
+          this._log('warn', 'merge-completion-unclosed', { topic: idHex(role.topicId).slice(0, 12), corr: corr.slice(0, 8), winner: m.winner.slice(0, 10), heldMs: now - m.completedAt });
         }
       }
       for (const [corr, p] of role.sync.openPulls || []) {
@@ -868,6 +879,7 @@ export const mergeMachineMethods = {
     }
     if (gateCorr === corr) this._mergeGateClear(role, 'completed');
     m.state = 'completed';
+    m.completedAt = stepAt;                                   // 4.159.0 (MC-1): the sweep bounds how long a completion waits for MERGE_CLOSED
     // THE CANDIDATE IS SPENT (4.159.0): the claim is W's. Every abort, refusal
     // and timeout already cleared the record; the completed merge did not, and
     // the record outlived the hold and the next promotion of this same role.
