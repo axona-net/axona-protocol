@@ -50,8 +50,15 @@ check('C1 on: a refused-capacity answer, then the next verify offers again and t
   on.refused === 1 && on.afterRefusal.refusedRow === 1 && on.offers === 2 && on.S.wRole.isRoot && !on.S.lRole.isRoot && on.ids.every((id) => on.S.wRole.cacheIds.has(id)),
   JSON.stringify({ refused: on.refused, after: on.afterRefusal, offers: on.offers, w: on.S.wRole.isRoot, l: on.S.lRole.isRoot }));
 const off = await refusal(false);
-check('C2 off (control): the next verify offers nothing and both stay root',
-  off.refused === 1 && off.offers === 1 && off.S.wRole.isRoot && off.S.lRole.isRoot,
+// 4.159.0: this control used to pin the STUCK CANDIDATE with cutover off
+// ("the next verify offers nothing and both stay root"): a refused-capacity
+// answer left the candidate record behind and _mergeCandidate refused the same
+// winner for ever. That is the fault that held two roots on #council in
+// production for 33 hours. A trigger naming the recorded winner now reaches
+// _mergeOffer whatever the switch says, so with cutover off the next verify
+// offers again and the merge completes too.
+check('C2 off: the next verify offers again and the merge completes (no stuck candidate, 4.159.0)',
+  off.refused === 1 && off.offers === 2 && off.S.wRole.isRoot && !off.S.lRole.isRoot && off.ids.every((id) => off.S.wRole.cacheIds.has(id)),
   JSON.stringify({ offers: off.offers, w: off.S.wRole.isRoot, l: off.S.lRole.isRoot }));
 
 async function reminted(cutover) {

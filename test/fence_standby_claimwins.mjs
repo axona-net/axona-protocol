@@ -109,18 +109,31 @@ console.log('\n[B] cutover OFF: an aborted round is offered again to the same wi
   seed(ctx, T, { isRoot: true, cache: 1 });
   const role = ctx.role(T);
   const W = lc(idHex(REG | 0x0800n));                       // closer than SELF to every TP
-  let offers = 0;
-  am._mergeOffer = () => { offers++; };
+  // 4.159.0: the dedup of a repeat nomination lives in the REAL _mergeOffer
+  // (one open merge per winner at this incarnation), not in a candidate
+  // record that _mergeCandidate ranks against itself. So this section counts
+  // offers SENT (a round opened: the real function answering true); a counting stub in its place would count calls, and a call that
+  // _mergeOffer refuses is the mechanism, not a re-offer.
+  am._route = () => Promise.resolve({ consumed: true });
+  const offers = () => [...(role.sync.openMerges?.values() || [])].filter((m) => m.winner === W).length;
+  // A round OPENED is _mergeOffer answering true; a refused call answers false.
+  const realOffer = am._mergeOffer.bind(am); let sent = 0;
+  am._mergeOffer = (...args) => { const r = realOffer(...args); if (r) sent++; return r; };
+  const rows = () => sent;
   am._mergeCandidate(T, W, 5, 'beacon');
-  check('first nomination offers', offers === 1, `offers ${offers}`);
+  check('first nomination offers', rows() === 1 && offers() === 1, `rows ${rows()} open ${offers()}`);
   am._mergeCandidate(T, W, 5, 'beacon');
-  check('a repeat nomination while the round stands does not re-offer', offers === 1, `offers ${offers}`);
-  role.merge.gate = { corr: 'c0ffee00c0ffee00', at: ctx.clock.t };
-  role.merge.corr = 'c0ffee00c0ffee00';
+  check('a repeat nomination while the round stands does not re-offer', rows() === 1 && offers() === 1 && am._candidateOutcome === 'standing', `rows ${rows()} open ${offers()} outcome ${am._candidateOutcome}`);
+  // The abort is of the round that is actually open (its own corr), so the
+  // round closes with it; a made-up corr would leave the real round standing
+  // and the next nomination would rightly be refused.
+  const liveCorr = [...role.sync.openMerges.keys()][0];
+  role.merge.gate = { corr: liveCorr, at: ctx.clock.t };
+  role.merge.corr = liveCorr;
   am._mergeAbort(role, 'timeout');
   check('the abort clears the stale candidate', role.merge.candidate == null);
   am._mergeCandidate(T, W, 5, 'beacon');
-  check('the next nomination of the same winner offers again', offers === 2, `offers ${offers}`);
+  check('the next nomination of the same winner offers again', rows() === 2, `rows ${rows()} open ${offers()}`);
 }
 
 console.log('\n[C1] an epoch-0 grant from a closer root does not usurp a higher-epoch principal');

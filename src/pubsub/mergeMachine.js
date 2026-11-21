@@ -868,6 +868,10 @@ export const mergeMachineMethods = {
     }
     if (gateCorr === corr) this._mergeGateClear(role, 'completed');
     m.state = 'completed';
+    // THE CANDIDATE IS SPENT (4.159.0): the claim is W's. Every abort, refusal
+    // and timeout already cleared the record; the completed merge did not, and
+    // the record outlived the hold and the next promotion of this same role.
+    role.merge.candidate = null;
     // THE COMMIT GUARD (assumption 7): the synchronous run from the recheck to
     // the completed flip must not have been suspended past the lease. L cannot
     // prevent it and detects it only here, after the fact: the flip stands (the
@@ -910,6 +914,7 @@ export const mergeMachineMethods = {
     if (!c || c.corr !== payload.corr || (payload.winnerEpoch | 0) !== c.winnerEpoch) { this._log('warn', 'merge-stale', { topic: idHex(topicBig).slice(0, 12), corr: String(payload.corr).slice(0, 8), why: 'closed-mismatch' }); return 'consumed'; }
     role.merge.completing = null;
     role.merge.pins.clear();
+    role.merge.candidate = null;                             // 4.159.0: closed is closed; no record of W as a pending winner
     this._mergeCloseCorr(role, payload.corr);
     this._log('info', 'merge-closed', { topic: idHex(topicBig).slice(0, 12), corr: payload.corr.slice(0, 8), winner: c.winner.slice(0, 10) });
     return 'consumed';

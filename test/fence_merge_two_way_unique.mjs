@@ -72,7 +72,10 @@ Ln.am._verifyRoots(fab.clock);
 for (let i = 0; i < 6; i++) await new Promise((r) => setImmediate(r));
 await fab.settle();
 const offers = Ln.routed.filter((r) => r.type === 'pubsub:mergeoffer');
-check('1 the verify recorded W as the candidate and L sent ONE offer', lRole.merge?.candidate?.id === idHex(wId) && offers.length === 1 && logs(Ln, 'merge-offer').length === 1, JSON.stringify({ cand: lRole.merge?.candidate, offers: offers.length }));
+// 4.159.0: the candidate RECORD is spent when the merge completes (it is null
+// by the time the fabric is quiet), so the nomination is read from its log row.
+const cands = logs(Ln, 'merge-candidate');
+check('1 the verify recorded W as the candidate and L sent ONE offer', cands.length === 1 && idHex(wId).startsWith(cands[0].ctx.id) && offers.length === 1 && logs(Ln, 'merge-offer').length === 1 && (lRole.merge?.candidate ?? null) === null, JSON.stringify({ cands: cands.map((c) => c.ctx), cand: lRole.merge?.candidate, offers: offers.length }));
 const corr = offers[0]?.payload?.corr;
 const pulls = W.routed.filter((r) => r.type === 'pubsub:pullup' && r.payload.corr === corr);
 check('2 W pulled under the offer\'s corr; L bound: cut + gate, header with one body and one del', pulls.length >= 1 && logs(Ln, 'merge-cut').length === 1 && logs(Ln, 'merge-bound').length === 1 && logs(Ln, 'merge-bound')[0].ctx.bodies === 1 && logs(Ln, 'merge-bound')[0].ctx.dels === 1, JSON.stringify({ pulls: pulls.length, bound: logs(Ln, 'merge-bound').map((l) => l.ctx) }));

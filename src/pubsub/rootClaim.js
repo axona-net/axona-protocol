@@ -346,6 +346,9 @@ export class RootClaim {
     // next epoch for this seat. Minted BEFORE the flip so the announce that
     // follows any promotion carries the new incarnation, never a stale one.
     if (isRoot) role.epoch = (this.m._knownEpoch?.(role.topicId) ?? 0) + 1;
+    // 4.159.0: a new incarnation of the claim starts with no merge candidate.
+    // The record belongs to the incarnation that recorded it.
+    if (isRoot && role.merge) role.merge.candidate = null;
     if (isRoot) this.m._stepDownHold?.delete(role.topicId);   // a root holds no step-down
     // Nature hygiene (v4.26.0, Phase 7): a role flipping to ROOT sheds any
     // BACKUP residue in the same transition. Before this, promote() left
@@ -568,6 +571,9 @@ export class RootClaim {
         role.merge.acceptedWinner = null;
         m._log('info', 'merge-record-expired', { topic: idHex(topicBig).slice(0, 12), winner: h.to.slice(0, 10) });
       }
+      // 4.159.0: the candidate record toward the held node expires with the
+      // hold. A node that may promote again owes that node nothing pending.
+      if (role?.merge?.candidate && lc(role.merge.candidate.id) === h.to) role.merge.candidate = null;
       m._log('info', 'root-hold-expired', {
         topic: idHex(topicBig).slice(0, 12), to: h.to.slice(0, 10), heldS: Math.round((m._now() - h.at) / 1000),
       });
