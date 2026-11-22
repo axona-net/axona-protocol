@@ -235,14 +235,24 @@ export const mergeMachineMethods = {
         } else if (m.state === 'completed' && Number.isFinite(m.completedAt) && now - m.completedAt >= MERGE_RETENTION_MS) {
           // 4.159.0 (MC-1, Orion 49bffa7b): a COMPLETED round whose
           // MERGE_CLOSED never came. W's own record ends at tS + R, after
-          // which W cannot send it. Past R on this side the round is closed
-          // here: the record goes, `completing` stops riding every SUB, and
-          // the export returns to ordinary expiry unless a pull is open.
+          // which W cannot send it. Past R on this side the ROUND is closed
+          // here: the record goes and `completing` stops riding every SUB.
           // Until 4.159.0 nothing but MERGE_CLOSED ended this state.
+          // THE EXPORT IS NOT RELEASED (Aster 9ba1d128; Dual-Root v0.1 "What
+          // holds custody when completion is lost"). No closure was confirmed,
+          // so this child may be the only holder. Its export moves from pins
+          // to `custody`: still kept from cap eviction, no longer kept from
+          // expiry. Each entry leaves at this node's own TTL and by nothing
+          // else. Round cleanup is bounded by R; custody is bounded by TTL.
           this._mergeCloseCorr(role, corr);
           if (role.merge?.completing?.corr === corr) role.merge.completing = null;
+          if (role.merge) {
+            if (!role.merge.custody) role.merge.custody = new Set();
+            for (const id of m.manifest?.bodies || []) if (role.cacheIds.has(id)) role.merge.custody.add(id);
+            for (const id of m.manifest?.dels || []) if (role.tombstones.has(id)) role.merge.custody.add(id);
+          }
           if (!role.sync?.openPulls?.size) this._mergeReleasePins(role, m, 'completion-unclosed');
-          this._log('warn', 'merge-completion-unclosed', { topic: idHex(role.topicId).slice(0, 12), corr: corr.slice(0, 8), winner: m.winner.slice(0, 10), heldMs: now - m.completedAt });
+          this._log('warn', 'merge-completion-unclosed', { topic: idHex(role.topicId).slice(0, 12), corr: corr.slice(0, 8), winner: m.winner.slice(0, 10), heldMs: now - m.completedAt, custody: role.merge?.custody?.size ?? 0 });
         }
       }
       for (const [corr, p] of role.sync.openPulls || []) {
@@ -276,6 +286,7 @@ export const mergeMachineMethods = {
       if (mg.completing || mg.gate) return true;
       if (mg.acceptedWinner && mg.acceptedWinner.exp > now) return true;
       if (mg.pins && mg.pins.size) return true;
+      if (mg.custody && mg.custody.size) return true;       // 4.159.0: an unclosed completion's export, until each entry's own expiry
     }
     if (role.sync?.openMerges?.size || role.sync?.openPulls?.size) return true;
     for (const t of role.tombstones.values()) if ((t?.exp ?? 0) > now) return true;

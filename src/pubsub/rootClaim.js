@@ -73,6 +73,7 @@ export function makeMergeState() {
     corr: null,             // (d3) the live exchange's correlation id
     pendingDelegation: new Map(), // (d1) ADOPT nonce -> {subs:[hex], at}: subscribers delegated but unacked
     pins: new Set(),        // (d3) msgIds exempt from cap eviction and expiry: W's baseline + manifest for a round's life; L's export after the flip
+    custody: new Set(),     // (4.159.0, L) export msgIds kept from CAP eviction after a completion nobody closed; each leaves at this node's own TTL
     reserve: null,          // (d3, W) {entries, bytes} left for W's own writes during a round; null = no round
     completing: null,       // (d3, L) {corr, winner, winnerEpoch, loserEpoch, hash} after the committed flip until MERGE_CLOSED; rides every SUB
     acceptedWinner: null,   // (d4, L) {id, epoch, at, exp}: the hold toward W regardless of closeness
@@ -363,6 +364,7 @@ export class RootClaim {
       role.merge.releaseToken = null;
       for (const corr of [...(role.sync?.openMerges?.keys?.() ?? [])]) this.m._mergeCloseCorr?.(role, corr);
       if (!role.sync?.openPulls?.size) { role.merge.pins?.clear?.(); role.merge.reserve = null; }
+      role.merge.custody?.clear?.();                          // a root's cache is under its own retention; child custody ends with the child
     }
     if (isRoot) this.m._stepDownHold?.delete(role.topicId);   // a root holds no step-down
     // Nature hygiene (v4.26.0, Phase 7): a role flipping to ROOT sheds any

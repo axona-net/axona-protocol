@@ -42,16 +42,27 @@
 //      body. Before the fix `completing` refused every later offer and every
 //      inbound pull on the new root, and two roots stood for ever.
 //   8  The same lost MERGE_CLOSED, L staying a child: past MERGE_RETENTION_MS
-//      the sweep closes the round, clears `completing` and releases the pins.
+//      the sweep closes the ROUND (record, `completing`, pins) and not before.
+//   9  CUSTODY (Aster 9ba1d128; Dual-Root v0.1, "What holds custody when
+//      completion is lost"): nobody confirmed closure, so the child may be
+//      the only holder. After the sweep its export is still in the cache
+//      with the cache driven past its cap, and the role is custody-alive.
+//  10  An expiry pass before the entry's own TTL removes nothing.
+//  11  Past this node's own TTL the entry expires, custody is empty and the
+//      role is no longer custody-alive. Round cleanup is bounded by R;
+//      custody is bounded by TTL.
 //
 // Mutants (each red): drop the same-winner branch in _mergeCandidate → 3,4,5;
 // drop the clear in _mergeStep5 AND _onMergeClosed AND the hold expiry AND
 // _set → 1 (any one of the four left in keeps 1 green on this path, so 1 is
 // pinned by removing them together; the branch is the load-bearing fix).
+// Custody mutants: release the pins in the sweep without moving the export to
+// `custody` → 9; exempt custody from _expireCache as pins are → 11; drop the
+// custody test from the cap loop in _cachePush → 9.
 // Run: node test/fence_merge_candidate_after_completion.mjs
 // =====================================================================
 import { splitScene, idHex } from './lib/mergeFixture.mjs';
-import { MERGE_RETENTION_MS } from '../src/pubsub/constants.js';
+import { MERGE_RETENTION_MS, TTL_MS } from '../src/pubsub/constants.js';
 
 let passed = 0, failed = 0;
 const check = (label, ok, extra = '') => { console.log(`  ${ok ? '✓' : '✗'} ${label}${ok ? '' : ' ' + extra}`); ok ? passed++ : failed++; };
@@ -117,7 +128,7 @@ check('5 the two converge: exactly one root afterwards, holding all three bodies
   S2.Ln.am._announceRoot = () => {};
   S2.Ln.rc.promote(L, { topicId: idHex(S2.Lt.topicId), via: [] }, { targetId: S2.lId, isTerminal: true, hopCount: 1 });
   await S2.fab.settle();
-  const clean = L.isRoot === true && L.merge.completing === null && L.merge.candidate === null && L.sync.openMerges.size === 0 && L.merge.pins.size === 0;
+  const clean = L.isRoot === true && L.merge.completing === null && L.merge.candidate === null && L.sync.openMerges.size === 0 && L.merge.pins.size === 0 && L.merge.custody.size === 0;
   const offersBefore = S2.logs(S2.Ln, 'merge-offer').length;
   await S2.stamp(S2.Ln, 3);
   await S2.trigger();
@@ -131,17 +142,35 @@ check('5 the two converge: exactly one root afterwards, holding all three bodies
 }
 {
   const S3 = await splitScene('candidate-mergeclosed-lost-sweep');
-  await S3.stamp(S3.W, 1); await S3.stamp(S3.Ln, 2);
+  await S3.stamp(S3.W, 1); const exportId = await S3.stamp(S3.Ln, 2);
   S3.fab.tap = (j) => (j.type === 'pubsub:mergeclosed') ? null : j;
   await S3.trigger();
-  const L = S3.lRole;
-  if (L.isRoot || !L.merge?.completing) { console.log('setup failed (sweep): not completing'); process.exit(1); }
-  S3.Ln.am._mergeSweep(S3.fab.clock + MERGE_RETENTION_MS - 1);
-  const early = L.merge.completing !== null && L.sync.openMerges.size === 1;
-  S3.Ln.am._mergeSweep(S3.fab.clock + MERGE_RETENTION_MS + 1);
-  check('8 MERGE_CLOSED lost, L stays a child: the sweep ends the round at MERGE_RETENTION_MS and not before',
+  const L = S3.lRole; const am = S3.Ln.am;
+  if (L.isRoot || !L.merge?.completing || !L.merge.pins.has(exportId)) { console.log(`setup failed (sweep): isRoot=${L.isRoot} completing=${!!L.merge?.completing} pinned=${L.merge?.pins?.has(exportId)}`); process.exit(1); }
+  am._mergeSweep(S3.fab.clock + MERGE_RETENTION_MS - 1);
+  const early = L.merge.completing !== null && L.sync.openMerges.size === 1 && L.merge.pins.has(exportId);
+  const tSweep = S3.fab.clock + MERGE_RETENTION_MS + 1;
+  am._mergeSweep(tSweep);
+  check('8 MERGE_CLOSED lost, L stays a child: the sweep ends the ROUND at MERGE_RETENTION_MS and not before',
     early && L.isRoot === false && L.merge.completing === null && L.sync.openMerges.size === 0 && L.merge.pins.size === 0 && S3.logs(S3.Ln, 'merge-completion-unclosed').length === 1,
     `early=${early} completing=${JSON.stringify(L.merge.completing)} open=${L.sync.openMerges.size} pins=${L.merge.pins.size} log=${S3.logs(S3.Ln, 'merge-completion-unclosed').length}`);
+  // Cache pressure: the cap is set to two entries and five newer bodies arrive.
+  const capWas = am._cacheMax; am._cacheMax = 2;
+  for (let i = 0; i < 5; i++) am._cachePush(L, { msgId: `pressure-${i}`, publishTs: tSweep + 1 + i, json: '{}' });
+  am._cacheMax = capWas;
+  check('9 custody: with the cache driven past its cap the unclosed export is still held and the role is custody-alive',
+    L.cacheIds.has(exportId) && L.merge.custody.has(exportId) && L.cache.length <= 3 && am._custodyAlive(L, tSweep + 10) === true,
+    `held=${L.cacheIds.has(exportId)} custody=${L.merge.custody?.has(exportId)} cache=${L.cache.length} alive=${am._custodyAlive(L, tSweep + 10)}`);
+  const body = L.cache.find((c) => c.msgId === exportId);
+  const tEarly = body.publishTs + TTL_MS - 1;
+  am._expireTombstones(L, tEarly); am._expireCache(L, tEarly);
+  check('10 an expiry pass before the entry\'s own TTL removes nothing', L.cacheIds.has(exportId) && L.merge.custody.has(exportId),
+    `held=${L.cacheIds.has(exportId)} custody=${L.merge.custody.has(exportId)}`);
+  const tLate = body.publishTs + TTL_MS + 1;
+  am._expireTombstones(L, tLate); am._expireCache(L, tLate);
+  check('11 past this node\'s own TTL the entry expires, custody is empty, the role is not custody-alive',
+    !L.cacheIds.has(exportId) && L.merge.custody.size === 0 && am._custodyAlive(L, tLate) === false,
+    `held=${L.cacheIds.has(exportId)} custody=${L.merge.custody.size} alive=${am._custodyAlive(L, tLate)}`);
 }
 
 console.log(`\nfence_merge_candidate_after_completion: ${passed} passed, ${failed} failed`);
