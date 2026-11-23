@@ -367,6 +367,12 @@ export class RootClaim {
       role.merge.custody?.clear?.();                          // a root's cache is under its own retention; child custody ends with the child
     }
     if (isRoot) this.m._stepDownHold?.delete(role.topicId);   // a root holds no step-down
+    // 4.160.0 REPLICATE DELTA (Orion RD-2): a replica stamp belongs to the ROOT
+    // incarnation that recorded it. Across ROOT -> non-ROOT -> ROOT the replica may
+    // have lost its copy, so no stamp survives a flip in either direction. The
+    // replica ledger (role.replicas) and the full-push record are left as they
+    // were: they predate the delta and decide nothing about it once stamps are gone.
+    this.m._replicaHwClear?.(role);
     // Nature hygiene (v4.26.0, Phase 7): a role flipping to ROOT sheds any
     // BACKUP residue in the same transition. Before this, promote() left
     // backupOf + the _backupTopics membership in place forever — a ROOT

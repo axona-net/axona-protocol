@@ -30,6 +30,9 @@
 import { AxonaManager } from '../src/pubsub/AxonaManager.js';
 import { ROOT_REPLICATE_FULL_MS } from '../src/pubsub/constants.js';
 import { sealTestDht } from './lib/testCapability.mjs';
+import { createAuthorIdentity } from '../src/identity/index.js';
+import { buildEnvelope } from '../src/pubsub/envelope.js';
+import { deriveTopicIdBig } from '../src/pubsub/post.js';
 
 let pass = 0, fail = 0;
 const ok = (cond, name, extra = '') => { if (cond) { pass++; console.log(`  ✓ ${name}`); } else { fail++; console.log(`  ✗ ${name} ${extra}`); } };
@@ -38,12 +41,16 @@ const REG = 0x87n << 248n;
 const hex = (b) => b.toString(16).padStart(66, '0');
 const SELF = REG | 0x011n;
 const NB1 = hex(REG | 0xaa0n), NB2 = hex(REG | 0xaafn), NB3 = hex(REG | 0xab1n);
-const T = REG | 0x1001n;
+const T_DEFAULT = REG | 0x1001n;
+const DESC = { region: 'useast', owner: null, name: 'fence-replicate-delta', write: 'open' };
+const T_REAL = await deriveTopicIdBig(DESC);
+const author = await createAuthorIdentity();
 
-function mk({ armed }) {
+function mk({ armed, T = T_DEFAULT }) {
   const clock = { t: 1_000_000 };
   let neighbors = [NB1, NB2];
   const refuse = new Set();
+  const hold = new Map();   // to -> resolver list: a push whose verdict the test releases later
   const pushes = [];
   const dht = {
     verdictsSupported: true,
@@ -60,15 +67,24 @@ function mk({ armed }) {
     const to = hex(target);
     pushes.push({ to, n: Array.isArray(payload.msgs) ? payload.msgs.length : 0, ids: (payload.msgs || []).map((m) => m.msgId) });
     if (refuse.has(to)) { refuse.delete(to); return { consumed: false }; }
+    if (hold.has(to)) { const q = hold.get(to); hold.delete(to); return new Promise((res) => q.push(res)); }
     return { consumed: true };
   };
   am.pubsubSubscribe(T);
   const role = am._becomeRoot(T);
   let seq = 0;
-  const publish = () => { seq++; clock.t += 10; role.cache.push({ msgId: `m${seq}`, publishTs: clock.t, json: `{"k":${seq}}`, seq }); };
+  const publish = () => { seq++; clock.t += 10; role.cache.push({ msgId: `m${seq}`, publishTs: clock.t, json: `{"k":${seq}}`, seq }); role.lastTs = clock.t; };
+  // A stamped body arriving from elsewhere (merge import, replay-up, handoff):
+  // a SIGNED envelope through the real _ingestStamped, at a stamp the test
+  // chooses. Returns the msgId when the body was held.
+  const importAt = async (tag, ts) => {
+    const e = await buildEnvelope({ topic: DESC, message: `{"imp":"${tag}"}`, identity: author, ts, seq: 0 });
+    const r = await am._ingestStamped(role, { msgId: e.msgId, json: JSON.stringify(e), publishTs: ts, seq: 0 }, am._cutCapture(role));
+    return r === 'held' && role.cacheIds.has(e.msgId) ? e.msgId : null;
+  };
   const eager = () => am._replicateRole(T, role, null, clock.t, null, -1, { eager: true });
   const sweep = () => am._replicateRole(T, role, null, clock.t);
-  return { am, role, clock, pushes, publish, eager, sweep, setNeighbors: (a) => { neighbors = a; }, refuse };
+  return { am, role, clock, pushes, publish, eager, sweep, setNeighbors: (a) => { neighbors = a; }, refuse, hold, importAt };
 }
 
 const last = (pushes, k) => pushes.slice(-k);
@@ -139,6 +155,93 @@ console.log('\n[7] armed: a member whose last push was not consumed gets the ful
   const byTo = Object.fromEntries(last(pushes, 2).map((p) => [p.to, p.n]));
   ok(byTo[NB2] === 5, 'NB2 (last push not consumed) got all 5', JSON.stringify(byTo));
   ok(byTo[NB1] === 1, 'NB1 got only the new one', JSON.stringify(byTo));
+}
+
+// ── Orion eed879b0 (2026-11-23): RD-0 … RD-3 ─────────────────────────────
+console.log('\n[8] RD-0: a body that enters the cache at or below a replica\'s stamp ends that replica\'s deltas');
+{
+  const { pushes, publish, eager, importAt, role } = mk({ armed: true, T: T_REAL });
+  publish(); await eager(); publish(); await eager();
+  const hw = role.lastTs;
+  const old = await importAt('old', hw - 500);
+  ok(!!old, 'precondition: a signed body stamped BELOW the high-water was held through _ingestStamped');
+  publish(); await eager();
+  const got = last(pushes, 2);
+  ok(got.every((p) => p.n === 4 && p.ids.includes(old)), 'the next eager push carried the whole cache, the old body included, to each replica', JSON.stringify(got));
+  publish(); await eager();
+  ok(last(pushes, 2).every((p) => p.n === 1), 'and the round after that is a delta again', JSON.stringify(last(pushes, 2).map((p) => p.n)));
+}
+{
+  const { pushes, publish, eager, importAt, role } = mk({ armed: true, T: T_REAL });
+  publish(); await eager(); publish(); await eager();
+  const tie = await importAt('tie', role.lastTs);             // SAME millisecond as the stamp
+  publish(); await eager();
+  ok(!!tie && last(pushes, 2).every((p) => p.ids.includes(tie)), 'a body stamped EQUAL to the stamp is not skipped either', JSON.stringify(last(pushes, 2)));
+}
+
+console.log('\n[9] RD-1: a round that sent one member a delta does not count as the full push');
+{
+  const { pushes, publish, eager, sweep, setNeighbors, role } = mk({ armed: true });
+  for (let i = 0; i < 3; i++) { publish(); await eager(); }
+  const sigBefore = role.sync.sig, fullBefore = role.sync.lastFullAt;
+  setNeighbors([NB1, NB3]);
+  publish(); await eager();                                    // NB1 delta, NB3 full
+  const byTo = Object.fromEntries(last(pushes, 2).map((p) => [p.to, p.n]));
+  ok(byTo[NB1] === 1 && byTo[NB3] === 4, 'precondition: a mixed round (NB1 delta, NB3 full)', JSON.stringify(byTo));
+  ok(role.sync.sig === sigBefore && role.sync.lastFullAt === fullBefore, 'the mixed round did not advance the full-push record', JSON.stringify(role.sync));
+  await sweep();
+  const sw = Object.fromEntries(last(pushes, 2).map((p) => [p.to, p.n]));
+  ok(sw[NB1] === 4, 'so the next sweep sent NB1 the whole cache, not a keepalive', JSON.stringify(sw));
+}
+
+console.log('\n[10] RD-2: a role that leaves ROOT and returns starts with no replica stamps');
+{
+  const { pushes, publish, eager, role, am } = mk({ armed: true });
+  publish(); await eager(); publish(); await eager();
+  ok(role.replicaHw?.size === 2, 'precondition: both replicas carry a stamp');
+  role.isRoot = false;
+  const back = am._rootClaim._set(role, true, 'fence-return');
+  ok(back?.committed !== false && role.isRoot === true, 'precondition: the role is ROOT again through RootClaim._set', JSON.stringify(back));
+  ok(!(role.replicaHw?.size), 'the stamps of the earlier incarnation are gone', String(role.replicaHw?.size));
+  publish(); await eager();
+  ok(last(pushes, 2).every((p) => p.n === 3), 'and its first eager push is the whole cache', JSON.stringify(last(pushes, 2).map((p) => p.n)));
+}
+
+console.log('\n[11] RD-3: a push that was in flight across an invalidation records no stamp');
+{
+  const { pushes, publish, eager, importAt, role, hold } = mk({ armed: true, T: T_REAL });
+  publish(); await eager(); publish();
+  const q = []; hold.set(NB1, q);
+  const flying = eager();                                      // NB1's verdict is held
+  for (let i = 0; i < 20 && !q.length; i++) await Promise.resolve();
+  ok(q.length === 1, 'precondition: one push to NB1 is in flight');
+  const old = await importAt('old', role.lastTs - 500);        // invalidation while it flies
+  q[0]({ consumed: true }); await flying;
+  ok(!role.replicaHw?.has(NB1), 'the late verdict did not put NB1\'s stamp back', String(role.replicaHw?.get(NB1)));
+  publish(); await eager();
+  const byTo = Object.fromEntries(last(pushes, 2).map((p) => [p.to, p.ids.includes(old)]));
+  ok(!!old && byTo[NB1] === true, 'and NB1\'s next eager push carried the old body', JSON.stringify(byTo));
+}
+{
+  const { publish, eager, role, hold } = mk({ armed: true });
+  publish(); await eager(); publish();
+  const q = []; hold.set(NB1, q);
+  const first = eager();                                       // stamp A, held
+  for (let i = 0; i < 20 && !q.length; i++) await Promise.resolve();
+  publish(); await eager();                                    // stamp B > A, lands first
+  const b = role.replicaHw.get(NB1);
+  q[0]({ consumed: true }); await first;                       // A lands second
+  ok(role.replicaHw.get(NB1) === b, 'two verdicts arriving out of order never move a stamp backwards', `${role.replicaHw.get(NB1)} vs ${b}`);
+}
+{
+  const { publish, eager, role, hold } = mk({ armed: true });
+  publish(); await eager(); publish();
+  const q = []; hold.set(NB1, q);
+  const flying = eager();
+  for (let i = 0; i < 20 && !q.length; i++) await Promise.resolve();
+  role.isRoot = false;                                         // the role stopped being ROOT while the push flew
+  q[0]({ consumed: true }); await flying;
+  ok(!role.replicaHw?.has(NB1) || role.replicaHw.get(NB1) < role.lastTs, 'a verdict landing on a role that is no longer ROOT records no new stamp', String(role.replicaHw?.get(NB1)));
 }
 
 console.log(`\n${fail ? '✗' : '✓'} fence_replicate_delta: ${pass} passed, ${fail} failed`);

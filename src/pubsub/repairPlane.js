@@ -949,6 +949,24 @@ export const repairPlaneMethods = {
   // that are hit most and matter least. The early return previously carried a
   // dead `unreported` key (a v4.57.0 leftover) and omitted unsupported/violation,
   // so those read `undefined` on exactly the quiet paths.
+  // REPLICA STAMPS (4.160.0 REPLICATE DELTA; Orion eed879b0 RD-0, RD-2, RD-3).
+  // role.replicaHw: memberHex -> the stamp up to which that member is known to
+  // hold everything. role.replicaHwGen counts invalidations; a push in flight
+  // across one records no stamp when its verdict lands.
+  //   _replicaHwClear(role)        every stamp (a ROOT transition)
+  //   _replicaHwClear(role, hex)   one member (a push not consumed; left the cohort)
+  //   _replicaHwBelow(role, ts)    a body entered the cache at ts, at or below the
+  //                                high-water: every stamp >= ts no longer proves
+  //                                the member holds everything up to it
+  _replicaHwClear(role, hex = null) {
+    role.replicaHwGen = (role.replicaHwGen | 0) + 1;
+    if (hex == null) role.replicaHw?.clear(); else role.replicaHw?.delete(hex);
+  },
+  _replicaHwBelow(role, ts) {
+    role.replicaHwGen = (role.replicaHwGen | 0) + 1;
+    if (role.replicaHw?.size) for (const [hex, hw] of role.replicaHw) if (ts <= hw) role.replicaHw.delete(hex);
+  },
+
   async _replicateRole(t, role, bridge, now, budget = null, idx = -1, opts = null) {
     // `dispatched` and `snapshot` are the DURABILITY EVIDENCE FLAGS (Aster,
     // council 2026-08-01). The counters alone cannot carry the distinction the
@@ -1026,7 +1044,7 @@ export const repairPlaneMethods = {
       if (this._replicaInherit) want = this._inheritCohort(t, role, want, bridge);
     }
     const wantSet = new Set(want);
-    for (const hex of [...role.replicas.keys()]) if (!wantSet.has(hex)) { role.replicas.delete(hex); role.replicaHw?.delete(hex); }   // retire those no longer in the cohort
+    for (const hex of [...role.replicas.keys()]) if (!wantSet.has(hex)) { role.replicas.delete(hex); this._replicaHwClear(role, hex); }   // retire those no longer in the cohort
     // role.attempted is pruned to the SAME cohort, for the same reason and on the
     // same tick. It was described as "bounded" and was not: every failed,
     // unsupported or violating target stayed forever, so a long-lived root under
@@ -1066,10 +1084,16 @@ export const repairPlaneMethods = {
     // recorded at that credit and no push to it has failed since (a failure
     // clears the stamp), and the last full push is inside the backstop.
     // Everyone else falls through to the full/keepalive decision below, unchanged.
-    // role.sync.sig is NOT advanced by a delta round: the next sweep still sends
-    // one full snapshot, which covers anything a stamp-based delta can miss (a
-    // message merged in below the high-water).
+    // role.sync.sig is NOT advanced by a round that sent ANY member a delta (Orion
+    // RD-1): sig and lastFullAt mean "every member of this cohort was sent the
+    // full snapshot at sig", and the next sweep relies on that to decide between
+    // a full push and a keepalive.
+    // gen0 / epoch0 (Orion RD-3): this function awaits its sends. A stamp is
+    // recorded afterwards only if nothing invalidated stamps meanwhile and the
+    // role is still the same ROOT incarnation. Captured here, in the same
+    // synchronous stretch that assembles the payloads below.
     const hwNow = this._highWater(role);
+    const gen0 = role.replicaHwGen | 0, epoch0 = role.epoch;
     const deltaFor = new Map();
     if (this._replicateDelta && opts?.eager && (now - (role.sync.lastFullAt || 0)) < ROOT_REPLICATE_FULL_MS) {
       for (const hex of want) {
@@ -1143,16 +1167,20 @@ export const repairPlaneMethods = {
     // dispatched:true — these pushes really went out, so the outcome IS evidence.
     // snapshot carries whether the payload contained the role's state: only a
     // FULL push can testify about a message. See the nil() header above.
-    // A full snapshot went out only if at least one member did not get a delta.
-    const fullSent = !!full && want.some((hex) => !deltaFor.has(hex));
+    // The full-push record advances only when EVERY member was sent the full
+    // snapshot (RD-1). `snapshot` below is the weaker fact, that content went out.
+    const fullSent = !!full && deltaFor.size === 0;
+    const contentSent = (!!full && want.some((hex) => !deltaFor.has(hex))) || deltaFor.size > 0;
     const out = { attempted: want.length, verified: 0, failed: 0, unsupported: 0, violation: 0,
-                  dispatched: true, snapshot: fullSent || deltaFor.size > 0, delta: deltaFor.size, failures: [] };
+                  dispatched: true, snapshot: contentSent, delta: deltaFor.size, failures: [] };
     // role.attempted is a BOUNDED DIAGNOSTICS RECORD, deliberately outside
     // role.replicas and outside every repair, confirm and handoff decision path.
     // It exists so the difference between "no evidence" and "evidence of failure"
     // is inspectable rather than inferred. Nothing reads it to decide anything.
     role.attempted ??= new Map();
-    for (const { hex, verdict } of await Promise.all(sent)) {
+    const verdicts = await Promise.all(sent);
+    const fresh = role.isRoot && role.epoch === epoch0 && (role.replicaHwGen | 0) === gen0;   // RD-3: read ONCE, before this round's own failures bump it
+    for (const { hex, verdict } of verdicts) {
       if (verdict === 'consumed') {
         out.verified++;
         role.inheritRefused?.delete(hex);
@@ -1160,10 +1188,15 @@ export const repairPlaneMethods = {
         // 4.160.0: a content-bearing push that was consumed proves the member holds
         // everything up to hwNow (full) or had up to its old stamp and now the rest
         // (delta). A keepalive proves nothing new about content.
-        if (full || deltaFor.has(hex)) (role.replicaHw ??= new Map()).set(hex, hwNow);
+        // Never backwards (two rounds may land out of order), and never after an
+        // invalidation that happened while this push was in flight (RD-3).
+        if (fresh && (full || deltaFor.has(hex))) {
+          const prev = (role.replicaHw ??= new Map()).get(hex);
+          role.replicaHw.set(hex, Number.isFinite(prev) ? Math.max(prev, hwNow) : hwNow);
+        }
         continue;
       }
-      role.replicaHw?.delete(hex);   // 4.160.0: no delta after a push that was not consumed; the next push to it is full
+      this._replicaHwClear(role, hex);   // 4.160.0: no delta after a push that was not consumed; the next push to it is full
       if (this._replicaInherit) (role.inheritRefused ??= new Map()).set(hex, now);   // RI-2: read only by _inheritCohort
       out[verdict]++;
       out.failures.push({ id: hex.slice(0, 12), v: verdict });   // WHO the push failed to + its dispatch verdict — replication-failure attribution (#45/#432/#397)

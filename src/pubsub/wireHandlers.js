@@ -1063,7 +1063,14 @@ export const wireHandlersMethods = {
       return 'unvouched';
     }
     if (tv?.kind === 'suppress') { if (tv.viaClaim) this._promoteClaim(role, m.msgId, tv); return 'held'; }   // killed → don't resurrect via replay-up (verified above)
+    // 4.160.0 REPLICATE DELTA (Orion RD-0): a stamped body arriving from elsewhere
+    // (merge import, replay-up, handoff, union at the root) can land AT OR BELOW
+    // the high-water. A delta carries only stamps above a replica's stamp, so it
+    // would never carry this body. Read the high-water before the write; a root's
+    // own publish is always above it and never takes this branch.
+    const hwBefore = this._highWater(role);
     if (!this._cachePush(role, { msgId: m.msgId, publishTs: m.publishTs, json: m.json, seq: m.seq }, cut)) return 'refused';
+    if (m.publishTs <= hwBefore && role.cacheIds.has(m.msgId)) this._replicaHwBelow(role, m.publishTs);
     if (tv && role.cacheIds.has(m.msgId)) this._tombstoneCommit(role, m.msgId, tv);   // revoke or supersede, only once cached (Orion D3)
     // Phase 3 shadow: observe the VERIFIED body (env passed verifyEnvelope + the
     // topic-binding check above) if it survived the cache write. The observer
