@@ -437,6 +437,50 @@ for (const armed of [true, false]) {
   } else {
     ok(declined > 0 && !heldAtB && answers.at(-1) === 'consumed' && !killFailed(), 'FLAG OFF control: the answer is the old receipt and the kill path behaves as it always has', JSON.stringify({ a: answers.at(-1), log: wlog.filter((x) => /kill/.test(x)) }));
   }
+
+  // Aster 28643872: the SAME message can carry successive deletion records, and a
+  // record held here can be older than the one in the frame, or past its expiry.
+  // Holding a tombstone KEY is not holding the deletion being acknowledged.
+  const frame = () => ({ topicId: topicHex, from: idHex(W_ID), msgs: [], dels: W._activeDels(role), rd: { since: null, hw: W._highWater(role) } });
+  const hand = () => B._onReplicate(frame(), { targetId: B_ID, isTerminal: true, hopCount: 1, fromId: idHex(W_ID) });
+  // First the backup takes e2's deletion after all, so that e1's record is the ONLY thing in question below.
+  B._applyKill = realApplyKill; await hand();
+  ok(bRole().tombstones.has(e2.msgId), 'precondition: the backup now holds every other deletion record the root sends', '');
+  const k1Ts = bRole().tombstones.get(e1.msgId)?.kill?.ts;
+  // (a) OLDER: the author kills e1 again; the backup declines the new record and keeps the first.
+  const declineE1 = (r, t, d, ...rest) => { if (d?.msgId === e1.msgId) return true; return realApplyKill(r, t, d, ...rest); };
+  B._applyKill = declineE1;
+  await kill(e1, 4);
+  const wKill = role.tombstones.get(e1.msgId)?.kill, bKill = bRole().tombstones.get(e1.msgId)?.kill;
+  if (armed) {
+    ok(wKill?.ts > k1Ts && bKill?.ts === k1Ts && answers.at(-1)?.retained === false, 'armed, OLDER record: the backup still holds a tombstone for the message, but not the newer deletion, and says not retained', JSON.stringify({ w: wKill?.ts, b: bKill?.ts, a: answers.at(-1) }));
+    ok(killFailed(), 'armed, OLDER record: the newer kill\'s replication is NOT confirmed', JSON.stringify(wlog.filter((x) => /kill/.test(x))));
+  } else {
+    ok(wKill?.ts > k1Ts && bKill?.ts === k1Ts && answers.at(-1) === 'consumed' && !killFailed(), 'FLAG OFF control, OLDER record: the old receipt, confirmed as it always has been', JSON.stringify({ a: answers.at(-1) }));
+  }
+  if (armed) {
+    // (b) POSITIVE CONTROL: the backup takes the newer record; the same frame is now retained.
+    B._applyKill = realApplyKill;
+    const good = await hand();
+    ok(good?.retained === true && bRole().tombstones.get(e1.msgId)?.kill?.ts === wKill.ts, 'armed POSITIVE CONTROL: with the current deletion record held, the same frame is retained', JSON.stringify(good));
+    // (b2) ANOTHER AUTHOR: a deletion record for the same message signed by someone else, not later
+    // than the one held. The backup declines it. The record it holds is not that deletion.
+    B._applyKill = declineE1;
+    const other = await createAuthorIdentity();
+    const held = bRole().tombstones.get(e1.msgId);
+    const kOther = await buildKill({ topicId: topicHex, msgId: e1.msgId, identity: other, ts: held.kill.ts - 1, seq: 1 });
+    const foreign = await B._onReplicate({ topicId: topicHex, from: idHex(W_ID), msgs: [], dels: [{ del: true, msgId: e1.msgId, killTs: held.killTs, signer: kOther.signerPubkey, seq: held.seq, publishTs: held.killTs, kill: kOther }], rd: { since: null, hw: W._highWater(role) } }, { targetId: B_ID, isTerminal: true, hopCount: 1, fromId: idHex(W_ID) });
+    ok(kOther.signerPubkey !== held.kill.signerPubkey && bRole().tombstones.get(e1.msgId)?.kill?.signerPubkey === held.kill.signerPubkey && foreign?.consumed === true && foreign.retained === false, 'armed, ANOTHER AUTHOR: a held record by a different author does not cover the deletion sent; not retained', JSON.stringify(foreign));
+    B._applyKill = realApplyKill; await hand();               // back to the held, current record
+    // (c) EXPIRED: the record held is the right one, but past its own expiry, and is not refreshed.
+    B._applyKill = declineE1;
+    bRole().tombstones.get(e1.msgId).exp = clock.t - 1;
+    const stale = await hand();
+    ok(bRole().tombstones.has(e1.msgId) && stale?.consumed === true && stale.retained === false, 'armed, EXPIRED record: a tombstone past its expiry is not evidence; not retained', JSON.stringify(stale));
+    // and the kill path: the author kills again while the backup holds only the expired record
+    await kill(e1, 5);
+    ok(answers.at(-1)?.retained === false && killFailed(), 'armed, EXPIRED record: the kill\'s replication is NOT confirmed', JSON.stringify({ a: answers.at(-1), log: wlog.filter((x) => /kill/.test(x)) }));
+  }
 }
 
 console.log('\n[16] the routed reply carries `retained` at both AxonaPeer sites');

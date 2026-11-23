@@ -1181,6 +1181,27 @@ export const wireHandlersMethods = {
   // topic is queued or dropped, when a body the frame carried is not held, when
   // the caps evict a body (_cachePush), and when the sender changes. A backup
   // holding MORE than the root (a superset) does not break it.
+  // DOES THE RECORD HELD HERE COVER THE DELETION IN THE FRAME (Aster 28643872).
+  // A tombstone KEY is not that. One message can carry successive deletion
+  // records (the author kills again; _onKill advances the tombstone), and a
+  // record outlives its use until the sweep removes it. The record held covers
+  // the one sent only when it is CURRENT (not past its own expiry) and, by the
+  // ordering the kill path already uses:
+  //   the frame carries a signed kill -> this node holds a signed kill by the
+  //     SAME author that is not older on the author's clock (authorAfter);
+  //   the frame carries none (proof-less carrier) -> the held root stamp is
+  //     not below the frame's.
+  _tombCovers(role, d) {
+    const t = role.tombstones.get(d.msgId);
+    if (!t || !((t.exp ?? 0) > this._now())) return false;
+    const k = (this._killProofs && d.kill && typeof d.kill === 'object') ? d.kill : null;
+    if (k) {
+      const h = t.kill;
+      if (!h || lc(h.signerPubkey ?? '') !== lc(k.signerPubkey ?? '')) return false;
+      return !authorAfter(k.ts, k.seq, h.ts, h.seq);            // the frame's kill is not strictly after the one held
+    }
+    return !Number.isFinite(d.killTs) || (Number.isFinite(t.killTs) && t.killTs >= d.killTs);
+  },
   _replicaRetained(payload, fromHex, how) {
     let tb = null; try { tb = idBig(payload.topicId); } catch { tb = null; }
     const role = tb !== null ? this.axonRoles.get(tb) : null;
@@ -1195,7 +1216,7 @@ export const wireHandlersMethods = {
     // deletion records, and the eager kill path confirms a kill on this answer.
     // A record this node did not install is not retained.
     for (const d of (Array.isArray(payload.dels) ? payload.dels : [])) {
-      if (!d || !d.msgId || !role.tombstones.has(d.msgId)) return drop();
+      if (!d || !d.msgId || !this._tombCovers(role, d)) return drop();
     }
     if (rd.since === null || rd.since === undefined) { role.replicaChain = { from: fromHex, hw: rd.hw }; return true; }
     const c = role.replicaChain;
