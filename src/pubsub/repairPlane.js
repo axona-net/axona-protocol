@@ -554,16 +554,17 @@ export const repairPlaneMethods = {
         this._pinInFlight(dependency);
         try { await fn(); } catch { /* ingest is best-effort; anti-entropy re-heals */ }
         finally { this._ingestInlineActive = false; this._unpinInFlight(dependency); }
-        return;
+        return 'inline';                              // fn has RUN to its end (4.160.0: the caller may then read what was kept)
       }
     }
     if (q.length >= INGEST_QUEUE_MAX) {
       this._ingestDropped = (this._ingestDropped || 0) + 1;
       if ((this._ingestDropped & 255) === 1) this._log('warn', 'ingest-overflow', { dropped: this._ingestDropped, queued: q.length });
-      return;
+      return 'dropped';
     }
     q.push({ fn, dep: dependency });
     if (!this._ingestPumping) { this._ingestPumping = true; this._ingestPump(); }
+    return 'queued';
   },
 
   async _ingestPump() {
@@ -1172,10 +1173,15 @@ export const repairPlaneMethods = {
     const declares = this.dht?.verdictsSupported;
     const sent = want.map((hex) => {
       let p;
-      try { p = this._syncPush(idBig(hex), t, role, 'COHORT_REPLICATE', deltaFor.has(hex) ? { sinceHw: deltaFor.get(hex) } : { full }); }
+      // rd (armed, content-bearing pushes only): what this push claims. `since`
+      // is the stamp a delta starts from (null on a full push), `hw` the stamp it
+      // reaches. A receiver that understands it answers `retained` (Aster 0fe7b43e).
+      const isDelta = deltaFor.has(hex);
+      const rd = (this._replicateDelta && (isDelta || full)) ? { since: isDelta ? deltaFor.get(hex) : null, hw: hwNow } : null;
+      try { p = this._syncPush(idBig(hex), t, role, 'COHORT_REPLICATE', isDelta ? { sinceHw: deltaFor.get(hex), rd } : { full, rd }); }
       catch { return { hex, verdict: 'failed' }; }                  // sync throw
       return Promise.resolve(p).then(
-        (r) => ({ hex, verdict: dispatchVerdict(r, declares) }),
+        (r) => ({ hex, verdict: dispatchVerdict(r, declares), retained: (r && typeof r === 'object') ? r.retained : undefined }),
         () => ({ hex, verdict: 'failed' }),                          // async reject
       );
     });
@@ -1186,7 +1192,7 @@ export const repairPlaneMethods = {
     // snapshot (RD-1). `snapshot` below is the weaker fact, that content went out.
     const fullSent = !!full && deltaFor.size === 0;
     const contentSent = (!!full && want.some((hex) => !deltaFor.has(hex))) || deltaFor.size > 0;
-    const out = { attempted: want.length, verified: 0, failed: 0, unsupported: 0, violation: 0,
+    const out = { attempted: want.length, verified: 0, failed: 0, unsupported: 0, violation: 0, unretained: 0,
                   dispatched: true, snapshot: contentSent, delta: deltaFor.size, failures: [] };
     // role.attempted is a BOUNDED DIAGNOSTICS RECORD, deliberately outside
     // role.replicas and outside every repair, confirm and handoff decision path.
@@ -1195,9 +1201,19 @@ export const repairPlaneMethods = {
     role.attempted ??= new Map();
     const verdicts = await Promise.all(sent);
     const fresh = role.isRoot && role.epoch === epoch0 && (role.replicaHwGen | 0) === gen0;   // RD-3: read ONCE, before this round's own failures bump it
-    for (const { hex, verdict } of verdicts) {
+    // DURABILITY IS ABOUT ONE MESSAGE (Aster 0fe7b43e). Armed, the eager caller
+    // names the pending message's stamp. A member counts toward `verified` only
+    // if its push COVERED that stamp (a full push, or a delta starting below it)
+    // and the receiver did not say it kept less: a delta needs `retained: true`;
+    // a full push is counted as it always was unless the receiver answered
+    // `retained: false`. Unarmed, nothing here changes.
+    const coverTs = this._replicateDelta && Number.isFinite(opts?.coverTs) ? opts.coverTs : null;
+    for (const { hex, verdict, retained } of verdicts) {
       if (verdict === 'consumed') {
-        out.verified++;
+        const isDelta = deltaFor.has(hex);
+        const covered = coverTs === null || (isDelta ? deltaFor.get(hex) < coverTs : !!full);
+        const kept = !this._replicateDelta || (isDelta ? retained === true : retained !== false);
+        if (covered && kept) out.verified++; else out.unretained++;
         role.inheritRefused?.delete(hex);
         role.replicas.set(hex, { at: now, via: 'consumed' });        // the ONLY crediting path
         // 4.160.0: a content-bearing push that was consumed proves the member holds
@@ -1205,9 +1221,16 @@ export const repairPlaneMethods = {
         // (delta). A keepalive proves nothing new about content.
         // Never backwards (two rounds may land out of order), and never after an
         // invalidation that happened while this push was in flight (RD-3).
-        if (fresh && (full || deltaFor.has(hex))) {
+        // ONLY ON THE RECEIVER'S WORD (Aster 0fe7b43e). `consumed` is a receipt for
+        // dispatch: _onReplicate answers it for a frame it queued and for one it
+        // dropped. A stamp is recorded only when the receiver answered
+        // `retained: true`, which it does after its ingest has run. A kernel that
+        // does not answer it never earns a stamp and keeps getting full pushes.
+        if (fresh && retained === true && (full || isDelta)) {
           const prev = (role.replicaHw ??= new Map()).get(hex);
           role.replicaHw.set(hex, Number.isFinite(prev) ? Math.max(prev, hwNow) : hwNow);
+        } else if (retained !== true && role.replicaHw?.has(hex)) {
+          this._replicaHwClear(role, hex);                           // it held a stamp and did not confirm this push: the next one is full
         }
         continue;
       }

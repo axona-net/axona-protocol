@@ -811,7 +811,7 @@ export const wireHandlersMethods = {
       // Q2/C4: the outcome is READ, not discarded. `.catch(() => {})` here used to
       // swallow the only evidence available and confirm regardless, so a publish
       // whose every replication push exhausted still reported durable.
-      const rep = await this._replicateRole(role.topicId, role, bridge, this._now(), null, -1, EAGER)
+      const rep = await this._replicateRole(role.topicId, role, bridge, this._now(), null, -1, { eager: true, coverTs: ts })
         // A REJECTION FABRICATES NOTHING (Aster, on v4.58.2). I had this catch
         // asserting dispatched:true, snapshot:true — inventing evidence flags for a
         // call that threw, in the middle of a change whose entire purpose is that
@@ -1163,8 +1163,38 @@ export const wireHandlersMethods = {
     let dep = null;
     if (payload.from && isHexId(lc(payload.from))) dep = lc(payload.from);
     else if (meta?.fromId != null) { try { dep = lc(idHex(idBig(meta.fromId))); } catch { /* unresolvable: no pin */ } }
-    await this._ingestEnqueue(() => this._syncIngest(payload, meta, 'REPLICATE'), dep);   // inline path completes here; queued path returns at once
-    return 'consumed';
+    const how = await this._ingestEnqueue(() => this._syncIngest(payload, meta, 'REPLICATE'), dep);   // inline path completes here; queued path returns at once
+    // 4.160.0 (Aster 0fe7b43e; shape Orion e4d19e7b). 'consumed' has always meant
+    // "taken for ingest", and it is answered for a frame that was queued and for
+    // one dropped at a full queue. A sender running REPLICATE_DELTA marks its
+    // content pushes with `rd` and is told what was KEPT, in the reply this RPC
+    // already returns. A sender that sends no `rd` gets the answer it always got.
+    if (!payload.rd || typeof payload.rd !== 'object') return 'consumed';
+    return { consumed: true, retained: this._replicaRetained(payload, dep, how) };
+  },
+  // RETAINED: true only when the ingest RAN TO ITS END in this call, every body
+  // the frame carried is now held (or stands killed), and the frame continues
+  // what this role already confirmed FROM THIS SENDER:
+  //   a full push (since null) starts a chain at rd.hw;
+  //   a delta (since S -> hw) is accepted only if the chain stands at S.
+  // The chain is this node's own record. It is dropped when a frame for the
+  // topic is queued or dropped, when a body the frame carried is not held, when
+  // the caps evict a body (_cachePush), and when the sender changes. A backup
+  // holding MORE than the root (a superset) does not break it.
+  _replicaRetained(payload, fromHex, how) {
+    let tb = null; try { tb = idBig(payload.topicId); } catch { tb = null; }
+    const role = tb !== null ? this.axonRoles.get(tb) : null;
+    if (!role) return false;
+    const rd = payload.rd;
+    const drop = () => { role.replicaChain = null; return false; };
+    if (how !== 'inline' || !fromHex || !Number.isFinite(rd.hw)) return drop();
+    for (const m of (Array.isArray(payload.msgs) ? payload.msgs : [])) {
+      if (!m || !(role.cacheIds.has(m.msgId) || role.tombstones.has(m.msgId))) return drop();
+    }
+    if (rd.since === null || rd.since === undefined) { role.replicaChain = { from: fromHex, hw: rd.hw }; return true; }
+    const c = role.replicaChain;
+    if (c && c.from === fromHex && c.hw === rd.since) { c.hw = rd.hw; return true; }
+    return drop();
   },
 
   // ── DELIVER (parent → subscriber; a relay re-fans down the tree) ──────

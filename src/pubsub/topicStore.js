@@ -87,6 +87,7 @@ export const topicStoreMethods = {
       if (!old) break;
       role.cacheIds.delete(old.msgId);
       role.cacheBytes -= old.bytes;
+      role.replicaChain = null;                                          // 4.160.0: a body left under the caps; this node no longer vouches for the prefix
       if (this._tombAuthority) this._taObserveEvict(role, old.msgId);   // Phase 3 shadow: keep body mirror in step (no-op flag-off)
     }
     // LATEST-ONLY: the entry just pushed is the newest held (checked above), so

@@ -1395,9 +1395,12 @@ export class AxonaPeer extends DHT {
         originId: typeof originId === 'string' ? originId : null,
       });
 
-      if (result === 'consumed') {
+      // A handler may answer { consumed: true, retained } (kernel 4.160.0): the
+      // boolean rides the reply this RPC already returns. 'consumed' alone is a
+      // receipt for dispatch and says nothing of what the receiver kept.
+      if (result === 'consumed' || result?.consumed === true) {
         hopTrace?.('delivered');
-        return { consumed: true, atNode: meId, hops };
+        return { consumed: true, atNode: meId, hops, ...(typeof result?.retained === 'boolean' ? { retained: result.retained } : {}) };
       }
       if (isTerminal && capable) {
         hopTrace?.('terminal-not-target', { synaptome: node.synaptome.size });
@@ -7080,8 +7083,8 @@ export class AxonaPeer extends DHT {
       node:     originNode,
     });
 
-    if (result === 'consumed') {
-      return { consumed: true, atNode: originNode.id, hops: 0 };
+    if (result === 'consumed' || result?.consumed === true) {
+      return { consumed: true, atNode: originNode.id, hops: 0, ...(typeof result?.retained === 'boolean' ? { retained: result.retained } : {}) };
     }
     if (isTerminal && capable) {
       return { consumed: false, atNode: originNode.id, hops: 0, terminal: true };

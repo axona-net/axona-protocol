@@ -28,7 +28,7 @@
 // Offline: _route is stubbed to capture each REPLICATE payload.
 // =====================================================================
 import { AxonaManager } from '../src/pubsub/AxonaManager.js';
-import { ROOT_REPLICATE_FULL_MS } from '../src/pubsub/constants.js';
+import { ROOT_REPLICATE_FULL_MS, INGEST_QUEUE_MAX } from '../src/pubsub/constants.js';
 import { sealTestDht } from './lib/testCapability.mjs';
 import { createAuthorIdentity } from '../src/identity/index.js';
 import { buildEnvelope } from '../src/pubsub/envelope.js';
@@ -52,6 +52,7 @@ function mk({ armed, T = T_DEFAULT }) {
   let neighbors = [NB1, NB2];
   const refuse = new Set();
   const hold = new Map();   // to -> resolver list: a push whose verdict the test releases later
+  const receiptOnly = new Set();
   const pushes = [];
   const dht = {
     verdictsSupported: true,
@@ -69,7 +70,13 @@ function mk({ armed, T = T_DEFAULT }) {
     pushes.push({ to, n: Array.isArray(payload.msgs) ? payload.msgs.length : 0, ids: (payload.msgs || []).map((m) => m.msgId) });
     if (refuse.has(to)) { refuse.delete(to); return { consumed: false }; }
     if (hold.has(to)) { const q = hold.get(to); hold.delete(to); return new Promise((res) => q.push(res)); }
-    return { consumed: true };
+    // The stub stands for a receiver on THIS kernel that kept what it was sent:
+    // it answers `retained: true` to a push marked `rd`, as _onReplicate does
+    // after an inline ingest. A member in `receiptOnly` stands for a receiver
+    // that answers the bare receipt (an older kernel, or a frame it queued).
+    // The REAL receiver is driven in section [14].
+    if (receiptOnly.has(to)) return { consumed: true };
+    return payload.rd ? { consumed: true, retained: true } : { consumed: true };
   };
   am.pubsubSubscribe(T);
   const role = am._becomeRoot(T);
@@ -89,7 +96,7 @@ function mk({ armed, T = T_DEFAULT }) {
   const deliverAt = (id, ts) => am._onDeliver({ topicId: idHex(T), from: lc(idHex(REG | 0xbb0n)), msgs: [{ msgId: id, publishTs: ts, json: `{"d":"${id}"}`, seq: 0 }] }, { targetId: SELF, isTerminal: true, hopCount: 1 });
   // A REAL publish: a signed envelope through _ingestPublish, which stamps it and runs the eager replicate itself.
   const realPublish = async (tag) => { const e = await buildEnvelope({ topic: DESC, message: `{"p":"${tag}"}`, identity: author, ts: clock.t, seq: 1 }); const r = await am._ingestPublish(role, JSON.stringify(e)); return { id: e.msgId, r }; };
-  return { am, role, clock, pushes, publish, eager, sweep, deliverAt, realPublish, setNeighbors: (a) => { neighbors = a; }, refuse, hold, importAt };
+  return { am, role, clock, pushes, publish, eager, sweep, deliverAt, realPublish, setNeighbors: (a) => { neighbors = a; }, refuse, hold, receiptOnly, importAt };
 }
 
 const last = (pushes, k) => pushes.slice(-k);
@@ -221,7 +228,7 @@ console.log('\n[11] RD-3: a push that was in flight across an invalidation recor
   for (let i = 0; i < 20 && !q.length; i++) await Promise.resolve();
   ok(q.length === 1, 'precondition: one push to NB1 is in flight');
   const old = await importAt('old', role.lastTs - 500);        // invalidation while it flies
-  q[0]({ consumed: true }); await flying;
+  q[0]({ consumed: true, retained: true }); await flying;
   ok(!role.replicaHw?.has(NB1), 'the late verdict did not put NB1\'s stamp back', String(role.replicaHw?.get(NB1)));
   publish(); await eager();
   const byTo = Object.fromEntries(last(pushes, 2).map((p) => [p.to, p.ids.includes(old)]));
@@ -235,7 +242,7 @@ console.log('\n[11] RD-3: a push that was in flight across an invalidation recor
   for (let i = 0; i < 20 && !q.length; i++) await Promise.resolve();
   publish(); await eager();                                    // stamp B > A, lands first
   const b = role.replicaHw.get(NB1);
-  q[0]({ consumed: true }); await first;                       // A lands second
+  q[0]({ consumed: true, retained: true }); await first;                       // A lands second
   ok(role.replicaHw.get(NB1) === b, 'two verdicts arriving out of order never move a stamp backwards', `${role.replicaHw.get(NB1)} vs ${b}`);
 }
 {
@@ -245,7 +252,7 @@ console.log('\n[11] RD-3: a push that was in flight across an invalidation recor
   const flying = eager();
   for (let i = 0; i < 20 && !q.length; i++) await Promise.resolve();
   role.isRoot = false;                                         // the role stopped being ROOT while the push flew
-  q[0]({ consumed: true }); await flying;
+  q[0]({ consumed: true, retained: true }); await flying;
   ok(!role.replicaHw?.has(NB1) || role.replicaHw.get(NB1) < role.lastTs, 'a verdict landing on a role that is no longer ROOT records no new stamp', String(role.replicaHw?.get(NB1)));
 }
 
@@ -282,6 +289,92 @@ for (const armed of [true, false]) {
   const ns = last(pushes, 2).map((p) => p.n);
   if (armed) ok(ns.every((n) => n === 3), 'armed: both members, having no stamp, got all 3', JSON.stringify(ns));
   else ok(ns.every((n) => n === 0), 'unarmed: both got a keepalive, as before this release', JSON.stringify(ns));
+}
+
+// ── Aster 0fe7b43e (2026-11-23): a receipt is not retention ──────────────
+console.log('\n[14] a member that answers the bare receipt never earns a stamp: full pushes, as before this release');
+{
+  const { pushes, publish, eager, receiptOnly, role } = mk({ armed: true });
+  receiptOnly.add(NB2);
+  let verified = true;
+  for (let i = 0; i < 4; i++) { publish(); const r = await eager(); verified = verified && r.verified === 2; }
+  const byTo = Object.fromEntries(last(pushes, 2).map((p) => [p.to, p.n]));
+  ok(byTo[NB2] === 4 && !role.replicaHw?.has(NB2), 'NB2 (receipt only) got the whole cache on the fourth publish and holds no stamp', JSON.stringify(byTo));
+  ok(byTo[NB1] === 1, 'NB1 (answers retained) got only the new one', JSON.stringify(byTo));
+  ok(verified, 'a consumed FULL push still counts as it always did', '');
+}
+
+console.log('\n[15] two REAL managers: a frame the backup drops earns no delta credit and does not mark the publish durable');
+{
+  // W is a root, B its one backup. B is a real AxonaManager: its own
+  // _onReplicate, ingest queue and cache decide what it answers. The route
+  // between them maps the handler's answer the way AxonaPeer does.
+  const W_ID = REG | 0x011n, B_ID = REG | 0xaa0n, B_HEX = hex(B_ID);
+  const clock = { t: 1_000_000 };
+  const sent = [];
+  const mkDht = (self, neighbors) => ({ verdictsSupported: true, getSelfId: () => self, onRoutedMessage: () => {}, routeMessage: () => ({ consumed: true }), neighbors: () => neighbors, bridgeId: () => null });
+  const B = new AxonaManager({ dht: sealTestDht(mkDht(B_ID, [])), now: () => clock.t, rootReplicas: 1, replicateDelta: true });   // rootReplicas > 0: this node accepts backup duty
+  B.nodeId = B_ID; B.setLogSink(() => {});
+  const W = new AxonaManager({ dht: sealTestDht(mkDht(W_ID, [B_HEX])), now: () => clock.t, rootReplicas: 1, replicateDelta: true });
+  W.nodeId = W_ID; W.setLogSink(() => {});
+  W._route = async (target, type, payload) => {
+    if (type !== 'pubsub:replicate') return { consumed: true };
+    const result = await B._onReplicate(payload, { targetId: B_ID, isTerminal: true, hopCount: 1, fromId: idHex(W_ID) });
+    sent.push({ n: (payload.msgs || []).length, rd: payload.rd ?? null, result });
+    if (result === 'consumed' || result?.consumed === true) return { consumed: true, atNode: B_ID, hops: 1, ...(typeof result?.retained === 'boolean' ? { retained: result.retained } : {}) };
+    return { consumed: false, atNode: B_ID, hops: 1 };
+  };
+  W.pubsubSubscribe(T_REAL);
+  const role = W._becomeRoot(T_REAL);
+  const pub = async (tag) => { clock.t += 10; const e = await buildEnvelope({ topic: DESC, message: `{"p":"${tag}"}`, identity: author, ts: clock.t, seq: 1 }); const r = await W._ingestPublish(role, JSON.stringify(e)); return { id: e.msgId, r }; };
+  const bHolds = (id) => !!B.axonRoles.get(T_REAL)?.cacheIds.has(id);
+
+  const p1 = await pub('one');
+  ok(sent.at(-1).n === 1 && sent.at(-1).result?.retained === true && bHolds(p1.id), 'POSITIVE CONTROL: the backup ingested the full push inline, holds the body and answered retained', JSON.stringify(sent.at(-1)));
+  ok(p1.r?.ok === true && p1.r.pendingDurability !== true && role.replicaHw?.has(B_HEX), 'the publish is durable and the backup earned a stamp', JSON.stringify(p1.r));
+
+  // The backup's ingest queue is full and a pump is running: the next frame is dropped.
+  const realQueue = B._ingestQueue, realPumping = B._ingestPumping;
+  B._ingestQueue = Array.from({ length: INGEST_QUEUE_MAX }, () => ({ fn: async () => {}, dep: null })); B._ingestPumping = true;
+  const p2 = await pub('two');
+  B._ingestQueue = realQueue ?? []; B._ingestQueue.length = 0; B._ingestPumping = realPumping ?? false;
+  const d2 = sent.at(-1);
+  ok(d2.rd && d2.rd.since !== null && d2.n === 1 && !bHolds(p2.id), 'precondition: the root sent a DELTA and the backup does not hold its body', JSON.stringify({ rd: d2.rd, n: d2.n }));
+  ok(d2.result?.consumed === true && d2.result?.retained === false, 'the backup answered the receipt WITHOUT retention', JSON.stringify(d2.result));
+  ok(!role.replicaHw?.has(B_HEX), 'the root gave no delta credit: the stamp is gone', String(role.replicaHw?.get(B_HEX)));
+  ok(p2.r?.pendingDurability === true, 'and the publish is NOT marked durable', JSON.stringify(p2.r));
+
+  const p3 = await pub('three');
+  ok(sent.at(-1).rd?.since === null && sent.at(-1).n === 3 && bHolds(p2.id) && bHolds(p3.id), 'the next push is FULL and the backup now holds the lost body too', JSON.stringify({ rd: sent.at(-1).rd, n: sent.at(-1).n }));
+  const p4 = await pub('four');
+  ok(sent.at(-1).rd?.since !== null && sent.at(-1).n === 1 && sent.at(-1).result?.retained === true && bHolds(p4.id) && p4.r.pendingDurability !== true, 'POSITIVE CONTROL: with the prefix retained the delta is accepted, held and the publish is durable', JSON.stringify({ rd: sent.at(-1).rd, r: p4.r }));
+
+  // A delta that does not continue what the backup confirmed is not retained.
+  const c = B.axonRoles.get(T_REAL).replicaChain;
+  B.axonRoles.get(T_REAL).replicaChain = { from: c.from, hw: c.hw - 1 };
+  const p5 = await pub('five');
+  ok(sent.at(-1).result?.retained === false && p5.r?.pendingDurability === true && !role.replicaHw?.has(B_HEX), 'a delta starting from a stamp the backup did not confirm earns no credit and no durability', JSON.stringify(sent.at(-1).result));
+
+  // Each half of the backup's answer, alone. Frames are handed to the REAL _onReplicate.
+  const bRole = B.axonRoles.get(T_REAL), from = idHex(W_ID), tHex = idHex(T_REAL);
+  const hand = (msgs, rd) => B._onReplicate({ topicId: tHex, from, msgs, dels: [], rd }, { targetId: B_ID, isTerminal: true, hopCount: 1, fromId: from });
+  clock.t += 10;
+  const bogus = await hand([{ msgId: 'not-a-signed-body', json: '{}', publishTs: clock.t, seq: 0 }], { since: null, hw: clock.t });
+  ok(bogus?.consumed === true && bogus.retained === false && !bRole.cacheIds.has('not-a-signed-body') && bRole.replicaChain === null, 'an INLINE full frame whose body the backup did not keep is not retained', JSON.stringify(bogus));
+  clock.t += 10; const X = clock.t;
+  const emptyFull = await hand([], { since: null, hw: X });
+  ok(emptyFull?.retained === true && bRole.replicaChain?.hw === X, 'control: an inline frame with nothing to keep starts the chain', JSON.stringify(emptyFull));
+  B._ingestQueue = Array.from({ length: INGEST_QUEUE_MAX }, () => ({ fn: async () => {}, dep: null })); B._ingestPumping = true;
+  const emptyDropped = await hand([], { since: X, hw: X + 5 });
+  B._ingestQueue.length = 0; B._ingestPumping = false;
+  ok(emptyDropped?.consumed === true && emptyDropped.retained === false && bRole.replicaChain === null, 'a frame DROPPED at a full queue is not retained even when it carried no body, and the chain is gone', JSON.stringify(emptyDropped));
+}
+
+console.log('\n[16] the routed reply carries `retained` at both AxonaPeer sites');
+{
+  const src = (await import('node:fs')).readFileSync(new URL('../src/dht/AxonaPeer.js', import.meta.url), 'utf8');
+  const n = (src.match(/typeof result\?\.retained === 'boolean' \? \{ retained: result\.retained \} : \{\}/g) || []).length;
+  ok(n === 2 && !/if \(result === 'consumed'\) \{/.test(src), 'both terminal sites accept { consumed: true, retained } and forward the boolean', String(n));
 }
 
 console.log(`\n${fail ? '✗' : '✓'} fence_replicate_delta: ${pass} passed, ${fail} failed`);
