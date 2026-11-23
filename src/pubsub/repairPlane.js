@@ -955,15 +955,25 @@ export const repairPlaneMethods = {
   // across one records no stamp when its verdict lands.
   //   _replicaHwClear(role)        every stamp (a ROOT transition)
   //   _replicaHwClear(role, hex)   one member (a push not consumed; left the cohort)
-  //   _replicaHwBelow(role, ts)    a body entered the cache at ts, at or below the
-  //                                high-water: every stamp >= ts no longer proves
-  //                                the member holds everything up to it
+  //   _replicaHwBelow(role, ts)    a body entered the cache at ts (called from
+  //                                _cachePush, the one place a body is added):
+  //                                every stamp >= ts no longer proves the member
+  //                                holds everything up to it, and a push in flight
+  //                                that would record such a stamp must not
+  // role.replicaHwSent: the largest stamp any round has been sent with. A body at
+  // or below it may be missing from a push still in flight.
+  // A stamp is _highWater at the send. The cache is in ARRIVAL order, so that can
+  // be BELOW the newest body the push carried (Orion RD-4: a DELIVER from a root
+  // whose clock runs ahead, then a local publish). A stamp that is too low is
+  // safe: the next delta re-sends what lies above it and the ingest is a union.
+  // A stamp is never above what was sent, and _replicaHwBelow removes it the
+  // moment a body enters at or below it.
   _replicaHwClear(role, hex = null) {
     role.replicaHwGen = (role.replicaHwGen | 0) + 1;
     if (hex == null) role.replicaHw?.clear(); else role.replicaHw?.delete(hex);
   },
   _replicaHwBelow(role, ts) {
-    role.replicaHwGen = (role.replicaHwGen | 0) + 1;
+    if (ts <= (role.replicaHwSent ?? -Infinity)) role.replicaHwGen = (role.replicaHwGen | 0) + 1;
     if (role.replicaHw?.size) for (const [hex, hw] of role.replicaHw) if (ts <= hw) role.replicaHw.delete(hex);
   },
 
@@ -1093,6 +1103,7 @@ export const repairPlaneMethods = {
     // role is still the same ROOT incarnation. Captured here, in the same
     // synchronous stretch that assembles the payloads below.
     const hwNow = this._highWater(role);
+    if (this._replicateDelta && !(hwNow <= role.replicaHwSent)) role.replicaHwSent = hwNow;
     const gen0 = role.replicaHwGen | 0, epoch0 = role.epoch;
     const deltaFor = new Map();
     if (this._replicateDelta && opts?.eager && (now - (role.sync.lastFullAt || 0)) < ROOT_REPLICATE_FULL_MS) {
@@ -1101,7 +1112,11 @@ export const repairPlaneMethods = {
         if (role.replicas.has(hex) && Number.isFinite(hw)) deltaFor.set(hex, hw);
       }
     }
+    // Armed, an eager round after a stamp was dropped is full for that reason
+    // alone (Orion RD-4): sig can stand still across a publish when the cache is
+    // at its cap or its last entry is not its newest.
     const full = sig !== role.sync.sig
+      || (this._replicateDelta && !!opts?.eager && want.some((hex) => !Number.isFinite(role.replicaHw?.get(hex))))
       || want.some((hex) => !role.replicas.has(hex))
       || (now - (role.sync.lastFullAt || 0)) >= ROOT_REPLICATE_FULL_MS;
     // Full-push budget (task #332, I-11): when the tick's budget is spent, a

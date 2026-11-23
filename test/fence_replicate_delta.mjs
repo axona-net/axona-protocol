@@ -33,6 +33,7 @@ import { sealTestDht } from './lib/testCapability.mjs';
 import { createAuthorIdentity } from '../src/identity/index.js';
 import { buildEnvelope } from '../src/pubsub/envelope.js';
 import { deriveTopicIdBig } from '../src/pubsub/post.js';
+import { idHex, lc } from '../src/pubsub/ids.js';
 
 let pass = 0, fail = 0;
 const ok = (cond, name, extra = '') => { if (cond) { pass++; console.log(`  ✓ ${name}`); } else { fail++; console.log(`  ✗ ${name} ${extra}`); } };
@@ -84,7 +85,11 @@ function mk({ armed, T = T_DEFAULT }) {
   };
   const eager = () => am._replicateRole(T, role, null, clock.t, null, -1, { eager: true });
   const sweep = () => am._replicateRole(T, role, null, clock.t);
-  return { am, role, clock, pushes, publish, eager, sweep, setNeighbors: (a) => { neighbors = a; }, refuse, hold, importAt };
+    // A body arriving on the DELIVER path (unverified there; cached in arrival order).
+  const deliverAt = (id, ts) => am._onDeliver({ topicId: idHex(T), from: lc(idHex(REG | 0xbb0n)), msgs: [{ msgId: id, publishTs: ts, json: `{"d":"${id}"}`, seq: 0 }] }, { targetId: SELF, isTerminal: true, hopCount: 1 });
+  // A REAL publish: a signed envelope through _ingestPublish, which stamps it and runs the eager replicate itself.
+  const realPublish = async (tag) => { const e = await buildEnvelope({ topic: DESC, message: `{"p":"${tag}"}`, identity: author, ts: clock.t, seq: 1 }); const r = await am._ingestPublish(role, JSON.stringify(e)); return { id: e.msgId, r }; };
+  return { am, role, clock, pushes, publish, eager, sweep, deliverAt, realPublish, setNeighbors: (a) => { neighbors = a; }, refuse, hold, importAt };
 }
 
 const last = (pushes, k) => pushes.slice(-k);
@@ -242,6 +247,41 @@ console.log('\n[11] RD-3: a push that was in flight across an invalidation recor
   role.isRoot = false;                                         // the role stopped being ROOT while the push flew
   q[0]({ consumed: true }); await flying;
   ok(!role.replicaHw?.has(NB1) || role.replicaHw.get(NB1) < role.lastTs, 'a verdict landing on a role that is no longer ROOT records no new stamp', String(role.replicaHw?.get(NB1)));
+}
+
+console.log('\n[12] RD-4 (Orion 4b1f95f0): a body cached on the DELIVER path, and a stamp above the next publish');
+{
+  const { pushes, publish, eager, deliverAt, role } = mk({ armed: true });
+  publish(); await eager(); publish(); await eager();
+  await deliverAt('dold', role.lastTs - 500);                 // RD-4a: a late DELIVER below the stamps, at a ROOT
+  ok(role.cacheIds.has('dold'), 'precondition: the root cached a body that arrived by DELIVER below its high-water');
+  publish(); await eager();
+  ok(last(pushes, 2).every((p) => p.ids.includes('dold')), 'RD-4a: the next eager push carried that body to each replica', JSON.stringify(last(pushes, 2).map((p) => p.ids)));
+}
+for (const armed of [false, true]) {
+  const { pushes, sweep, deliverAt, realPublish, role, am, clock } = mk({ armed, T: T_REAL });
+  role.isRoot = false;                                        // a relay under a root whose clock runs 1.5 s ahead
+  await deliverAt('skew', clock.t + 1500);
+  ok(role.cacheIds.has('skew') && (role.lastTs || 0) < clock.t + 1500, `precondition (${armed ? 'armed' : 'unarmed'}): the relay cached the skewed body and its own last stamp did not move`);
+  am._rootClaim._set(role, true, 'fence-promote');
+  clock.t += 100; await sweep();
+  clock.t += 100; const before = pushes.length;
+  const { id, r } = await realPublish('new');
+  const sent = pushes.slice(before);
+  ok(r?.ok === true && role.cache.find((c) => c.msgId === id)?.publishTs < clock.t + 1300, `precondition (${armed ? 'armed' : 'unarmed'}): a real publish was stamped BELOW the skewed body`, JSON.stringify(r));
+  ok(sent.length === 2 && sent.every((p) => p.ids.includes(id)), `RD-4b (${armed ? 'armed' : 'unarmed'}): the publish itself reached both replicas`, JSON.stringify(sent.map((p) => p.n)));
+}
+
+console.log('\n[13] an eager round with nothing new: armed, a member with no stamp gets the whole cache; unarmed, unchanged');
+for (const armed of [true, false]) {
+  const { pushes, publish, eager, sweep, role, am } = mk({ armed });
+  for (let i = 0; i < 3; i++) { publish(); await eager(); }
+  await sweep();                                              // every member full: the full-push record now matches the cache
+  role.isRoot = false; am._rootClaim._set(role, true, 'fence-return');   // stamps dropped; cache, ledger and record unchanged
+  await eager();                                              // nothing new (a kill claim runs the eager replicate like this)
+  const ns = last(pushes, 2).map((p) => p.n);
+  if (armed) ok(ns.every((n) => n === 3), 'armed: both members, having no stamp, got all 3', JSON.stringify(ns));
+  else ok(ns.every((n) => n === 0), 'unarmed: both got a keepalive, as before this release', JSON.stringify(ns));
 }
 
 console.log(`\n${fail ? '✗' : '✓'} fence_replicate_delta: ${pass} passed, ${fail} failed`);

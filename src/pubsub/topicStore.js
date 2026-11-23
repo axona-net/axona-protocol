@@ -57,6 +57,14 @@ export const topicStoreMethods = {
     entry.bytes = (entry.json ? entry.json.length : 0) + 80;
     role.cache.push(entry);
     role.cacheIds.add(entry.msgId);
+    // 4.160.0 REPLICATE DELTA (Orion RD-0, RD-4): EVERY body enters the cache
+    // here, whichever path brought it: this root's own publish, a stamped import
+    // (merge, replay-up, handoff) or a DELIVER, which is unverified and cached in
+    // arrival order. A replica stamp at or above this body's stamp no longer
+    // proves that replica holds everything up to it, because a delta carries only
+    // stamps ABOVE the replica's. In steady state a root's own publish is stamped
+    // above every stamp it has recorded and removes none.
+    if (this._replicateDelta) this._replicaHwBelow(role, entry.publishTs ?? 0);
     role.cacheBytes += entry.bytes;
     // ADVISORY throughput: one distinct message just entered the cache. Callers
     // gate on cacheIds (dedup) before _cachePush, so this counts each message
