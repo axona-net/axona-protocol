@@ -363,7 +363,7 @@ export class RootClaim {
       role.merge.acceptedWinner = null;
       role.merge.releaseToken = null;
       for (const corr of [...(role.sync?.openMerges?.keys?.() ?? [])]) this.m._mergeCloseCorr?.(role, corr);
-      if (!role.sync?.openPulls?.size) { role.merge.pins?.clear?.(); role.merge.reserve = null; }
+      this.m._mergePinsRebuild?.(role);                       // loser-side rounds are closed above; an open W-side pull keeps its own pins
       role.merge.custody?.clear?.();                          // a root's cache is under its own retention; child custody ends with the child
     }
     if (isRoot) this.m._stepDownHold?.delete(role.topicId);   // a root holds no step-down
