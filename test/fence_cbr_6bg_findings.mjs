@@ -78,5 +78,33 @@ const renew = async (S, hw) => { await S.L.handlers.get('pubsub:sub')({ topicId:
   S.fab.clock += 1000; await renew(S, S.L.am._highWater(S.lRole)); await S.L.am.refreshTick(); await settleMore(S.fab);
   check('F4 6BG-2b a stale deferral does nothing: no step 5, L stays root, W not root', S.lRole.isRoot && !S.wr()?.isRoot && S.ev(S.L).includes('merge-step5-stale') && !S.ev(S.L).includes('merge-step5'), JSON.stringify({ l: S.lRole.isRoot, w: !!S.wr()?.isRoot, ev: S.ev(S.L).filter((x) => /step5/.test(x)) }));
   check('F5 6BG-3 the stale round\'s gate and candidate are cleared at once, not left for the sweep', !S.lRole.merge?.gate && !S.lRole.merge?.candidate, JSON.stringify({ gate: !!S.lRole.merge?.gate, candidate: !!S.lRole.merge?.candidate })); }
+// 4.159.0 follow-up (Aster e3e4ea7c): a DEFERRED step 5 and a W-side pull open on
+// the SAME role. Pins belong to rounds, so ending either round leaves the other's
+// protection. The pull record is placed directly, in the shape _onMergeOffer
+// leaves after the header is admitted: the scene has no third root to offer one.
+const overlap = async (name) => {
+  const S = await scene(name);
+  await S.trigger();
+  const m = [...S.lRole.sync.openMerges.values()][0];
+  const exportIds = m ? [...m.manifest.bodies] : [];
+  const p = { header: true, state: 'pulling', startedAt: S.fab.clock, loser: idHex(S.L.id ^ 0x55n), baseline: ['pull-baseline-1'], manifest: { bodies: ['pull-body-1'], dels: ['pull-del-1'] } };
+  (S.lRole.sync.openPulls ??= new Map()).set('corr-overlap-pull', p);
+  S.lRole.merge.reserve = { entries: 1, bytes: 100 };
+  S.L.am._mergePinsRebuild(S.lRole);
+  const pins = S.lRole.merge.pins;
+  const pullIds = ['pull-baseline-1', 'pull-body-1', 'pull-del-1'];
+  const pre = !!m && m.deferPinned === true && exportIds.length > 0 && exportIds.every((id) => pins.has(id)) && pullIds.every((id) => pins.has(id));
+  return { S, m, p, exportIds, pullIds, pins, pre };
+};
+{ const o = await overlap('cbr-6bgf-6');
+  check('F6 precondition: a deferred step 5 and an admitted pull are open together, both pinned', o.pre, JSON.stringify({ deferPinned: o.m?.deferPinned, pins: o.pins.size }));
+  o.S.L.am._mergeReleasePins(o.S.lRole, o.p, 'fence-pull-ends'); o.S.lRole.sync.openPulls.delete('corr-overlap-pull');
+  check('F7 the pull ends first: the deferred export stays pinned, the pull\'s pins and the reserve go', o.exportIds.every((id) => o.pins.has(id)) && o.pullIds.every((id) => !o.pins.has(id)) && o.S.lRole.merge.reserve === null, JSON.stringify({ exportLeft: o.exportIds.filter((id) => o.pins.has(id)).length, pullLeft: o.pullIds.filter((id) => o.pins.has(id)).length, reserve: o.S.lRole.merge.reserve })); }
+{ const o = await overlap('cbr-6bgf-8');
+  o.S.L.am._mergeUnpinDeferred(o.S.lRole, o.m);
+  check('F8 the deferral ends first: the export is unpinned, the pull keeps its baseline, manifest and reserve', o.pre && o.m.deferPinned === false && o.exportIds.every((id) => !o.pins.has(id)) && o.pullIds.every((id) => o.pins.has(id)) && !!o.S.lRole.merge.reserve, JSON.stringify({ exportLeft: o.exportIds.filter((id) => o.pins.has(id)).length, pullLeft: o.pullIds.filter((id) => o.pins.has(id)).length, reserve: o.S.lRole.merge.reserve })); }
+{ const o = await overlap('cbr-6bgf-9');
+  o.S.fab.clock += MERGE_TIMEOUT_MS + 1; await o.S.L.am.refreshTick(); await settleMore(o.S.fab);
+  check('F9 both pass their lease in one tick through the real sweep: nothing is left pinned or reserved, L keeps the root', o.pre && o.S.lRole.isRoot && o.pins.size === 0 && !o.S.lRole.merge.reserve && !o.S.lRole.sync.openPulls.size, JSON.stringify({ l: o.S.lRole.isRoot, pins: o.pins.size, reserve: o.S.lRole.merge.reserve, pulls: o.S.lRole.sync.openPulls.size })); }
 console.log(`\nfence_cbr_6bg_findings: ${passed} passed, ${failed} failed`);
 process.exit(failed ? 1 : 0);
