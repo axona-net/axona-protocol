@@ -171,8 +171,15 @@ export const syncEngineMethods = {
   // — HANDOFF and the repair-plane retries remain fire-and-forget — but the one
   // caller that writes a durability ledger (_replicateRole) must be able to see
   // whether the send actually went anywhere.
-  _syncPush(targetBig, topicBig, role, policyName, { full = true } = {}) {
-    const { msgs, dels } = full ? this._syncSnapshot(role) : { msgs: [], dels: [] };
+  _syncPush(targetBig, topicBig, role, policyName, { full = true, sinceHw = null } = {}) {
+    // 4.160.0 REPLICATE DELTA: with sinceHw the push carries only messages newer
+    // than that stamp (plus the active tombstones, as a full push does). The
+    // receiver's REPLICATE ingest is a union (_ingestStampedBatch), so a partial
+    // push adds and never erases. The subscriber list and leases ride full pushes
+    // only, as before.
+    const delta = Number.isFinite(sinceHw);
+    if (delta) full = false;
+    const { msgs, dels } = delta ? this._syncDelta(role, sinceHw) : full ? this._syncSnapshot(role) : { msgs: [], dels: [] };
     const payload = { topicId: idHex(topicBig), from: idHex(this.nodeId), msgs, dels };
     // SUBSCRIBER-LIST REPLICATION: on a FULL push, carry the root's direct
     // subscriber/children list so the backup can re-adopt them into its fanout on

@@ -949,7 +949,7 @@ export const repairPlaneMethods = {
   // that are hit most and matter least. The early return previously carried a
   // dead `unreported` key (a v4.57.0 leftover) and omitted unsupported/violation,
   // so those read `undefined` on exactly the quiet paths.
-  async _replicateRole(t, role, bridge, now, budget = null, idx = -1) {
+  async _replicateRole(t, role, bridge, now, budget = null, idx = -1, opts = null) {
     // `dispatched` and `snapshot` are the DURABILITY EVIDENCE FLAGS (Aster,
     // council 2026-08-01). The counters alone cannot carry the distinction the
     // ledger needs, and v4.58.1 proved it by getting both halves wrong:
@@ -1026,7 +1026,7 @@ export const repairPlaneMethods = {
       if (this._replicaInherit) want = this._inheritCohort(t, role, want, bridge);
     }
     const wantSet = new Set(want);
-    for (const hex of [...role.replicas.keys()]) if (!wantSet.has(hex)) role.replicas.delete(hex);   // retire those no longer in the cohort
+    for (const hex of [...role.replicas.keys()]) if (!wantSet.has(hex)) { role.replicas.delete(hex); role.replicaHw?.delete(hex); }   // retire those no longer in the cohort
     // role.attempted is pruned to the SAME cohort, for the same reason and on the
     // same tick. It was described as "bounded" and was not: every failed,
     // unsupported or violating target stayed forever, so a long-lived root under
@@ -1060,6 +1060,23 @@ export const repairPlaneMethods = {
     // cheap and captures every convergence-relevant change (count, high-water,
     // tombstones); any union-ingest bumps it and re-arms one full push.
     const sig = `${role.cache.length}:${this._highWater(role)}:${role.tombstones.size}`;
+    // 4.160.0 REPLICATE DELTA (armed + eager caller only). A member gets a delta
+    // only with evidence it holds everything up to a known stamp: it is credited
+    // (role.replicas, 'consumed' — the only crediting path), a high-water was
+    // recorded at that credit and no push to it has failed since (a failure
+    // clears the stamp), and the last full push is inside the backstop.
+    // Everyone else falls through to the full/keepalive decision below, unchanged.
+    // role.sync.sig is NOT advanced by a delta round: the next sweep still sends
+    // one full snapshot, which covers anything a stamp-based delta can miss (a
+    // message merged in below the high-water).
+    const hwNow = this._highWater(role);
+    const deltaFor = new Map();
+    if (this._replicateDelta && opts?.eager && (now - (role.sync.lastFullAt || 0)) < ROOT_REPLICATE_FULL_MS) {
+      for (const hex of want) {
+        const hw = role.replicaHw?.get(hex);
+        if (role.replicas.has(hex) && Number.isFinite(hw)) deltaFor.set(hex, hw);
+      }
+    }
     const full = sig !== role.sync.sig
       || want.some((hex) => !role.replicas.has(hex))
       || (now - (role.sync.lastFullAt || 0)) >= ROOT_REPLICATE_FULL_MS;
@@ -1116,7 +1133,7 @@ export const repairPlaneMethods = {
     const declares = this.dht?.verdictsSupported;
     const sent = want.map((hex) => {
       let p;
-      try { p = this._syncPush(idBig(hex), t, role, 'COHORT_REPLICATE', { full }); }
+      try { p = this._syncPush(idBig(hex), t, role, 'COHORT_REPLICATE', deltaFor.has(hex) ? { sinceHw: deltaFor.get(hex) } : { full }); }
       catch { return { hex, verdict: 'failed' }; }                  // sync throw
       return Promise.resolve(p).then(
         (r) => ({ hex, verdict: dispatchVerdict(r, declares) }),
@@ -1126,8 +1143,10 @@ export const repairPlaneMethods = {
     // dispatched:true — these pushes really went out, so the outcome IS evidence.
     // snapshot carries whether the payload contained the role's state: only a
     // FULL push can testify about a message. See the nil() header above.
+    // A full snapshot went out only if at least one member did not get a delta.
+    const fullSent = !!full && want.some((hex) => !deltaFor.has(hex));
     const out = { attempted: want.length, verified: 0, failed: 0, unsupported: 0, violation: 0,
-                  dispatched: true, snapshot: !!full, failures: [] };
+                  dispatched: true, snapshot: fullSent || deltaFor.size > 0, delta: deltaFor.size, failures: [] };
     // role.attempted is a BOUNDED DIAGNOSTICS RECORD, deliberately outside
     // role.replicas and outside every repair, confirm and handoff decision path.
     // It exists so the difference between "no evidence" and "evidence of failure"
@@ -1138,8 +1157,13 @@ export const repairPlaneMethods = {
         out.verified++;
         role.inheritRefused?.delete(hex);
         role.replicas.set(hex, { at: now, via: 'consumed' });        // the ONLY crediting path
+        // 4.160.0: a content-bearing push that was consumed proves the member holds
+        // everything up to hwNow (full) or had up to its old stamp and now the rest
+        // (delta). A keepalive proves nothing new about content.
+        if (full || deltaFor.has(hex)) (role.replicaHw ??= new Map()).set(hex, hwNow);
         continue;
       }
+      role.replicaHw?.delete(hex);   // 4.160.0: no delta after a push that was not consumed; the next push to it is full
       if (this._replicaInherit) (role.inheritRefused ??= new Map()).set(hex, now);   // RI-2: read only by _inheritCohort
       out[verdict]++;
       out.failures.push({ id: hex.slice(0, 12), v: verdict });   // WHO the push failed to + its dispatch verdict — replication-failure attribution (#45/#432/#397)
@@ -1154,7 +1178,7 @@ export const repairPlaneMethods = {
     // A prior credit is NOT deleted when this tick fails: that entry records what
     // was true at its own `at`, and erasing it would replace a past fact with a
     // present one.
-    if (full) { role.sync.sig = sig; role.sync.lastFullAt = now; }
+    if (fullSent) { role.sync.sig = sig; role.sync.lastFullAt = now; }
     return out;
   },
 

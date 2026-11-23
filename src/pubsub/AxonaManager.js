@@ -130,6 +130,7 @@ export class AxonaManager {
     tombstoneAuth = false,         // REF-1.1 S2.0c Phase 3: DEFAULT-OFF shadow wiring of the tombstone authorization core (observe-only; no behavior change)
     killProofs = null,             // 4.131.0: carry + retain the author's signed kill proof with every tombstone (DEFAULT-ON; null = env KILL_PROOFS, default 1)
     frameRegistry = false,         // REF-1.1 S2: DEFAULT-OFF Boundary-1 frame-contract registry (shadow-wraps the 19 routed handlers; observe-only; byte-identical flag-off)
+    replicateDelta = null,         // 4.160.0 (David 2026-11-20): eager cohort replicate sends only messages newer than each replica's last credited push. DEFAULT OFF; null = env REPLICATE_DELTA
     regionRoles = null,            // David 2026-11-13: a role goes only to a node in the topic's region (regionRoles.js). DEFAULT OFF; null = env REGION_ROLES
     cutover = null,
     hintRefresh = null,            // Closer-Born v0.6 3d hint refresh (David 2026-11-03): DEFAULT OFF; null = env HINT_REFRESH
@@ -329,6 +330,16 @@ export class AxonaManager {
     this._cacheMax   = replayCacheSize || CACHE_MAX;
     this._cacheBytes = replayCacheBytes || CACHE_BYTES;
     this._rootReplicas = Number.isFinite(rootReplicas) ? Math.max(0, rootReplicas) : ROOT_REPLICAS;
+    // REPLICATE DELTA (4.160.0, David 2026-11-20 "build the delta replicate fix").
+    // Every publish a root ingests runs the eager cohort replicate, and the cache
+    // signature changes on every publish, so before this each one pushed the WHOLE
+    // cache (up to CACHE_MAX messages) to every replica: P publishes to one topic
+    // = P growing snapshots per replica. Testnet TQ3 (2026-11-20, THROTTLE=1,
+    // region 80): one host took 10,030 ingest entries in 29 s and its JS heap went
+    // to 584 MB. Armed, the eager path sends a credited replica only what is newer
+    // than its last credited push; full snapshots stay with the periodic sweep, a
+    // new or uncredited member, and the ROOT_REPLICATE_FULL_MS backstop. DEFAULT OFF.
+    this._replicateDelta = !!(replicateDelta ?? envNum('REPLICATE_DELTA', 0));
 
     // Public/inspectable state (contract surface).
     this.axonRoles       = new Map();   // topicIdBig -> Role  (topics I host: root or relay)
