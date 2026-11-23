@@ -18,7 +18,7 @@ import { Fabric, freshId, realTopic, author, idHex } from './lib/mergeFixture.mj
 import { buildEnvelope } from '../src/pubsub/envelope.js';
 import { ROOT_VERIFY_FIRST_MS, MERGE_TIMEOUT_MS } from '../src/pubsub/constants.js';
 
-const EXPECT = 5;
+const EXPECT = 9;
 let passed = 0, failed = 0;
 const check = (label, ok, extra = '') => { console.log(`  ${ok ? '✓' : '✗'} ${label}${ok ? '' : ' ' + extra}`); ok ? passed++ : failed++; };
 process.on('exit', (code) => { if (code === 0 && passed + failed < EXPECT) { console.log(`  ✗ exited after ${passed + failed} of ${EXPECT} checks`); process.exitCode = 1; } });
