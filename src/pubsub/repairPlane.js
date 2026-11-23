@@ -1204,15 +1204,17 @@ export const repairPlaneMethods = {
     // DURABILITY IS ABOUT ONE MESSAGE (Aster 0fe7b43e). Armed, the eager caller
     // names the pending message's stamp. A member counts toward `verified` only
     // if its push COVERED that stamp (a full push, or a delta starting below it)
-    // and the receiver did not say it kept less: a delta needs `retained: true`;
-    // a full push is counted as it always was unless the receiver answered
-    // `retained: false`. Unarmed, nothing here changes.
+    // and the receiver answered `retained: true`. Armed, a bare `consumed` is a
+    // receipt for dispatch and is NOT durability evidence, for a full push as for
+    // a delta (Aster 650e31bf): a peer that answers only the receipt still gets
+    // its full pushes and is still credited in role.replicas, and counts toward
+    // no publish's or kill's durability. Unarmed, nothing here changes.
     const coverTs = this._replicateDelta && Number.isFinite(opts?.coverTs) ? opts.coverTs : null;
     for (const { hex, verdict, retained } of verdicts) {
       if (verdict === 'consumed') {
         const isDelta = deltaFor.has(hex);
         const covered = coverTs === null || (isDelta ? deltaFor.get(hex) < coverTs : !!full);
-        const kept = !this._replicateDelta || (isDelta ? retained === true : retained !== false);
+        const kept = !this._replicateDelta || retained === true;
         if (covered && kept) out.verified++; else out.unretained++;
         role.inheritRefused?.delete(hex);
         role.replicas.set(hex, { at: now, via: 'consumed' });        // the ONLY crediting path

@@ -32,7 +32,8 @@ import { ROOT_REPLICATE_FULL_MS, INGEST_QUEUE_MAX } from '../src/pubsub/constant
 import { sealTestDht } from './lib/testCapability.mjs';
 import { createAuthorIdentity } from '../src/identity/index.js';
 import { buildEnvelope } from '../src/pubsub/envelope.js';
-import { deriveTopicIdBig } from '../src/pubsub/post.js';
+import { deriveTopicId, deriveTopicIdBig } from '../src/pubsub/post.js';
+import { buildKill } from '../src/pubsub/kill.js';
 import { idHex, lc } from '../src/pubsub/ids.js';
 
 let pass = 0, fail = 0;
@@ -301,7 +302,7 @@ console.log('\n[14] a member that answers the bare receipt never earns a stamp: 
   const byTo = Object.fromEntries(last(pushes, 2).map((p) => [p.to, p.n]));
   ok(byTo[NB2] === 4 && !role.replicaHw?.has(NB2), 'NB2 (receipt only) got the whole cache on the fourth publish and holds no stamp', JSON.stringify(byTo));
   ok(byTo[NB1] === 1, 'NB1 (answers retained) got only the new one', JSON.stringify(byTo));
-  ok(verified, 'a consumed FULL push still counts as it always did', '');
+  ok(!verified, 'precondition for [17]: armed, the receipt-only member did not count toward verified', '');
 }
 
 console.log('\n[15] two REAL managers: a frame the backup drops earns no delta credit and does not mark the publish durable');
@@ -368,6 +369,74 @@ console.log('\n[15] two REAL managers: a frame the backup drops earns no delta c
   const emptyDropped = await hand([], { since: X, hw: X + 5 });
   B._ingestQueue.length = 0; B._ingestPumping = false;
   ok(emptyDropped?.consumed === true && emptyDropped.retained === false && bRole.replicaChain === null, 'a frame DROPPED at a full queue is not retained even when it carried no body, and the chain is gone', JSON.stringify(emptyDropped));
+}
+
+// ── Aster 650e31bf (2026-11-23): a bare receipt is not durability evidence; deletions need evidence too ──
+console.log('\n[17] mixed versions: a legacy peer keeps its full pushes and counts toward no durability; flag off, unchanged');
+{
+  const { pushes, publish, eager, receiptOnly, role } = mk({ armed: true });
+  receiptOnly.add(NB2);                                       // NB2 runs a kernel that answers the bare receipt
+  let rs = [];
+  for (let i = 0; i < 3; i++) { publish(); rs.push(await eager()); }
+  const byTo = Object.fromEntries(last(pushes, 2).map((p) => [p.to, p.n]));
+  ok(byTo[NB2] === 3 && !role.replicaHw?.has(NB2) && role.replicas.has(NB2), 'armed: the legacy peer still gets the whole cache, holds no stamp, and is still a credited replica', JSON.stringify(byTo));
+  ok(rs.every((r) => r.verified === 1 && r.unretained === 1 && r.failed === 0), 'armed: only the peer that answered `retained` counts toward durability; the receipt is counted apart and is not a failure', JSON.stringify(rs.map((r) => [r.verified, r.unretained, r.failed])));
+}
+{
+  const { pushes, publish, eager, receiptOnly } = mk({ armed: true });
+  receiptOnly.add(NB1); receiptOnly.add(NB2);                 // a cohort of legacy peers only
+  publish(); const r = await eager();
+  ok(r.verified === 0 && r.attempted === 2 && last(pushes, 2).every((p) => p.n === 1), 'armed, legacy peers only: full pushes go out and NO durability is claimed', JSON.stringify([r.verified, r.attempted]));
+}
+{
+  const { pushes, publish, eager, receiptOnly } = mk({ armed: false });
+  receiptOnly.add(NB1); receiptOnly.add(NB2);
+  let rs = [];
+  for (let i = 0; i < 3; i++) { publish(); rs.push(await eager()); }
+  ok(rs.every((r) => r.verified === 2) && last(pushes, 2).every((p) => p.n === 3 && true), 'FLAG OFF control: a consumed full push counts as it always has, and every push is the whole cache', JSON.stringify(rs.map((r) => r.verified)));
+}
+
+console.log('\n[18] a deletion: the kill is confirmed only when the backup holds the deletion record');
+for (const armed of [true, false]) {
+  const W_ID = REG | 0x011n, B_ID = REG | 0xaa0n, B_HEX = hex(B_ID);
+  const clock = { t: 1_000_000 }; const wlog = []; const answers = [];
+  const mkDht = (self, neighbors) => ({ verdictsSupported: true, getSelfId: () => self, onRoutedMessage: () => {}, routeMessage: () => ({ consumed: true }), neighbors: () => neighbors, bridgeId: () => null });
+  const B = new AxonaManager({ dht: sealTestDht(mkDht(B_ID, [])), now: () => clock.t, rootReplicas: 1, replicateDelta: armed });
+  B.nodeId = B_ID; B.setLogSink(() => {});
+  const W = new AxonaManager({ dht: sealTestDht(mkDht(W_ID, [B_HEX])), now: () => clock.t, rootReplicas: 1, replicateDelta: armed });
+  W.nodeId = W_ID; W.setLogSink((lvl, ev) => wlog.push(ev));
+  W._route = async (target, type, payload) => {
+    if (type !== 'pubsub:replicate') return { consumed: true };
+    const result = await B._onReplicate(payload, { targetId: B_ID, isTerminal: true, hopCount: 1, fromId: idHex(W_ID) });
+    answers.push(result);
+    if (result === 'consumed' || result?.consumed === true) return { consumed: true, atNode: B_ID, hops: 1, ...(typeof result?.retained === 'boolean' ? { retained: result.retained } : {}) };
+    return { consumed: false, atNode: B_ID, hops: 1 };
+  };
+  W.pubsubSubscribe(T_REAL);
+  const role = W._becomeRoot(T_REAL);
+  const topicHex = await deriveTopicId(DESC);
+  const pub = async (tag) => { clock.t += 10; const e = await buildEnvelope({ topic: DESC, message: `{"p":"${tag}"}`, identity: author, ts: clock.t, seq: 1 }); await W._ingestPublish(role, JSON.stringify(e)); return e; };
+  const kill = async (e, seq) => { clock.t += 10; const k = await buildKill({ topicId: topicHex, msgId: e.msgId, identity: author, ts: clock.t, seq }); wlog.length = 0; await W._onKill({ topicId: topicHex, kill: k }, { targetId: W_ID, fromId: 20n, isTerminal: true }); for (let i = 0; i < 8; i++) await new Promise((r) => setImmediate(r)); };
+  const bRole = () => B.axonRoles.get(T_REAL);
+  const tag = armed ? 'armed' : 'FLAG OFF';
+  const killFailed = () => wlog.some((ev) => String(ev).endsWith('kill-replicate-all-failed'));   // the sink receives the event name with its prefix
+
+  const e1 = await pub('a'), e2 = await pub('b');
+  await kill(e1, 2);
+  ok(role.tombstones.has(e1.msgId) && bRole()?.tombstones.has(e1.msgId) && !killFailed(), `${tag} POSITIVE CONTROL: the backup holds the deletion record and the kill's replication is confirmed`, JSON.stringify({ b: !!bRole()?.tombstones.has(e1.msgId), log: wlog.filter((x) => /kill/.test(x)) }));
+  if (armed) ok(answers.at(-1)?.retained === true, 'armed: the backup answered retained for the push that carried the deletion', JSON.stringify(answers.at(-1)));
+
+  // The backup takes the frame inline and keeps its bodies, but declines the deletion record.
+  const realApplyKill = B._applyKill.bind(B); let declined = 0;
+  B._applyKill = (r, t, d, ...rest) => { if (d?.msgId === e2.msgId) { declined++; return true; } return realApplyKill(r, t, d, ...rest); };
+  await kill(e2, 3);
+  const heldAtB = !!bRole()?.tombstones.has(e2.msgId);
+  if (armed) {
+    ok(declined > 0 && !heldAtB && answers.at(-1)?.consumed === true && answers.at(-1)?.retained === false, 'armed: the frame was taken, the deletion record is NOT held, and the backup said so', JSON.stringify({ declined, heldAtB, a: answers.at(-1) }));
+    ok(killFailed(), 'armed: the kill\'s replication is NOT confirmed', JSON.stringify(wlog.filter((x) => /kill/.test(x))));
+  } else {
+    ok(declined > 0 && !heldAtB && answers.at(-1) === 'consumed' && !killFailed(), 'FLAG OFF control: the answer is the old receipt and the kill path behaves as it always has', JSON.stringify({ a: answers.at(-1), log: wlog.filter((x) => /kill/.test(x)) }));
+  }
 }
 
 console.log('\n[16] the routed reply carries `retained` at both AxonaPeer sites');

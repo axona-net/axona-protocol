@@ -1191,6 +1191,12 @@ export const wireHandlersMethods = {
     for (const m of (Array.isArray(payload.msgs) ? payload.msgs : [])) {
       if (!m || !(role.cacheIds.has(m.msgId) || role.tombstones.has(m.msgId))) return drop();
     }
+    // DELETIONS TOO (Aster 650e31bf). Every push carries the sender's active
+    // deletion records, and the eager kill path confirms a kill on this answer.
+    // A record this node did not install is not retained.
+    for (const d of (Array.isArray(payload.dels) ? payload.dels : [])) {
+      if (!d || !d.msgId || !role.tombstones.has(d.msgId)) return drop();
+    }
     if (rd.since === null || rd.since === undefined) { role.replicaChain = { from: fromHex, hw: rd.hw }; return true; }
     const c = role.replicaChain;
     if (c && c.from === fromHex && c.hw === rd.since) { c.hw = rd.hw; return true; }
