@@ -143,6 +143,7 @@ export class AxonaManager {
     hostTag = null,                // 6b: opaque failure-domain tag the embedder names (<= 32 chars); null = env HOST_TAG, else none
     verifyWalk = null,             // Closer-Born v0.6 farther-reaching verify (David 2026-11-03): DEFAULT OFF; null = env VERIFY_WALK
     attachEcho = null,             // Closer-Born v0.6 3d (David 2026-11-03 "go ahead with 3d"): DEFAULT OFF; null = env ATTACH_ECHO
+    pinProof = null,               // 4.162.0 pin proof (cause-side note v0.2 parts 1+2): DEFAULT OFF; null = env PIN_PROOF
     returnRoute = null,            // Closer-Born v0.6 return routes (David 2026-11-03 "go ahead with the return routes"): DEFAULT OFF; null = env RETURN_ROUTE                // Closer-Born Relay Inherits the Root v0.4 Part 3e (David 2026-11-03 "go ahead with the cutover state machine"): DEFAULT OFF; null = env CUTOVER
     routeTypeTally = null,         // DIAGNOSTIC (David 2026-11-16 "build the per-type count"): DEFAULT OFF; env ROUTE_TYPE_TALLY=1. Counts this manager's routed sends and received frames BY TYPE. Changes no decision.
     announceNewOnly = null,        // 4.150.0 (David 2026-11-16 "build the announce-only-the-new-topic change"): DEFAULT OFF; env ANNOUNCE_NEW_ONLY=1. A root claim announces THAT topic; the full list stays on the BEACON_MS timer.
@@ -409,6 +410,8 @@ export class AxonaManager {
     // its sender, is always answered with a DELIVER (empty when there is no
     // history) that echoes the nonce. A pinned unarmed renewal stays silent.
     this._attachEcho      = !!(attachEcho ?? envNum('ATTACH_ECHO', 0));
+    this._pinProof        = !!(pinProof ?? envNum('PIN_PROOF', 0));
+    this._pinProofStats   = { answered: 0, floored: 0, unpinned: 0 };
     // FARTHER-REACHING VERIFY (Closer-Born v0.6, "What would make this wrong"):
     // the root self-verify's lookup on standalone peers is findKClosest, which
     // reaches two channel-hops. Armed, the verify also runs the DHT walk
@@ -1770,6 +1773,29 @@ export class AxonaManager {
   // This is only expressible now: _route discarded routeMessage's promise until
   // v4.57.0 and did not classify it until v4.58.0. Before this week a failed
   // renewal returned undefined and there was nothing to check.
+  // PIN PROOF (4.162.0). The rule above judges a pin by what went UP. This one
+  // judges it by what came DOWN: PIN_PROOF_SILENT renewals sent to a pin that
+  // promised an answer, and no delivery addressed to this node accepted from it
+  // since. On 2026-11-24 a browser tab met the upward test for nine hours while
+  // every answer to it was lost on the way down. Recovery is the SAME body as a
+  // failed upward verdict: drop the pin, floor the interval, null the stamps.
+  // The caller (the renewal loop) sends the next SUBSCRIBE unpinned at once.
+  _unpinUnproven(topicBig, pinHex, s) {
+    const up = this._upstream.get(topicBig);
+    if (!up || up[0] !== pinHex) return false;
+    this._upstream.delete(topicBig);
+    const silent = s ? (s.unanswered | 0) : 0;
+    if (s) { s.interval = this.renewFastMs; s.lastRenewSent = null; s.unanswered = 0; s.proofFrom = null; }
+    const role = this.axonRoles.get(topicBig);
+    if (role?.sync) role.sync.lastRenewAt = null;
+    this._pinProofStats.unpinned++;
+    this._log('info', 'upstream-unproven', {
+      topic: idHex(topicBig).slice(0, 12), was: pinHex.slice(0, 12), silent,
+      detail: 'renewals went up and nothing addressed to this node came down — re-homing unpinned',
+    });
+    return true;
+  }
+
   _unpinIfWaypointDead(topicBig, deadHex, sent) {
     const declares = this.dht?.verdictsSupported;
     Promise.resolve(sent).then((r) => {

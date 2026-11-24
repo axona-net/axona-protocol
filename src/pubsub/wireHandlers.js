@@ -8,7 +8,7 @@
 // AxonaManager.prototype; root-claim decisions delegate to rootClaim.js.
 
 import {
-  T, RENEW_MS, RENEW_FAST_MS, RENEW_BACKOFF, DROP_MS, ROOT_CLAIM_MS,
+  T, RENEW_MS, RENEW_FAST_MS, RENEW_BACKOFF, DROP_MS, ROOT_CLAIM_MS, PIN_PROOF_FLOOR_MS,
   ROOT_REPLICAS, BACKUP_EVICT_MS, CACHE_MAX, CACHE_BYTES, MAX_DIRECT,
   DELEGATE_BATCH, MAX_VIA, VIA_HOP_BUDGET, TTL_MS, APP_DEDUP_MAX, ADOPT_ACK_MS,
   PENDING_PUB_TTL_MS, PENDING_PUB_MAX_TRIES, COLD_BURST_TRIES,
@@ -433,7 +433,16 @@ export const wireHandlersMethods = {
       if (stampsDemand) role.lastDemandAt = this._now();
       // 3d: an attach-bearing or unpinned renewal is always answered, so the
       // subscriber re-pins to the node actually serving it.
-      const echo = this._attachEcho && (!!attach || unpinned);
+      let echo = this._attachEcho && (!!attach || unpinned);
+      // PIN PROOF part 2 (4.162.0): EVERY renewal is answered, whatever the
+      // other two options say, so the subscriber's count has something to hear.
+      // An answer the rule above does not already owe is floored per seat.
+      if (this._pinProof && !echo) {
+        const nowP = this._now();
+        if (nowP - (existing.lastProofAt || 0) >= Math.min(this.renewFastMs, PIN_PROOF_FLOOR_MS)) {
+          existing.lastProofAt = nowP; echo = true; this._pinProofStats.answered++;
+        } else this._pinProofStats.floored++;
+      }
       this._replayTo(role, subHex, since, echo, latest, attach);
       return;
     }
@@ -1288,7 +1297,7 @@ export const wireHandlersMethods = {
         a.gen = decision.g;
         a.from = child; this._attach.set(topicBig, a);
         this._upstream.set(topicBig, [child]);
-        const s = this.mySubscriptions.get(topicBig); if (s) s.interval = this.renewFastMs;
+        const s = this.mySubscriptions.get(topicBig); if (s) { s.interval = this.renewFastMs; s.unanswered = 0; s.proofFrom = null; }
         const role1 = this.axonRoles.get(topicBig);
         if (role1 && !role1.isRoot) { role1.upstreamHeld = new Set(); role1.upstreamHeldFrom = child; }
         this._log('info', 'delegated-by-parent', { topic: idHex(topicBig).slice(0, 12), from: decision.fromHex.slice(0, 10), to: child.slice(0, 10) });
@@ -1309,6 +1318,16 @@ export const wireHandlersMethods = {
         if (s) s.interval = this.renewFastMs;
       }
       this._upstream.set(topicBig, [fromHex]);
+      // PIN PROOF part 1 (4.162.0): THIS is the proof from below — a DELIVER
+      // addressed to this node and accepted. A beacon never reaches this line.
+      if (this._pinProof) {
+        const sp = this.mySubscriptions.get(topicBig);
+        if (sp) {
+          sp.unanswered = 0;
+          if (payload.proof === 1) sp.proofFrom = fromHex;
+          else if (sp.proofFrom !== fromHex) sp.proofFrom = null;
+        }
+      }
       this._disc(topicBig, 'sub-root', { root: fromHex ? String(fromHex).slice(0, 12) : null });
     }
 
@@ -1438,7 +1457,9 @@ export const wireHandlersMethods = {
     const genT = this._topicLifetime ? this._genCarried(role) : null;   // Topic Lifetime 4.1
     // The reply to a SUB echoes its attachment nonce on every DELIVER it sends
     // (TL-B07): that is what makes it an authorized attachment at the receiver.
-    const gx = { ...(genT ? { gen: genT } : {}), ...(this._topicLifetime && attach ? { attach } : {}) };
+    // PIN PROOF (4.162.0): a node that answers every renewal says so on what it
+    // sends a seat; only then does that seat count its silence against it.
+    const gx = { ...(genT ? { gen: genT } : {}), ...(this._topicLifetime && attach ? { attach } : {}), ...(this._pinProof ? { proof: 1 } : {}) };
     let batch = [], bytes = 0, sent = false;
     const inBatch = new Set();
     const flush = () => {

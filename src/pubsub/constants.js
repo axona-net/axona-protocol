@@ -29,6 +29,16 @@ export const RENEW_MS        = 60_000;          // re-subscribe cadence CEILING 
 // fast (measured ~82% delivery @30%/round vs 43% at 60s); calm → backs off → cheap.
 export const RENEW_FAST_MS   = 5_000;           // adaptive floor: initial + post-re-home interval
 export const RENEW_BACKOFF   = 1.5;             // multiply the interval each stable renewal, up to RENEW_MS
+// PIN PROOF (4.162.0; "Not attached until something has come down" v0.2, parts
+// 1 and 2; option pinProof / env PIN_PROOF, default OFF). A subscriber keeps a
+// pin only while deliveries addressed to it arrive from it. SILENT is how many
+// renewals may go unanswered before the pin is dropped; it is read BEFORE the
+// next renewal is sent, so two whole renewal gaps have passed (two minutes on a
+// settled topic: David 2026-11-24, "Two minutes is a good place to start").
+// FLOOR is the least time between two EMPTY answers a root sends one seat, so a
+// subscriber renewing in a tight loop cannot make a root send in one.
+export const PIN_PROOF_SILENT   = 2;
+export const PIN_PROOF_FLOOR_MS = 2_000;
 export const DROP_MS         = 180_000;         // evict a subscriber after missed renewals (≥ 3× ceiling)
 // IDLE-ROLE REAP (David 2026-09-23). A role whose cache is EMPTY and whose last
 // message is older than this is torn down, whatever else would retain it — root

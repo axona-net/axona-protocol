@@ -8,7 +8,7 @@
 // Methods are mixed into AxonaManager.prototype; state lives on the façade.
 
 import {
-  T, RENEW_MS, RENEW_FAST_MS, RENEW_BACKOFF, DROP_MS, ROOT_CLAIM_MS,
+  T, RENEW_MS, RENEW_FAST_MS, RENEW_BACKOFF, DROP_MS, ROOT_CLAIM_MS, PIN_PROOF_SILENT,
   ROOT_REPLICAS, BACKUP_EVICT_MS, CACHE_MAX, CACHE_BYTES, MAX_DIRECT,
   DELEGATE_BATCH, MAX_VIA, VIA_HOP_BUDGET, TTL_MS, APP_DEDUP_MAX,
   PENDING_PUB_TTL_MS, PENDING_PUB_MAX_TRIES, COLD_BURST_TRIES,
@@ -179,8 +179,19 @@ export const repairPlaneMethods = {
         }
         const iv = attached ? (s.interval || this.renewFastMs) : this.renewFastMs;
         if (now - s.lastRenewSent < iv) continue;
+        // PIN PROOF (4.162.0): read the count BEFORE this renewal goes out. It
+        // counts only against a pin that said it answers renewals (proofFrom),
+        // so a root without the option is never left for being quiet.
+        let held = attached;
+        if (this._pinProof && attached) {
+          const pin = this._upstream.get(t)[0];
+          if (s.proofFrom === pin) {
+            if ((s.unanswered | 0) >= PIN_PROOF_SILENT) { if (this._unpinUnproven(t, pin, s)) held = false; }
+            else s.unanswered = (s.unanswered | 0) + 1;
+          }
+        }
         s.lastRenewSent = now;
-        s.interval = attached
+        s.interval = held
           ? Math.min(this.renewMs, Math.round((s.interval || this.renewFastMs) * RENEW_BACKOFF))
           : this.renewFastMs;
       }
