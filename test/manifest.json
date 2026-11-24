@@ -461,6 +461,10 @@
       "class": "default"
     },
     {
+      "file": "fence_return_route_health.mjs",
+      "class": "default"
+    },
+    {
       "file": "smoke_root_stepdown_hold.mjs",
       "class": "default"
     },

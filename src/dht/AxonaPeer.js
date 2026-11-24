@@ -2444,6 +2444,28 @@ export class AxonaPeer extends DHT {
   /** P3 counters for health(). */
   noPathStats() { return { on: this._noPathOn(), held: this._heldSrc.size, ...this._noPathStats }; }
 
+  // Return-route census (4.161.0). Two sets of counters have existed since
+  // Closer-Born v0.6 and neither was readable from outside the process: the
+  // pub/sub side (a reply sent down the reverse of the path its request came
+  // by) and the routing side (a hop honouring an rpath it was handed). On
+  // 2026-11-24 a browser tab stayed "attached" for nine hours while 3,214
+  // relay log rows named it a failed destination; whether its return route had
+  // expired, failed once and been dropped, or never been recorded could only
+  // be argued from two constants. This prints the counters so it can be read.
+  // `armed` and `live` say whether the option is on and how many breadcrumbs
+  // are held now. Read-only: it changes no route.
+  returnRouteStats() {
+    const am = this._axonaManager;
+    const zeroP = { recorded: 0, used: 0, delivered: 0, fellBack: 0 };
+    const zeroR = { honoured: 0, unavailable: 0, originated: 0, delivered: 0, fellBack: 0 };
+    return {
+      pubsub: am
+        ? { armed: am._returnRoute === true, live: am._retRoutes?.size ?? 0, ...zeroP, ...(am._returnRouteStats || {}) }
+        : null,
+      routing: { ...zeroR, ...(this._returnRouteStats || {}) },
+    };
+  }
+
   /** Report the tick's liveness state when it changes; never on every tick. */
   _fillReport(rep) {
     this._fillLast = rep;
@@ -5321,6 +5343,7 @@ export class AxonaPeer extends DHT {
       perimeter:     (() => { try { return this.perimeterStats(); } catch { return null; } })(),   // Perimeter v0.1–v0.3
       pex:           (() => { try { return this.pexStats(); } catch { return null; } })(),         // P2 peer exchange (4.126.0)
       noPath:        (() => { try { return this.noPathStats(); } catch { return null; } })(),      // P3 no-path deferral (4.126.0)
+      returnRoute:   (() => { try { return this.returnRouteStats(); } catch { return null; } })(), // return-route census (4.161.0)
       started:       this._started === true,
       transport,
       meshDegraded,
