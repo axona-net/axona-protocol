@@ -37,6 +37,7 @@
 //     Engine-cycle code continue to work)
 // =====================================================================
 
+import { LossBurst } from './lossBurst.js';
 import { DHT }            from '../contracts/DHT.js';
 import { Synapse }        from './Synapse.js';
 import { DeadPeers }      from './DeadPeers.js';
@@ -2742,6 +2743,13 @@ export class AxonaPeer extends DHT {
   _peerDeath(dead, reason) {
     const node = this._node;
     if (!node) return false;
+    // LOSS BURST, LOG ONLY (4.164.0; domain LOSS_BURST_LOG). This is the one
+    // death body, so it is the one place a burst can be counted. Read BEFORE
+    // the tables below forget the dead peer. Contained: a throw here must not
+    // cost the eviction.
+    if (this._domain?.LOSS_BURST_LOG === true) {
+      try { this._noteLossBurst(dead, reason); } catch { /* the count is not worth the eviction */ }
+    }
     node.synaptome?.delete(dead);
     node.incomingSynapses?.delete(dead);
     node.connections?.delete(dead);
@@ -2760,6 +2768,45 @@ export class AxonaPeer extends DHT {
     this._emitLog?.('info', 'peer-died-evicted', { peer: toHex(dead), reason: reason ?? 'unknown' });
     this._scheduleMaintain();   // a lost peer may have been a near-quota successor → refill
     return true;
+  }
+
+  /**
+   * The open channels of this node, as [total, nonBridge], `dead` left out.
+   * A bridge is the node this transport dialled, or any id in the bridges'
+   * system region. Channels are the transport's bound peers where it can say,
+   * else the node's connection table.
+   */
+  _openChannels(dead) {
+    const node = this._node; const t = node?.transport;
+    let ids = [];
+    try {
+      if (typeof t?.boundPeers === 'function') ids = [...t.boundPeers()];
+      else if (node?.connections) ids = [...node.connections];
+    } catch { ids = []; }
+    let bridge = null; try { bridge = t?.bridgeNodeIdBig != null ? asId(t.bridgeNodeIdBig) : null; } catch { bridge = null; }
+    let total = 0, nonBridge = 0;
+    for (const raw of ids) {
+      let id; try { id = asId(raw); } catch { continue; }
+      if (id === dead) continue;
+      total++;
+      const isBridge = (bridge !== null && id === bridge) || toHex(id).slice(0, 2) === 'ff';
+      if (!isBridge) nonBridge++;
+    }
+    return [total, nonBridge];
+  }
+  _noteLossBurst(dead, reason) {
+    const lb = (this._lossBurst ??= new LossBurst());
+    const [left, nonBridgeLeft] = this._openChannels(dead);
+    const now = typeof this._lossBurstClock === 'function' ? this._lossBurstClock() : Date.now();
+    const hit = lb.death(now, left + 1, nonBridgeLeft);
+    if (!hit) return null;
+    let roles = null; try { roles = this._axonaManager?.axonRoles?.size ?? null; } catch { roles = null; }
+    this._emitLog?.('warn', 'loss-burst', {
+      closed: hit.closed, base: hit.base, windowMs: hit.windowMs, left, nonBridgeLeft,
+      roles, last: toHex(dead).slice(0, 12), reason: reason ?? 'unknown',
+      detail: 'LOG ONLY: over half the channels closed in the window, under three non-bridge left; nothing was reset',
+    });
+    return hit;
   }
 
   /**
