@@ -473,6 +473,10 @@
       "class": "default"
     },
     {
+      "file": "fence_loss_burst_log.mjs",
+      "class": "default"
+    },
+    {
       "file": "smoke_root_stepdown_hold.mjs",
       "class": "default"
     },

@@ -115,6 +115,12 @@ const DEFAULTS = Object.freeze({
   // `returnRoute` option records and uses the reversed path. Env RETURN_ROUTE=1
   // arms both where process.env exists.
   RETURN_ROUTE:        false,
+  // "A node that lost everyone starts over" v0.6, trigger 1, LOG ONLY (4.164.0).
+  // With the flag on, a burst of channel closes writes one line, loss-burst,
+  // with the counts. Nothing is closed and nothing is reset: this is the count
+  // of how often the rule WOULD fire, on a roll above all, before a rule that
+  // tears a node down is built on it. Env LOSS_BURST_LOG=1.
+  LOSS_BURST_LOG:      false,
   // P3 of Mesh Partition Self-Heal v0.2 (axona-docs 87a608a; David 2026-10-30
   // "Build P3 and P2, default off"): an offer the mesh COULD NOT DELIVER is a
   // deferral, not a failure of the identity. Confirmed non-delivery is the
@@ -187,7 +193,7 @@ export class AxonaDomain {
     }
     // P2/P3 arming, the same rule: the env speaks only when the option is not
     // given AND the variable is set; =0 is a control arm, unset is the default.
-    for (const flag of ['NO_PATH_DEFER', 'PEER_EXCHANGE', 'SIGNAL_RETURN_ROUTE', 'RETURN_ROUTE', 'BOUND_TARGET_DELIVER', 'LOOKAHEAD_ANSWER_LIVE']) {
+    for (const flag of ['NO_PATH_DEFER', 'PEER_EXCHANGE', 'SIGNAL_RETURN_ROUTE', 'RETURN_ROUTE', 'BOUND_TARGET_DELIVER', 'LOOKAHEAD_ANSWER_LIVE', 'LOSS_BURST_LOG']) {
       if (opts[flag] == null) {
         const e = envNum(flag, null);
         if (e !== null) this[flag] = e === 1;
