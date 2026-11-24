@@ -624,6 +624,10 @@
       "class": "default"
     },
     {
+      "file": "fence_kill_cancels_pending_pub.mjs",
+      "class": "default"
+    },
+    {
       "file": "smoke_pubsub_kill_heal.mjs",
       "class": "default"
     },

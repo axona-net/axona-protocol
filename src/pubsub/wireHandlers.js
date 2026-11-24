@@ -18,7 +18,7 @@ import {
   ROOT_VERIFY_FIRST_MS, ROOT_VERIFY_MS, ROOT_VERIFY_BATCH, METRICS_LEASE_MS,
   METRICS_PUB_MS, METRICS_COALESCE_MS,
 } from './constants.js';
-import { idHex, idBig, lc, isHexId } from './ids.js';
+import { idHex, idBig, lc, isHexId, pendingKey } from './ids.js';
 // Step-down hold re-entry guard (see _holdIntercept, 4.102.0): how long a
 // forward's return nonce is remembered, and how many may be outstanding.
 // 4.160.0 REPLICATE DELTA: the eager (per-write) cohort replicate. Armed, it may
@@ -1599,6 +1599,14 @@ export const wireHandlersMethods = {
     // the tombstone/fan-out work below, so no retry can outlive the retraction
     // (Aster: the kill must cancel atomically and preserve the tombstone).
     this._durability?.cancel(role, target);
+    // AND NO PUBLISH RETRY EITHER (4.165.0; found 2026-11-24, lines read by
+    // Orion a79dd958). A node that published into a topic it roots can hold its
+    // own body in _pendingPub for good: on a fabric that verifies no push the
+    // ingest returns before _confirmPending. Cancelling the durability retry
+    // above left that entry standing, and the tick pump then sent the BODY to
+    // the next root born closer, one frame ahead of the kill. The kill's own
+    // pending entry is untouched: the kill keeps retrying, the body does not.
+    this._pendingPub?.delete(pendingKey(topicBig, target));   // topicBig, not role: a reader applying a delivered kill has no role
     const killTs = m.killTs ?? this._now();
     const seq = m.seq;                                 // root-assigned dense counter for this kill
     if (role && Number.isFinite(seq) && seq > role.seq) role.seq = seq;   // recover counter (kill occupied a slot)
