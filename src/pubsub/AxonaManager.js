@@ -144,6 +144,7 @@ export class AxonaManager {
     verifyWalk = null,             // Closer-Born v0.6 farther-reaching verify (David 2026-11-03): DEFAULT OFF; null = env VERIFY_WALK
     attachEcho = null,             // Closer-Born v0.6 3d (David 2026-11-03 "go ahead with 3d"): DEFAULT OFF; null = env ATTACH_ECHO
     pinProof = null,               // 4.162.0 pin proof (cause-side note v0.2 parts 1+2): DEFAULT OFF; null = env PIN_PROOF
+    returnRouteTtlMs = null,       // 4.163.0 (cause-side note v0.2 part 3): a breadcrumb's life; null = env RETURN_ROUTE_TTL_MS, else 60 s as before
     returnRoute = null,            // Closer-Born v0.6 return routes (David 2026-11-03 "go ahead with the return routes"): DEFAULT OFF; null = env RETURN_ROUTE                // Closer-Born Relay Inherits the Root v0.4 Part 3e (David 2026-11-03 "go ahead with the cutover state machine"): DEFAULT OFF; null = env CUTOVER
     routeTypeTally = null,         // DIAGNOSTIC (David 2026-11-16 "build the per-type count"): DEFAULT OFF; env ROUTE_TYPE_TALLY=1. Counts this manager's routed sends and received frames BY TYPE. Changes no decision.
     announceNewOnly = null,        // 4.150.0 (David 2026-11-16 "build the announce-only-the-new-topic change"): DEFAULT OFF; env ANNOUNCE_NEW_ONLY=1. A root claim announces THAT topic; the full list stays on the BEACON_MS timer.
@@ -394,6 +395,17 @@ export class AxonaManager {
     // to it is open, else greedy), and the own lookup is the fallback. The
     // breadcrumb is a hint: authority rests on signed envelopes and corr.
     this._returnRoute     = !!(returnRoute ?? envNum('RETURN_ROUTE', 0));
+    // A BREADCRUMB'S LIFE (4.163.0). The default, 60 s, EQUALS the settled
+    // renewal gap (RENEW_MS), so a subscriber that renews on time is without a
+    // way back for the instant between expiry and its next renewal, and for as
+    // long as that renewal runs late. Set to a multiple of the gap, a message
+    // published late in it still has a way down. Unset, nothing changes. A
+    // value that is not a finite number of at least 1 s is refused for the
+    // default: a typo must not make every breadcrumb expire at once or never.
+    {
+      const want = Number(returnRouteTtlMs ?? envNum('RETURN_ROUTE_TTL_MS', RETURN_ROUTE_TTL_MS));
+      this._returnRouteTtlMs = (Number.isFinite(want) && want >= 1_000 && want <= 3_600_000) ? Math.round(want) : RETURN_ROUTE_TTL_MS;
+    }
     this._announceNewOnly = !!(announceNewOnly ?? envNum('ANNOUNCE_NEW_ONLY', 0));
     this._beaconChunk     = !!(beaconChunk ?? envNum('BEACON_CHUNK', 0));
     this._beaconVerdict   = !!(beaconVerdict ?? envNum('BEACON_VERDICT', 0));
@@ -635,7 +647,7 @@ export class AxonaManager {
     if (!this._returnRoute || !meta || !Array.isArray(meta.path) || !meta.path.length) return;
     const base = meta.path.filter((h) => typeof h === 'string' && isHexId(h)).slice(-RETURN_RPATH_MAX).reverse();
     if (!base.length) return;
-    const now = this._now(), self = lc(idHex(this.nodeId)), exp = now + RETURN_ROUTE_TTL_MS;
+    const now = this._now(), self = lc(idHex(this.nodeId)), exp = now + this._returnRouteTtlMs;
     const seen = new Set();
     for (const k of keys) {
       if (typeof k !== 'string' || !isHexId(k)) continue;
