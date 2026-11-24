@@ -2460,7 +2460,7 @@ export class AxonaPeer extends DHT {
     const zeroR = { honoured: 0, unavailable: 0, originated: 0, delivered: 0, fellBack: 0 };
     return {
       pubsub: am
-        ? { armed: am._returnRoute === true, live: am._retRoutes?.size ?? 0, ...zeroP, ...(am._returnRouteStats || {}) }
+        ? { armed: am._returnRoute === true, live: am._retRoutes?.size ?? 0, ttlMs: am._returnRouteTtlMs ?? null, ...zeroP, ...(am._returnRouteStats || {}) }
         : null,
       routing: { ...zeroR, ...(this._returnRouteStats || {}) },
     };
