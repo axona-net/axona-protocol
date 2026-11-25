@@ -1202,6 +1202,34 @@ export const wireHandlersMethods = {
     }
     return !Number.isFinite(d.killTs) || (Number.isFinite(t.killTs) && t.killTs >= d.killTs);
   },
+  /**
+   * Is the body in `json` covered by one of `kills`? Covered means: a kill of
+   * this msgId, bound to this topic where it names one, signed by the body's
+   * OWN author, and not older than the body on that author's clock. The kills
+   * handed in are proofs and claims the caller's funnel has already verified;
+   * a marker with no proof covers nothing. Used to decide whether a pending
+   * publish may stop being re-sent (4.165.0).
+   */
+  _killCoversEnvelope(json, msgId, topicBig, kills) {
+    let author = null, ts = null, seq = null;
+    try { const e = JSON.parse(json); author = lc(e?.signerPubkey ?? '') || null; ts = e?.ts; seq = e?.seq; } catch { return false; }
+    if (!author || !Number.isFinite(ts)) return false;
+    for (const k of (kills || [])) {
+      if (!k || typeof k !== 'object' || k.msgId !== msgId) continue;
+      if (lc(k.signerPubkey ?? '') !== author) continue;
+      if (k.topicId != null) { try { if (idBig(k.topicId) !== topicBig) continue; } catch { continue; } }
+      if (!Number.isFinite(k.ts)) continue;
+      if (authorAfter(ts, seq, k.ts, k.seq)) continue;          // the body is strictly AFTER this kill: a republication it does not retract
+      return true;
+    }
+    return false;
+  },
+  /** The pump's question: does this node hold a LIVE tombstone whose own proof or claims cover this pending publish? */
+  _pendingPubKilled(p) {
+    const t = this.axonRoles.get(p.topicBig)?.tombstones?.get(p.msgId);
+    if (!t || !((t.exp ?? 0) > this._now())) return false;
+    return this._killCoversEnvelope(p.json, p.msgId, p.topicBig, [t.kill, ...(t.claims ? t.claims.values() : [])]);
+  },
   _replicaRetained(payload, fromHex, how) {
     let tb = null; try { tb = idBig(payload.topicId); } catch { tb = null; }
     const role = tb !== null ? this.axonRoles.get(tb) : null;
@@ -1606,7 +1634,21 @@ export const wireHandlersMethods = {
     // above left that entry standing, and the tick pump then sent the BODY to
     // the next root born closer, one frame ahead of the kill. The kill's own
     // pending entry is untouched: the kill keeps retrying, the body does not.
-    this._pendingPub?.delete(pendingKey(topicBig, target));   // topicBig, not role: a reader applying a delivered kill has no role
+    //
+    // ONLY FOR A DELETION AUTHORIZED FOR THAT EXACT ENVELOPE (Aster 8aff1137).
+    // This line is reached by deletions nothing has authorized: a reader has no
+    // role and so no held-body author check; a cache miss takes a marker
+    // provisionally; a proof-less carrier names a signer nobody verified. None
+    // of those may cost a live publish its retry. The pending envelope itself
+    // says who its author is and when it was written, so it is the judge:
+    // a verified kill or claim BY THAT AUTHOR, not older than the body on the
+    // author's clock. topicBig, not role: a reader applying a delivered kill
+    // has no role.
+    {
+      const pk = pendingKey(topicBig, target);
+      const pend = this._pendingPub?.get(pk);
+      if (pend && !staleProof && this._killCoversEnvelope(pend.json, target, topicBig, [m.kill, ...(Array.isArray(m.claims) ? m.claims : [])])) this._pendingPub.delete(pk);
+    }
     const killTs = m.killTs ?? this._now();
     const seq = m.seq;                                 // root-assigned dense counter for this kill
     if (role && Number.isFinite(seq) && seq > role.seq) role.seq = seq;   // recover counter (kill occupied a slot)

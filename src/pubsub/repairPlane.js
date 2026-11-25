@@ -238,16 +238,20 @@ export const repairPlaneMethods = {
     //     the publisher observes its own msgId (implicit ack, _confirmPending) or
     //     maxTries/TTL — idempotent (the root dedups by msgId). Repro:
     //     test/repro_lossy_restart.mjs (root held full backlog ~20/30 → 30/30).
-    // KILLS FIRST (4.165.0). A root that is new to both must take the kill
-    // provisionally before the body arrives, so the body is suppressed on
-    // arrival; the other order shows a message and then retracts it.
+    // KILLS FIRST (4.165.0). This is LOCAL SEND ORDER and nothing more: loss
+    // or reordering on the way can still put the body first at a receiver. It
+    // improves the odds that a root new to both takes the kill provisionally
+    // before the body; it is not what makes a killed body stay unsent. The
+    // cancel in _applyKill and the guard below are.
     for (const map of [this._pendingKill, this._pendingPub]) {
       if (!map) continue;
       const isKill = map === this._pendingKill;
       for (const [key, p] of map) {                    // keyed by pendingKey(topic, msgId); p.topicBig is the topic
         if (now - p.at > PENDING_PUB_TTL_MS || (p.tries || 0) >= PENDING_PUB_MAX_TRIES) { map.delete(key); continue; }
-        // A body this node holds a tombstone for is never sent again (4.165.0).
-        if (!isKill && this.axonRoles.get(p.topicBig)?.tombstones?.has(p.msgId)) { map.delete(key); continue; }
+        // A body this node holds an AUTHORIZED, live deletion for is never sent
+        // again (4.165.0). A provisional marker, an expired one, or one by
+        // another signer does not stop it (Aster 8aff1137).
+        if (!isKill && this._pendingPubKilled(p)) { map.delete(key); continue; }
         p.tries = (p.tries || 0) + 1;
         const tb = p.topicBig;
         // 4.154.0 (pubHintLive): the previous send was pinned and a full tick
@@ -1352,8 +1356,8 @@ export const repairPlaneMethods = {
         this._burstTimers.delete(h);
         const p = this._pendingPub?.get(pendingKey(topicBig, msgId));
         if (!p) return;                                 // confirmed or aged out → quench
-        // killed since (4.165.0): a body this node tombstoned is not sent again
-        if (this.axonRoles.get(topicBig)?.tombstones?.has(msgId)) { this._pendingPub.delete(pendingKey(topicBig, msgId)); return; }
+        // killed since (4.165.0): a body this node holds an authorized, live deletion for is not sent again
+        if (this._pendingPubKilled(p)) { this._pendingPub.delete(pendingKey(topicBig, msgId)); return; }
         const via = this._pubVia(topicBig);
         p.via = via[0] ?? null;
         this._send(T.PUB, { topicId: idHex(topicBig), via, json: p.json });

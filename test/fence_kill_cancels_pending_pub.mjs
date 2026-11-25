@@ -31,8 +31,13 @@
 //      from the pump and not sent.
 //   P3 a pending publish with no tombstone is still re-sent (the retry lives).
 // A reader:
-//   R1 a node with no role applies a delivered kill without throwing, and its
-//      own pending publish for that message is gone.
+//   R1 a node with no role applies a delivered deletion without throwing.
+// Defensive (Aster 8aff1137): the retry of a LIVE publish survives every
+// deletion not authorized for that exact envelope:
+//   D1 a provisional marker, D2 an expired deletion, D3 another signer's,
+//   D4 the author's older kill; D5 the author's kill held as a claim does stop
+//   it; D6/D7 the same two cases on the early resend pump; D8 to D11 the same
+//   four at _applyKill on a cache miss; D12 the judge alone.
 // Run: node test/fence_kill_cancels_pending_pub.mjs
 // =====================================================================
 import { AxonaManager } from '../src/pubsub/AxonaManager.js';
@@ -45,7 +50,7 @@ import { regionCenter } from '../src/utils/region-names.js';
 import { sealTestDht } from './lib/testCapability.mjs';
 
 const LOC = regionCenter('useast');
-const EXPECT = 11;
+const EXPECT = 23;
 let passed = 0, failed = 0;
 const check = (label, ok, extra = '') => { console.log(`  ${ok ? '✓' : '✗'} ${label}${ok ? '' : ' ' + extra}`); ok ? passed++ : failed++; };
 process.on('exit', (code) => { if (code === 0 && passed + failed < EXPECT) { console.log(`  ✗ exited after ${passed + failed} of ${EXPECT} checks`); process.exitCode = 1; } });
@@ -148,10 +153,10 @@ console.log('fence_kill_cancels_pending_pub: a killed body is never sent again b
   {
     const X = await mk();
     const role = X.am._rootClaim.become(topicId, 'sub-terminal');
-    role.tombstones.set(e.msgId, { exp: X.am._now() + 3_600_000, killTs: X.am._now(), signer: null, seq: 9 });
+    role.tombstones.set(e.msgId, { exp: X.am._now() + 3_600_000, killTs: X.am._now(), signer: kill.signerPubkey, kill, seq: 9 });
     X.am._pendingPub = new Map([[key, { topicBig: topicId, msgId: e.msgId, json: JSON.stringify(e), at: X.am._now(), tries: 0, via: null }]]);
     await X.tick();
-    check('P2 a pending publish this node holds a tombstone for is dropped, not sent', X.out.filter((o) => carriesBody(o, e.msgId)).length === 0 && !X.am._pendingPub.has(key), JSON.stringify({ sent: X.out.filter((o) => o.type === 'pubsub:pub').length, held: X.am._pendingPub.has(key) }));
+    check('P2 a pending publish this node holds the AUTHOR\'s live deletion for is dropped, not sent', X.out.filter((o) => carriesBody(o, e.msgId)).length === 0 && !X.am._pendingPub.has(key), JSON.stringify({ sent: X.out.filter((o) => o.type === 'pubsub:pub').length, held: X.am._pendingPub.has(key) }));
   }
   {
     const X = await mk();
@@ -174,7 +179,75 @@ console.log('fence_kill_cancels_pending_pub: a killed body is never sent again b
   const key = pendingKey(topicId, e.msgId);
   am._pendingPub = new Map([[key, { topicBig: topicId, msgId: e.msgId, json: JSON.stringify(e), at: Date.now(), tries: 0, via: null }]]);
   let threw = null; try { am._applyKill(undefined, topicId, { msgId: e.msgId, killTs: Date.now(), seq: 2, del: true }); } catch (err) { threw = err; }
-  check('R1 a reader with no role applies a delivered kill without throwing, and its pending publish is gone', threw === null && !am._pendingPub.has(key), String(threw?.message || ''));
+  check('R1 a reader with no role applies a delivered deletion without throwing', threw === null, String(threw?.message || ''));
+}
+{
+  // DEFENSIVE (Aster 8aff1137): a live pending publish survives every deletion
+  // that is not authorized for that exact envelope, and an authorized current
+  // one still quenches both resend paths.
+  const alice = await createAuthorIdentity(); const bob = await createAuthorIdentity();
+  const desc = { region: 'useast', owner: null, name: 'kill-defensive', write: 'open' };
+  const topicId = await deriveTopicIdBig(desc);
+  const t0 = Date.now();
+  const e = await buildEnvelope({ topic: desc, message: { hi: 4 }, seq: 5, identity: alice, ts: t0 });
+  const key = pendingKey(topicId, e.msgId);
+  const K = (o) => buildKill({ topicId: idHex(topicId), msgId: e.msgId, ...o });
+  const good  = await K({ seq: 6, ts: t0 + 10, identity: alice });       // the author, after the body
+  const stale = await K({ seq: 4, ts: t0 - 10_000, identity: alice });   // the author, BEFORE the body
+  const forged = await K({ seq: 6, ts: t0 + 10, identity: bob });        // another signer
+  const mk = async () => {
+    const out = []; let clock = t0 + 100;
+    const self = await freshId();
+    const dht = { getSelfId: () => self, onRoutedMessage: () => {}, verdictsSupported: false, routeMessage: (target, type, payload) => { out.push({ type, payload }); }, findKClosest: async () => [] };
+    const am = new AxonaManager({ dht: sealTestDht(dht), now: () => clock });
+    const role = am._rootClaim.become(topicId, 'sub-terminal');
+    am._pendingPub = new Map([[key, { topicBig: topicId, msgId: e.msgId, json: JSON.stringify(e), at: clock, tries: 0, via: null }]]);
+    const bodies = () => out.filter((o) => carriesBody(o, e.msgId)).length;
+    return { am, role, out, bodies, tick: async () => { clock += 6000; await am.refreshTick(); for (let k = 0; k < 6; k++) await new Promise((r) => setImmediate(r)); }, now: () => clock };
+  };
+  const tomb = (X, extra) => X.role.tombstones.set(e.msgId, { exp: X.now() + 3_600_000, killTs: X.now(), signer: null, seq: 9, ...extra });
+
+  { const X = await mk(); tomb(X, {}); await X.tick();
+    check('D1 a PROVISIONAL marker (no proof) does not stop the retry', X.bodies() >= 1 && X.am._pendingPub.has(key)); }
+  { const X = await mk(); tomb(X, { kill: good, signer: good.signerPubkey, exp: X.now() - 1 }); await X.tick();
+    check('D2 an EXPIRED deletion does not stop the retry, even with the author\'s proof', X.bodies() >= 1 && X.am._pendingPub.has(key)); }
+  { const X = await mk(); tomb(X, { kill: forged, signer: forged.signerPubkey }); await X.tick();
+    check('D3 a deletion by ANOTHER signer does not stop the retry', X.bodies() >= 1 && X.am._pendingPub.has(key)); }
+  { const X = await mk(); tomb(X, { kill: stale, signer: stale.signerPubkey }); await X.tick();
+    check('D4 the author\'s OLDER kill (before this body) does not stop the retry', X.bodies() >= 1 && X.am._pendingPub.has(key)); }
+  { const X = await mk(); tomb(X, { kill: forged, signer: forged.signerPubkey, claims: new Map([[good.signerPubkey.toLowerCase(), good]]) }); await X.tick();
+    check('D5 the author\'s kill held as a CLAIM on a foreign marker does stop it', X.bodies() === 0 && !X.am._pendingPub.has(key)); }
+  { const X = await mk(); tomb(X, { kill: good, signer: good.signerPubkey });
+    X.am._burstTimers ??= new Set();
+    X.am._earlyResendPump(topicId, e.msgId, [1]);
+    await new Promise((r) => setTimeout(r, 30));
+    check('D6 the EARLY resend pump is quenched by the author\'s live deletion', X.bodies() === 0 && !X.am._pendingPub.has(key), String(X.bodies())); }
+  { const X = await mk(); tomb(X, {});
+    X.am._burstTimers ??= new Set();
+    X.am._earlyResendPump(topicId, e.msgId, [1]);
+    await new Promise((r) => setTimeout(r, 30));
+    check('D7 and is NOT quenched by a provisional marker', X.bodies() === 1 && X.am._pendingPub.has(key), String(X.bodies())); }
+  // _applyKill at a root that does NOT hold the body (a cache miss): nothing checks the author there.
+  { const X = await mk();
+    X.am._applyKill(X.role, topicId, { msgId: e.msgId, killTs: X.now(), signer: forged.signerPubkey, del: true });
+    check('D8 applying a proof-less deletion on a cache miss leaves the pending publish', X.am._pendingPub.has(key)); }
+  { const X = await mk();
+    X.am._applyKill(X.role, topicId, { msgId: e.msgId, killTs: X.now(), signer: forged.signerPubkey, kill: forged, del: true });
+    check('D9 applying ANOTHER signer\'s kill on a cache miss leaves the pending publish', X.am._pendingPub.has(key)); }
+  { const X = await mk();
+    X.am._applyKill(X.role, topicId, { msgId: e.msgId, killTs: X.now(), signer: stale.signerPubkey, kill: stale, del: true });
+    check('D10 applying the author\'s OLDER kill leaves the pending publish', X.am._pendingPub.has(key)); }
+  { const X = await mk();
+    X.am._applyKill(X.role, topicId, { msgId: e.msgId, killTs: X.now(), signer: good.signerPubkey, kill: good, del: true });
+    check('D11 applying the author\'s current kill cancels it', !X.am._pendingPub.has(key)); }
+  check('D12 the judge alone: no kills, a malformed body, a kill for another topic', (() => {
+    const X = new AxonaManager({ dht: sealTestDht({ getSelfId: () => 1n, onRoutedMessage: () => {}, verdictsSupported: false, routeMessage: () => {}, findKClosest: async () => [] }), now: () => t0 });
+    const j = JSON.stringify(e);
+    return X._killCoversEnvelope(j, e.msgId, topicId, []) === false
+      && X._killCoversEnvelope('not json', e.msgId, topicId, [good]) === false
+      && X._killCoversEnvelope(j, e.msgId, topicId + 1n, [good]) === false
+      && X._killCoversEnvelope(j, e.msgId, topicId, [null, undefined, {}, good]) === true;
+  })());
 }
 console.log(`\nfence_kill_cancels_pending_pub: ${passed} passed, ${failed} failed`);
 process.exit(failed ? 1 : 0);
