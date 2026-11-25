@@ -49,7 +49,7 @@ import { RootClaim, roleNature, makeMergeState } from './rootClaim.js';
 import { idHex, idBig, lc, isHexId, pendingKey } from './ids.js';
 import { dispatchVerdict, dispatchAttributedTo } from './dispatch.js';
 import { RoleScopedDurability } from './durability.js';
-import { T, RENEW_MS, RENEW_FAST_MS, DROP_MS, ROOT_REPLICAS, CACHE_MAX,
+import { T, RENEW_MS, RENEW_FAST_MS, DROP_MS, ROOT_REPLICAS, CACHE_MAX, PIN_PROOF_TOKENS, PIN_PROOF_BUDGET, PIN_PROOF_BUDGET_MS, PIN_PROOF_THIN,
          CACHE_BYTES, MAX_DIRECT, MAX_VIA, VIA_HOP_BUDGET, BEACON_MS,
          BEACON_FANOUT, BEACON_LAYERS, PENDING_PUB_TTL_MS, COLD_BURST_TRIES, HOLD_FIRST_MS, HOLD_REPEAT_MS,
          COLD_BURST_INTERVAL_MS, COLD_BURST_SLOW_TRIES,
@@ -411,7 +411,7 @@ export class AxonaManager {
     // history) that echoes the nonce. A pinned unarmed renewal stays silent.
     this._attachEcho      = !!(attachEcho ?? envNum('ATTACH_ECHO', 0));
     this._pinProof        = !!(pinProof ?? envNum('PIN_PROOF', 0));
-    this._pinProofStats   = { answered: 0, floored: 0, unpinned: 0 };
+    this._pinProofStats   = { answered: 0, floored: 0, unpinned: 0, degraded: 0, claimHeld: 0 };
     // FARTHER-REACHING VERIFY (Closer-Born v0.6, "What would make this wrong"):
     // the root self-verify's lookup on standalone peers is findKClosest, which
     // reaches two channel-hops. Armed, the verify also runs the DHT walk
@@ -1783,17 +1783,56 @@ export class AxonaManager {
   _unpinUnproven(topicBig, pinHex, s) {
     const up = this._upstream.get(topicBig);
     if (!up || up[0] !== pinHex) return false;
+    const now = this._now();
+    // THE BUDGET (Aster 8aff1137). Kept on the subscription, so it survives a
+    // re-home, and counted in drops inside a period. Spent: the pin STAYS, the
+    // reader is marked degraded, and nothing more is tried on silence alone
+    // until a reply to one of its own renewals arrives or the period passes.
+    const drops = (s.proofDrops = (s.proofDrops || []).filter((t) => now - t < PIN_PROOF_BUDGET_MS));
+    if (drops.length >= PIN_PROOF_BUDGET) {
+      if (!s.degraded) {
+        s.degraded = true; this._pinProofStats.degraded++;
+        this._log('warn', 'upstream-unproven-degraded', {
+          topic: idHex(topicBig).slice(0, 12), pin: pinHex.slice(0, 12), drops: drops.length,
+          detail: 'silence budget spent: pin kept, reader degraded until a reply to its own renewal arrives',
+        });
+      }
+      return false;
+    }
+    drops.push(now);
     this._upstream.delete(topicBig);
-    const silent = s ? (s.unanswered | 0) : 0;
-    if (s) { s.interval = this.renewFastMs; s.lastRenewSent = null; s.unanswered = 0; s.proofFrom = null; }
+    const silent = s.unanswered | 0;
+    s.interval = this.renewFastMs; s.lastRenewSent = null; s.unanswered = 0; s.proofFrom = null;
+    // THE OLD PIN IS KEPT AS CONTEXT: while it stands, this reader left a pin on
+    // silence and has not yet heard a reply to its own renewal from anyone.
+    s.unprovenPin = pinHex; s.unprovenAt = now;
     const role = this.axonRoles.get(topicBig);
     if (role?.sync) role.sync.lastRenewAt = null;
     this._pinProofStats.unpinned++;
     this._log('info', 'upstream-unproven', {
-      topic: idHex(topicBig).slice(0, 12), was: pinHex.slice(0, 12), silent,
-      detail: 'renewals went up and nothing addressed to this node came down — re-homing unpinned',
+      topic: idHex(topicBig).slice(0, 12), was: pinHex.slice(0, 12), silent, drops: drops.length,
+      detail: 'renewals went up and no reply to them came down — re-homing unpinned',
     });
     return true;
+  }
+  /** Fewer than PIN_PROOF_THIN neighbours that are not a bridge: this reader's silence may be its own. */
+  _proofThin() {
+    let n = 0;
+    try {
+      const bridge = typeof this.dht.bridgeNodeId === 'function' ? this.dht.bridgeNodeId() : null;
+      for (const nb of (this.dht.neighbors?.() || [])) {
+        let b; try { b = idBig(nb); } catch { continue; }
+        if (b === this.nodeId || (bridge != null && b === bridge) || idHex(b).slice(0, 2) === 'ff') continue;
+        n++;
+      }
+    } catch { return true; }
+    return n < PIN_PROOF_THIN;
+  }
+  /** What an application may read of one subscription's proof state. No ids. */
+  pubsubPinProofState(topicBig) {
+    const s = this.mySubscriptions.get(topicBig);
+    if (!this._pinProof || !s) return null;
+    return { unanswered: s.unanswered | 0, counting: !!s.proofFrom, degraded: !!s.degraded, recovering: !!s.unprovenPin, drops: (s.proofDrops || []).length };
   }
 
   _unpinIfWaypointDead(topicBig, deadHex, sent) {
@@ -1871,6 +1910,18 @@ export class AxonaManager {
         decl = { attach: nonce };
       }
     }
+    // PIN PROOF (4.162.0, Aster 8aff1137): this reader's renewal carries a fresh
+    // token of its own, apart from the attachment nonce, so it exists with
+    // Topic Lifetime off and can never move an attachment. Only a DELIVER that
+    // echoes one of the last few is proof that THIS renewal was answered.
+    let ppTok = null;
+    if (this._pinProof && sub && !(role && role.isRoot)) {
+      const b = new Uint8Array(8); globalThis.crypto.getRandomValues(b);
+      ppTok = Array.from(b, (x) => x.toString(16).padStart(2, '0')).join('');
+      const sent = (sub.ppSent ??= []);
+      sent.push(ppTok);
+      while (sent.length > PIN_PROOF_TOKENS) sent.shift();
+    }
     if (this._topicLifetime && role && !role.isRoot && !sub && !this._hostedTopics.has(topicBig)) {
       if (role.subscribers.size > 0) decl = { ...decl, demand: this._roleDemand(role) };
       else if (role.backupOf !== null || this._backupTopics.has(topicBig)) decl = { ...decl, standby: true, ...(role.standbyGen ? { gen: { ...role.standbyGen } } : {}) };
@@ -1888,6 +1939,7 @@ export class AxonaManager {
       // 3d: an unpinned sender says so; via alone cannot (an unpinned SUB with a
       // warm hint names it in via, exactly as a pinned SUB names its pin).
       ...(this._attachEcho && !((this._upstream.get(topicBig) || []).length) ? { unpinned: true } : {}),
+      ...(ppTok ? { pp: ppTok } : {}),
       // 6b: the sender's failure domain, so a root can tell a successor on its own host.
       ...(this._successorGate ? { fd: this._fdBlock() } : {}),
       // 6c: the standing lease this subscription or relay role carries upward.

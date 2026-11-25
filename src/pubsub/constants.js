@@ -39,6 +39,17 @@ export const RENEW_BACKOFF   = 1.5;             // multiply the interval each st
 // subscriber renewing in a tight loop cannot make a root send in one.
 export const PIN_PROOF_SILENT   = 2;
 export const PIN_PROOF_FLOOR_MS = 2_000;
+// (Aster 8aff1137.) The proof is a reply to THIS reader's own renewal: each
+// renewal carries a fresh token and only a DELIVER echoing one of the last
+// PIN_PROOF_TOKENS counts. A reader may drop a pin on silence at most
+// PIN_PROOF_BUDGET times inside PIN_PROOF_BUDGET_MS; after that it keeps the pin
+// and is marked degraded until a matching reply arrives. A reader that dropped
+// a pin on silence and has fewer than PIN_PROOF_THIN non-bridge neighbours does
+// not claim the root for itself: its silence may be its own.
+export const PIN_PROOF_TOKENS    = 4;
+export const PIN_PROOF_BUDGET    = 3;
+export const PIN_PROOF_BUDGET_MS = 10 * 60_000;
+export const PIN_PROOF_THIN      = 3;
 export const DROP_MS         = 180_000;         // evict a subscriber after missed renewals (≥ 3× ceiling)
 // IDLE-ROLE REAP (David 2026-09-23). A role whose cache is EMPTY and whose last
 // message is older than this is torn down, whatever else would retain it — root

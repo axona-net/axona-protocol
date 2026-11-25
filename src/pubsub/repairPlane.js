@@ -154,7 +154,17 @@ export const repairPlaneMethods = {
         } else {
           if (!this._unattachedSince.has(t)) this._unattachedSince.set(t, now);
           if (now - this._unattachedSince.get(t) >= ROOT_CLAIM_MS) {
-            if (this._rootClaim.selfClosestReachable(t)) {
+            // PIN PROOF (Aster 8aff1137): a reader that left its pin on SILENCE
+            // and is thin has shown nothing about the network; the silence may
+            // be its own. It does not claim the root on that evidence. It goes
+            // on renewing, and a reply to one of its renewals ends the hold.
+            const proofHeld = this._pinProof && !!s.unprovenPin && this._proofThin();
+            if (proofHeld) {
+              if (!s.claimHeldLogged) {
+                s.claimHeldLogged = true; this._pinProofStats.claimHeld++;
+                this._log('info', 'self-claim-held', { topic: idHex(t).slice(0, 12), was: String(s.unprovenPin).slice(0, 12), detail: 'left a pin on silence with too few peers to judge: not claiming the root' });
+              }
+            } else if (this._rootClaim.selfClosestReachable(t)) {
               // claimReachable returns null when admission REFUSES the claim
               // (v4.49.0 — today only the HARD bridge fence). `continue` is
               // justified solely by "we are root now"; if the claim was refused

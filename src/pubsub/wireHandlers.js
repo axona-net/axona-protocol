@@ -395,7 +395,7 @@ export const wireHandlersMethods = {
       // or to this pull from a log, instead of argued from the count of entries.
       if (sent !== false) this._log('info', 'split-union-pull', { topic: idHex(topicBig).slice(0, 12), from: subHex.slice(0, 12), policy: 'SPLIT_UNION', lw: payload.lw, myLw: this._lowWater(role) });
     }
-    this._accept(role, subHex, since, !!payload.latest, seat, typeof payload.attach === 'string' ? payload.attach : null, payload.unpinned === true);
+    this._accept(role, subHex, since, !!payload.latest, seat, typeof payload.attach === 'string' ? payload.attach : null, payload.unpinned === true, (typeof payload.pp === 'string' && /^[0-9a-f]{16}$/.test(payload.pp)) ? payload.pp : null);
     return 'consumed';
   },
 
@@ -422,7 +422,7 @@ export const wireHandlersMethods = {
   // A reader SUB and a child SUB with n > 0 stamp lastDemandAt; a standby SUB
   // never does. A standby seat is never delegated to a child: it exists to be
   // at the root.
-  _accept(role, subHex, since, latest = false, seat = null, attach = null, unpinned = false) {
+  _accept(role, subHex, since, latest = false, seat = null, attach = null, unpinned = false, pp = null) {
     const kind = seat?.kind || 'reader';
     const demand = seat ? (seat.demand | 0) : 1;
     const stampsDemand = kind === 'reader' || (kind === 'child' && demand > 0);
@@ -437,13 +437,16 @@ export const wireHandlersMethods = {
       // PIN PROOF part 2 (4.162.0): EVERY renewal is answered, whatever the
       // other two options say, so the subscriber's count has something to hear.
       // An answer the rule above does not already owe is floored per seat.
-      if (this._pinProof && !echo) {
+      // ONE BUDGET FOR EVERY EMPTY ANSWER (Aster 8aff1137): with the option on,
+      // the floor covers the attach-echo's empties as well as the ones this
+      // option adds. Content is never held back; only the empty frame is.
+      if (this._pinProof) {
         const nowP = this._now();
         if (nowP - (existing.lastProofAt || 0) >= Math.min(this.renewFastMs, PIN_PROOF_FLOOR_MS)) {
-          existing.lastProofAt = nowP; echo = true; this._pinProofStats.answered++;
-        } else this._pinProofStats.floored++;
+          existing.lastProofAt = nowP; if (!echo) this._pinProofStats.answered++; echo = true;
+        } else { echo = false; this._pinProofStats.floored++; }
       }
-      this._replayTo(role, subHex, since, echo, latest, attach);
+      this._replayTo(role, subHex, since, echo, latest, attach, pp);
       return;
     }
     if (role.subscribers.size >= this.maxDirect && kind !== 'standby') {    // overloaded → delegate
@@ -454,7 +457,7 @@ export const wireHandlersMethods = {
       if (!this._promoteChild(role)) {
         const c = this._pickChild(role, subHex);
         if (c) {
-          if (latest) this._replayTo(role, subHex, since, false, true, attach);  // current value from here, then hand off
+          if (latest) this._replayTo(role, subHex, since, false, true, attach, pp);  // current value from here, then hand off
           this._delegateTo(c, role, [{ subscriberId: subHex, since }]);
           if (this._topicLifetime) {   // the selection handover (see _promoteChild); this seat was answered by us (attach) so the subscriber's pin is us
             const g = this._genCarried(role);
@@ -467,7 +470,7 @@ export const wireHandlersMethods = {
     }
     role.subscribers.set(subHex, { since: Number.isFinite(since) ? since : 0, lastRenewed: this._now(), kind, demand });
     if (stampsDemand) role.lastDemandAt = this._now();
-    this._replayTo(role, subHex, since, true, latest, attach);  // delta (+ newest if latest) + a via-repin ping
+    this._replayTo(role, subHex, since, true, latest, attach, pp);  // delta (+ newest if latest) + a via-repin ping
   },
 
   // Choose the child relay XOR-closest to a subscriber (keyspace locality).
@@ -1323,9 +1326,16 @@ export const wireHandlersMethods = {
       if (this._pinProof) {
         const sp = this.mySubscriptions.get(topicBig);
         if (sp) {
-          sp.unanswered = 0;
           if (payload.proof === 1) sp.proofFrom = fromHex;
           else if (sp.proofFrom !== fromHex) sp.proofFrom = null;
+          // THE PROOF IS A REPLY TO OUR OWN RENEWAL (Aster 8aff1137): only a
+          // frame echoing a token this reader sent zeroes the count. Fan-out
+          // from the parent, or an addressed frame echoing nothing, is data.
+          // The frame is already past the attachment decision above, so with
+          // Topic Lifetime on it also matched the attachment and generation.
+          if (typeof payload.pp === 'string' && Array.isArray(sp.ppSent) && sp.ppSent.includes(payload.pp)) {
+            sp.unanswered = 0; sp.degraded = false; sp.unprovenPin = null; sp.unprovenAt = null; sp.claimHeldLogged = false;
+          }
         }
       }
       this._disc(topicBig, 'sub-root', { root: fromHex ? String(fromHex).slice(0, 12) : null });
@@ -1451,7 +1461,7 @@ export const wireHandlersMethods = {
   // ts-floor delta can't express "newest regardless of age": a current value
   // published before the subscriber's now-anchored floor sits below it and is
   // filtered out (the "subscribe latest → no callback" bug). Receiver dedups.
-  _replayTo(role, subHex, sinceTs, ping, latest = false, attach = null) {
+  _replayTo(role, subHex, sinceTs, ping, latest = false, attach = null, pp = null) {
     const subBig = idBig(subHex);
     const isSelf = subBig === this.nodeId;
     const genT = this._topicLifetime ? this._genCarried(role) : null;   // Topic Lifetime 4.1
@@ -1459,7 +1469,7 @@ export const wireHandlersMethods = {
     // (TL-B07): that is what makes it an authorized attachment at the receiver.
     // PIN PROOF (4.162.0): a node that answers every renewal says so on what it
     // sends a seat; only then does that seat count its silence against it.
-    const gx = { ...(genT ? { gen: genT } : {}), ...(this._topicLifetime && attach ? { attach } : {}), ...(this._pinProof ? { proof: 1 } : {}) };
+    const gx = { ...(genT ? { gen: genT } : {}), ...(this._topicLifetime && attach ? { attach } : {}), ...(this._pinProof ? { proof: 1, ...(pp ? { pp } : {}) } : {}) };
     let batch = [], bytes = 0, sent = false;
     const inBatch = new Set();
     const flush = () => {

@@ -20,24 +20,35 @@
 //   F  a root WITHOUT the option is never left for being quiet.
 //   G  off is today's shape: no proof field on the wire, no answer to a
 //      caught-up renewal.
+// Aster 8aff1137:
+//   H  the proof is a reply to THIS reader's own renewal: fan-out from the
+//      parent does not zero the count, nor does a token the reader never sent.
+//   I  a thin reader that left its pin on silence does NOT claim the root; an
+//      ordinary unattached reader still does; a reader with peers still does.
+//   J  the budget: after PIN_PROOF_BUDGET drops inside the period the pin is
+//      kept and the reader reads degraded; a reply to its renewal clears it.
+//   K  one budget for every empty answer: with the option on, attach-echo's
+//      empties are floored too; with it off they are as before.
+//   L  mixed versions: an old reader at a new root keeps its pin and ignores
+//      the new fields.
 // Run: node test/fence_pin_proof.mjs
 // =====================================================================
 import { Fabric, freshId, realTopic, author, idHex } from './lib/mergeFixture.mjs';
 import { buildEnvelope } from '../src/pubsub/envelope.js';
-import { PIN_PROOF_SILENT, PIN_PROOF_FLOOR_MS, RENEW_MS } from '../src/pubsub/constants.js';
+import { PIN_PROOF_SILENT, PIN_PROOF_FLOOR_MS, PIN_PROOF_BUDGET, PIN_PROOF_BUDGET_MS, ROOT_CLAIM_MS, RENEW_MS } from '../src/pubsub/constants.js';
 
-const EXPECT = 19;
+const EXPECT = 38;
 let passed = 0, failed = 0;
 const check = (label, ok, extra = '') => { console.log(`  ${ok ? '✓' : '✗'} ${label}${ok ? '' : ' ' + extra}`); ok ? passed++ : failed++; };
 process.on('exit', (code) => { if (code === 0 && passed + failed < EXPECT) { console.log(`  ✗ exited after ${passed + failed} of ${EXPECT} checks`); process.exitCode = 1; } });
 
 // A root W holding one message and a subscriber S attached to it and caught up.
-async function scene(name, { root = true, sub = true } = {}) {
+async function scene(name, { root = true, sub = true, rootOpts = {} } = {}) {
   const Lt = await realTopic(name);
   const fab = new Fabric();
   const a = await freshId(), b = await freshId();
   const [wId, sId] = ((a ^ Lt.topicId) < (b ^ Lt.topicId)) ? [a, b] : [b, a];
-  const W = fab.addNode(wId, { pinProof: root }); const S = fab.addNode(sId, { pinProof: sub });
+  const W = fab.addNode(wId, { pinProof: root, ...rootOpts }); const S = fab.addNode(sId, { pinProof: sub });
   W.am._announceRoot = () => {};
   S.am._rootClaim.selfClosestReachable = () => false;      // S is a reader here, never a claimant
   S.am._readRepair = async () => {};
@@ -148,6 +159,117 @@ console.log(' G. off is today\'s shape');
   const d0 = X.delivers().length;
   await X.renew();
   check('G1 no proof field on any DELIVER, and a caught-up renewal draws none', X.delivers().every((r) => !('proof' in r.payload)) && X.delivers().length === d0, JSON.stringify({ n: X.delivers().length, d0 }));
+}
+
+console.log(' H. the proof is a reply to this reader\'s own renewal');
+{
+  const X = await scene('pin-proof-H');
+  // deaf to REPLIES only: every DELIVER that echoes a token is dropped; fan-out passes.
+  X.fab.tap = (j) => (j.type === 'pubsub:deliver' && j.dest === X.sId && typeof j.payload?.pp === 'string' ? null : j);
+  const pub = async (k) => {
+    X.fab.clock += 10;
+    const env = await buildEnvelope({ topic: X.Lt.desc, message: { k }, seq: k, identity: author, ts: X.fab.clock });
+    await X.W.handlers.get('pubsub:pub')({ topicId: idHex(X.Lt.topicId), json: JSON.stringify(env) }, { targetId: X.W.id, isTerminal: true, hopCount: 1, fromId: idHex(X.Lt.publisher) });
+    await X.fab.settle();
+  };
+  await X.renew(); await pub(2); await X.renew(); await pub(3);
+  check('H1 fan-out from the parent arrives and does NOT zero the count', X.sub0.unanswered === PIN_PROOF_SILENT && X.pin() === X.w, String(X.sub0.unanswered));
+  await X.renew();
+  check('H2 so the pin is still dropped on silence to its renewals', X.unproven().length === 1, String(X.unproven().length));
+  const Y = await scene('pin-proof-H3');
+  Y.deaf(); await Y.renew(); await Y.renew();
+  await Y.S.handlers.get('pubsub:deliver')({ topicId: idHex(Y.Lt.topicId), from: idHex(Y.wId), msgs: [], proof: 1, pp: '00'.repeat(8) }, { targetId: Y.S.id, isTerminal: true, hopCount: 1, fromId: idHex(Y.wId) });
+  check('H3 a frame echoing a token the reader never sent does not zero it', Y.sub0.unanswered === PIN_PROOF_SILENT, String(Y.sub0.unanswered));
+  const tok = Y.sub0.ppSent[Y.sub0.ppSent.length - 1];
+  await Y.S.handlers.get('pubsub:deliver')({ topicId: idHex(Y.Lt.topicId), from: idHex(Y.wId), msgs: [], proof: 1, pp: tok }, { targetId: Y.S.id, isTerminal: true, hopCount: 1, fromId: idHex(Y.wId) });
+  check('H4 a frame echoing its own latest token does', (Y.sub0.unanswered | 0) === 0, String(Y.sub0.unanswered));
+}
+
+console.log(' I. a thin reader that left on silence does not claim the root');
+{
+  const run = async (name, { thin, viaProof }) => {
+    const X = await scene(name);
+    let claims = 0;
+    X.S.am._rootClaim.selfClosestReachable = () => true;
+    X.S.am._rootClaim.claimReachable = () => { claims++; return null; };
+    X.S.am._proofThin = () => thin;
+    X.deaf();
+    if (viaProof) { await X.renew(); await X.renew(); await X.renew(); }
+    else { X.S.am._upstream.delete(X.Lt.topicId); }
+    for (let i = 0; i < 3; i++) { X.fab.clock += ROOT_CLAIM_MS + 1; await X.S.am.refreshTick(); await X.fab.settle(); }
+    return { X, claims };
+  };
+  const a = await run('pin-proof-I1', { thin: true, viaProof: true });
+  check('I1 thin, left on silence: unattached past ROOT_CLAIM_MS, sees itself closest, and does NOT claim', a.claims === 0 && a.X.pin() === null && a.X.sub0.unprovenPin === a.X.w, JSON.stringify({ claims: a.claims, ctx: a.X.sub0.unprovenPin?.slice(0, 8) }));
+  check('I2 and it says so once', a.X.S.logs.filter((l) => l.ev === 'pubsub:self-claim-held').length === 1 && a.X.S.am.pubsubPinProofState(a.X.Lt.topicId).recovering === true);
+  const b = await run('pin-proof-I3', { thin: true, viaProof: false });
+  check('I3 control: a thin reader unattached for any OTHER reason still claims, as today', b.claims >= 1, String(b.claims));
+  const c = await run('pin-proof-I4', { thin: false, viaProof: true });
+  check('I4 a reader with peers that left on silence still claims', c.claims >= 1, String(c.claims));
+  const d = await run('pin-proof-I5', { thin: true, viaProof: true });
+  d.X.fab.tap = null; await d.X.renew();
+  check('I5 a reply to its renewal ends the hold: re-pinned, context cleared', d.X.pin() === d.X.w && d.X.sub0.unprovenPin === null && d.X.S.am.pubsubPinProofState(d.X.Lt.topicId).recovering === false, JSON.stringify({ pin: d.X.pin()?.slice(0, 8), ctx: d.X.sub0.unprovenPin }));
+}
+
+console.log(' J. the budget');
+{
+  const X = await scene('pin-proof-J');
+  // The reader's OWN cadence: after a drop it renews at the fast floor and backs off, so
+  // three drops fit well inside the period. (Stepping a whole minute each time would
+  // let the first drop age out before the fourth silence.)
+  const stepOf = (Z) => async () => { Z.fab.clock += (Z.sub0.interval || Z.S.am.renewFastMs) + 1; await Z.S.am.refreshTick(); await Z.fab.settle(); };
+  const step = stepOf(X);
+  // The root answers the FIRST frame after each drop (so the reader re-pins) and is then silent again.
+  let letOne = false;
+  X.fab.tap = (j) => { if (j.type !== 'pubsub:deliver' || j.dest !== X.sId) return j; if (letOne) { letOne = false; return j; } return null; };
+  const cycle = async () => { await step(); await step(); letOne = true; await step(); };
+  for (let i = 0; i < PIN_PROOF_BUDGET; i++) await cycle();
+  check(`J1 ${PIN_PROOF_BUDGET} drops inside the period, each re-pinned by the next answer`, X.unproven().length === PIN_PROOF_BUDGET && X.pin() === X.w, JSON.stringify({ n: X.unproven().length, pin: X.pin()?.slice(0, 8) }));
+  await step(); await step(); await step();
+  const st = X.S.am.pubsubPinProofState(X.Lt.topicId);
+  check('J2 the next silence does NOT drop the pin: the reader is degraded and says so once', X.unproven().length === PIN_PROOF_BUDGET && X.pin() === X.w && st.degraded === true && X.S.logs.filter((l) => l.ev === 'pubsub:upstream-unproven-degraded').length === 1, JSON.stringify(st));
+  await step(); await step(); await step(); await step();
+  check('J3 it stays degraded, with no further drop, while the silence lasts', X.unproven().length === PIN_PROOF_BUDGET && X.S.am.pubsubPinProofState(X.Lt.topicId).degraded === true);
+  X.fab.tap = null; await step();
+  check('J4 a reply to its renewal clears the degraded mark', X.S.am.pubsubPinProofState(X.Lt.topicId).degraded === false && (X.sub0.unanswered | 0) === 0);
+  const Y = await scene('pin-proof-J5');
+  let one = false;
+  Y.fab.tap = (j) => { if (j.type !== 'pubsub:deliver' || j.dest !== Y.sId) return j; if (one) { one = false; return j; } return null; };
+  const stepY = stepOf(Y);
+  for (let i = 0; i < PIN_PROOF_BUDGET; i++) { await stepY(); await stepY(); one = true; await stepY(); }
+  await stepY(); await stepY(); await stepY();
+  const heldAt = Y.unproven().length;
+  Y.fab.clock += PIN_PROOF_BUDGET_MS + 1;
+  await stepY(); await stepY(); await stepY();
+  check('J5 held at the budget, and whole again once the period has passed', heldAt === PIN_PROOF_BUDGET && Y.unproven().length === PIN_PROOF_BUDGET + 1, JSON.stringify({ heldAt, after: Y.unproven().length }));
+}
+
+console.log(' K. one budget for every empty answer');
+{
+  const fire = async (X, n, extra) => {
+    const newest = X.wRole.cache[X.wRole.cache.length - 1].publishTs;
+    const meta = { targetId: X.W.id, isTerminal: true, hopCount: 1, fromId: idHex(X.sId) };
+    X.fab.clock += PIN_PROOF_FLOOR_MS + 1;
+    const d0 = X.delivers().length;
+    for (let i = 0; i < n; i++) await X.W.handlers.get('pubsub:sub')({ topicId: idHex(X.Lt.topicId), subscriberId: idHex(X.sId), via: [idHex(X.wId)], since: newest, ...extra(i) }, meta);
+    await X.fab.settle();
+    return X.delivers().length - d0;
+  };
+  const on = await scene('pin-proof-K1', { rootOpts: { attachEcho: true } });
+  check('K1 option on: fifty attach-bearing renewals in one instant draw ONE empty answer', (await fire(on, 50, (i) => ({ attach: i.toString(16).padStart(16, '0') }))) === 1);
+  const off = await scene('pin-proof-K2', { root: false, sub: false, rootOpts: { attachEcho: true } });
+  check('K2 option off (control): the same fifty draw fifty, as today', (await fire(off, 50, (i) => ({ attach: i.toString(16).padStart(16, '0') }))) === 50);
+}
+
+console.log(' L. mixed versions');
+{
+  const X = await scene('pin-proof-L', { root: true, sub: false });
+  const d0 = X.delivers().length;
+  for (let i = 0; i < 6; i++) await X.renew();
+  check('L1 an old reader at a new root: answered each renewal, pin kept, nothing counted', X.pin() === X.w && X.delivers().length - d0 === 6 && X.sub0.unanswered === undefined && X.S.am.pubsubPinProofState(X.Lt.topicId) === null, JSON.stringify({ d: X.delivers().length - d0, n: X.sub0.unanswered }));
+  check('L2 its renewals carry no token, and the answers echo none', X.subsOut().every((r) => !('pp' in r.payload)) && X.delivers().slice(d0).every((r) => !('pp' in r.payload) && r.payload.proof === 1));
+  const Y = await scene('pin-proof-L3', { root: false, sub: true });
+  check('L3 a new reader at an old root sends its token and is never counted (F, restated)', Y.subsOut().some((r) => typeof r.payload.pp === 'string') && !Y.sub0.proofFrom);
 }
 
 console.log(`\nfence_pin_proof: ${passed} passed, ${failed} failed`);
